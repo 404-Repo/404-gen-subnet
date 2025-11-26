@@ -1,0 +1,10 @@
+outputs/*
+
+*.pyc
+
+*.csv
+*.png
+*.jpg
+*.jpeg
+*.splat
+*.ply
