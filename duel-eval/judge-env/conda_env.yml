@@ -1,0 +1,10 @@
+name: judge-env
+channels:
+  - defaults
+
+dependencies:
+  - python=3.11
+  - pip
+  - pip:
+      - vllm==0.10.2 --extra-index-url https://download.pytorch.org/whl/cu128
+      - hf_transfer==0.1.9
