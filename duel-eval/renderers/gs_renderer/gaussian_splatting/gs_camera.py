@@ -43,7 +43,7 @@ class OrbitCamera:
         """Matrix with transform from world space to camera space"""
 
         R = self._cam_to_world_tr[:3, :3].transpose(0, 1)
-        T = -R @ self._cam_to_world_tr[:3, 3].unsqueeze(1)
+        T = R @ self._cam_to_world_tr[:3, 3].unsqueeze(1)
         Tr = torch.cat((R, T), dim=1)
         result = torch.eye(4)
         result[:3, :4] = Tr
@@ -157,8 +157,7 @@ class OrbitCamera:
         T = torch.eye(4, dtype=torch.float32)
         T[:3, :3] = self.look_at(campos, target_pos, opengl_conv)
         T[:3, 3] = campos
-        T[:3, 1:3] *= -1
-
+        
         self._cam_to_world_tr = T
 
     def _length(self, x: torch.Tensor, eps: float = 1e-20) -> torch.Tensor:
