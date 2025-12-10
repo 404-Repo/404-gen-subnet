@@ -1,0 +1,20 @@
+# Conda/venv
+conda_env.yml
+setup_env.sh
+cleanup_env.sh
+__pycache__/
+*.pyc
+*.pyo
+.env
+
+# Dev/docs
+README.md
+*.md
+.git/
+.gitignore
+
+# Outputs
+outputs/
+*.png
+*.jpg
+

@@ -1,0 +1,8 @@
+loguru==0.7.3
+bittensor==9.12.2
+bittensor-wallet==4.0.1
+click==8.3.1
+pydantic==2.12.4
+pydantic-settings==2.12.0
+httpx==0.28.1
+pybase64==1.4.2

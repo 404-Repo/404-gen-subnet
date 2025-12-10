@@ -1,0 +1,105 @@
+[tool.poetry]
+name = "round-manager"
+version = "0.1.0"
+description = "Finalizes rounds by updating the global leader, creating next round schedules, and determining competition end."
+authors = ["Maxim Bladyko <max@404.xyz>"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = ">=3.11,<=3.13"
+subnet-common = {path = "../shared", develop = true}
+pydantic-settings = "2.12.0"
+httpx = "0.28.1"
+loguru = "0.7.3"
+bittensor = "9.12.2"
+
+[tool.poetry.group.dev.dependencies]
+poetry = "2.2.1"
+poethepoet = { version = "0.38.0", extras = ["poetry_plugin"] }
+bandit = "1.9.2"
+black = "25.11.0"
+mypy = "1.18.2"
+ruff = "0.14.6"
+
+[build-system]
+requires = ["poetry-core", "setuptools", "wheel"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.black]
+target-version = ['py311']
+line-length = 120
+include = '\.pyi?$'
+exclude = '''
+/(
+    \.git
+  | \.pytest_cache
+  | \.idea
+  | \.venv
+  | \.vscode
+)/
+'''
+
+[tool.ruff]
+target-version = "py311"
+cache-dir = ".reports/ruff_cache"
+line-length = 120
+fix = true
+output-format = "full"
+include = ["*.py"]
+exclude = [".*"]
+
+[tool.ruff.lint]
+select = [
+    "E", # pycodestyle
+    "F", # pyflakes
+    "UP", # pyupgrade
+    "I", # isort
+    "S", # flake8-bandit
+    "B", # flake8-bugbear
+    "Q", # flake8-quotes
+    "ASYNC", # flake8-async
+    "PTH", # flake8-use-pathlib
+]
+fixable = ["ALL"]
+unfixable = []
+
+[tool.ruff.lint.flake8-quotes]
+docstring-quotes = "double"
+
+[tool.ruff.lint.isort]
+combine-as-imports = true
+lines-after-imports = 2
+
+[tool.bandit]
+skips = ["B104"]
+exclude_dirs = ["./.*/**"]
+
+[tool.mypy]
+cache_dir = ".reports/mypy_cache/"
+ignore_missing_imports = true
+disallow_incomplete_defs = true
+disallow_untyped_defs = true
+warn_unused_ignores = false
+warn_return_any = true
+warn_no_return = false
+warn_unreachable = true
+strict_equality = true
+warn_redundant_casts = true
+exclude = ['.venv/.*']
+
+[tool.poe]
+poetry_command = ""
+
+[tool.poe.tasks.lint]
+help = "Run all linters and formatters"
+ignore_fail = "return_non_zero"
+sequence = [
+    { cmd = "ruff check ." },
+    { cmd = "black ." },
+    { cmd = "bandit . -rq -c pyproject.toml" },
+    { cmd = "mypy ." },
+]
+
+[tool.poe.tasks.export-requirements]
+help = "Export requirements.txt for Docker"
+cmd = "poetry export -f requirements.txt --output requirements.txt --without-hashes"
