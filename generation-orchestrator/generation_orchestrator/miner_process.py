@@ -33,7 +33,7 @@ async def process_miner_with_retries(
     seed: int,
     shutdown: GracefulShutdown,
 ) -> None:
-    for attempt in range(settings.generation_attempts):
+    for attempt in range(settings.miner_process_attempts):
         try:
             async with semaphore:
                 if await process_miner(
@@ -50,7 +50,7 @@ async def process_miner_with_retries(
         except Exception as e:
             logger.exception(f"Attempt {attempt + 1} failed for {hotkey[:10]}: {e}")
 
-    logger.error(f"All {settings.generation_attempts} attempts failed for {hotkey[:10]}")
+    logger.error(f"All {settings.miner_process_attempts} attempts failed for {hotkey[:10]}")
 
 
 async def process_miner(
@@ -83,7 +83,7 @@ async def process_miner(
             image=docker_image,
             resource_name=settings.targon_resource,
             port=settings.generation_port,
-            container_concurrency=settings.max_concurrent_downloads + 1,
+            container_concurrency=settings.max_concurrent_prompts_per_miner + 1,
         )
         container_name = f"miner-{current_round}-{miner.hotkey[:10].lower()}"
         container = await ensure_running_container(
@@ -131,7 +131,7 @@ async def process_all_prompts(
     shutdown: GracefulShutdown,
 ) -> None:
     request_sem = asyncio.Semaphore(1)  # Using semaphores to limit request to one at a time.
-    process_sem = asyncio.Semaphore(settings.max_concurrent_downloads)  # Limiting request to control traffic
+    process_sem = asyncio.Semaphore(settings.max_concurrent_prompts_per_miner)  # Limiting request to control traffic
 
     async with R2Client(
         access_key_id=settings.r2_access_key_id.get_secret_value(),

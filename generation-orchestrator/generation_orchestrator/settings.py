@@ -71,20 +71,40 @@ class Settings(BaseSettings):
         description="Timeout for pod warmup in seconds",
     )
 
-    generation_attempts: int = Field(
+    miner_process_attempts: int = Field(
         default=2,
-        alias="GENERATION_ATTEMPTS",
-        description="Number of attempts to generate a solution",
+        alias="MINER_PROCESS_ATTEMPTS",
+        description="Number of attempts to process a miner (container deploy + all prompts)",
     )
 
-    max_concurrent_generations: int = Field(
+    max_concurrent_miners: int = Field(
         default=8,
-        alias="MAX_CONCURRENT_GENERATIONS",
-        description="Maximum number of concurrent generations",
+        alias="MAX_CONCURRENT_MINERS",
+        description="Maximum number of miners being processed concurrently",
     )
 
-    max_concurrent_downloads: int = Field(
-        default=8, alias="MAX_CONCURRENT_DOWNLOADS", description="Maximum number of concurrent downloads (per miner)"
+    max_concurrent_prompts_per_miner: int = Field(
+        default=8,
+        alias="MAX_CONCURRENT_PROMPTS_PER_MINER",
+        description="Maximum number of prompts processed concurrently per miner",
+    )
+
+    generation_http_attempts: int = Field(
+        default=3,
+        alias="GENERATION_HTTP_ATTEMPTS",
+        description="Number of HTTP request attempts for a single generation call",
+    )
+
+    generation_http_backoff_base: float = Field(
+        default=2.0,
+        alias="GENERATION_HTTP_BACKOFF_BASE",
+        description="Base delay in seconds for exponential backoff between generation retries",
+    )
+
+    generation_http_backoff_max: float = Field(
+        default=30.0,
+        alias="GENERATION_HTTP_BACKOFF_MAX",
+        description="Maximum delay in seconds between generation retries",
     )
 
     generation_timeout_seconds: int = Field(
