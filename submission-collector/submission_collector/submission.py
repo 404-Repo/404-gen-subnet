@@ -1,7 +1,7 @@
 import json
 
 from loguru import logger
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 
 class Submission(BaseModel):
@@ -49,4 +49,8 @@ def parse_commitment(
     latest_repo_block, repo = max(repo_commits)
     latest_commit_block, commit = max(commit_commits)
 
-    return Submission(hotkey=hotkey, reveal_block=latest_commit_block, repo=repo, commit=commit)
+    try:
+        return Submission(hotkey=hotkey, reveal_block=latest_commit_block, repo=repo, commit=commit)
+    except ValidationError as e:
+        logger.debug(f"Invalid submission data for {hotkey}: {e}")
+        return None
