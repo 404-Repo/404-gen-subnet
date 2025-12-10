@@ -37,7 +37,6 @@ Required variables:
 - `WALLET_HOTKEY` - wallet hotkey
 
 See `.env.template` for additional options.
-Delete unset variables from the .env file.
 
 ### 4. Run
 ```bash
