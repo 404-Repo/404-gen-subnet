@@ -1,10 +1,19 @@
 # 404-GEN Competition System
 
-A decentralized 3D content generation competition running on Bittensor Subnet 17. Miners submit open-source solutions for AI-powered 3D model generation, and validators run transparent competitions to determine the best solution.
+A decentralized 3D content generation competition running on Bittensor Subnet 17. 
+Miners submit open-source solutions for AI-powered 3D model generation, and validators run transparent competitions 
+to determine the best solution.
+
+## Competitions
+
+Miners will compete by providing the best Solution. Descriptions of the competitions can be found in folder "Competitions".
 
 ## Competition Mechanics
 
-The competition follows a **winner-stays-in** format. A defending champion holds the leader position, and challengers attempt to dethrone them each round. When multiple miners submit in the same round, they face the current leader sequentially by submission time. If a challenger wins, they become the new leader and subsequent challengers must beat them.
+The competition follows a **winner-stays-in** format. A defending champion holds the leader position, 
+and challengers attempt to dethrone them each round. When multiple miners submit their solution in the same round, 
+they compete against the current leader with their solution sequentially by submission time. If a challenger wins, they become the 
+new leader and subsequent challengers must beat them.
 
 All competition state is stored in a public git repository, making every decision auditable and every transition traceable.
 
@@ -45,16 +54,16 @@ All state is stored in the competition git repository under a deterministic stru
 
 ### Per-Round State (`rounds/{round_number}/`)
 
-| File | Writer | Stage | Description                                                  |
-|------|--------|-------|--------------------------------------------------------------|
-| `schedule.json` | round-manager | FINALIZING | Block window for submissions (earliest/latest reveal blocks) |
-| `submission.json` | submission-collector | COLLECTING | Collected miner submissions with timestamps                  |
-| `seed.json` | generation-orchestrator | GENERATING | Random seed for deterministic generation and duels           |
-| `prompts.txt` | generation-orchestrator | GENERATING | Image prompts for 3D generation                              |
-| `builds.json` | generation-orchestrator | GENERATING | Container build status per miner                             |
-| `{hotkey}/generations.json` | generation-orchestrator | GENERATING | Generation results and R2 references                         |
-| `{hotkey}/duels.json` | judge-service | DUELS | Duel outcomes for this miner                                 |
-| `judge_progress.json` | judge-service | DUELS | Progress tracking for sequential duels                       |
+| File | Writer | Stage | Description                                                   |
+|------|--------|-------|---------------------------------------------------------------|
+| `schedule.json` | round-manager | FINALIZING | Block window for submissions (earliest/latest reveal blocks)  |
+| `submission.json` | submission-collector | COLLECTING | Collected miner submissions with timestamps                   |
+| `seed.json` | generation-orchestrator | GENERATING | Randomly selected seed for deterministic generation and duels |
+| `prompts.txt` | generation-orchestrator | GENERATING | Image prompts for 3D generation                               |
+| `builds.json` | generation-orchestrator | GENERATING | Container build status per miner                              |
+| `{hotkey}/generations.json` | generation-orchestrator | GENERATING | Generation results and R2 references                          |
+| `{hotkey}/duels.json` | judge-service | DUELS | Duel outcomes for this miner                                  |
+| `judge_progress.json` | judge-service | DUELS | Progress tracking for sequential duels                        |
 
 ### Leader Transition
 
@@ -102,5 +111,4 @@ FINALIZING ──► COLLECTING ──► GENERATING ──► DUELS ──► F
 - **R2 (Cloudflare)**: PLY files and rendered PNG previews
 
 ## License
-
-[Add license information]
+The provided code is MIT License compatible.
