@@ -221,7 +221,7 @@ async def process_prompt(
 
 
 class _GenerateAndRenderResult(BaseModel):
-    """Result of generated and render cycle."""
+    """Result of generation and render cycle."""
 
     ply_content: bytes | None = None
     png_content: bytes | None = None
