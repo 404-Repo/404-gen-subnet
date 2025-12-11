@@ -22,14 +22,14 @@ class GitBatcher(BaseModel):
     branch: str
     base_sha: str
 
-    interval: float = 300.0  # normal interval (success)
-    conflict_interval: float = 30.0  # short interval (on failure)
+    interval: float = 600.0  # normal interval (success)
+    conflict_interval: float = 60.0  # short interval (on failure)
 
     _pending_files: dict[str, str] = PrivateAttr(default_factory=dict)
     _pending_messages: set[str] = PrivateAttr(default_factory=set)
 
     _last_commit_time: float = PrivateAttr(default=0.0)
-    _current_interval: float = PrivateAttr(default=300.0)  # starts equal to an interval
+    _current_interval: float = PrivateAttr(default=600.0)  # starts equal to an interval
 
     model_config = {"arbitrary_types_allowed": True}
 

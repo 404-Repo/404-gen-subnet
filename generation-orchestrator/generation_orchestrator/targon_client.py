@@ -2,7 +2,7 @@ from types import TracebackType
 from typing import Self
 
 from loguru import logger
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 from targon.client.client import Client
 from targon.client.serverless import (
     AutoScalingConfig,
@@ -24,8 +24,6 @@ class ContainerDeployConfig(BaseModel):
 
     image: str
     container_concurrency: int
-    command: list[str] = Field(default_factory=lambda: ["sh", "-c"])
-    args: list[str] = Field(default_factory=lambda: ["python serve.py"])
     resource_name: str = "h200-small"
     port: int = 10006
 
@@ -87,8 +85,6 @@ class TargonClient:
             name=name,
             container=TargonContainerConfig(
                 image=config.image,
-                command=config.command,
-                args=config.args,
             ),
             resource_name=config.resource_name,
             network=NetworkConfig(
