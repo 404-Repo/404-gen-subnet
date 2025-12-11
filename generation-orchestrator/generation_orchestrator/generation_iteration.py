@@ -191,7 +191,7 @@ async def _watch_builds_and_generate(
 
     builds = {hotkey: BuildInfo.from_submission(submission) for hotkey, submission in submissions.items()}
     tasks: dict[str, asyncio.Task] = {}  # hotkey -> task
-    semaphore = StaggeredSemaphore(settings.max_concurrent_generations)
+    semaphore = StaggeredSemaphore(settings.max_concurrent_miners)
     deadline = asyncio.get_running_loop().time() + settings.build_timeout_seconds
 
     if leader_docker_image:

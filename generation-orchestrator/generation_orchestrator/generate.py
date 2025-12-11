@@ -14,6 +14,11 @@ class GenerationResponse(BaseModel):
     generation_time: float | None = None
 
 
+def _is_retryable_status(status: int) -> bool:
+    """Check if the HTTP status code is retryable (server errors and rate limiting)."""
+    return status >= 500 or status == 429
+
+
 async def generate(
     request_sem: asyncio.Semaphore,
     endpoint: str,
@@ -32,6 +37,54 @@ async def generate(
         pool=30.0,
     )
 
+    max_attempts = settings.generation_http_attempts
+
+    for attempt in range(max_attempts):
+        if shutdown.should_stop:
+            return GenerationResponse(success=False)
+
+        if attempt > 0:
+            backoff = min(
+                settings.generation_http_backoff_base * (2 ** (attempt - 1)),
+                settings.generation_http_backoff_max,
+            )
+            logger.info(f"{log_id}: Retry {attempt + 1}/{max_attempts} after {backoff:.1f}s")
+            await asyncio.sleep(backoff)
+
+        result = await _generate_attempt(
+            request_sem=request_sem,
+            endpoint=endpoint,
+            image=image,
+            seed=seed,
+            log_id=log_id,
+            timeout=timeout,
+            attempt=attempt,
+            max_attempts=max_attempts,
+        )
+
+        if result is not None:  # None means retryable failure — continue to next attempt
+            return result
+
+    logger.error(f"{log_id}: All {max_attempts} generation attempts failed")
+    return GenerationResponse(success=False)
+
+
+async def _generate_attempt(
+    request_sem: asyncio.Semaphore,
+    endpoint: str,
+    image: bytes,
+    seed: int,
+    log_id: str,
+    timeout: httpx.Timeout,  # noqa: ASYNC109
+    attempt: int,
+    max_attempts: int,
+) -> GenerationResponse | None:
+    """Single generation attempt.
+
+    Returns:
+        GenerationResponse on success or non-retryable failure.
+        None on retryable failure (signals caller to retry).
+    """
     sem_released = False
     await request_sem.acquire()
 
@@ -55,8 +108,11 @@ async def generate(
                     try:
                         content = await response.aread()
                     except Exception as e:
-                        logger.exception(f"Failed to read response body for {log_id}: {e}")
-                        return GenerationResponse(success=False)
+                        # Failed to read body — could be truncated, worth retrying
+                        logger.warning(
+                            f"{log_id}: Failed to read response body (attempt {attempt + 1}/{max_attempts}): {e}"
+                        )
+                        return None
 
                     download_time = asyncio.get_running_loop().time() - start_time - elapsed
                     mb_size = len(content) / 1024 / 1024
@@ -72,20 +128,33 @@ async def generate(
                     )
 
             except httpx.TimeoutException:
-                logger.error(f"Generation timed out for {log_id}")
-                return GenerationResponse(success=False)
+                logger.warning(f"{log_id}: Generation timed out (attempt {attempt + 1}/{max_attempts})")
+                return None  # Retryable
+
             except httpx.HTTPStatusError as exc:
                 status = exc.response.status_code
                 try:
                     error_body = await exc.response.aread()
                     error_preview = error_body.decode("utf-8", errors="replace")[:500]
-                    logger.error(f"Generation failed for {log_id} with HTTP {status}: {error_preview}")
                 except Exception:
-                    logger.error(f"Generation failed for {log_id} with HTTP {status} (could not read body)")
-                return GenerationResponse(success=False)
+                    error_preview = "(could not read body)"
+
+                if _is_retryable_status(status):
+                    logger.warning(f"{log_id}: HTTP {status} (attempt {attempt + 1}/{max_attempts}): {error_preview}")
+                    return None  # Retryable
+                else:
+                    logger.error(f"{log_id}: HTTP {status} (not retryable): {error_preview}")
+                    return GenerationResponse(success=False)
+
+            except httpx.RequestError as e:
+                # Connection errors, DNS failures, etc.
+                logger.warning(f"{log_id}: Request error (attempt {attempt + 1}/{max_attempts}): {e}")
+                return None  # Retryable
+
             except Exception as e:
-                logger.error(f"Unexpected error during generation for {log_id}: {e}")
+                logger.error(f"{log_id}: Unexpected error during generation: {e}")
                 return GenerationResponse(success=False)
+
     finally:
         if not sem_released:
             request_sem.release()
