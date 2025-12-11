@@ -2,11 +2,11 @@ import asyncio
 import sys
 
 from loguru import logger
-from round_manager.settings import settings
 from subnet_common.graceful_shutdown import GracefulShutdown
 from subnet_common.utils import format_duration
 
 from round_manager.manage_round_iteration import run_manage_round_iteration
+from round_manager.settings import settings
 
 
 def setup_logging(log_level: str) -> None:
