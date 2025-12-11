@@ -174,7 +174,6 @@ async def process_prompt(
     shutdown: GracefulShutdown,
 ) -> None:
     log_id = f"{miner.hotkey[:10]}/{prompt.name}"
-    single_gen = GenerationResult()
 
     async with process_sem:
         if shutdown.should_stop:
@@ -183,7 +182,10 @@ async def process_prompt(
         async with aiofiles.open(prompt.path, "rb") as f:
             image = await f.read()
 
-        result = await generate(
+        ply_key = make_storage_key(miner.hotkey, current_round, prompt.name, "ply")
+        png_key = make_storage_key(miner.hotkey, current_round, prompt.name, "png")
+
+        result = await _generate_and_render_with_retries(
             request_sem=request_sem,
             endpoint=endpoint,
             image=image,
@@ -192,35 +194,22 @@ async def process_prompt(
             log_id=log_id,
         )
 
-        if result.content is None:
-            miner.generations[prompt.name] = single_gen
-            await save_miner_generations(
-                git_batcher=git_batcher, hotkey=miner.hotkey, round_num=current_round, generations=miner.generations
-            )
-            return
+        single_gen = GenerationResult()
 
-        single_gen.generation_time = result.generation_time or 0.0
-        single_gen.size = len(result.content)
+        if result.ply_content is not None:
+            single_gen.generation_time = result.generation_time or 0.0
+            single_gen.size = len(result.ply_content)
 
-        ply_key = make_storage_key(miner.hotkey, current_round, prompt.name, "ply")
-        png_key = make_storage_key(miner.hotkey, current_round, prompt.name, "png")
-
-        ply_result, png_result = await asyncio.gather(
-            r2.upload(key=ply_key, data=result.content),
-            render(settings.render_service_url, result.content),
-            return_exceptions=True,
-        )
-
-        if isinstance(ply_result, BaseException):
-            logger.error(f"{log_id}: PLY upload failed: {ply_result}")
-        else:
-            single_gen.ply = make_cdn_url(ply_key)
-
-        if isinstance(png_result, BaseException) or png_result is None:
-            logger.warning(f"{log_id}: render failed: {png_result}")
-        else:
+            # Upload PLY (always, for analysis even if render failed)
             try:
-                await r2.upload(key=png_key, data=png_result)
+                await r2.upload(key=ply_key, data=result.ply_content)
+                single_gen.ply = make_cdn_url(ply_key)
+            except Exception as e:
+                logger.error(f"{log_id}: PLY upload failed: {e}")
+
+        if result.png_content is not None:
+            try:
+                await r2.upload(key=png_key, data=result.png_content)
                 single_gen.png = make_cdn_url(png_key)
             except Exception as e:
                 logger.error(f"{log_id}: PNG upload failed: {e}")
@@ -228,6 +217,80 @@ async def process_prompt(
     miner.generations[prompt.name] = single_gen
     await save_miner_generations(
         git_batcher=git_batcher, hotkey=miner.hotkey, round_num=current_round, generations=miner.generations
+    )
+
+
+class _GenerateAndRenderResult(BaseModel):
+    """Result of generated and render cycle."""
+
+    ply_content: bytes | None = None
+    png_content: bytes | None = None
+    generation_time: float | None = None
+
+
+async def _generate_and_render_with_retries(
+    request_sem: asyncio.Semaphore,
+    endpoint: str,
+    image: bytes,
+    seed: int,
+    shutdown: GracefulShutdown,
+    log_id: str,
+) -> _GenerateAndRenderResult:
+    """Generate and render with prompt-level retries.
+
+    If render fails (likely bad PLY), regenerate and try again.
+    After all retries are exhausted, returns last PLY content (for analysis) even without PNG.
+    """
+    max_attempts = settings.prompt_retry_attempts
+    last_ply_content: bytes | None = None
+    last_generation_time: float | None = None
+
+    for attempt in range(max_attempts):
+        if shutdown.should_stop:
+            break
+
+        if attempt > 0:
+            logger.info(f"{log_id}: Prompt retry {attempt + 1}/{max_attempts}")
+
+        gen_result = await generate(
+            request_sem=request_sem,
+            endpoint=endpoint,
+            image=image,
+            seed=seed,
+            shutdown=shutdown,
+            log_id=log_id,
+        )
+
+        if gen_result.content is None:
+            # Generation failed after HTTP retries — no point retrying at the prompt level
+            break
+
+        last_ply_content = gen_result.content
+        last_generation_time = gen_result.generation_time
+
+        png_content = await render(
+            endpoint=settings.render_service_url,
+            ply_content=gen_result.content,
+            log_id=log_id,
+        )
+
+        if png_content is not None:
+            return _GenerateAndRenderResult(
+                ply_content=gen_result.content,
+                png_content=png_content,
+                generation_time=gen_result.generation_time,
+            )
+
+        logger.warning(f"{log_id}: render failed, will regenerate (attempt {attempt + 1}/{max_attempts})")
+
+    # All retries exhausted — return last PLY for analysis (if any)
+    if last_ply_content is not None:
+        logger.warning(f"{log_id}: all {max_attempts} prompt attempts failed, saving last PLY for analysis")
+
+    return _GenerateAndRenderResult(
+        ply_content=last_ply_content,
+        png_content=None,
+        generation_time=last_generation_time,
     )
 
 

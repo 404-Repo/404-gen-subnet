@@ -89,6 +89,12 @@ class Settings(BaseSettings):
         description="Maximum number of prompts processed concurrently per miner",
     )
 
+    prompt_retry_attempts: int = Field(
+        default=3,
+        alias="PROMPT_RETRY_ATTEMPTS",
+        description="Number of generate+render attempts per prompt before giving up",
+    )
+
     generation_http_attempts: int = Field(
         default=3,
         alias="GENERATION_HTTP_ATTEMPTS",
