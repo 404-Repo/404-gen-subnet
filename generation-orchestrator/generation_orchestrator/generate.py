@@ -110,7 +110,7 @@ async def _generate_attempt(
                     except Exception as e:
                         # Failed to read body — could be truncated, worth retrying
                         logger.warning(
-                            f"{log_id}: Failed to read response body (attempt {attempt + 1}/{max_attempts}): {e}"
+                            f"{log_id}: failed to read response body (attempt {attempt + 1}/{max_attempts}): {e}"
                         )
                         return None
 
@@ -128,7 +128,7 @@ async def _generate_attempt(
                     )
 
             except httpx.TimeoutException:
-                logger.warning(f"{log_id}: Generation timed out (attempt {attempt + 1}/{max_attempts})")
+                logger.warning(f"{log_id}: generation timed out (attempt {attempt + 1}/{max_attempts})")
                 return None  # Retryable
 
             except httpx.HTTPStatusError as exc:
@@ -148,11 +148,11 @@ async def _generate_attempt(
 
             except httpx.RequestError as e:
                 # Connection errors, DNS failures, etc.
-                logger.warning(f"{log_id}: Request error (attempt {attempt + 1}/{max_attempts}): {e}")
+                logger.warning(f"{log_id}: request error (attempt {attempt + 1}/{max_attempts}): {e}")
                 return None  # Retryable
 
             except Exception as e:
-                logger.error(f"{log_id}: Unexpected error during generation: {e}")
+                logger.error(f"{log_id}: unexpected error during generation: {e}")
                 return GenerationResponse(success=False)
 
     finally:
