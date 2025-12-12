@@ -33,6 +33,10 @@ class Settings(BaseSettings):
         default=2, alias="MAX_CONCURRENT_DUELS", description="Maximum number of concurrent duels"
     )
 
+    max_generation_time_seconds: int = Field(
+        default=35, alias="MAX_GENERATION_TIME", description="Maximum generation time in seconds"
+    )
+
     pause_on_stage_end: bool = Field(
         default=False, alias="PAUSE_ON_STAGE_END", description="Pause for inspection or intervention on stage end"
     )
