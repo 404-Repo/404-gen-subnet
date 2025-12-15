@@ -33,3 +33,4 @@ dist/
 build/
 *.egg-info/
 *404-weights-service.config.js
+*404-weights-setter.config.js
