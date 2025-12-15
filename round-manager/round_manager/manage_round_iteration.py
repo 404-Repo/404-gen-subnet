@@ -5,7 +5,7 @@ from loguru import logger
 from subnet_common.competition.build_info import BuildInfo, get_builds
 from subnet_common.competition.config import CompetitionConfig, require_competition_config
 from subnet_common.competition.judge_progress import JudgeProgress, get_judge_progress
-from subnet_common.competition.leader import LeaderEntry, LeaderState, require_leader_state
+from subnet_common.competition.leader import LeaderEntry, LeaderListAdapter, LeaderState, require_leader_state
 from subnet_common.competition.schedule import RoundSchedule, get_schedule
 from subnet_common.competition.state import CompetitionState, RoundStage, require_state
 from subnet_common.github import GitHubClient
@@ -199,7 +199,7 @@ async def commit_round_updates(
         parts.append("schedule")
 
     if leader_state:
-        files["leader.json"] = leader_state.model_dump_json(indent=2)
+        files["leader.json"] = LeaderListAdapter.dump_json(leader_state.transitions, indent=2).decode()
         parts.append("leader")
 
     message = f"Update {', '.join(parts)} for round {state.current_round}"
