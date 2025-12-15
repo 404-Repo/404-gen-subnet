@@ -211,6 +211,10 @@ async def _run_match(
     aggregates scores, and returns the complete match report.
     """
     sem = asyncio.Semaphore(settings.max_concurrent_duels)
+    overtime_allowance = int(len(prompts) * settings.overtime_tolerance_ratio)
+
+    leader_overtime = _get_overtime_prompts(prompts, leader_gens, overtime_allowance)
+    challenger_overtime = _get_overtime_prompts(prompts, challenger_gens, overtime_allowance)
 
     duels = await asyncio.gather(
         *[
@@ -220,8 +224,8 @@ async def _run_match(
                 prompt=p,
                 leader_gen=leader_gens.get(Path(p).stem, GenerationResult()),
                 challenger_gen=challenger_gens.get(Path(p).stem, GenerationResult()),
-                leader=leader,
-                hotkey=hotkey,
+                leader_overtime=Path(p).stem in leader_overtime,
+                challenger_overtime=Path(p).stem in challenger_overtime,
                 seed=seed,
                 shutdown=shutdown,
             )
@@ -240,21 +244,44 @@ async def _run_match(
     )
 
 
+def _get_overtime_prompts(
+    prompts: list[str],
+    gens: dict[str, GenerationResult],
+    allowance: int,
+) -> set[str]:
+    """Return prompt stems that exceed overtime allowance.
+
+    The first `allowance` overtime prompts are free; the rest are penalized.
+    """
+    penalized = set()
+    overtime_count = 0
+
+    for p in prompts:
+        stem = Path(p).stem
+        gen = gens.get(stem)
+        if gen and gen.generation_time and gen.generation_time > settings.max_generation_time_seconds:
+            overtime_count += 1
+            if overtime_count > allowance:
+                penalized.add(stem)
+
+    return penalized
+
+
 async def _evaluate_prompt(
     openai: AsyncOpenAI,
     sem: asyncio.Semaphore,
     prompt: str,
     leader_gen: GenerationResult,
     challenger_gen: GenerationResult,
-    leader: str,
-    hotkey: str,
+    leader_overtime: bool,
+    challenger_overtime: bool,
     seed: int,
     shutdown: GracefulShutdown,
 ) -> DuelReport:
     """Evaluate a single prompt duel between leader and challenger.
 
-    Returns early with the appropriate winner if previews are missing.
-    Otherwise, calls the judge VLM to determine the winner.
+    Returns early with the appropriate winner if previews are missing or
+    generation time penalties apply. Otherwise, calls the judge VLM.
     """
     stem = Path(prompt).stem
 
@@ -272,37 +299,16 @@ async def _evaluate_prompt(
     if shutdown.should_stop:
         return duel
 
-    if not leader_gen.png and not challenger_gen.png:
-        logger.debug(f"No previews for {stem}")
-        duel.winner = DuelWinner.DRAW
+    winner, issues = _check_missing_previews(leader_gen, challenger_gen, stem)
+    if winner is not None:
+        duel.winner = winner
+        duel.issues = issues
         return duel
 
-    if not leader_gen.png:
-        logger.debug(f"No preview for {stem} from leader {leader[:10]}")
-        duel.winner = DuelWinner.MINER
-        return duel
-
-    if not challenger_gen.png:
-        logger.debug(f"No preview for {stem} from challenger {hotkey[:10]}")
-        duel.winner = DuelWinner.LEADER
-        return duel
-
-    leader_gen_time_exceeded = leader_gen.generation_time > settings.max_generation_time_seconds
-    challenger_gen_time_exceeded = challenger_gen.generation_time > settings.max_generation_time_seconds
-
-    if leader_gen_time_exceeded and challenger_gen_time_exceeded:
-        duel.winner = DuelWinner.DRAW
-        duel.issues = "Generation time exceeded for both"
-        return duel
-
-    if leader_gen_time_exceeded:
-        duel.winner = DuelWinner.MINER
-        duel.issues = "Generation time exceeded for leader"
-        return duel
-
-    if challenger_gen_time_exceeded:
-        duel.winner = DuelWinner.LEADER
-        duel.issues = "Generation time exceeded for challenger"
+    winner, issues = _check_overtime(leader_overtime, challenger_overtime)
+    if winner is not None:
+        duel.winner = winner
+        duel.issues = issues
         return duel
 
     async with sem:
@@ -320,12 +326,53 @@ async def _evaluate_prompt(
         elapsed = asyncio.get_running_loop().time() - start
         logger.debug(f"Duel {stem}: {result.outcome:+d} in {elapsed:.1f}s")
 
-        if result.outcome < 0:
-            duel.winner = DuelWinner.LEADER
-        elif result.outcome > 0:
-            duel.winner = DuelWinner.MINER
-        else:
-            duel.winner = DuelWinner.DRAW
+        duel.winner = _outcome_to_winner(result.outcome)
         duel.issues = result.issues
-
         return duel
+
+
+def _check_missing_previews(
+    leader_gen: GenerationResult,
+    challenger_gen: GenerationResult,
+    stem: str,
+) -> tuple[DuelWinner | None, str]:
+    """Return winner based on missing previews, or None if both present."""
+    if not leader_gen.png and not challenger_gen.png:
+        logger.debug(f"No previews for {stem}")
+        return DuelWinner.DRAW, f"No previews for {stem}"
+
+    if not leader_gen.png:
+        logger.debug(f"No preview for {stem} from leader")
+        return DuelWinner.MINER, f"No preview for {stem} from leader"
+
+    if not challenger_gen.png:
+        logger.debug(f"No preview for {stem} from challenger")
+        return DuelWinner.LEADER, f"No preview for {stem} from challenger"
+
+    return None, ""
+
+
+def _check_overtime(
+    leader_overtime: bool,
+    challenger_overtime: bool,
+) -> tuple[DuelWinner | None, str]:
+    """Return (winner, issues) based on overtime penalties, or (None, None) if no penalty."""
+    if leader_overtime and challenger_overtime:
+        return DuelWinner.DRAW, "Generation time exceeded for both"
+
+    if leader_overtime:
+        return DuelWinner.MINER, "Generation time exceeded for leader"
+
+    if challenger_overtime:
+        return DuelWinner.LEADER, "Generation time exceeded for challenger"
+
+    return None, ""
+
+
+def _outcome_to_winner(outcome: int) -> DuelWinner:
+    """Convert numeric outcome to DuelWinner."""
+    if outcome < 0:
+        return DuelWinner.LEADER
+    if outcome > 0:
+        return DuelWinner.MINER
+    return DuelWinner.DRAW
