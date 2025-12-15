@@ -92,6 +92,9 @@ async def _generate_attempt(
         async with httpx.AsyncClient(timeout=timeout) as client:
             try:
                 start_time = asyncio.get_running_loop().time()
+
+                logger.debug(f"{log_id}: generating (attempt {attempt + 1}/{max_attempts})")
+
                 async with client.stream(
                     "POST",
                     f"{endpoint}/generate",
@@ -104,6 +107,8 @@ async def _generate_attempt(
 
                     request_sem.release()
                     sem_released = True
+
+                    logger.debug(f"{log_id}: generation completed in {elapsed:.1f}s")
 
                     try:
                         content = await response.aread()
