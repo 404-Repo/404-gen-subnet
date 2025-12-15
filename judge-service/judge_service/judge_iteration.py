@@ -287,6 +287,24 @@ async def _evaluate_prompt(
         duel.winner = DuelWinner.LEADER
         return duel
 
+    leader_gen_time_exceeded = leader_gen.generation_time > settings.max_generation_time_seconds
+    challenger_gen_time_exceeded = challenger_gen.generation_time > settings.max_generation_time_seconds
+
+    if leader_gen_time_exceeded and challenger_gen_time_exceeded:
+        duel.winner = DuelWinner.DRAW
+        duel.issues = "Generation time exceeded for both"
+        return duel
+
+    if leader_gen_time_exceeded:
+        duel.winner = DuelWinner.MINER
+        duel.issues = "Generation time exceeded for leader"
+        return duel
+
+    if challenger_gen_time_exceeded:
+        duel.winner = DuelWinner.LEADER
+        duel.issues = "Generation time exceeded for challenger"
+        return duel
+
     async with sem:
         if shutdown.should_stop:
             return duel
