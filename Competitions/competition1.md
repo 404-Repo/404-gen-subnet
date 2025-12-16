@@ -3,7 +3,7 @@
 ### What we provide:
 1. A Set of 140k+ 2D Image Prompts for Testing;
 2. Our base miner [implementation](https://github.com/404-Repo/404-base-miner) that is ready for Commercial Use; 
-3. Judge Code for Evaluating Gaussian Splat Outputs. This can be found in this repository ("duel-eval" folder);
+3. Judge Code for Evaluating Gaussian Splat Outputs. This can be found in this repository ("judge-service" folder);
 
 ### Base miner description:
 Our Base Miner Implementation Includes:

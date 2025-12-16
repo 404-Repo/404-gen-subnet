@@ -27,6 +27,8 @@ async def main() -> None:
         branch=settings.github_winner_info_branch,
         token=settings.github_token,
         set_weights_interval_sec=settings.set_weights_interval_sec,
+        set_weights_retry_interval_sec=settings.set_weights_retry_interval_sec,
+        next_leader_wait_interval_sec=settings.next_leader_wait_interval_sec,
         subnet_owner_uid=settings.subnet_owner_uid,
         netuid=settings.netuid,
         wallet=wallet,
