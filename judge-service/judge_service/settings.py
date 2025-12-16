@@ -37,6 +37,12 @@ class Settings(BaseSettings):
         default=35, alias="MAX_GENERATION_TIME", description="Maximum generation time in seconds"
     )
 
+    overtime_tolerance_ratio: float = Field(
+        default=0.1,
+        alias="OVERTIME_TOLERANCE_RATIO",
+        description="Ratio of overtime prompts allowed before penalization (e.g., 0.1 = first 10% are not penalized)",
+    )
+
     pause_on_stage_end: bool = Field(
         default=False, alias="PAUSE_ON_STAGE_END", description="Pause for inspection or intervention on stage end"
     )
