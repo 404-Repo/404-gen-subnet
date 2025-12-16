@@ -95,7 +95,7 @@ def get_next_round_start(
     if current_time < today_round:
         next_round = today_round
     else:
-        next_round = today_round + timedelta(days=1)
+        next_round = today_round + timedelta(hours=config.round_duration_hours)
 
     # Skip day if FINALIZING with insufficient buffer
     time_remaining = next_round - current_time

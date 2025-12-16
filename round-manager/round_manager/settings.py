@@ -31,5 +31,11 @@ class Settings(BaseSettings):
 
     log_level: str = Field(default="DEBUG", alias="LOG_LEVEL", description="Logging level")
 
+    round_duration_hours: int = Field(
+        default=24,
+        alias="ROUND_DURATION_HOURS",
+        description="Round duration in hours",
+    )
+
 
 settings = Settings()  # type: ignore[call-arg]
