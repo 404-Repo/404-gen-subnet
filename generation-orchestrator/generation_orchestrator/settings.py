@@ -78,13 +78,13 @@ class Settings(BaseSettings):
     )
 
     max_concurrent_miners: int = Field(
-        default=8,
+        default=4,
         alias="MAX_CONCURRENT_MINERS",
         description="Maximum number of miners being processed concurrently",
     )
 
     max_concurrent_prompts_per_miner: int = Field(
-        default=8,
+        default=4,
         alias="MAX_CONCURRENT_PROMPTS_PER_MINER",
         description="Maximum number of prompts processed concurrently per miner",
     )
@@ -114,11 +114,21 @@ class Settings(BaseSettings):
     )
 
     generation_timeout_seconds: int = Field(
-        default=30, alias="GENERATION_TIMEOUT", description="Generation timeout in seconds"
+        default=35, alias="GENERATION_TIMEOUT", description="Generation timeout in seconds"
     )
 
     download_timeout_seconds: int = Field(
         default=180, alias="DOWNLOAD_TIMEOUT", description="Download timeout in seconds"
+    )
+
+    overtime_tolerance_ratio: float = Field(
+        default=0.1,
+        alias="OVERTIME_TOLERANCE_RATIO",
+        description="Ratio of overtime prompts allowed before penalization (e.g., 0.1 = first 10% are not penalized)",
+    )
+
+    max_fail_rate: float = Field(
+        default=0.3, alias="MAX_FAIL_RATE", description="Maximum fail rate for a pod before retrying with a new pod"
     )
 
     render_service_url: str = Field(
