@@ -31,7 +31,7 @@ async def render(endpoint: str, ply_content: bytes, log_id: str) -> bytes | None
             logger.error(f"{log_id}: render failed: HTTP {response.status_code} ({elapsed:.1f}s)")
             return None
 
-        logger.info(f"{log_id}: rendered in {elapsed:.1f}s, {len(response.content) / 1024:.1f}KB")
+        logger.debug(f"{log_id}: rendered in {elapsed:.1f}s, {len(response.content) / 1024:.1f}KB")
         return response.content
 
     except httpx.TimeoutException:

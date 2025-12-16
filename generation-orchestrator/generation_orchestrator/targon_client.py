@@ -101,7 +101,7 @@ class TargonClient:
         try:
             logger.debug(f"Requested container deploy {name}")
             response = await self.client.async_serverless.deploy_container(request)
-            logger.info(f"Deployed container {name} ({response.uid})")
+            logger.debug(f"Deployed container {name} ({response.uid})")
         except (TargonError, APIError) as e:
             logger.error(f"Failed to deploy container {name}: {e}")
             raise TargonClientError(f"Failed to deploy container: {e}") from e

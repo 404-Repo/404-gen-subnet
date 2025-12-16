@@ -21,6 +21,7 @@ class CompetitionConfig(BaseModel):
     weight_floor: float = Field(..., description="Minimum leader weight")
     prompts_per_round: int = Field(..., description="Number of prompts to select for each round")
     carryover_prompts: int = Field(..., description="Number of prompts retained from the previous round")
+    round_duration_days: int = Field(default=1, description="Round duration in days")
 
 
 async def require_competition_config(git: GitHubClient, ref: str) -> CompetitionConfig:
