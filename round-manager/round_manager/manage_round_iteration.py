@@ -36,9 +36,21 @@ async def run_manage_round_iteration() -> None:
         schedule = await get_schedule(git, state.current_round, ref=latest_commit_sha)
         logger.debug(f"Previous round schedule: {schedule}")
 
-        current_block = await bt.async_subtensor(network=settings.network).get_current_block()
-        next_round_start, next_round_start_block = get_next_round_start(
-            current_time=datetime.now(UTC), current_block=current_block, config=config
+        subtensor = bt.async_subtensor(network=settings.network)
+        current_block = await subtensor.get_current_block()
+
+        previous_round_start: datetime | None = None
+        block_timestamp: datetime | None = None
+
+        if schedule:
+            block_timestamp = await subtensor.get_timestamp(block=schedule.latest_reveal_block)
+            previous_round_start = block_timestamp
+
+        next_round_start, next_round_start_block = _get_next_round_start(
+            current_time=datetime.now(UTC),
+            current_block=current_block,
+            config=config,
+            previous_round_start=previous_round_start,
         )
 
         # Check if the competition has ended
@@ -80,38 +92,44 @@ async def run_manage_round_iteration() -> None:
         )
 
 
-def get_next_round_start(
+def _get_next_round_start(
     current_time: datetime,
     current_block: int,
     config: CompetitionConfig,
+    previous_round_start: datetime | None,
 ) -> tuple[datetime, int]:
     """
     Calculate the next round start datetime and block.
     """
-    today = current_time.date()
-    today_round = datetime.combine(today, config.round_start_time, tzinfo=UTC)
 
-    # Determine candidate round start
-    if current_time < today_round:
-        next_round = today_round
+    # Find earliest eligible date based on previous round
+    if previous_round_start is not None:
+        earliest_date = (previous_round_start + timedelta(days=config.round_duration_days)).date()
     else:
-        next_round = today_round + timedelta(days=1)
+        earliest_date = current_time.date()
 
-    # Skip day if FINALIZING with insufficient buffer
-    time_remaining = next_round - current_time
-    if time_remaining < timedelta(hours=config.finalization_buffer_hours):
-        next_round += timedelta(days=1)
+    # Build candidate at the fixed round start time
+    candidate = datetime.combine(earliest_date, config.round_start_time, tzinfo=UTC)
+
+    logger.info(f"Candidate: {candidate}")
+
+    # Skip days if insufficient finalization buffer
+    time_remaining = candidate - current_time
+    min_time_remaining = timedelta(hours=config.finalization_buffer_hours)
+    while time_remaining < min_time_remaining:
+        candidate += timedelta(days=1)
+        time_remaining = candidate - current_time
 
     # Clamp to competition bounds
     first_round = datetime.combine(config.first_evaluation_date, config.round_start_time, tzinfo=UTC)
-    if next_round < first_round:
-        next_round = first_round
+    if candidate < first_round:
+        candidate = first_round
 
     # Calculate block
-    seconds_until = (next_round - current_time).total_seconds()
+    seconds_until = (candidate - current_time).total_seconds()
     blocks_until = int(seconds_until / BLOCK_TIME_SECONDS)
 
-    return next_round, current_block + blocks_until
+    return candidate, current_block + blocks_until
 
 
 def update_leader_state(
