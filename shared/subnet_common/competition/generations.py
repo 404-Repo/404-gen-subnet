@@ -10,6 +10,15 @@ class GenerationResult(BaseModel):
     generation_time: float = 0
     size: int = 0
 
+    def is_failed(self) -> bool:
+        return self.ply is None or self.png is None
+
+    def is_overtime(self, timeout: float) -> bool:
+        return self.generation_time > timeout
+
+    def needs_retry(self, timeout: float) -> bool:
+        return self.is_failed() or self.is_overtime(timeout)
+
 
 MinerGenerationsAdapter = TypeAdapter(dict[str, GenerationResult])
 
