@@ -23,6 +23,70 @@ class Miner(BaseModel):
     generations: dict[str, GenerationResult]
 
 
+class ProcessingStats(BaseModel):
+    """Stats from processing a miner's prompts."""
+
+    total: int
+    successful: int  # ply + png + within the time limit
+    failed: int  # no png
+    overtime: int  # has output but exceeded the time limit
+
+
+def _calculate_stats(generations: dict[str, GenerationResult], prompts: list[Prompt]) -> ProcessingStats:
+    """Calculate processing stats for completed prompts."""
+    successful = 0
+    failed = 0
+    overtime = 0
+
+    timeout = settings.generation_timeout_seconds
+
+    for p in prompts:
+        gen = generations.get(p.name)
+        if gen is None or gen.is_failed():
+            failed += 1
+        elif gen.is_overtime(timeout):
+            overtime += 1
+        else:
+            successful += 1
+
+    return ProcessingStats(total=len(prompts), successful=successful, failed=failed, overtime=overtime)
+
+
+def _get_remaining_prompts(
+    generations: dict[str, GenerationResult],
+    prompts: list[Prompt],
+) -> list[Prompt]:
+    """Get prompts that still need processing (not done or need retry)."""
+    timeout = settings.generation_timeout_seconds
+    remaining = []
+    for p in prompts:
+        gen = generations.get(p.name)
+        if gen is None or gen.needs_retry(timeout):
+            remaining.append(p)
+    return remaining
+
+
+def _should_retry_with_new_pod(stats: ProcessingStats) -> tuple[bool, str]:
+    """Decide if failure/overtime counts warrant a new pod.
+
+    Returns (should_retry, reason).
+    """
+    if stats.total == 0:
+        return True, "no prompts processed"
+
+    fail_rate = stats.failed / stats.total
+
+    if fail_rate > settings.max_fail_rate:
+        return True, f"fail rate {fail_rate:.1%} > {settings.max_fail_rate:.1%}"
+
+    overtime_tolerance = stats.total * settings.overtime_tolerance_ratio
+
+    if stats.overtime > overtime_tolerance:
+        return True, f"overtime count {stats.overtime} > {overtime_tolerance}"
+
+    return False, ""
+
+
 async def process_miner_with_retries(
     semaphore: StaggeredSemaphore,
     git_batcher: GitBatcher,
@@ -33,10 +97,12 @@ async def process_miner_with_retries(
     seed: int,
     shutdown: GracefulShutdown,
 ) -> None:
+    log_id = hotkey[:10]
+
     for attempt in range(settings.miner_process_attempts):
         try:
             async with semaphore:
-                if await process_miner(
+                success, stats = await process_miner(
                     git_batcher=git_batcher,
                     hotkey=hotkey,
                     docker_image=docker_image,
@@ -44,13 +110,32 @@ async def process_miner_with_retries(
                     prompts=prompts,
                     seed=seed,
                     shutdown=shutdown,
-                ):
-                    return
-            logger.info(f"Attempt {attempt + 1} wasn't successful for {hotkey[:10]}.")
-        except Exception as e:
-            logger.exception(f"Attempt {attempt + 1} failed for {hotkey[:10]}: {e}")
+                )
 
-    logger.error(f"All {settings.miner_process_attempts} attempts failed for {hotkey[:10]}")
+                if not success:
+                    logger.info(f"{log_id}: attempt {attempt + 1} failed (pod issue)")
+                    continue
+
+                logger.info(
+                    f"{log_id}: attempt {attempt + 1} - "
+                    f"{stats.successful} ok, {stats.failed} failed, {stats.overtime} overtime"
+                )
+
+                if stats.failed == 0 and stats.overtime == 0:
+                    return
+
+                should_retry, reason = _should_retry_with_new_pod(stats)
+                if not should_retry:
+                    logger.info(f"{log_id}: rates acceptable, done")
+                    return
+
+                # Will retry with a new pod
+                logger.info(f"{log_id}: {reason}, will retry {stats.failed + stats.overtime} prompts with new pod")
+
+        except Exception as e:
+            logger.exception(f"{log_id}: attempt {attempt + 1} failed: {e}")
+
+    logger.error(f"{log_id}: all {settings.miner_process_attempts} attempts failed")
 
 
 async def process_miner(
@@ -61,7 +146,14 @@ async def process_miner(
     prompts: list[Prompt],
     seed: int,
     shutdown: GracefulShutdown,
-) -> bool:
+) -> tuple[bool, ProcessingStats]:
+    """Process a miner's prompts.
+
+    Returns:
+        (success, stats) where success indicates pod worked, stats have prompt outcomes.
+    """
+    log_id = hotkey[:10]
+
     generations = await get_miner_generations(
         git=git_batcher.git, hotkey=hotkey, round_num=current_round, ref=settings.github_branch
     )  # Safe to load the progress here, as there is no concurrent activity that updates it.
@@ -71,12 +163,13 @@ async def process_miner(
         docker_image=docker_image,
         generations=generations,
     )
-    remaining = [p for p in prompts if p.name not in miner.generations]
-    if not remaining:
-        logger.info(f"Miner {miner.hotkey[:10]} already completed all prompts")
-        return True
 
-    logger.info(f"Miner {miner.hotkey[:10]}: {len(miner.generations)} done, {len(remaining)} remaining")
+    remaining = _get_remaining_prompts(generations, prompts)
+    if not remaining:
+        logger.info(f"{log_id}: already completed all prompts")
+        return True, _calculate_stats(miner.generations, prompts)
+
+    logger.info(f"{log_id}: {len(miner.generations)} done, {len(remaining)} remaining")
 
     async with TargonClient(api_key=settings.targon_api_key.get_secret_value()) as targon:
         config = ContainerDeployConfig(
@@ -98,11 +191,11 @@ async def process_miner(
         )
         if container is None:
             await targon.delete_containers_by_name(container_name)
-            return False
+            return False, _calculate_stats(miner.generations, prompts)
 
         if container.url is None:
             await targon.delete_container(container.uid)
-            return False
+            return False, _calculate_stats(miner.generations, prompts)
 
         try:
             await process_all_prompts(
@@ -118,7 +211,7 @@ async def process_miner(
             if not settings.debug_keep_pods_alive:
                 await targon.delete_container(container.uid)
 
-    return True
+    return True, _calculate_stats(miner.generations, prompts)
 
 
 async def process_all_prompts(
@@ -238,19 +331,20 @@ async def _generate_and_render_with_retries(
 ) -> _GenerateAndRenderResult:
     """Generate and render with prompt-level retries.
 
-    If render fails (likely bad PLY), regenerate and try again.
-    After all retries are exhausted, returns last PLY content (for analysis) even without PNG.
+    Retries on: render failure, generation overtime.
+    After all retries exhausted, returns the last result (even if overtime).
     """
     max_attempts = settings.prompt_retry_attempts
-    last_ply_content: bytes | None = None
-    last_generation_time: float | None = None
+    last_ply: bytes | None = None
+    last_png: bytes | None = None
+    last_time: float | None = None
 
     for attempt in range(max_attempts):
         if shutdown.should_stop:
             break
 
         if attempt > 0:
-            logger.info(f"{log_id}: Prompt retry {attempt + 1}/{max_attempts}")
+            logger.info(f"{log_id}: prompt retry {attempt + 1}/{max_attempts}")
 
         gen_result = await generate(
             request_sem=request_sem,
@@ -262,11 +356,10 @@ async def _generate_and_render_with_retries(
         )
 
         if gen_result.content is None:
-            # Generation failed after HTTP retries — no point retrying at the prompt level
-            break
+            break  # Generation failed, no point retrying
 
-        last_ply_content = gen_result.content
-        last_generation_time = gen_result.generation_time
+        last_ply = gen_result.content
+        last_time = gen_result.generation_time
 
         png_content = await render(
             endpoint=settings.render_service_url,
@@ -274,24 +367,23 @@ async def _generate_and_render_with_retries(
             log_id=log_id,
         )
 
-        if png_content is not None:
-            return _GenerateAndRenderResult(
-                ply_content=gen_result.content,
-                png_content=png_content,
-                generation_time=gen_result.generation_time,
-            )
+        if png_content is None:
+            logger.warning(f"{log_id}: render failed (attempt {attempt + 1}/{max_attempts})")
+            continue
 
-        logger.warning(f"{log_id}: render failed, will regenerate (attempt {attempt + 1}/{max_attempts})")
+        last_png = png_content
 
-    # All retries exhausted — return last PLY for analysis (if any)
-    if last_ply_content is not None:
-        logger.warning(f"{log_id}: all {max_attempts} prompt attempts failed, saving last PLY for analysis")
+        if last_time and last_time > settings.generation_timeout_seconds:
+            logger.warning(f"{log_id}: overtime ({last_time:.1f}s) (attempt {attempt + 1}/{max_attempts})")
+            continue
 
-    return _GenerateAndRenderResult(
-        ply_content=last_ply_content,
-        png_content=None,
-        generation_time=last_generation_time,
-    )
+        # Full success: PLY + PNG + on time
+        return _GenerateAndRenderResult(ply_content=last_ply, png_content=last_png, generation_time=last_time)
+
+    if last_ply is not None:
+        logger.warning(f"{log_id}: all {max_attempts} attempts exhausted")
+
+    return _GenerateAndRenderResult(ply_content=last_ply, png_content=last_png, generation_time=last_time)
 
 
 def make_storage_key(hotkey: str, current_round: int, prompt_name: str, ext: str) -> str:
