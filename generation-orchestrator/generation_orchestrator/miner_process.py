@@ -331,12 +331,13 @@ async def _generate_and_render_with_retries(
 ) -> _GenerateAndRenderResult:
     """Generate and render with prompt-level retries.
 
-    If render fails (likely bad PLY), regenerate and try again.
-    After all retries are exhausted, returns last PLY content (for analysis) even without PNG.
+    Retries on: render failure, generation overtime.
+    After all retries exhausted, returns the last result (even if overtime).
     """
     max_attempts = settings.prompt_retry_attempts
-    last_ply_content: bytes | None = None
-    last_generation_time: float | None = None
+    last_ply: bytes | None = None
+    last_png: bytes | None = None
+    last_time: float | None = None
 
     for attempt in range(max_attempts):
         if shutdown.should_stop:
@@ -355,11 +356,10 @@ async def _generate_and_render_with_retries(
         )
 
         if gen_result.content is None:
-            # Generation failed after HTTP retries — no point retrying at the prompt level
-            break
+            break  # Generation failed, no point retrying
 
-        last_ply_content = gen_result.content
-        last_generation_time = gen_result.generation_time
+        last_ply = gen_result.content
+        last_time = gen_result.generation_time
 
         png_content = await render(
             endpoint=settings.render_service_url,
@@ -367,24 +367,23 @@ async def _generate_and_render_with_retries(
             log_id=log_id,
         )
 
-        if png_content is not None:
-            return _GenerateAndRenderResult(
-                ply_content=gen_result.content,
-                png_content=png_content,
-                generation_time=gen_result.generation_time,
-            )
+        if png_content is None:
+            logger.warning(f"{log_id}: render failed (attempt {attempt + 1}/{max_attempts})")
+            continue
 
-        logger.warning(f"{log_id}: render failed, will regenerate (attempt {attempt + 1}/{max_attempts})")
+        last_png = png_content
 
-    # All retries exhausted — return last PLY for analysis (if any)
-    if last_ply_content is not None:
-        logger.warning(f"{log_id}: all {max_attempts} prompt attempts failed, saving last PLY")
+        if last_time and last_time > settings.generation_timeout_seconds:
+            logger.warning(f"{log_id}: overtime ({last_time:.1f}s) (attempt {attempt + 1}/{max_attempts})")
+            continue
 
-    return _GenerateAndRenderResult(
-        ply_content=last_ply_content,
-        png_content=None,
-        generation_time=last_generation_time,
-    )
+        # Full success: PLY + PNG + on time
+        return _GenerateAndRenderResult(ply_content=last_ply, png_content=last_png, generation_time=last_time)
+
+    if last_ply is not None:
+        logger.warning(f"{log_id}: all {max_attempts} attempts exhausted")
+
+    return _GenerateAndRenderResult(ply_content=last_ply, png_content=last_png, generation_time=last_time)
 
 
 def make_storage_key(hotkey: str, current_round: int, prompt_name: str, ext: str) -> str:
