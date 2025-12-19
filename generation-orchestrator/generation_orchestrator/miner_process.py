@@ -263,7 +263,7 @@ async def process_prompt(
             targon=targon,
         )
         if container is None:
-            return
+            logger.error(f"{log_id}: Failed to restart container")
 
     await save_miner_generations(
         git_batcher=git_batcher, hotkey=miner.hotkey, round_num=current_round, generations=miner.generations
