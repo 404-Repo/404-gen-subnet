@@ -121,6 +121,12 @@ class Settings(BaseSettings):
         default=180, alias="DOWNLOAD_TIMEOUT", description="Download timeout in seconds"
     )
 
+    generation_failure_threshold: int = Field(
+        default=32,
+        alias="GENERATION_FAILURE_THRESHOLD",
+        description="Number of failures after which we should re-create pod",
+    )
+
     render_service_url: str = Field(
         default="http://localhost:8000/", alias="RENDER_URL", description="Render service base URL"
     )

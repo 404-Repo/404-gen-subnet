@@ -6,6 +6,7 @@ from pydantic import BaseModel
 from subnet_common.competition.generations import GenerationResult, get_miner_generations, save_miner_generations
 from subnet_common.git_batcher import GitBatcher
 from subnet_common.graceful_shutdown import GracefulShutdown
+from targon.client.serverless import ServerlessResourceListItem
 
 from generation_orchestrator.generate import generate
 from generation_orchestrator.prompts import Prompt
@@ -21,6 +22,7 @@ class Miner(BaseModel):
     hotkey: str
     docker_image: str
     generations: dict[str, GenerationResult]
+    restart_count: int = 0
 
 
 async def process_miner_with_retries(
@@ -85,23 +87,13 @@ async def process_miner(
             port=settings.generation_port,
             container_concurrency=settings.max_concurrent_prompts_per_miner + 1,
         )
-        container_name = f"miner-{current_round}-{miner.hotkey[:10].lower()}"
-        container = await ensure_running_container(
-            targon,
-            name=container_name,
+        container_name = _get_container_name(miner=miner, round=current_round)
+        container = await _run_container(
+            container_name=container_name,
             config=config,
-            shutdown=GracefulShutdown(),
-            reuse_existing=settings.debug_keep_pods_alive,
-            deploy_timeout=settings.targon_startup_timeout_seconds,
-            warmup_timeout=settings.targon_warmup_timeout_seconds,
-            check_interval=settings.check_pod_interval_seconds,
+            targon=targon,
         )
         if container is None:
-            await targon.delete_containers_by_name(container_name)
-            return False
-
-        if container.url is None:
-            await targon.delete_container(container.uid)
             return False
 
         try:
@@ -113,6 +105,8 @@ async def process_miner(
                 seed=seed,
                 shutdown=shutdown,
                 miner=miner,
+                targon=targon,
+                config=config,
             )
         finally:
             if not settings.debug_keep_pods_alive:
@@ -129,6 +123,8 @@ async def process_all_prompts(
     prompts: list[Prompt],
     seed: int,
     shutdown: GracefulShutdown,
+    targon: TargonClient,
+    config: ContainerDeployConfig,
 ) -> None:
     request_sem = asyncio.Semaphore(1)  # Using semaphores to limit request to one at a time.
     process_sem = asyncio.Semaphore(settings.max_concurrent_prompts_per_miner)  # Limiting request to control traffic
@@ -150,6 +146,8 @@ async def process_all_prompts(
                 r2=r2,
                 miner=miner,
                 shutdown=shutdown,
+                targon=targon,
+                config=config,
             )
             for prompt in prompts
         ]
@@ -159,6 +157,36 @@ async def process_all_prompts(
         for prompt, result in zip(prompts, results, strict=True):
             if isinstance(result, Exception):
                 logger.error(f"{miner.hotkey[:10]}/{prompt.name}: {result}")
+
+
+def _get_container_name(*, miner: Miner, round: int) -> str:
+    return f"miner-{round}-{miner.hotkey[:10].lower()}"
+
+
+async def _run_container(
+    *,
+    container_name: str,
+    config: ContainerDeployConfig,
+    targon: TargonClient,
+) -> ServerlessResourceListItem | None:
+    container = await ensure_running_container(
+        targon,
+        name=container_name,
+        config=config,
+        shutdown=GracefulShutdown(),
+        reuse_existing=settings.debug_keep_pods_alive,
+        deploy_timeout=settings.targon_startup_timeout_seconds,
+        warmup_timeout=settings.targon_warmup_timeout_seconds,
+        check_interval=settings.check_pod_interval_seconds,
+    )
+    if container is None:
+        await targon.delete_containers_by_name(container_name)
+        return None
+
+    if container.url is None:
+        await targon.delete_container(container.uid)
+        return None
+    return container
 
 
 async def process_prompt(
@@ -172,6 +200,8 @@ async def process_prompt(
     r2: R2Client,
     miner: Miner,
     shutdown: GracefulShutdown,
+    targon: TargonClient,
+    config: ContainerDeployConfig,
 ) -> None:
     log_id = f"{miner.hotkey[:10]}/{prompt.name}"
 
@@ -215,6 +245,26 @@ async def process_prompt(
                 logger.error(f"{log_id}: PNG upload failed: {e}")
 
     miner.generations[prompt.name] = single_gen
+
+    num_fails = len(
+        [
+            1
+            for g in miner.generations.values()
+            if g.ply is None or g.generation_time >= settings.generation_timeout_seconds
+        ]
+    )
+    if miner.restart_count == 0 and num_fails >= settings.generation_failure_threshold:
+        miner.restart_count = 1
+        container_name = _get_container_name(miner=miner, round=current_round)
+        await targon.delete_containers_by_name(container_name)
+        container = await _run_container(
+            container_name=container_name,
+            config=config,
+            targon=targon,
+        )
+        if container is None:
+            return
+
     await save_miner_generations(
         git_batcher=git_batcher, hotkey=miner.hotkey, round_num=current_round, generations=miner.generations
     )
