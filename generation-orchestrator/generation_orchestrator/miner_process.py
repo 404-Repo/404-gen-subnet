@@ -254,6 +254,7 @@ async def process_prompt(
         ]
     )
     if miner.restart_count == 0 and num_fails >= settings.generation_failure_threshold:
+        logger.warning(f"{log_id}: Restarting container due to generation failures (num_fails: {num_fails})")
         miner.restart_count = 1
         container_name = _get_container_name(miner=miner, round=current_round)
         await targon.delete_containers_by_name(container_name)
