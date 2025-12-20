@@ -117,6 +117,12 @@ class Settings(BaseSettings):
         default=30, alias="GENERATION_TIMEOUT", description="Generation timeout in seconds"
     )
 
+    generation_failure_threshold: int = Field(
+        default=32,
+        alias="GENERATION_FAILURE_THRESHOLD",
+        description="Number of generation failures before restarting the miner",
+    )
+
     download_timeout_seconds: int = Field(
         default=180, alias="DOWNLOAD_TIMEOUT", description="Download timeout in seconds"
     )
