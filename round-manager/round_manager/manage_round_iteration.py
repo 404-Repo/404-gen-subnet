@@ -43,8 +43,11 @@ async def run_manage_round_iteration() -> None:
         block_timestamp: datetime | None = None
 
         if schedule:
-            block_timestamp = await subtensor.get_timestamp(block=schedule.latest_reveal_block)
+            block_info = await subtensor.get_block_info(block=schedule.latest_reveal_block)
+            block_timestamp = datetime.fromtimestamp(block_info.timestamp, tz=UTC)
             previous_round_start = block_timestamp
+
+        logger.debug(f"Previous round start: {previous_round_start}")
 
         next_round_start, next_round_start_block = _get_next_round_start(
             current_time=datetime.now(UTC),
