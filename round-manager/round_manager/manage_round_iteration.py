@@ -36,64 +36,63 @@ async def run_manage_round_iteration() -> None:
         schedule = await get_schedule(git, state.current_round, ref=latest_commit_sha)
         logger.debug(f"Previous round schedule: {schedule}")
 
-        subtensor = bt.get_async_subtensor(network=settings.network)
-        async with subtensor as subtensor:
-            current_block = await subtensor.get_current_block()
+        subtensor = await bt.get_async_subtensor(network=settings.network)
+        current_block = await subtensor.get_current_block()
 
-            previous_round_start: datetime | None = None
-            block_timestamp: datetime | None = None
+        previous_round_start: datetime | None = None
+        block_timestamp: datetime | None = None
 
-            if schedule:
-                block_info = await subtensor.get_block_info(block=schedule.latest_reveal_block)
-                block_timestamp = datetime.fromtimestamp(block_info.timestamp, tz=UTC)
-                previous_round_start = block_timestamp
+        if schedule:
+            block_info = await subtensor.get_block_info(block=schedule.latest_reveal_block)
+            block_timestamp = datetime.fromtimestamp(block_info.timestamp, tz=UTC)
+            previous_round_start = block_timestamp
 
-            logger.debug(f"Previous round start: {previous_round_start}")
+        logger.debug(f"Previous round start: {previous_round_start}")
 
-            next_round_start, next_round_start_block = _get_next_round_start(
-                current_time=datetime.now(UTC),
-                current_block=current_block,
-                config=config,
-                previous_round_start=previous_round_start,
+        next_round_start, next_round_start_block = _get_next_round_start(
+            current_time=datetime.now(UTC),
+            current_block=current_block,
+            config=config,
+            previous_round_start=previous_round_start,
+        )
+
+        # Check if the competition has ended
+        if next_round_start.date() > config.last_competition_date:
+            logger.info("Competition has ended. No more rounds to schedule.")
+            next_round_schedule = None
+        else:
+            logger.info(f"Next round start: ~{next_round_start}, block {next_round_start_block}")
+            next_round_schedule = RoundSchedule(
+                earliest_reveal_block=schedule.latest_reveal_block + 1 if schedule else 0,
+                latest_reveal_block=next_round_start_block,
             )
 
-            # Check if the competition has ended
-            if next_round_start.date() > config.last_competition_date:
-                logger.info("Competition has ended. No more rounds to schedule.")
-                next_round_schedule = None
-            else:
-                logger.info(f"Next round start: ~{next_round_start}, block {next_round_start_block}")
-                next_round_schedule = RoundSchedule(
-                    earliest_reveal_block=schedule.latest_reveal_block + 1 if schedule else 0,
-                    latest_reveal_block=next_round_start_block,
-                )
+        leader_state = await require_leader_state(git, ref=latest_commit_sha)
+        judge_progress = await get_judge_progress(git, state.current_round, ref=latest_commit_sha)
+        logger.debug(f"Judge progress for previous round: {judge_progress}")
 
-            leader_state = await require_leader_state(git, ref=latest_commit_sha)
-            judge_progress = await get_judge_progress(git, state.current_round, ref=latest_commit_sha)
-            logger.debug(f"Judge progress for previous round: {judge_progress}")
+        builds = await get_builds(git, round_num=state.current_round, ref=latest_commit_sha)
+        leader_state = update_leader_state(
+            leader_state=leader_state,
+            judge_progress=judge_progress,
+            builds=builds,
+            config=config,
+            effective_block=next_round_start_block,
+        )
 
-            builds = await get_builds(git, round_num=state.current_round, ref=latest_commit_sha)
-            leader_state = update_leader_state(
-                leader_state=leader_state,
-                judge_progress=judge_progress,
-                builds=builds,
-                config=config,
-                effective_block=next_round_start_block,
-            )
+        if next_round_schedule is None:
+            state.stage = RoundStage.FINISHED
+        else:
+            state.stage = RoundStage.PAUSED if settings.pause_on_stage_end else RoundStage.COLLECTING
+            state.current_round += 1
 
-            if next_round_schedule is None:
-                state.stage = RoundStage.FINISHED
-            else:
-                state.stage = RoundStage.PAUSED if settings.pause_on_stage_end else RoundStage.COLLECTING
-                state.current_round += 1
-
-            await commit_round_updates(
-                git=git,
-                state=state,
-                leader_state=leader_state,
-                next_round_schedule=next_round_schedule,
-                latest_commit_sha=latest_commit_sha,
-            )
+        await commit_round_updates(
+            git=git,
+            state=state,
+            leader_state=leader_state,
+            next_round_schedule=next_round_schedule,
+            latest_commit_sha=latest_commit_sha,
+        )
 
 
 def _get_next_round_start(
