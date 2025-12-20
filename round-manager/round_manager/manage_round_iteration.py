@@ -36,7 +36,7 @@ async def run_manage_round_iteration() -> None:
         schedule = await get_schedule(git, state.current_round, ref=latest_commit_sha)
         logger.debug(f"Previous round schedule: {schedule}")
 
-        subtensor = bt.async_subtensor(network=settings.network)
+        subtensor = bt.get_async_subtensor(network=settings.network)
         current_block = await subtensor.get_current_block()
 
         previous_round_start: datetime | None = None
