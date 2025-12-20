@@ -139,8 +139,8 @@ async def _get_previous_round_start(latest_reveal_block: int, subtensor: bt.Asyn
     try:
         block_timestamp = await subtensor.get_timestamp(block=latest_reveal_block)
         return block_timestamp
-    except bt.errors.StateDiscardedError:
-        logger.warning(f"Block {latest_reveal_block} is too old and has been pruned")
+    except Exception as e:
+        logger.warning(f"Error getting previous round start: {e}. Use archive.")
         archive_subtensor = await bt.get_async_subtensor(network="archive")
         timestamp = await archive_subtensor.get_timestamp(block=latest_reveal_block)
         return timestamp
