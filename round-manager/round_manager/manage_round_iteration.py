@@ -40,12 +40,9 @@ async def run_manage_round_iteration() -> None:
         current_block = await subtensor.get_current_block()
 
         previous_round_start: datetime | None = None
-        block_timestamp: datetime | None = None
 
         if schedule:
-            block_info = await subtensor.get_block_info(block=schedule.latest_reveal_block)
-            block_timestamp = datetime.fromtimestamp(block_info.timestamp, tz=UTC)
-            previous_round_start = block_timestamp
+            previous_round_start = await _get_previous_round_start(latest_reveal_block=schedule.latest_reveal_block, subtensor=subtensor)
 
         logger.debug(f"Previous round start: {previous_round_start}")
 
@@ -133,6 +130,20 @@ def _get_next_round_start(
     blocks_until = int(seconds_until / BLOCK_TIME_SECONDS)
 
     return candidate, current_block + blocks_until
+
+
+async def _get_previous_round_start(latest_reveal_block: int, subtensor: bt.async_subtensor) -> datetime:
+    """
+    Get the previous round start datetime.
+    """
+    try:
+        block_timestamp = await subtensor.get_timestamp(block=latest_reveal_block)
+        return block_timestamp
+    except bt.errors.StateDiscardedError:
+        logger.warning(f"Block {latest_reveal_block} is too old and has been pruned")
+        archive_subtensor = await bt.get_async_subtensor(network="archive")
+        timestamp = await archive_subtensor.get_timestamp(block=latest_reveal_block)
+        return timestamp
 
 
 def update_leader_state(
