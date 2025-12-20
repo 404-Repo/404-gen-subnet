@@ -132,7 +132,7 @@ def _get_next_round_start(
     return candidate, current_block + blocks_until
 
 
-async def _get_previous_round_start(latest_reveal_block: int, subtensor: bt.async_subtensor) -> datetime:
+async def _get_previous_round_start(latest_reveal_block: int, subtensor: bt.AsyncSubtensor) -> datetime:
     """
     Get the previous round start datetime.
     """
