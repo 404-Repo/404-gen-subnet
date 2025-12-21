@@ -22,6 +22,7 @@ class Miner(BaseModel):
     hotkey: str
     docker_image: str
     generations: dict[str, GenerationResult]
+    restart_count: int = 0
 
 
 async def process_miner_with_retries(
@@ -256,7 +257,7 @@ async def process_prompt(
             if g.ply is None or g.generation_time >= settings.generation_timeout_seconds
         ]
     )
-    if failure_count >= settings.generation_failure_threshold:
+    if failure_count >= settings.generation_failure_threshold and miner.restart_count == 0:
         logger.error(f"{log_id}: Generation failure threshold reached, restarting pod")
         container_name = get_container_name(current_round, miner)
         await targon.delete_containers_by_name(container_name)
@@ -266,6 +267,7 @@ async def process_prompt(
             miner=miner,
             config=config,
         )
+        miner.restart_count += 1
         if container is not None:
             logger.error(f"{log_id}: Error restarting pod")
 

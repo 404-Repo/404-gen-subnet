@@ -113,6 +113,12 @@ class Settings(BaseSettings):
         description="Maximum delay in seconds between generation retries",
     )
 
+    pod_restart_limit: int = Field(
+        default=1,
+        alias="POD_RESTART_LIMIT",
+        description="Maximum number of times to restart the pod during one try",
+    )
+
     generation_timeout_seconds: int = Field(
         default=30, alias="GENERATION_TIMEOUT", description="Generation timeout in seconds"
     )
