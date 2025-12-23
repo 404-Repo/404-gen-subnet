@@ -9,7 +9,7 @@ class Settings(BaseSettings):
     netuid: int = Field(default=17, description="Netuid of the Subtensor network")
     set_weights_interval_sec: int = Field(default=1800, ge=60, description="Interval in seconds to set weights")
     set_weights_retry_interval_sec: int = Field(
-        default=300,
+        default=420,
         ge=10,
         description="Interval in seconds to retry setting weights",
     )
