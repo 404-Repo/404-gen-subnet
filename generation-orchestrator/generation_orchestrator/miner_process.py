@@ -257,7 +257,7 @@ async def process_prompt(
             if g.ply is None or g.generation_time >= settings.generation_timeout_seconds
         ]
     )
-    if failure_count >= settings.generation_failure_threshold and miner.restart_count == 0:
+    if failure_count >= settings.generation_failure_threshold and miner.restart_count < settings.pod_restart_limit:
         logger.error(f"{log_id}: Generation failure threshold reached, restarting pod")
         container_name = get_container_name(current_round, miner)
         await targon.delete_containers_by_name(container_name)

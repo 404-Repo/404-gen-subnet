@@ -101,6 +101,7 @@ class WeightsService:
 
             leader_uid, leader_weight = await self._resolve_leader(subtensor, leader_state)
             weights = self._calculate_weights(leader_uid=leader_uid, leader_weight=leader_weight)
+            logger.info(f"Setting weights: {weights}")
             res, error_msg = await subtensor.set_weights(
                 wallet=self._wallet,
                 netuid=self._netuid,
@@ -109,6 +110,7 @@ class WeightsService:
                 wait_for_inclusion=False,
                 wait_for_finalization=False,
             )
+            logger.info(f"Weights set: {res}")
             if not res:
                 logger.warning(f"Weights not updated. Will retry after next interval: {error_msg}")
                 self._last_error_set_weights_time = time.time()
