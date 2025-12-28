@@ -3,6 +3,7 @@ import time
 from typing import cast
 
 import bittensor as bt
+from bittensor.core.async_subtensor import get_async_subtensor
 from loguru import logger
 from pydantic import BaseModel
 from shared.subnet_common.github import GitHubClient
@@ -85,7 +86,7 @@ class WeightsService:
                 await asyncio.sleep(self._set_weights_loop_interval)
 
     async def _set_weights_iteration(self) -> None:
-            subtensor = bt.get_async_subtensor(self._subtensor_endpoint)
+            subtensor = await get_async_subtensor(self._subtensor_endpoint)
             leader_state = await self._fetch_leader_state()
             logger.info("Leader state retreived")
             leader_last_block = self._get_leader_last_block(leader_state=leader_state)
