@@ -18,7 +18,7 @@ class WeightsService:
     def __init__(
         self,
         *,
-        subtensor: bt.async_subtensor,
+        subtensor_endpoint: str,
         repo: str,
         branch: str,
         token: str | None,
@@ -29,7 +29,7 @@ class WeightsService:
         netuid: int,
         wallet: bt.wallet,
     ) -> None:
-        self._subtensor = subtensor
+        self._subtensor_endpoint = subtensor_endpoint
         """Bittensor subtensor instance."""
         self._repo = repo
         """GitHub repo for the competition state."""
@@ -85,12 +85,12 @@ class WeightsService:
                 await asyncio.sleep(self._set_weights_loop_interval)
 
     async def _set_weights_iteration(self) -> None:
-        async with self._subtensor as subtensor:
+            subtensor = bt.get_async_subtensor(self._subtensor_endpoint)
             leader_state = await self._fetch_leader_state()
             logger.info("Leader state retreived")
             leader_last_block = self._get_leader_last_block(leader_state=leader_state)
             logger.info(f"Leader last block retrieved: {leader_last_block}")
-            current_block = await self._subtensor.get_current_block()
+            current_block = await subtensor.get_current_block()
             logger.info(f"Current block retrieved: {current_block}")
             if leader_last_block is not None and current_block < leader_last_block:
                 time_to_block = (leader_last_block - current_block) * self._BLOCK_TIME
