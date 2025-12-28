@@ -20,9 +20,8 @@ async def main() -> None:
             name=settings.wallet_name,
             hotkey=settings.wallet_hotkey,
         )
-    subtensor = bt.async_subtensor(settings.subtensor_endpoint)
     weights_service = WeightsService(
-        subtensor=subtensor,
+        subtensor_endpoint=settings.subtensor_endpoint,
         repo=settings.github_winner_info_repo,
         branch=settings.github_winner_info_branch,
         token=settings.github_token,
