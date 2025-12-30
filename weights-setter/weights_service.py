@@ -32,7 +32,7 @@ class WeightsService:
     ) -> None:
         self._subtensor_endpoint = subtensor_endpoint
         """Bittensor subtensor instance."""
-        self._subtensor = get_async_subtensor(self._subtensor_endpoint)
+        self._subtensor: bt.async_subtensor | None = None
         """Bittensor subtensor instance."""
         self._repo = repo
         """GitHub repo for the competition state."""
@@ -72,6 +72,8 @@ class WeightsService:
     async def set_weights_loop(self) -> None:
         while True:
             try:
+                if self._subtensor is None:
+                    self._subtensor = await get_async_subtensor(self._subtensor_endpoint)
                 current_time = time.time()
                 logger.trace(f"{current_time - self._last_successful_set_weights_time} passed since last set weights.")
                 # Weights were set successfully recently
