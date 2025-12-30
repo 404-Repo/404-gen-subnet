@@ -86,6 +86,8 @@ class WeightsService:
                 await asyncio.sleep(self._set_weights_loop_interval)
 
     async def _set_weights_iteration(self) -> None:
+        subtensor: bt.async_subtensor | None = None
+        try:
             subtensor = await get_async_subtensor(self._subtensor_endpoint)
             leader_state = await self._fetch_leader_state()
             logger.info("Leader state retreived")
@@ -130,6 +132,11 @@ class WeightsService:
                 return
             logger.info(f"Weights set successfully: {weights}")
             self._last_successful_set_weights_time = time.time()
+        except Exception as e:
+            raise e
+        finally:
+            if subtensor is not None:
+                await subtensor.close()
 
     async def _fetch_leader_state(self) -> LeaderState | None:
         async with GitHubClient(repo=self._repo, token=self._token) as git:
