@@ -89,49 +89,49 @@ class WeightsService:
         subtensor: bt.async_subtensor | None = None
         try:
             subtensor = await get_async_subtensor(self._subtensor_endpoint)
-            leader_state = await self._fetch_leader_state()
-            logger.info("Leader state retreived")
-            leader_last_block = self._get_leader_last_block(leader_state=leader_state)
-            logger.info(f"Leader last block retrieved: {leader_last_block}")
-            current_block = await subtensor.get_current_block()
-            logger.info(f"Current block retrieved: {current_block}")
-            if leader_last_block is not None and current_block < leader_last_block:
-                time_to_block = (leader_last_block - current_block) * self._BLOCK_TIME
-                if time_to_block <= self._next_leader_wait_interval_sec:
-                    logger.info(
-                        f"Postponing weights set. "
-                        f"Waiting for {time_to_block} seconds for next leader to become active. "
-                        f"Leader last block: {leader_last_block}, current block: {current_block}"
-                    )
-                    return
+            # leader_state = await self._fetch_leader_state()
+            # logger.info("Leader state retreived")
+            # leader_last_block = self._get_leader_last_block(leader_state=leader_state)
+            # logger.info(f"Leader last block retrieved: {leader_last_block}")
+            # current_block = await subtensor.get_current_block()
+            # logger.info(f"Current block retrieved: {current_block}")
+            # if leader_last_block is not None and current_block < leader_last_block:
+            #     time_to_block = (leader_last_block - current_block) * self._BLOCK_TIME
+            #     if time_to_block <= self._next_leader_wait_interval_sec:
+            #         logger.info(
+            #             f"Postponing weights set. "
+            #             f"Waiting for {time_to_block} seconds for next leader to become active. "
+            #             f"Leader last block: {leader_last_block}, current block: {current_block}"
+            #         )
+            #         return
 
-            leader_uid, leader_weight = await self._resolve_leader(subtensor, leader_state)
-            logger.info(f"Leader uid: {leader_uid}, Leader_weight: {leader_weight}")
-            weights = self._calculate_weights(leader_uid=leader_uid, leader_weight=leader_weight)
-            logger.info("Weights calculated")
-            res, error_msg = await subtensor.set_weights(
-                wallet=self._wallet,
-                netuid=self._netuid,
-                weights=weights.weights,
-                uids=weights.uids,
-                wait_for_inclusion=False,
-                wait_for_finalization=False,
-            )
-            if not res:
-                logger.warning(f"Weights not updated. Will retry after next interval: {error_msg}")
-                self._last_error_set_weights_time = time.time()
-                return
-            else:
-                logger.info("Weights set. Checking...")
+            # leader_uid, leader_weight = await self._resolve_leader(subtensor, leader_state)
+            # logger.info(f"Leader uid: {leader_uid}, Leader_weight: {leader_weight}")
+            # weights = self._calculate_weights(leader_uid=leader_uid, leader_weight=leader_weight)
+            # logger.info("Weights calculated")
+            # res, error_msg = await subtensor.set_weights(
+            #     wallet=self._wallet,
+            #     netuid=self._netuid,
+            #     weights=weights.weights,
+            #     uids=weights.uids,
+            #     wait_for_inclusion=False,
+            #     wait_for_finalization=False,
+            # )
+            # if not res:
+            #     logger.warning(f"Weights not updated. Will retry after next interval: {error_msg}")
+            #     self._last_error_set_weights_time = time.time()
+            #     return
+            # else:
+            #     logger.info("Weights set. Checking...")
 
-            # Wait for confirmation blocks
-            weights_updated = await self._check_weights_updated(subtensor=subtensor, ref_block=current_block)
-            if not weights_updated:
-                logger.warning("Weights not updated. Will retry after next interval.")
-                self._last_error_set_weights_time = time.time()
-                return
-            logger.info(f"Weights set successfully: {weights}")
-            self._last_successful_set_weights_time = time.time()
+            # # Wait for confirmation blocks
+            # weights_updated = await self._check_weights_updated(subtensor=subtensor, ref_block=current_block)
+            # if not weights_updated:
+            #     logger.warning("Weights not updated. Will retry after next interval.")
+            #     self._last_error_set_weights_time = time.time()
+            #     return
+            # logger.info(f"Weights set successfully: {weights}")
+            # self._last_successful_set_weights_time = time.time()
         except Exception as e:
             raise e
         finally:
