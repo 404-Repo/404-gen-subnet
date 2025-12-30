@@ -136,6 +136,7 @@ class WeightsService:
             raise e
         finally:
             if subtensor is not None:
+                logger.info("Closing subtensor")
                 await subtensor.close()
 
     async def _fetch_leader_state(self) -> LeaderState | None:
