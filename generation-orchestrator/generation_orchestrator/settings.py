@@ -90,13 +90,13 @@ class Settings(BaseSettings):
     )
 
     prompt_retry_attempts: int = Field(
-        default=3,
+        default=2,
         alias="PROMPT_RETRY_ATTEMPTS",
         description="Number of generate+render attempts per prompt before giving up",
     )
 
     generation_http_attempts: int = Field(
-        default=3,
+        default=2,
         alias="GENERATION_HTTP_ATTEMPTS",
         description="Number of HTTP request attempts for a single generation call",
     )
@@ -127,8 +127,10 @@ class Settings(BaseSettings):
         description="Ratio of overtime prompts allowed before penalization (e.g., 0.1 = first 10% are not penalized)",
     )
 
-    max_fail_rate: float = Field(
-        default=0.3, alias="MAX_FAIL_RATE", description="Maximum fail rate for a pod before retrying with a new pod"
+    max_failed_prompts_budget: int = Field(
+        default=32,
+        alias="MAX_FAILED_PROMPTS_BUDGET",
+        description="Maximum number of failed prompts allowed before stopping retry attempts entirely",
     )
 
     render_service_url: str = Field(
