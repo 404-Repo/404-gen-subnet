@@ -8,10 +8,20 @@ class Settings(BaseSettings):
     subtensor_endpoint: str = Field(default="finney", description="Endpoint of the Subtensor network")
     netuid: int = Field(default=17, description="Netuid of the Subtensor network")
     set_weights_interval_sec: int = Field(default=1800, ge=60, description="Interval in seconds to set weights")
-    set_weights_retry_interval_sec: int = Field(
-        default=300,
+    set_weights_iteration_timeout_sec: int = Field(
+        default=600,
+        ge=60,
+        description="Timeout in seconds for the entire set_weights iteration (10 minutes default)",
+    )
+    set_weights_min_retry_interval_sec: int = Field(
+        default=240,
         ge=10,
-        description="Interval in seconds to retry setting weights",
+        description="Minimum interval in seconds before retrying after failure (4 minutes default)",
+    )
+    set_weights_max_retry_interval_sec: int = Field(
+        default=360,
+        ge=10,
+        description="Maximum interval in seconds before retrying after failure (6 minutes default)",
     )
     next_leader_wait_interval_sec: int = Field(
         default=1500,
