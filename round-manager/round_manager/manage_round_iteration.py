@@ -1,4 +1,4 @@
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, time, timedelta
 
 import bittensor as bt
 from loguru import logger
@@ -33,137 +33,188 @@ async def run_manage_round_iteration() -> None:
         config = await require_competition_config(git, ref=latest_commit_sha)
         logger.debug(f"Current competition config: {config}")
 
-        schedule = await get_schedule(git, state.current_round, ref=latest_commit_sha)
-        logger.debug(f"Previous round schedule: {schedule}")
+        current_block = await _get_current_block()
+        current_time = datetime.now(UTC)
 
-        subtensor = bt.async_subtensor(network=settings.network)
-        current_block = await subtensor.get_current_block()
+        previous_schedule = await get_schedule(git, state.current_round, ref=latest_commit_sha)
 
-        previous_round_start: datetime | None = None
-        block_timestamp: datetime | None = None
+        previous_round_start = (
+            _estimate_round_start(
+                reveal_block=previous_schedule.latest_reveal_block,
+                current_block=current_block,
+                current_time=current_time,
+                round_start_time=config.round_start_time,
+            )
+            if previous_schedule
+            else None
+        )
 
-        if schedule:
-            block_timestamp = await subtensor.get_timestamp(block=schedule.latest_reveal_block)
-            previous_round_start = block_timestamp
-
-        next_round_start, next_round_start_block = _get_next_round_start(
-            current_time=datetime.now(UTC),
+        next_round_start, next_round_start_block = _compute_next_round_start(
+            current_time=current_time,
             current_block=current_block,
             config=config,
             previous_round_start=previous_round_start,
         )
 
-        # Check if the competition has ended
-        if next_round_start.date() > config.last_competition_date:
-            logger.info("Competition has ended. No more rounds to schedule.")
-            next_round_schedule = None
-        else:
-            logger.info(f"Next round start: ~{next_round_start}, block {next_round_start_block}")
-            next_round_schedule = RoundSchedule(
-                earliest_reveal_block=schedule.latest_reveal_block + 1 if schedule else 0,
-                latest_reveal_block=next_round_start_block,
-            )
+        next_round_schedule = _build_next_schedule(
+            next_round_start=next_round_start,
+            next_round_start_block=next_round_start_block,
+            config=config,
+            previous_latest_reveal_block=previous_schedule.latest_reveal_block if previous_schedule else None,
+        )
 
         leader_state = await require_leader_state(git, ref=latest_commit_sha)
         judge_progress = await get_judge_progress(git, state.current_round, ref=latest_commit_sha)
         logger.debug(f"Judge progress for previous round: {judge_progress}")
 
         builds = await get_builds(git, round_num=state.current_round, ref=latest_commit_sha)
-        leader_state = update_leader_state(
-            leader_state=leader_state,
+
+        leader_transition = _compute_leader_transition(
             judge_progress=judge_progress,
             builds=builds,
+            current_leader=leader_state.get_latest(),
             config=config,
             effective_block=next_round_start_block,
         )
 
-        if next_round_schedule is None:
-            state.stage = RoundStage.FINISHED
-        else:
-            state.stage = RoundStage.PAUSED if settings.pause_on_stage_end else RoundStage.COLLECTING
-            state.current_round += 1
+        if leader_transition:
+            leader_state.transitions.append(leader_transition)
 
-        await commit_round_updates(
+        next_stage = _determine_next_stage(next_round_schedule)
+        next_round = state.current_round if next_round_schedule is None else state.current_round + 1
+
+        await _commit_round_updates(
             git=git,
-            state=state,
+            next_round=next_round,
+            next_stage=next_stage,
             leader_state=leader_state,
+            leader_changed=leader_transition is not None,
             next_round_schedule=next_round_schedule,
             latest_commit_sha=latest_commit_sha,
         )
 
 
-def _get_next_round_start(
+async def _get_current_block() -> int:
+    subtensor = await bt.get_async_subtensor(network=settings.network)
+    block: int = await subtensor.get_current_block()
+    return block
+
+
+def _estimate_round_start(
+    reveal_block: int,
+    current_block: int,
+    current_time: datetime,
+    round_start_time: time,
+) -> datetime:
+    """
+    Estimate round start datetime from a block number.
+
+    Since rounds start at a configured time, we calculate the approximate date
+    from block difference and combine it with the known start time.
+    """
+    blocks_ago = current_block - reveal_block
+    approximate_time = current_time - timedelta(seconds=blocks_ago * BLOCK_TIME_SECONDS)
+    return datetime.combine(approximate_time.date(), round_start_time, tzinfo=UTC)
+
+
+def _compute_next_round_start(
     current_time: datetime,
     current_block: int,
     config: CompetitionConfig,
     previous_round_start: datetime | None,
 ) -> tuple[datetime, int]:
-    """
-    Calculate the next round start datetime and block.
-    """
+    """Calculate the next round start datetime and block."""
+    earliest_date = (
+        (previous_round_start + timedelta(days=config.round_duration_days)).date()
+        if previous_round_start
+        else current_time.date()
+    )
 
-    # Find earliest eligible date based on previous round
-    if previous_round_start is not None:
-        earliest_date = (previous_round_start + timedelta(days=config.round_duration_days)).date()
-    else:
-        earliest_date = current_time.date()
-
-    # Build candidate at the fixed round start time
     candidate = datetime.combine(earliest_date, config.round_start_time, tzinfo=UTC)
+    logger.info(f"Initial candidate: {candidate}")
 
-    logger.info(f"Candidate: {candidate}")
+    candidate = _ensure_finalization_buffer(candidate, current_time, config.finalization_buffer_hours)
+    candidate = _clamp_to_competition_start(candidate, config)
 
-    # Skip days if insufficient finalization buffer
-    time_remaining = candidate - current_time
-    min_time_remaining = timedelta(hours=config.finalization_buffer_hours)
-    while time_remaining < min_time_remaining:
-        candidate += timedelta(days=1)
-        time_remaining = candidate - current_time
-
-    # Clamp to competition bounds
-    first_round = datetime.combine(config.first_evaluation_date, config.round_start_time, tzinfo=UTC)
-    if candidate < first_round:
-        candidate = first_round
-
-    # Calculate block
     seconds_until = (candidate - current_time).total_seconds()
     blocks_until = int(seconds_until / BLOCK_TIME_SECONDS)
 
     return candidate, current_block + blocks_until
 
 
-def update_leader_state(
-    leader_state: LeaderState,
+def _ensure_finalization_buffer(candidate: datetime, current_time: datetime, buffer_hours: float) -> datetime:
+    """Advance candidate date until there's sufficient finalization buffer."""
+    min_buffer = timedelta(hours=buffer_hours)
+    while (candidate - current_time) < min_buffer:
+        candidate += timedelta(days=1)
+    return candidate
+
+
+def _clamp_to_competition_start(candidate: datetime, config: CompetitionConfig) -> datetime:
+    """Ensure a candidate is not before the first evaluation date."""
+    first_round = datetime.combine(config.first_evaluation_date, config.round_start_time, tzinfo=UTC)
+    return max(candidate, first_round)
+
+
+def _build_next_schedule(
+    next_round_start: datetime,
+    next_round_start_block: int,
+    config: CompetitionConfig,
+    previous_latest_reveal_block: int | None,
+) -> RoundSchedule | None:
+    """Build the schedule for the next round, or None if competition has ended."""
+    if next_round_start.date() > config.last_competition_date:
+        logger.info("Competition has ended. No more rounds to schedule.")
+        return None
+
+    logger.info(f"Next round start: ~{next_round_start}, block {next_round_start_block}")
+
+    return RoundSchedule(
+        earliest_reveal_block=previous_latest_reveal_block + 1 if previous_latest_reveal_block is not None else 0,
+        latest_reveal_block=next_round_start_block,
+    )
+
+
+def _determine_next_stage(next_round_schedule: RoundSchedule | None) -> RoundStage:
+    """Determine what stage the competition should transition to."""
+    if next_round_schedule is None:
+        return RoundStage.FINISHED
+    return RoundStage.PAUSED if settings.pause_on_stage_end else RoundStage.COLLECTING
+
+
+def _compute_leader_transition(
     judge_progress: JudgeProgress,
     builds: dict[str, BuildInfo],
+    current_leader: LeaderEntry,
     config: CompetitionConfig,
     effective_block: int,
-) -> LeaderState | None:
+) -> LeaderEntry | None:
     """
-    Update the leader state based on round results.
+    Compute the leader transition entry for this round.
 
-    Returns updated LeaderState or None if no changes are needed.
+    Returns a new LeaderEntry to append to transitions, or None if no transition is needed.
     """
-    current_leader = leader_state.get_latest()
-    new_leader = find_new_leader(judge_progress, builds, current_leader, effective_block)
-
+    new_leader = _find_new_leader(judge_progress, builds, current_leader, effective_block)
     if new_leader:
         logger.info(f"New leader: {new_leader.hotkey} ({new_leader.repo}@{new_leader.commit[:8]})")
-        leader_state.transitions.append(new_leader)
-        return leader_state
+        return new_leader
 
     if current_leader.weight <= config.weight_floor:
         logger.info("Leader defended. Weight already at floor.")
         return None
 
     decayed_weight = max(config.weight_floor, current_leader.weight - config.weight_decay)
-    decayed_leader = current_leader.model_copy(update={"weight": decayed_weight, "effective_block": effective_block})
-    leader_state.transitions.append(decayed_leader)
     logger.info(f"Leader defended. Weight decayed to {decayed_weight}")
-    return leader_state
+
+    return current_leader.model_copy(
+        update={
+            "weight": decayed_weight,
+            "effective_block": effective_block,
+        }
+    )
 
 
-def find_new_leader(
+def _find_new_leader(
     judge_progress: JudgeProgress,
     builds: dict[str, BuildInfo],
     current_leader: LeaderEntry,
@@ -172,22 +223,19 @@ def find_new_leader(
     """
     Determine if there's a new leader.
 
-    Returns new LeaderEntry or None if the current leader is defended.
+    Returns new LeaderEntry or None if the current leader defended.
     """
     winner = judge_progress.leader
 
-    # "leader" means the current leader won
     if winner == "leader":
         return None
 
-    # Winner not in builds - invalid
     if winner not in builds:
         logger.warning(f"Winner {winner} not found in builds")
         return None
 
     build = builds[winner]
 
-    # Same repo and commit as current leader - no change
     if build.repo == current_leader.repo and build.commit == current_leader.commit:
         return None
 
@@ -201,26 +249,30 @@ def find_new_leader(
     )
 
 
-async def commit_round_updates(
+async def _commit_round_updates(
     git: GitHubClient,
-    state: CompetitionState,
-    leader_state: LeaderState | None,
+    next_round: int,
+    next_stage: RoundStage,
+    leader_state: LeaderState,
+    leader_changed: bool,
     next_round_schedule: RoundSchedule | None,
     latest_commit_sha: str,
 ) -> None:
     """Commit all round updates atomically."""
+    state = CompetitionState(stage=next_stage, current_round=next_round)
+
     files = {"state.json": state.model_dump_json(indent=2)}
-    parts = [f"state ({state.stage.value})"]
+    parts = [f"state ({next_stage.value})"]
 
     if next_round_schedule:
-        files[f"rounds/{state.current_round}/schedule.json"] = next_round_schedule.model_dump_json(indent=2)
+        files[f"rounds/{next_round}/schedule.json"] = next_round_schedule.model_dump_json(indent=2)
         parts.append("schedule")
 
-    if leader_state:
+    if leader_changed:
         files["leader.json"] = LeaderListAdapter.dump_json(leader_state.transitions, indent=2).decode()
         parts.append("leader")
 
-    message = f"Update {', '.join(parts)} for round {state.current_round}"
+    message = f"Update {', '.join(parts)} for round {next_round}"
 
     await git.commit_files(
         files=files,
