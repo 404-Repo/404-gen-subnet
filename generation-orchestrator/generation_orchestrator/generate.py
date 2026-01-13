@@ -121,7 +121,7 @@ async def _generate_attempt(
 
                     download_time = asyncio.get_running_loop().time() - start_time - elapsed
                     mb_size = len(content) / 1024 / 1024
-                    logger.info(
+                    logger.debug(
                         f"Generated for {log_id} in {elapsed:.1f}s, "
                         f"downloaded in {download_time:.1f}s, {mb_size:.1f} MiB"
                     )

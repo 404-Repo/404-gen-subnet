@@ -243,11 +243,14 @@ async def _watch_builds_and_generate(
         await shutdown.wait(timeout=settings.check_build_interval_seconds)
 
     if tasks:
-        logger.info(f"Waiting for {len(tasks)} miners to complete generations")
-        results = await asyncio.gather(*tasks.values(), return_exceptions=True)
-        for hotkey, result in zip(tasks.keys(), results, strict=True):
-            if isinstance(result, Exception):
-                logger.error(f"Generation failed for {hotkey}: {result}")
+        total_miners = len(tasks)
+        logger.info(f"Waiting for {total_miners} miners to complete generations")
+
+        completed_miners = 0
+        for task in asyncio.as_completed(tasks.values()):
+            await task
+            completed_miners += 1
+            logger.info(f"Progress: {completed_miners}/{total_miners} miners completed")
 
     async with TargonClient(api_key=settings.targon_api_key.get_secret_value()) as targon:
         await targon.delete_containers_by_prefix(f"miner-{current_round}")
@@ -292,7 +295,7 @@ def _get_build_status(job: GitHubJob | None, build: BuildInfo) -> BuildStatus:
         return BuildStatus.NOT_FOUND
     if job.conclusion == "success":
         return BuildStatus.SUCCESS
-    if job.conclusion == "failure":
+    if job.conclusion in ("failure", "cancelled", "skipped", "timed_out", "action_required"):
         return BuildStatus.FAILURE
     if job.status == "in_progress":
         return BuildStatus.IN_PROGRESS
