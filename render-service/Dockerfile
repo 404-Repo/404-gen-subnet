@@ -49,14 +49,25 @@ FROM nvidia/cuda:12.8.0-runtime-ubuntu22.04 AS runtime
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
+ENV PYOPENGL_PLATFORM=egl
 
-# Install Python runtime only
+# Install Python runtime and headless OpenGL dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3.11 \
     python3-pip \
     libgomp1 \
-    libgl1-mesa-glx \
+    # Headless EGL/OpenGL support
+    libegl1 \
+    libgl1 \
+    libgles2 \
+    libglvnd0 \
+    # Fallback/compatibility
+    libosmesa6 \
+    # Other deps
     libglib2.0-0 \
+    libxrender1 \
+    libxext6 \
+    libsm6 \
     && rm -rf /var/lib/apt/lists/* \
     && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1
 
@@ -65,7 +76,7 @@ ENV CUDA_HOME=/usr/local/cuda
 ENV PATH="${CUDA_HOME}/bin:${PATH}"
 ENV LD_LIBRARY_PATH="${CUDA_HOME}/lib64:${LD_LIBRARY_PATH}"
 ENV NVIDIA_VISIBLE_DEVICES=all
-ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility
+ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility,graphics
 
 WORKDIR /app
 
@@ -80,7 +91,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application code
 COPY renderers/ ./renderers/
 COPY render_service.py .
-COPY splats_render_2x2_grid.py .
+COPY render.py .
+COPY constants.py .
+COPY utils/ ./utils/
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
