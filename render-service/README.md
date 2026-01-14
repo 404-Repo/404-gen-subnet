@@ -1,10 +1,13 @@
 # Render Service
 
-A GPU-accelerated FastAPI service for rendering 3D Gaussian Splat (`.ply`) files into 2×2 multi-view grid images.
+A GPU-accelerated FastAPI service for rendering 3D Gaussian Splat (`.ply`) and mesh (`.glb`) files into 2×2 multi-view grid images.
 
 ## Overview
 
-This service uses [gsplat](https://github.com/nerfstudio-project/gsplat) to render PLY files containing Gaussian splat data from 4 camera angles, combining them into a single grid image. It's designed for evaluating 3D model quality in automated pipelines.
+This service renders 3D models from 4 camera angles, combining them into a single grid image. It's designed for evaluating 3D model quality in automated pipelines.
+
+- **Gaussian Splats (`.ply`)**: Uses [gsplat](https://github.com/nerfstudio-project/gsplat) for high-quality splat rendering
+- **Meshes (`.glb`)**: Uses [pyrender](https://github.com/mmatl/pyrender) with 2× supersampling antialiasing
 
 **Output Example:**  
 A 1041×1041 PNG image with 4 views (front, right, back, left) arranged in a 2×2 grid with white background.
@@ -49,9 +52,9 @@ Health check endpoint.
 {"status": "ok"}
 ```
 
-### `POST /render`
+### `POST /render_ply`
 
-Render a PLY file to a 2×2 grid image.
+Render a Gaussian Splat PLY file to a 2×2 grid image.
 
 **Request:**
 - `file` (multipart/form-data): A `.ply` file containing Gaussian splat data
@@ -64,7 +67,7 @@ Render a PLY file to a 2×2 grid image.
 
 **Example:**
 ```bash
-curl -X POST "http://localhost:8000/render" \
+curl -X POST "http://localhost:8000/render_ply" \
   -F "file=@model.ply" \
   -o output.png
 ```
@@ -75,8 +78,42 @@ import httpx
 
 with open("model.ply", "rb") as f:
     response = httpx.post(
-        "http://localhost:8000/render",
+        "http://localhost:8000/render_ply",
         files={"file": ("model.ply", f, "application/octet-stream")},
+    )
+    
+with open("output.png", "wb") as f:
+    f.write(response.content)
+```
+
+### `POST /render_glb`
+
+Render a GLB mesh file to a 2×2 grid image with 2× supersampling antialiasing.
+
+**Request:**
+- `file` (multipart/form-data): A `.glb` file containing a 3D mesh
+- `device` (query, optional): `"cuda"` or `"cpu"` (auto-detected if not specified)
+
+**Response:**
+- `200 OK`: PNG image (`image/png`)
+- `400 Bad Request`: Invalid file format or empty payload
+- `500 Internal Server Error`: Rendering failed
+
+**Example:**
+```bash
+curl -X POST "http://localhost:8000/render_glb" \
+  -F "file=@model.glb" \
+  -o output.png
+```
+
+**Python Example:**
+```python
+import httpx
+
+with open("model.glb", "rb") as f:
+    response = httpx.post(
+        "http://localhost:8000/render_glb",
+        files={"file": ("model.glb", f, "application/octet-stream")},
     )
     
 with open("output.png", "wb") as f:
@@ -85,27 +122,7 @@ with open("output.png", "wb") as f:
 
 ---
 
-## Batch Rendering (CLI)
 
-For bulk rendering without the HTTP server:
-
-```bash
-python splats_render_2x2_grid.py \
-  --folders /path/to/splats /path/to/more/splats \
-  --output-folder ./outputs/renders \
-  --N_instances 100 \
-  --device cuda
-```
-
-**Arguments:**
-| Argument | Description |
-|----------|-------------|
-| `--folders` | Input directories containing `.ply` or `.splat` files |
-| `--output-folder` | Output directory for rendered PNGs |
-| `--N_instances` | Max files to render (default: all) |
-| `--device` | `cuda` or `cpu` (auto-detect if omitted) |
-
----
 
 ## Configuration
 
@@ -168,25 +185,5 @@ render-service/
 - NVIDIA CUDA Toolkit 12.8
 - GCC 13.x
 
----
 
-## Troubleshooting
-
-### `CUDA out of memory`
-The service clears GPU cache after each render. If issues persist:
-- Use `device=cpu` for large models
-- Reduce `IMG_WIDTH`/`IMG_HEIGHT` in `splats_render_2x2_grid.py`
-
-### `gsplat` build fails
-Ensure CUDA environment variables are set:
-```bash
-export CUDA_HOME=$CONDA_PREFIX
-export CPATH="$CONDA_PREFIX/targets/x86_64-linux/include:$CONDA_PREFIX/include"
-```
-
-### Docker GPU not detected
-Verify NVIDIA runtime:
-```bash
-docker run --rm --gpus all nvidia/cuda:12.8.0-base-ubuntu22.04 nvidia-smi
-```
 

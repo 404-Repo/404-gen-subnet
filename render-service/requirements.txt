@@ -9,3 +9,9 @@ pyyaml>=6.0
 fastapi==0.115.5
 uvicorn==0.32.1
 python-multipart==0.0.20
+loguru
+
+pyrender 
+trimesh 
+PyOpenGL 
+PyOpenGL_accelerate

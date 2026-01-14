@@ -21,7 +21,7 @@ async def render(endpoint: str, ply_content: bytes, log_id: str) -> bytes | None
             )
         ) as client:
             response = await client.post(
-                f"{endpoint}/render",
+                f"{endpoint}/render_ply",
                 files={"file": ("content.ply", ply_content, "application/octet-stream")},
             )
 
