@@ -125,7 +125,7 @@ class CollectionIteration:
                     self.prompts = {prompt.split("/")[-1].split(".")[0] for prompt in self.prompts}
 
                 # Collect generations and update git state.
-                await self._collect_generations(round=state.current_round)
+                await self._collect_generations(state=state)
 
                 # Commit generations to Git.
                 await self._commit_generations(git=git, base_sha=latest_commit_sha, state=state)
@@ -285,7 +285,7 @@ class CollectionIteration:
                         generations=generations,
                     )
 
-    async def _collect_generations(self, *, round: int) -> None:
+    async def _collect_generations(self, *, state: CompetitionState) -> None:
         """Collect generations from the Git repository."""
         tasks: list[asyncio.Task] = []
         async with R2Client(
@@ -294,20 +294,21 @@ class CollectionIteration:
             r2_endpoint=settings.r2_endpoint.get_secret_value(),
             bucket=settings.r2_bucket,
         ) as r2_upload:
-            session = aioboto3.Session()
             for gen in self.miner_generations.values():
                 remaining_prompts = [p for p in self.prompts if p not in gen.generations]
                 if not remaining_prompts:
                     continue
                 logger.info(f"Collecting generations for {gen.hotkey} from {gen.cdn_url} for remaining {len(remaining_prompts)} prompts")
                 for prompt in remaining_prompts:
+                    if time.time() > state.generation_deadline:
+                        return
                     task = asyncio.create_task(
                         self._copy_file(
                             cdn_url=gen.cdn_url, 
                             miner_hotkey=gen.hotkey,
                             prompt=prompt,
                             r2_upload=r2_upload,
-                            round=round,
+                            state=state,
                         )
                     )
                     tasks.append(task)
@@ -320,7 +321,7 @@ class CollectionIteration:
         miner_hotkey: str, 
         prompt: str,
         r2_upload: R2Client,
-        round: int,
+        state: CompetitionState,
     ) -> None:
         """Copy a file from CDN to R2."""
         # Download from CDN
@@ -337,7 +338,9 @@ class CollectionIteration:
 
         # Upload to R2
         async with self._upload_sem:
-            key = f"{round}/{miner_hotkey}/{prompt}.{extension}"
+            key = f"{state.current_round}/{miner_hotkey}/{prompt}.{extension}"
+            if time.time() > state.generation_deadline:
+                return
             await r2_upload.upload(key=key, data=data)
             self.miner_generations[miner_hotkey].generations[prompt] = f"{self._r2_cdn_url}/{key}"
             logger.success(f"{miner_hotkey}: downloaded {prompt}.{extension} from {cdn_url} and uploaded to {key}")
