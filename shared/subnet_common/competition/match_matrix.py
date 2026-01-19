@@ -16,13 +16,9 @@ class MatchMatrix:
 
     def __init__(self) -> None:
         self._margins: dict[tuple[str, str], float] = {}
-        self._order: list[tuple[str, str]] = []
 
     def add(self, left: str, right: str, margin: float) -> None:
-        key = (left, right)
-        if key not in self._margins:
-            self._order.append(key)
-        self._margins[key] = margin
+        self._margins[(left, right)] = margin
 
     def has(self, left: str, right: str) -> bool:
         return (left, right) in self._margins
@@ -35,8 +31,8 @@ class MatchMatrix:
 
     def to_csv(self) -> str:
         lines = ["left,right,margin"]
-        for left, right in self._order:
-            lines.append(f"{left},{right},{self._margins[(left, right)]}")
+        for (left, right), margin in self._margins.items():
+            lines.append(f"{left},{right},{margin}")
         return "\n".join(lines)
 
     @classmethod

@@ -26,38 +26,33 @@ class AuditRequests:
     """Append-only list of audit requests. Deduplicates by hotkey."""
 
     def __init__(self) -> None:
-        self._requests: list[AuditRequest] = []
-        self._hotkeys: set[str] = set()
+        self._requests: dict[str, AuditRequest] = {}
 
     def add(self, request: AuditRequest) -> bool:
         """Add request if hotkey not present. Returns True if added."""
-        if request.hotkey in self._hotkeys:
+        if request.hotkey in self._requests:
             return False
-        self._requests.append(request)
-        self._hotkeys.add(request.hotkey)
+        self._requests[request.hotkey] = request
         return True
 
     def has(self, hotkey: str) -> bool:
-        return hotkey in self._hotkeys
+        return hotkey in self._requests
 
     def has_any(self) -> bool:
         return bool(self._requests)
 
     def get(self, hotkey: str) -> AuditRequest | None:
-        for r in self._requests:
-            if r.hotkey == hotkey:
-                return r
-        return None
+        return self._requests.get(hotkey)
 
     @property
     def hotkeys(self) -> set[str]:
-        return self._hotkeys.copy()
+        return set(self._requests.keys())
 
     def __len__(self) -> int:
         return len(self._requests)
 
     def to_json(self) -> str:
-        return AuditRequestListAdapter.dump_json(self._requests, indent=2).decode()
+        return AuditRequestListAdapter.dump_json(list(self._requests.values()), indent=2).decode()
 
     @classmethod
     def from_json(cls, content: str) -> "AuditRequests":

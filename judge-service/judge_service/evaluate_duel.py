@@ -120,7 +120,7 @@ async def ask_judge(
 
 
 async def evaluate_duel(client: AsyncOpenAI, prompt_url: str, left_url: str, right_url: str, seed: int) -> DuelResult:
-    """Run a position-balanced duel (two calls with swapped order) and return outcome."""
+    """Run a position-balanced duel (two calls with swapped order) and return an outcome."""
 
     try:
         result_1, result_2 = await asyncio.gather(

@@ -61,11 +61,12 @@ async def run_match(
     duels = sorted(duels, key=lambda d: d.name)
 
     score = sum(WINNER_TO_SCORE[d.winner] for d in duels)
+    margin = score / len(duels) if duels else 0
     return MatchReport(
         left=left,
         right=right,
         score=score,
-        margin=score / len(duels),
+        margin=margin,
         duels=duels,
     )
 
@@ -102,16 +103,12 @@ async def _evaluate_prompt(
     if shutdown.should_stop:
         return duel
 
-    winner, issues = _check_missing_previews(left_gen, right_gen, stem)
-    if winner is not None:
-        duel.winner = winner
-        duel.issues = issues
+    if result := _check_missing_previews(left_gen, right_gen, stem):
+        duel.winner, duel.issues = result
         return duel
 
-    winner, issues = _check_overtime(left_overtime, right_overtime)
-    if winner is not None:
-        duel.winner = winner
-        duel.issues = issues
+    if result := _check_overtime(left_overtime, right_overtime):
+        duel.winner, duel.issues = result
         return duel
 
     async with sem:
@@ -119,7 +116,7 @@ async def _evaluate_prompt(
             return duel
 
         start = asyncio.get_running_loop().time()
-        result = await evaluate_duel(
+        duel_result = await evaluate_duel(
             client=openai,
             prompt_url=prompt,
             left_url=left_gen.png,
@@ -127,10 +124,10 @@ async def _evaluate_prompt(
             seed=seed,
         )
         elapsed = asyncio.get_running_loop().time() - start
-        logger.debug(f"Duel {stem}: {result.outcome:+d} in {elapsed:.1f}s")
+        logger.debug(f"Duel {stem}: {duel_result.outcome:+d} in {elapsed:.1f}s")
 
-        duel.winner = _outcome_to_winner(result.outcome)
-        duel.issues = result.issues
+        duel.winner = _outcome_to_winner(duel_result.outcome)
+        duel.issues = duel_result.issues
         return duel
 
 
@@ -138,7 +135,7 @@ def _check_missing_previews(
     left_gen: GenerationResult,
     right_gen: GenerationResult,
     stem: str,
-) -> tuple[DuelWinner | None, str]:
+) -> tuple[DuelWinner, str] | None:
     """Return winner based on missing previews, or None if both present."""
     if not left_gen.png and not right_gen.png:
         logger.debug(f"No previews for {stem}")
@@ -152,13 +149,13 @@ def _check_missing_previews(
         logger.debug(f"No preview for {stem} from right")
         return DuelWinner.LEFT, f"No preview for {stem} from right"
 
-    return None, ""
+    return None
 
 
 def _check_overtime(
     left_overtime: bool,
     right_overtime: bool,
-) -> tuple[DuelWinner | None, str]:
+) -> tuple[DuelWinner, str] | None:
     """Return winner based on overtime penalties, or None if no penalty."""
     if left_overtime and right_overtime:
         return DuelWinner.DRAW, "Generation time exceeded for both"
@@ -169,7 +166,7 @@ def _check_overtime(
     if right_overtime:
         return DuelWinner.LEFT, "Generation time exceeded for right"
 
-    return None, ""
+    return None
 
 
 def _outcome_to_winner(outcome: int) -> DuelWinner:

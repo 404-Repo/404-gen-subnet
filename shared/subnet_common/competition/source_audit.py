@@ -8,7 +8,7 @@ from subnet_common.github import GitHubClient
 
 class AuditVerdict(str, Enum):
     PASSED = "passed"
-    DISQUALIFIED = "disqualified"
+    FAILED = "failed"
 
 
 class AuditResult(BaseModel):
@@ -49,5 +49,5 @@ def get_passed_hotkeys(results: list[AuditResult]) -> set[str]:
     return {r.hotkey for r in results if r.verdict == AuditVerdict.PASSED}
 
 
-def get_disqualified_hotkeys(results: list[AuditResult]) -> set[str]:
-    return {r.hotkey for r in results if r.verdict == AuditVerdict.DISQUALIFIED}
+def get_failed_hotkeys(results: list[AuditResult]) -> set[str]:
+    return {r.hotkey for r in results if r.verdict == AuditVerdict.FAILED}

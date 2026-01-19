@@ -33,6 +33,7 @@ async def run_judge_iteration(settings: Settings, shutdown: GracefulShutdown) ->
             git_batcher=git_batcher,
             state=state,
             openai=openai,
+            settings=settings,
         )
         await runner.run(shutdown)
 

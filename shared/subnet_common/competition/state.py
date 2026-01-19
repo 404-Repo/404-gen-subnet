@@ -12,7 +12,7 @@ class RoundStage(str, Enum):
     DOWNLOADING = "downloading"  # Fetching 3D/renders from miner CDNs
     DUELS = "duels"  # Duels, verification, and approval
     FINALIZING = "finalizing"  # Updating the leader and creating the next round schedule
-    FINISHED = "finished"  # Competition complete, no further rounds
+    FINISHED = "finished"  # Competition completes, no further rounds
     PAUSED = "paused"  # Manual hold for inspection or intervention
 
 

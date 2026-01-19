@@ -1,6 +1,6 @@
 from enum import Enum
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class DuelWinner(str, Enum):
@@ -26,10 +26,24 @@ class DuelReport(BaseModel):
 
 
 class MatchReport(BaseModel):
-    """Report for a full match between two miners."""
+    """
+    Detailed match report, stored in git.
+
+    Contains all duel results for transparency and auditability.
+    """
 
     left: str
     right: str
     score: int
     margin: float
     duels: list[DuelReport]
+
+
+class MatchOutcome(BaseModel):
+    """Result of a match between two miners."""
+
+    left: str
+    right: str
+    margin: float
+    decisive_prompts: list[str] = Field(default_factory=list)
+    from_cache: bool = False
