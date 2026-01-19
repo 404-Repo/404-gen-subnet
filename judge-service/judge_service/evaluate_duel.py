@@ -1,9 +1,11 @@
 import asyncio
 from typing import Literal
 
+import httpx
 from loguru import logger
-from openai import AsyncOpenAI
+from openai import APIConnectionError, APIStatusError, AsyncOpenAI
 from pydantic import BaseModel, Field
+from tenacity import RetryCallState, retry, retry_if_exception, stop_after_attempt, wait_exponential
 
 
 MODEL = "zai-org/GLM-4.1V-9B-Thinking"
@@ -43,6 +45,26 @@ class DuelResult(BaseModel):
     issues: str = Field(..., description="Human-readable issue summary from judge")
 
 
+def _is_retryable(exc: BaseException) -> bool:
+    """Check if the exception is retryable (transient errors only)."""
+    if isinstance(exc, APIConnectionError | httpx.ConnectError | httpx.ReadTimeout):
+        return True
+    if isinstance(exc, APIStatusError) and exc.status_code in (429, 500, 502, 503, 504):
+        return True
+    return False
+
+
+def _log_retry(retry_state: RetryCallState) -> None:
+    exc = retry_state.outcome.exception() if retry_state.outcome else None
+    logger.warning(f"Retrying ask_judge (attempt {retry_state.attempt_number}): {exc}")
+
+
+@retry(
+    retry=retry_if_exception(_is_retryable),
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=1, max=10),
+    before_sleep=_log_retry,
+)
 async def ask_judge(
     client: AsyncOpenAI,
     prompt_url: str,

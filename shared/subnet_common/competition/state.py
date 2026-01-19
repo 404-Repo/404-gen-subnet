@@ -7,12 +7,13 @@ from subnet_common.github import GitHubClient
 
 
 class RoundStage(str, Enum):
-    COLLECTING = "collecting"  # Gathering miner submissions for the current round
-    GENERATING = "generating"  # Building containers, deploying models, generating 3D outputs, and rendering previews
-    DUELS = "duels"  # Comparing generated outputs to determine the round winner
+    OPEN = "open"  # Submission window open, miners register CDN URLs
+    MINER_GENERATION = "miner_generation"  # Seed published, miners have 2h to generate and upload
+    DOWNLOADING = "downloading"  # Fetching 3D/renders from miner CDNs
+    DUELS = "duels"  # Duels, verification, and approval
     FINALIZING = "finalizing"  # Updating the leader and creating the next round schedule
-    FINISHED = "finished"  # Competition completes, no further rounds
-    PAUSED = "paused"  # Manual hold for inspection or intervention (can occur after any stage)
+    FINISHED = "finished"  # Competition complete, no further rounds
+    PAUSED = "paused"  # Manual hold for inspection or intervention
 
 
 class CompetitionState(BaseModel):
