@@ -37,5 +37,22 @@ class Settings(BaseSettings):
 
     log_level: str = Field(default="DEBUG", alias="LOG_LEVEL", description="Logging level")
 
+    generation_duration: int = Field(
+        default=2*60*60,
+        alias="GENERATION_DURATION",
+        description="Generation stage duration in seconds when we accept miner submissions.",
+    )
+
+    r2_access_key_id: SecretStr = Field(..., alias="R2_ACCESS_KEY_ID", description="R2 access key ID")
+    r2_secret_access_key: SecretStr = Field(..., alias="R2_SECRET_ACCESS_KEY", description="R2 secret access key")
+    r2_endpoint: SecretStr = Field(..., alias="R2_ENDPOINT", description="R2 endpoint")
+    r2_bucket: str = Field(default="404-gen", alias="R2_BUCKET", description="R2 bucket name")
+
+    max_concurrent_requests: int = Field(
+        default=10,
+        alias="MAX_CONCURRENT_REQUESTS",
+        description="Maximum number of concurrent requests to the CDN and R2",
+    )
+
 
 settings = Settings()  # type: ignore[call-arg]

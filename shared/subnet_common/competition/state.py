@@ -20,6 +20,7 @@ class CompetitionState(BaseModel):
 
     current_round: int = Field(..., strict=False, description="Current round number")
     stage: RoundStage = Field(..., description="Current round stage")
+    generation_deadline: int | None = Field(default=None, description="Generation stage deadline as UTC POSIX timestamp")
 
 
 async def require_state(git: GitHubClient, ref: str) -> CompetitionState:
