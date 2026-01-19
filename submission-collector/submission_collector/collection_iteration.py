@@ -44,7 +44,7 @@ class CollectionIteration:
         """List of generation extensions."""
         self._r2_cdn_url: str = r2_cdn_url
 
-    async def run_collection_iteration(self) -> int | None:
+    async def run(self) -> int | None:
         """Run one submission collection iteration.
         Waits for the reveal window to close, collects valid submissions from a chain,
         and commits results to Git.

@@ -5,7 +5,7 @@ from loguru import logger
 from subnet_common.graceful_shutdown import GracefulShutdown
 from subnet_common.utils import format_duration
 
-from submission_collector.collection_iteration import run_collection_iteration
+from submission_collector.collection_iteration import CollectionIteration, run_collection_iteration
 from submission_collector.settings import settings
 
 
@@ -31,9 +31,14 @@ async def main() -> None:
     logger.info("Submission collector started")
     logger.info(f"Network: {settings.network}, NetUID: {settings.netuid}")
 
+    collection_iteration = CollectionIteration(
+        max_concurrent_requests=settings.max_concurrent_requests,
+        r2_cdn_url=settings.r2_cdn_url,
+    )
+
     while not shutdown.should_stop:
         try:
-            wait_seconds = await run_collection_iteration()
+            wait_seconds = await collection_iteration.run()
 
             if wait_seconds is None:
                 wait_seconds = settings.check_state_interval_seconds
