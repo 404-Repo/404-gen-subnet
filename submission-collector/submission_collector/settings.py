@@ -47,6 +47,7 @@ class Settings(BaseSettings):
     r2_secret_access_key: SecretStr = Field(..., alias="R2_SECRET_ACCESS_KEY", description="R2 secret access key")
     r2_endpoint: SecretStr = Field(..., alias="R2_ENDPOINT", description="R2 endpoint")
     r2_bucket: str = Field(default="404-gen", alias="R2_BUCKET", description="R2 bucket name")
+    r2_cdn_url: str = Field(..., alias="R2_CDN_URL", description="Cdn url for saved generations in R2 bucket")
 
     max_concurrent_requests: int = Field(
         default=10,

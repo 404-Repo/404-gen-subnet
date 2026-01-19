@@ -24,12 +24,12 @@ import httpx
 class MinerGenerations(BaseModel):
     hotkey: str = Field(..., min_length=10, description="Bittensor hotkey of winner")
     cdn_url: str = Field(..., description="CDN URL of the directory with generated PLY files")
-    generations: set[str] = Field(default_factory=set, description="Set of prompt names that have been generated. Note: without .png extension.")
+    generations: dict[str, str] = Field(default_factory=dict, description="Dictionary of prompt names and their corresponding R2 CDN URL.")
 
 
 class CollectionIteration:
 
-    def __init__(self, max_concurrent_requests: int):
+    def __init__(self, *, max_concurrent_requests: int, r2_cdn_url: str) -> None:
         self.miner_generations: dict[str, MinerGenerations] = {}
         """Dictionary of miner generations."""
         self.prompts: set[str] = []
@@ -42,6 +42,7 @@ class CollectionIteration:
         """Semaphore to limit the number of concurrent requests to the CDN and R2 for downloading generations."""
         self._GENERATION_EXTENSIONS: list[str] = ["ply", "glb"]
         """List of generation extensions."""
+        self._r2_cdn_url: str = r2_cdn_url
 
     async def run_collection_iteration(self) -> int | None:
         """Run one submission collection iteration.
@@ -123,8 +124,11 @@ class CollectionIteration:
                     self.prompts = await require_prompts(git, state.current_round, ref=latest_commit_sha)
                     self.prompts = {prompt.split("/")[-1].split(".")[0] for prompt in self.prompts}
 
-                # Collect generations
+                # Collect generations and update git state.
                 await self._collect_generations(round=state.current_round)
+
+                # Commit generations to Git.
+                await self._commit_generations(git=git, base_sha=latest_commit_sha, state=state)
 
             return None  # Wait default interval after a collection
 
@@ -184,6 +188,22 @@ class CollectionIteration:
             branch=settings.github_branch,
         )
 
+    async def _commit_generations(
+        self,
+        git: GitHubClient,
+        base_sha: str,
+        state: CompetitionState,
+    ) -> None:
+        """Commit generations to Git."""
+        files: dict[str, str] = {}
+        for hotkey, generations in self.miner_generations.items():
+            files[f"rounds/{state.current_round}/{hotkey}/generations.json"] = json.dumps(generations.generations.values(), indent=2)
+        await git.commit_files(
+            files={"generations.json": json.dumps(self.miner_generations, indent=2)},
+            message=f"Update generations for round {state.current_round}",
+            base_sha=base_sha,
+            branch=settings.github_branch,
+        )
 
     async def _commit_state_and_submissions(
         self,
@@ -240,7 +260,7 @@ class CollectionIteration:
                 bucket=settings.r2_bucket,
             ) as r2_upload_client:
                 for submission in submissions:
-                    generations: set[str] = set()
+                    generations: dict[str, str] = {}
                     prefix = f"{state.current_round}/{submission.hotkey}/"
                     try:
                         response = await r2_upload_client.list_objects(prefix=prefix)
@@ -257,14 +277,13 @@ class CollectionIteration:
                             continue
                         prompt_name, extension = filename.rsplit(".", 1)
                         if extension in self._GENERATION_EXTENSIONS:
-                            generations.add(prompt_name)
+                            generations[prompt_name] = f"{self._r2_cdn_url}/{key}"
 
                     self.miner_generations[submission.hotkey] = MinerGenerations(
                         hotkey=submission.hotkey,
                         cdn_url=submission.cdn_url,
                         generations=generations,
                     )
-
 
     async def _collect_generations(self, *, round: int) -> None:
         """Collect generations from the Git repository."""
@@ -320,7 +339,7 @@ class CollectionIteration:
         async with self._upload_sem:
             key = f"{round}/{miner_hotkey}/{prompt}.{extension}"
             await r2_upload.upload(key=key, data=data)
-            self.miner_generations[miner_hotkey].generations.add(prompt)
+            self.miner_generations[miner_hotkey].generations[prompt] = f"{self._r2_cdn_url}/{key}"
             logger.success(f"{miner_hotkey}: downloaded {prompt}.{extension} from {cdn_url} and uploaded to {key}")
 
     async def _check_file_exists(self, *, url: str) -> bool:
