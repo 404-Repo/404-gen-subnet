@@ -151,19 +151,8 @@ class CollectionIteration:
         return seconds_left
 
 
-    async def _collect_submissions(subtensor: bt.async_subtensor, schedule: RoundSchedule) -> list[Submission]:
+    async def _collect_submissions(self, subtensor: bt.async_subtensor, schedule: RoundSchedule) -> list[Submission]:
         """Fetch and parse valid revealed commitments from a chain."""
-
-        return [
-            Submission(
-                hotkey="hotkey1",
-                reveal_block=100,
-                repo="repo1",
-                commit="commit1",
-                cdn_url="https://pub-a428a3613c1a4da5b37d3df525a05f03.r2.dev",
-            )
-        ]
-
         commitments = await subtensor.get_all_revealed_commitments(netuid=settings.netuid)
         logger.debug(f"Revealed commitments: {commitments}")
 
@@ -207,10 +196,22 @@ class CollectionIteration:
     ) -> None:
         """Commit generations to Git."""
         files: dict[str, str] = {}
-        for hotkey, generations in self.miner_generations.items():
-            files[f"rounds/{state.current_round}/{hotkey}/generations.json"] = json.dumps(generations.generations.values(), indent=2)
+        for hotkey, miner_generations in self.miner_generations.items():
+            # Per-miner generations file: list of CDN URLs for this miner's prompts.
+            files[f"rounds/{state.current_round}/{hotkey}/generations.json"] = json.dumps(
+                list(miner_generations.generations.values()),
+                indent=2,
+            )
+
+        # Global index of generations: map hotkey -> {prompt_name: cdn_url}
+        generations_index: dict[str, dict[str, str]] = {
+            hotkey: miner_generations.generations for hotkey, miner_generations in self.miner_generations.items()
+        }
+
+        files["generations.json"] = json.dumps(generations_index, indent=2)
+
         await git.commit_files(
-            files={"generations.json": json.dumps(self.miner_generations, indent=2)},
+            files=files,
             message=f"Update generations for round {state.current_round}",
             base_sha=base_sha,
             branch=settings.github_branch,
@@ -282,7 +283,12 @@ class CollectionIteration:
                         )
                         continue
 
-                    for key in response.keys:
+                    contents = response.get("Contents") or []
+                    print(response, type(response))
+                    for obj in contents:
+                        key = obj.get("Key")
+                        if not key:
+                            continue
                         filename = key.split("/")[-1]
                         if "." not in filename:
                             continue
