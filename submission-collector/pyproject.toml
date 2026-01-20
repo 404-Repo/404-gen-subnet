@@ -6,13 +6,15 @@ authors = ["Maxim Bladyko <max@404.xyz>"]
 readme = "README.md"
 
 [tool.poetry.dependencies]
-python = ">=3.11,<=3.13"
+python = ">=3.11,<=3.14"
 subnet-common = {path = "../shared", develop = true}
 bittensor = "9.12.2"
 pydantic-settings = "2.12.0"
 httpx = "0.28.1"
 pybase64 = "1.4.2"
 loguru = "0.7.3"
+aioboto3 = "15.5.0"
+types-aiobotocore-s3 = "2.26.0"
 
 [tool.poetry.group.dev.dependencies]
 poetry = "2.2.1"
