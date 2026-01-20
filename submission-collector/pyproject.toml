@@ -6,7 +6,7 @@ authors = ["Maxim Bladyko <max@404.xyz>"]
 readme = "README.md"
 
 [tool.poetry.dependencies]
-python = ">=3.11,<=3.13"
+python = ">=3.11,<=3.14"
 subnet-common = {path = "../shared", develop = true}
 bittensor = "9.12.2"
 pydantic-settings = "2.12.0"
