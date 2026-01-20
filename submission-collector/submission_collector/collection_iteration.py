@@ -11,7 +11,7 @@ from subnet_common.competition.state import CompetitionState, RoundStage, requir
 from subnet_common.github import GitHubClient
 from subnet_common.utils import format_duration
 from types_aiobotocore_s3 import S3Client
-from r2_client import R2Client
+from submission_collector.r2_client import R2Client
 from pydantic import BaseModel, Field
 
 from submission_collector.settings import settings
@@ -72,7 +72,7 @@ class CollectionIteration:
             if state.stage == RoundStage.GENERATING:
                 if state.generation_deadline is None:
                     # TODO: remove in future. It is here for the last old round.
-                    return None
+                    state.generation_deadline = int(time.time()) + settings.generation_duration
                 if time.time() > state.generation_deadline:
                     # If the generation deadline is reached, clear the miner generations and commit the state to duels or finalizing.
                     self.miner_generations.clear()
@@ -153,6 +153,17 @@ class CollectionIteration:
 
     async def _collect_submissions(subtensor: bt.async_subtensor, schedule: RoundSchedule) -> list[Submission]:
         """Fetch and parse valid revealed commitments from a chain."""
+
+        return [
+            Submission(
+                hotkey="hotkey1",
+                reveal_block=100,
+                repo="repo1",
+                commit="commit1",
+                cdn_url="https://pub-a428a3613c1a4da5b37d3df525a05f03.r2.dev",
+            )
+        ]
+
         commitments = await subtensor.get_all_revealed_commitments(netuid=settings.netuid)
         logger.debug(f"Revealed commitments: {commitments}")
 

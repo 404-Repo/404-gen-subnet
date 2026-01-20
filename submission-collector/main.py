@@ -5,11 +5,12 @@ from loguru import logger
 from subnet_common.graceful_shutdown import GracefulShutdown
 from subnet_common.utils import format_duration
 
-from submission_collector.collection_iteration import CollectionIteration, run_collection_iteration
+from submission_collector.collection_iteration import CollectionIteration
 from submission_collector.settings import settings
 
 
 def setup_logging(log_level: str) -> None:
+    logger.info("Setting up logging...")
     logger.remove()
 
     logger.add(
@@ -25,6 +26,8 @@ def setup_logging(log_level: str) -> None:
 async def main() -> None:
     setup_logging(log_level=settings.log_level)
 
+    logger.info("Submission collector initializing...")
+
     shutdown = GracefulShutdown()
     shutdown.setup_signal_handlers()
 
@@ -39,7 +42,6 @@ async def main() -> None:
     while not shutdown.should_stop:
         try:
             wait_seconds = await collection_iteration.run()
-
             if wait_seconds is None:
                 wait_seconds = settings.check_state_interval_seconds
             else:
@@ -49,7 +51,6 @@ async def main() -> None:
         except Exception as e:
             logger.exception(f"Collection cycle failed: {e}")
             wait_seconds = settings.check_state_interval_seconds
-
         logger.debug(f"Next cycle in {format_duration(wait_seconds)}")
         await shutdown.wait(timeout=wait_seconds)
 
