@@ -33,6 +33,12 @@ class BuildInfo(BaseModel):
             tag=f"{submission.commit[:7]}-{submission.round}",
         )
 
+    def get_runnable_image(self) -> str | None:
+        """Return docker_image if build succeeded and image exists, None otherwise."""
+        if self.status == BuildStatus.SUCCESS and self.docker_image is not None:
+            return self.docker_image
+        return None
+
 
 BuildsInfoAdapter = TypeAdapter(dict[str, BuildInfo])
 

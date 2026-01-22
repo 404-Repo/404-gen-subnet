@@ -32,12 +32,13 @@ async def main() -> None:
 
     while not shutdown.should_stop:
         try:
-            await run_judge_iteration(shutdown)
+            await run_judge_iteration(settings=settings, shutdown=shutdown)
         except asyncio.CancelledError:
             break
         except Exception as e:
             logger.exception(f"Judge cycle failed with {e}")
 
+        # TODO: smart delay
         logger.debug(f"Next cycle in {format_duration(settings.check_state_interval_seconds)}")
         await shutdown.wait(timeout=settings.check_state_interval_seconds)
 

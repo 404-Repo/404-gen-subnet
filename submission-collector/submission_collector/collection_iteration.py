@@ -72,6 +72,72 @@ async def run_collection_iteration() -> int | None:
 
         return None  # Wait default interval after a collection
 
+async def _todo():
+    latest_commit_sha = await _ensure_seed_and_prompts(
+        git=git,
+        state_round=state.current_round,
+        config=competition_config,
+        ref=latest_commit_sha,
+    )
+    git_batcher.base_sha = latest_commit_sha
+
+async def _ensure_seed_and_prompts(
+    git: GitHubClient,
+    state_round: int,
+    config: CompetitionConfig,
+    ref: str,
+) -> str:
+    """Ensure seed and prompts exist for the round, creating them if needed.
+
+    Returns the (possibly updated) commit ref.
+    """
+    seed = await get_seed_from_git(git, state_round, ref=ref)
+    if seed is not None:
+        return ref
+
+    seed = secrets.randbits(32)
+    logger.info(f"Generating seed: {seed}")
+
+    prompts = await _select_round_prompts(git, state_round, config, seed, ref)
+
+    new_sha: str = await git.commit_files(
+        files={
+            f"rounds/{state_round}/prompts.txt": "\n".join(prompts),
+            f"rounds/{state_round}/seed.json": json.dumps({"seed": seed}),
+        },
+        message=f"Generate seed and pick prompts for round {state_round}",
+        branch=settings.github_branch,
+    )
+    return new_sha
+
+
+async def _select_round_prompts(
+    git: GitHubClient,
+    state_round: int,
+    config: CompetitionConfig,
+    seed: int,
+    ref: str,
+) -> list[str]:
+    """Select prompts for the round: carryover from previous plus new from pool."""
+    all_prompts = await require_prompts(git, round_num=None, ref=ref)
+    previous_prompts = [] if state_round == 0 else await require_prompts(git, state_round - 1, ref=ref)
+
+    rng = random.Random(seed)  # nosec B311 # noqa: S311 - deterministic selection, seed is secure
+
+    carryover = _sample_up_to(rng, previous_prompts, config.carryover_prompts)
+    new_count = config.prompts_per_round - len(carryover)
+    new = _sample_up_to(rng, all_prompts, new_count)
+
+    logger.info(f"Selected {len(carryover)} carryover + {len(new)} new prompts")
+    return carryover + new
+
+
+def _sample_up_to(rng: random.Random, items: list[str], k: int) -> list[str]:
+    """Sample up to k items, returning all if fewer available."""
+    if len(items) <= k:
+        return items
+    return rng.sample(items, k=k)
+
 
 async def _get_wait_seconds(subtensor: bt.async_subtensor, schedule: RoundSchedule) -> int | None:
     """Return seconds to wait until a reveal window closes, or None if ready to collect."""

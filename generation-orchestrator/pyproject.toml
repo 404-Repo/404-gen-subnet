@@ -15,6 +15,7 @@ aioboto3 = "15.5.0"
 types-aiobotocore-s3 = "2.26.0"
 platformdirs = "4.5.0"
 httpx = "0.28.1"
+tenacity = "^9.1.2"
 targon-sdk = { git = "https://github.com/manifold-inc/targon-sdk.git", branch = "config" }
 
 
@@ -26,6 +27,8 @@ black = "25.11.0"
 mypy = "1.18.2"
 ruff = "0.14.6"
 types-aiofiles = "25.1.0.20251011"
+pytest = "^8.0.0"
+pytest-asyncio = "^0.23.0"
 
 [build-system]
 requires = ["poetry-core", "setuptools", "wheel"]
@@ -109,3 +112,11 @@ sequence = [
 [tool.poe.tasks.export-requirements]
 help = "Export requirements.txt for Docker"
 cmd = "poetry export -f requirements.txt --output requirements.txt --without-hashes"
+
+[tool.poe.tasks.test]
+help = "Run tests with pytest"
+cmd = "pytest tests/ -v"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

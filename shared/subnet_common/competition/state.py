@@ -1,3 +1,4 @@
+from datetime import datetime
 from enum import Enum
 
 from pydantic import BaseModel, Field
@@ -7,12 +8,13 @@ from subnet_common.github import GitHubClient
 
 
 class RoundStage(str, Enum):
-    COLLECTING = "collecting"  # Gathering miner submissions for the current round
-    GENERATING = "generating"  # Building containers, deploying models, generating 3D outputs, and rendering previews
-    DUELS = "duels"  # Comparing generated outputs to determine the round winner
+    OPEN = "open"  # Submission window opens, miners register their submissions
+    MINER_GENERATION = "miner_generation"  # Seed published, miners have 3h to generate and upload
+    DOWNLOADING = "downloading"  # Fetching 3D from miner CDNs
+    DUELS = "duels"  # Duels, verification, and approval
     FINALIZING = "finalizing"  # Updating the leader and creating the next round schedule
     FINISHED = "finished"  # Competition completes, no further rounds
-    PAUSED = "paused"  # Manual hold for inspection or intervention (can occur after any stage)
+    PAUSED = "paused"  # Manual hold for inspection or intervention
 
 
 class CompetitionState(BaseModel):
@@ -20,6 +22,10 @@ class CompetitionState(BaseModel):
 
     current_round: int = Field(..., strict=False, description="Current round number")
     stage: RoundStage = Field(..., description="Current round stage")
+    next_stage_eta: datetime | None = Field(
+        default=None,
+        description="Estimated UTC time when the next stage begins (approximate)",
+    )
 
 
 async def require_state(git: GitHubClient, ref: str) -> CompetitionState:
