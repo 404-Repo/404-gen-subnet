@@ -68,7 +68,7 @@ class ContainerInfo(BaseModel):
             return None
         return cls(
             name=container.name,
-            url=container.url,
+            url=container.url.rstrip("/"),
             delete_identifier=container.uid,
             provider=GPUProvider.TARGON,
         )
@@ -79,7 +79,7 @@ class ContainerInfo(BaseModel):
             return None
         return cls(
             name=container.name,
-            url=container.endpoint_base_url,
+            url=container.endpoint_base_url.rstrip("/"),
             delete_identifier=container.name,
             provider=GPUProvider.VERDA,
         )
