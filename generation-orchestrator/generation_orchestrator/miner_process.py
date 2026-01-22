@@ -134,7 +134,9 @@ async def process_miner_with_retries(
                     logger.info(f"{miner.log_id}: all {len(prompts)} prompts already completed")
                     return
 
-                logger.info(f"{miner.log_id}: attempt {attempt + 1}, processing {len(remaining)} prompts")
+                logger.info(
+                    f"{miner.log_id}: attempt {attempt} (budget: {budget}), processing {len(remaining)} prompts"
+                )
 
                 pod_ok, tracker = await _process_with_pod(
                     gpu_manager=gpu_manager,
@@ -145,6 +147,7 @@ async def process_miner_with_retries(
                     seed=seed,
                     shutdown=shutdown,
                 )
+
                 if not pod_ok or tracker is None:
                     budget -= WARMUP_FAILURE_COST
                     logger.warning(f"{miner.log_id}: warmup failure (budget: {budget})")
@@ -160,10 +163,12 @@ async def process_miner_with_retries(
 
                 budget -= RUNTIME_FAILURE_COST
                 logger.info(f"{miner.log_id}: will retry with new pod (budget: {budget})")
-            except Exception as e:
-                logger.exception(f"{hotkey[:10]}: attempt {attempt + 1} failed: {e}")
 
-    logger.error(f"{hotkey[:10]}: exhausted all {settings.miner_process_attempts} attempts")
+            except Exception as e:
+                budget -= RUNTIME_FAILURE_COST
+                logger.exception(f"{hotkey[:10]}: attempt {attempt} failed (budget: {budget}): {e}")
+
+    logger.error(f"{hotkey[:10]}: exhausted budget after {attempt} attempts")
 
 
 async def _process_with_pod(

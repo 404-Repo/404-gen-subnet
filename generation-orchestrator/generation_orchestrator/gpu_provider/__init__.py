@@ -356,6 +356,7 @@ class GPUProviderManager:
 
         for attempt in range(max_attempts):
             provider = self.get_provider(attempt)
+            generation_token = self.get_generation_token(provider)
             logger.info(f"POD attempt {attempt + 1}/{max_attempts} on {provider.value}")
 
             try:
@@ -384,13 +385,14 @@ class GPUProviderManager:
             if await wait_for_healthy(
                 container.url,
                 shutdown,
+                auth_token=generation_token,
                 timeout=warmup_timeout,
                 check_interval=check_interval,
             ):
                 logger.info(f"Container {name} healthy on {provider.value}")
                 return DeployedContainer(
                     info=container,
-                    generation_token=self.get_generation_token(provider),
+                    generation_token=generation_token,
                 )
 
             logger.warning(f"Container {name} failed warmup on {provider.value}")
@@ -418,6 +420,7 @@ async def wait_for_healthy(
     url: str,
     shutdown: GracefulShutdown,
     *,
+    auth_token: str | None = None,
     timeout: float = 300.0,  # noqa: ASYNC109
     check_interval: float = 5.0,
 ) -> bool:
@@ -425,10 +428,14 @@ async def wait_for_healthy(
     health_url = f"{url}/health"
     deadline = asyncio.get_running_loop().time() + timeout
 
+    headers = {}
+    if auth_token:
+        headers["Authorization"] = f"Bearer {auth_token}"
+
     async with httpx.AsyncClient(timeout=30.0) as http:
         while not shutdown.should_stop:
             try:
-                response = await http.get(health_url)
+                response = await http.get(health_url, headers=headers)
                 if response.status_code == 200:
                     return True
             except httpx.RequestError as e:
