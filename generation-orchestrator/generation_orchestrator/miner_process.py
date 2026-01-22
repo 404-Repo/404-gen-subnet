@@ -8,13 +8,19 @@ from subnet_common.git_batcher import GitBatcher
 from subnet_common.graceful_shutdown import GracefulShutdown
 
 from generation_orchestrator.generate import generate
+from generation_orchestrator.gpu_provider import (
+    GPUProviderError,
+    GPUProviderManager,
+)
 from generation_orchestrator.prompts import Prompt
 from generation_orchestrator.r2_client import R2Client
 from generation_orchestrator.render import render
 from generation_orchestrator.settings import settings
 from generation_orchestrator.staggered_semaphore import StaggeredSemaphore
-from generation_orchestrator.targon import ensure_running_container
-from generation_orchestrator.targon_client import ContainerDeployConfig, TargonClient
+
+
+WARMUP_FAILURE_COST = 2  # Pod acquisition/health check failures are expensive
+RUNTIME_FAILURE_COST = 1  # Overtime, GPU loss, etc.
 
 
 class FailureTracker:
@@ -106,13 +112,21 @@ async def process_miner_with_retries(
 ) -> None:
     """Process a miner's prompts with retries.
 
-    Creates new pods as needed based on failure rates. Stops when all prompts
-    are successful, rates are acceptable, or retry attempts are exhausted.
+    Attempt budget system:
+    - Total budget: settings.miner_process_attempts (e.g., 4)
+    - Warmup failure (pod didn't become healthy): costs 2
+    - Runtime failure (overtime, GPU issues): costs 1
+
+    This means: max 2 warmup failures OR max 4 runtime failures.
     """
-    for attempt in range(settings.miner_process_attempts):
+    gpu_manager = GPUProviderManager(settings)
+    budget = settings.miner_process_attempts
+    attempt = 0
+
+    while budget > 0 and not shutdown.should_stop:
+        attempt += 1
         async with semaphore:
             try:
-                miner = None
                 miner = await Miner.load(git_batcher, hotkey, docker_image, current_round)
 
                 remaining = miner.remaining_prompts(prompts)
@@ -123,6 +137,7 @@ async def process_miner_with_retries(
                 logger.info(f"{miner.log_id}: attempt {attempt + 1}, processing {len(remaining)} prompts")
 
                 pod_ok, tracker = await _process_with_pod(
+                    gpu_manager=gpu_manager,
                     git_batcher=git_batcher,
                     miner=miner,
                     prompts=remaining,
@@ -131,7 +146,8 @@ async def process_miner_with_retries(
                     shutdown=shutdown,
                 )
                 if not pod_ok or tracker is None:
-                    logger.warning(f"{miner.log_id}: pod failed to start")
+                    budget -= WARMUP_FAILURE_COST
+                    logger.warning(f"{miner.log_id}: warmup failure (budget: {budget})")
                     continue
 
                 logger.info(f"{miner.log_id}: {tracker.progress_str()}")
@@ -142,14 +158,16 @@ async def process_miner_with_retries(
                 if not should_retry:
                     return
 
-                logger.info(f"{miner.log_id}: will retry with new pod")
+                budget -= RUNTIME_FAILURE_COST
+                logger.info(f"{miner.log_id}: will retry with new pod (budget: {budget})")
             except Exception as e:
                 logger.exception(f"{hotkey[:10]}: attempt {attempt + 1} failed: {e}")
 
-        logger.error(f"{hotkey[:10]}: exhausted all {settings.miner_process_attempts} attempts")
+    logger.error(f"{hotkey[:10]}: exhausted all {settings.miner_process_attempts} attempts")
 
 
 async def _process_with_pod(
+    gpu_manager: GPUProviderManager,
     git_batcher: GitBatcher,
     miner: Miner,
     prompts: list[Prompt],
@@ -158,56 +176,45 @@ async def _process_with_pod(
     shutdown: GracefulShutdown,
 ) -> tuple[bool, FailureTracker | None]:
     """Process prompts with a pod. Returns (pod_started, tracker) or (False, None)."""
+    container_name = f"miner-{current_round}-{miner.log_id.lower()}"
 
-    async with TargonClient(api_key=settings.targon_api_key.get_secret_value()) as targon:
-        config = ContainerDeployConfig(
-            image=miner.docker_image,
-            resource_name=settings.targon_resource,
-            port=settings.generation_port,
-            container_concurrency=settings.max_concurrent_prompts_per_miner + 1,
+    deployed = await gpu_manager.get_healthy_pod(
+        name=container_name,
+        image=miner.docker_image,
+        gpu_type="H200",
+        shutdown=shutdown,
+    )
+
+    if deployed is None:
+        return False, None
+
+    try:
+        tracker = await _process_prompts(
+            git_batcher=git_batcher,
+            miner=miner,
+            endpoint=deployed.info.url,
+            generation_token=deployed.generation_token,
+            prompts=prompts,
+            current_round=current_round,
+            seed=seed,
+            shutdown=shutdown,
         )
-        container_name = f"miner-{current_round}-{miner.log_id.lower()}"
-        container = await ensure_running_container(
-            targon,
-            name=container_name,
-            config=config,
-            shutdown=GracefulShutdown(),
-            reuse_existing=False,
-            deploy_timeout=settings.targon_startup_timeout_seconds,
-            warmup_timeout=settings.targon_warmup_timeout_seconds,
-            check_interval=settings.check_pod_interval_seconds,
-        )
-
-        if container is None or container.url is None:
-            if container:
-                await targon.delete_container(container.uid)
-            else:
-                await targon.delete_containers_by_name(container_name)
-            return False, None
-
-        try:
-            tracker = await _process_prompts(
-                git_batcher=git_batcher,
-                miner=miner,
-                endpoint=container.url,
-                prompts=prompts,
-                current_round=current_round,
-                seed=seed,
-                shutdown=shutdown,
-            )
-            if tracker.budget_exceeded:
-                logger.warning(f"{miner.log_id}: stopped early, budget exceeded")
-        finally:
-            if not settings.debug_keep_pods_alive:
-                await targon.delete_container(container.uid)
-
-    return True, tracker
+        if tracker.budget_exceeded:
+            logger.warning(f"{miner.log_id}: stopped early, budget exceeded")
+        return True, tracker
+    finally:
+        if not settings.debug_keep_pods_alive:
+            try:
+                await gpu_manager.delete_container(deployed.info)
+            except GPUProviderError as e:
+                logger.warning(f"{miner.log_id}: failed to delete container: {e}")
 
 
 async def _process_prompts(
     git_batcher: GitBatcher,
     miner: Miner,
     endpoint: str,
+    generation_token: str | None,
     prompts: list[Prompt],
     current_round: int,
     seed: int,
@@ -230,6 +237,7 @@ async def _process_prompts(
                     git_batcher=git_batcher,
                     miner=miner,
                     endpoint=endpoint,
+                    generation_token=generation_token,
                     prompt=prompt,
                     current_round=current_round,
                     seed=seed,
@@ -255,6 +263,7 @@ async def _process_prompt(
     git_batcher: GitBatcher,
     miner: Miner,
     endpoint: str,
+    generation_token: str | None,
     prompt: Prompt,
     current_round: int,
     seed: int,
@@ -278,7 +287,13 @@ async def _process_prompt(
             image = await f.read()
 
         ply_content, png_content, gen_time = await _generate_and_render_with_retries(
-            endpoint, image, seed, request_sem, shutdown, log_id
+            endpoint=endpoint,
+            generation_token=generation_token,
+            image=image,
+            seed=seed,
+            request_sem=request_sem,
+            shutdown=shutdown,
+            log_id=log_id,
         )
 
         result = GenerationResult()
@@ -301,6 +316,7 @@ async def _process_prompt(
 
 async def _generate_and_render_with_retries(
     endpoint: str,
+    generation_token: str | None,
     image: bytes,
     seed: int,
     request_sem: asyncio.Semaphore,
@@ -318,7 +334,15 @@ async def _generate_and_render_with_retries(
         if attempt > 0:
             logger.info(f"{log_id}: retry {attempt + 1}/{settings.prompt_retry_attempts}")
 
-        gen_result = await generate(request_sem, endpoint, image, seed, log_id, shutdown)
+        gen_result = await generate(
+            request_sem=request_sem,
+            endpoint=endpoint,
+            image=image,
+            seed=seed,
+            log_id=log_id,
+            shutdown=shutdown,
+            auth_token=generation_token,
+        )
         if gen_result.content is None:
             break  # We make `settings.generation_http_attempts` to generate. If all fail, no need to retry.
 

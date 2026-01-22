@@ -55,26 +55,49 @@ class Settings(BaseSettings):
         alias="TARGON_RESOURCE",
         description="Targon resource name used for generations",
     )
+
+    verda_enabled: bool = Field(
+        default=False, alias="VERDA_ENABLED", description="Enable Verda as a backup GPU provider"
+    )
+    verda_client_id: SecretStr | None = Field(
+        default=None, alias="VERDA_CLIENT_ID", description="Verda OAuth client ID"
+    )
+    verda_client_secret: SecretStr | None = Field(
+        default=None, alias="VERDA_CLIENT_SECRET", description="Verda OAuth client secret"
+    )
+    verda_generation_token: SecretStr | None = Field(
+        default=None, alias="VERDA_GENERATION_TOKEN", description="Verda Bearer token for generation requests"
+    )
     generation_port: int = Field(
         default=10006,
         alias="GENERATION_PORT",
         description="Port used for generations",
     )
-    targon_startup_timeout_seconds: float = Field(
+    pod_visibility_timeout_seconds: float = Field(
         default=1800,
-        alias="TARGON_STARTUP_TIMEOUT",
-        description="Timeout for pod startup in seconds",
+        alias="POD_VISIBILITY_TIMEOUT",
+        description="Timeout for pod to become visible after deployment in seconds",
     )
-    targon_warmup_timeout_seconds: float = Field(
-        default=1800,
-        alias="TARGON_WARMUP_TIMEOUT",
-        description="Timeout for pod warmup in seconds",
+    pod_warmup_timeout_seconds: float = Field(
+        default=3600,
+        alias="POD_WARMUP_TIMEOUT",
+        description="Timeout for pod to become healthy after visibility in seconds",
+    )
+    pod_acquisition_retry_interval_seconds: int = Field(
+        default=120,
+        alias="POD_ACQUISITION_RETRY_INTERVAL",
+        description="Delay between pod acquisition attempts in seconds (default 2 min)",
+    )
+    pod_acquisition_max_attempts: int = Field(
+        default=720,
+        alias="POD_ACQUISITION_MAX_ATTEMPTS",
+        description="Maximum pod acquisition attempts (default 720 = 24h at 2 min intervals)",
     )
 
     miner_process_attempts: int = Field(
-        default=2,
+        default=4,
         alias="MINER_PROCESS_ATTEMPTS",
-        description="Number of attempts to process a miner (container deploy + all prompts)",
+        description="Number of attempts to process a miner (32+ failures, warmup failure, exceptions)",
     )
 
     max_concurrent_miners: int = Field(
@@ -128,7 +151,7 @@ class Settings(BaseSettings):
     )
 
     max_failed_prompts_budget: int = Field(
-        default=32,
+        default=24,
         alias="MAX_FAILED_PROMPTS_BUDGET",
         description="Maximum number of failed prompts allowed before stopping retry attempts entirely",
     )

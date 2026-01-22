@@ -15,11 +15,11 @@ from subnet_common.git_batcher import GitBatcher
 from subnet_common.github import GitHubClient, GitHubJob
 from subnet_common.graceful_shutdown import GracefulShutdown
 
+from generation_orchestrator.gpu_provider import GPUProviderManager
 from generation_orchestrator.miner_process import process_miner_with_retries
 from generation_orchestrator.prompts import Prompt, ensure_prompts_cached_from_git
 from generation_orchestrator.settings import settings
 from generation_orchestrator.staggered_semaphore import StaggeredSemaphore
-from generation_orchestrator.targon_client import TargonClient
 
 
 TERMINAL_BUILD_STATUSES = frozenset(
@@ -252,8 +252,9 @@ async def _watch_builds_and_generate(
             completed_miners += 1
             logger.info(f"Progress: {completed_miners}/{total_miners} miners completed")
 
-    async with TargonClient(api_key=settings.targon_api_key.get_secret_value()) as targon:
-        await targon.delete_containers_by_prefix(f"miner-{current_round}")
+    if not settings.debug_keep_pods_alive:
+        gpu_manager = GPUProviderManager(settings)
+        await gpu_manager.cleanup_by_prefix(f"miner-{current_round}")
 
 
 async def _get_miner_build_jobs(git: GitHubClient, run_id: int) -> dict[str, GitHubJob]:

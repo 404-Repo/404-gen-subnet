@@ -1,3 +1,4 @@
+import asyncio
 from types import TracebackType
 from typing import Self
 
@@ -26,10 +27,20 @@ class ContainerDeployConfig(BaseModel):
     container_concurrency: int
     resource_name: str = "h200-small"
     port: int = 10006
+    min_replicas: int = 1
+    max_replicas: int = 1
+    target_concurrency: int | None = None  # Defaults to container_concurrency
+    visibility: str = "external"
+
+    def get_target_concurrency(self) -> int:
+        """Return target_concurrency, defaulting to container_concurrency."""
+        return self.target_concurrency if self.target_concurrency is not None else self.container_concurrency
 
 
 class TargonClient:
     """Async Targon client."""
+
+    ERROR_BODY_MAX_LENGTH = 200
 
     def __init__(self, api_key: str, timeout: float = 60.0) -> None:
         self._api_key = api_key
@@ -71,8 +82,9 @@ class TargonClient:
                 containers = [c for c in containers if c.name.startswith(prefix)]
             return containers
         except (TargonError, APIError) as e:
+            error_msg = str(e)[: self.ERROR_BODY_MAX_LENGTH]
             logger.error(f"Failed to list containers: {e}")
-            raise TargonClientError(f"Failed to list containers: {e}") from e
+            raise TargonClientError(f"Failed to list containers: {error_msg}") from e
 
     async def get_container(self, name: str) -> ServerlessResourceListItem | None:
         """Get container by exact name. Returns None if not found."""
@@ -89,40 +101,54 @@ class TargonClient:
             resource_name=config.resource_name,
             network=NetworkConfig(
                 port=PortConfig(port=config.port),
-                visibility="external",
+                visibility=config.visibility,
             ),
             scaling=AutoScalingConfig(
-                min_replicas=1,
-                max_replicas=1,
+                min_replicas=config.min_replicas,
+                max_replicas=config.max_replicas,
                 container_concurrency=config.container_concurrency,
-                target_concurrency=config.container_concurrency,
+                target_concurrency=config.get_target_concurrency(),
             ),
         )
         try:
-            logger.debug(f"Requested container deploy {name}")
+            logger.debug(f"Deploying container {name}")
             response = await self.client.async_serverless.deploy_container(request)
-            logger.debug(f"Deployed container {name} ({response.uid})")
+            logger.info(f"Deployed container {name} ({response.uid})")
         except (TargonError, APIError) as e:
+            error_msg = str(e)[: self.ERROR_BODY_MAX_LENGTH]
             logger.error(f"Failed to deploy container {name}: {e}")
-            raise TargonClientError(f"Failed to deploy container: {e}") from e
+            raise TargonClientError(f"Failed to deploy container {name}: {error_msg}") from e
 
-    async def delete_container(self, uid: str, raise_on_failure: bool = False) -> None:
-        """Delete container by UID."""
+    async def delete_container(self, uid: str, raise_on_failure: bool = False) -> bool:
+        """Delete container by UID. Returns True if deleted or already gone."""
         try:
-            logger.debug(f"Requested container delete {uid}")
+            logger.debug(f"Deleting container {uid}")
             await self.client.async_serverless.delete_container(uid)
             logger.info(f"Deleted container: {uid}")
+            return True
         except (TargonError, APIError) as e:
-            logger.error(f"Failed to delete container: {e}")
+            error_str = str(e).lower()
+            # Treat 404 / not found as a success (idempotent delete)
+            if "404" in error_str or "not found" in error_str:
+                logger.debug(f"Container {uid} already deleted or not found")
+                return True
+            logger.error(f"Failed to delete container {uid}: {e}")
             if raise_on_failure:
-                raise TargonClientError(f"Failed to delete container: {e}") from e
+                error_msg = str(e)[: self.ERROR_BODY_MAX_LENGTH]
+                raise TargonClientError(f"Failed to delete container {uid}: {error_msg}") from e
+            return False
 
     async def delete_containers_by_name(self, name: str) -> int:
-        """Delete all containers with the exact name. Returns count deleted."""
+        """Delete all containers with exact name. Returns count deleted."""
         containers = await self.list_containers(name=name)
-        for c in containers:
-            await self.delete_container(c.uid)
-        return len(containers)
+        if not containers:
+            return 0
+
+        results = await asyncio.gather(
+            *[self.delete_container(c.uid) for c in containers],
+            return_exceptions=True,
+        )
+        return sum(1 for r in results if r is True)
 
     async def delete_containers_by_prefix(self, prefix: str) -> int:
         """
@@ -132,8 +158,15 @@ class TargonClient:
         miner-5-5e7eserr2a, miner-5-abc1234567, etc.
         """
         containers = await self.list_containers(prefix=prefix)
-        for c in containers:
-            await self.delete_container(c.uid)
-        if containers:
-            logger.info(f"Deleted {len(containers)} containers matching prefix '{prefix}'")
-        return len(containers)
+        if not containers:
+            return 0
+
+        results = await asyncio.gather(
+            *[self.delete_container(c.uid) for c in containers],
+            return_exceptions=True,
+        )
+        deleted = sum(1 for r in results if r is True)
+
+        if deleted:
+            logger.info(f"Deleted {deleted} containers matching prefix '{prefix}'")
+        return deleted

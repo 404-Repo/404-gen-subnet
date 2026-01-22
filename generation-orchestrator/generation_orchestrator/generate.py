@@ -26,6 +26,7 @@ async def generate(
     seed: int,
     log_id: str,
     shutdown: GracefulShutdown,
+    auth_token: str | None = None,
 ) -> GenerationResponse:
     if shutdown.should_stop:
         return GenerationResponse(success=False)
@@ -60,6 +61,7 @@ async def generate(
             timeout=timeout,
             attempt=attempt,
             max_attempts=max_attempts,
+            auth_token=auth_token,
         )
 
         if result is not None:  # None means retryable failure — continue to next attempt
@@ -78,6 +80,7 @@ async def _generate_attempt(
     timeout: httpx.Timeout,  # noqa: ASYNC109
     attempt: int,
     max_attempts: int,
+    auth_token: str | None = None,
 ) -> GenerationResponse | None:
     """Single generation attempt.
 
@@ -95,11 +98,16 @@ async def _generate_attempt(
 
                 logger.debug(f"{log_id}: generating (attempt {attempt + 1}/{max_attempts})")
 
+                headers = {}
+                if auth_token:
+                    headers["Authorization"] = f"Bearer {auth_token}"
+
                 async with client.stream(
                     "POST",
                     f"{endpoint}/generate",
                     files={"prompt_image_file": ("prompt.jpg", image, "image/jpeg")},
                     data={"seed": seed},
+                    headers=headers,
                 ) as response:
                     response.raise_for_status()
 
