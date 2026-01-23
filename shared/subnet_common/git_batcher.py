@@ -154,6 +154,11 @@ class GitBatcher(BaseModel):
         # For messages: union (safe)
         self._pending_messages.update(messages)
 
+    async def refresh_base_sha(self) -> str:
+        """Refresh base_sha from the current branch HEAD."""
+        self.base_sha = await self.git.get_ref_sha(self.branch)
+        return self.base_sha
+
     @property
     def pending_count(self) -> int:
         return len(self._pending_files)

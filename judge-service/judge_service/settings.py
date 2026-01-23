@@ -33,7 +33,7 @@ class Settings(BaseSettings):
         default=2, alias="MAX_CONCURRENT_DUELS", description="Maximum number of concurrent duels"
     )
 
-    max_generation_time_seconds: int = Field(
+    max_generation_time_seconds: float = Field(
         default=35, alias="MAX_GENERATION_TIME", description="Maximum generation time in seconds"
     )
 
