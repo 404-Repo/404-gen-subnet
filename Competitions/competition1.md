@@ -1,15 +1,15 @@
-## Competition 1: "Image to 3D Generation"
+## Competition 1: "Image to 3D Generation (Gaussian Splatting)"
 
 ### What we provide:
 1. A Set of 140k+ 2D Image Prompts for Testing;
-2. Our base miner [implementation](https://github.com/404-Repo/404-base-miner) that is ready for Commercial Use; 
+2. Our base miner [implementation](https://github.com/404-Repo/404-base-miner-gs) that is ready for Commercial Use; 
 3. Judge Code for Evaluating Gaussian Splat Outputs. This can be found in this repository ("judge-service" folder);
 
 ### Base miner description:
 Our Base Miner Implementation Includes:
 1. [Background removal](https://github.com/404-Repo/404-base-miner/tree/main/background_remover);
-2. [Trellis](https://github.com/404-Repo/404-base-miner/tree/main/trellis_generator) (Ready for Commercial Use. Produces Gaussian Splatting Models Only);
-3. Docker File. Location: ["docker"](https://github.com/404-Repo/404-base-miner/tree/main/docker) folder.
+2. [Trellis (implementation)](https://github.com/404-Repo/404-base-miner-gs) (Ready for Commercial Use. Produces Gaussian Splatting Models Only);
+3. Docker File. Location: ["docker"](https://github.com/404-Repo/404-base-miner-gs/tree/main/docker) folder.
 
 Our Background Remover uses two opensource models for removing the background from the input image:
 ([BEN 2](https://github.com/PramaLLC/BEN2/) and [BirefNet](https://github.com/ZhengPeng7/BiRefNet)). 
@@ -18,7 +18,7 @@ which is subsequently used by the Trellis model for generating the final Gaussia
 
 ### Requirements for Submitted Solution:
 1. **Packages/libraries**: must be permitted for Commercial Use;
-2. **Correct File Format**: Models should be stored in <span style="color:green"> 3DGS PLY </span> file format with an approximate size of no more than <span style="color:green"> 200 mb </span>;
+2. **Correct GS File Format**: Models should be stored in <span style="color:green"> 3DGS PLY </span> file format with an approximate size of no more than <span style="color:green"> 200 mb </span>;
 3. **Correct Orientation**: <span style="color:green"> Y-axis up </span>; for reference: when you upload your generated model to [SuperSplat editor](https://superspl.at/editor). It should not be tilted or upside down;
 4. **Asset Quality**: the Solution must significantly visually improve the quality of the generated assets compared to the output of our base miner;
 5. **Generation time** must be within <span style="color:green"> 30 seconds </span>;
