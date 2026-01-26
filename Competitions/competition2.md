@@ -17,8 +17,8 @@ Our Base Miner Implementation Includes:
 
 ### Requirements for Submitted Solution:
 1. **Packages/Libraries/Code**: must be permitted for Commercial Use;
-2. **Mesh Generator**: any mesh generator (your solution can be not based on our base miner code) can be used with permissive licenses for commercial use. 
-Any submission that will violate this rule will be disqualified.
+2. **Mesh Generator**: you can use any mesh generator that can has a permissive licenses for commercial use. 
+Our base miner serves as a guidance.
 2. **Correct Mesh File Format**: Models should be stored in <span style="color:green"> GLB </span> file format with an 
 approximate size of no more than <span style="color:green"> 200 mb </span>;
 3. **Correct Mesh Orientation**: <span style="color:green"> Y-axis up </span>;
