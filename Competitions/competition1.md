@@ -1,35 +1,41 @@
-## Competition 1: "Image to 3D Generation"
+## Competition 2: "Image to 3D Generation (Mesh)"
 
 ### What we provide:
 1. A Set of 140k+ 2D Image Prompts for Testing;
-2. Our base miner [implementation](https://github.com/404-Repo/404-base-miner) that is ready for Commercial Use; 
-3. Judge Code for Evaluating Gaussian Splat Outputs. This can be found in this repository ("judge-service" folder);
+2. Our base miner [implementation](https://github.com/404-Repo/404-base-miner-mesh) that is ready for Commercial Use; 
+3. Judge Code for Evaluating Mesh Outputs. This can be found in this repository ("judge-service" folder);
 
 ### Base miner description:
 Our Base Miner Implementation Includes:
-1. [Background removal](https://github.com/404-Repo/404-base-miner/tree/main/background_remover);
-2. [Trellis](https://github.com/404-Repo/404-base-miner/tree/main/trellis_generator) (Ready for Commercial Use. Produces Gaussian Splatting Models Only);
-3. Docker File. Location: ["docker"](https://github.com/404-Repo/404-base-miner/tree/main/docker) folder.
+1. [Trellis 2 (implementation)](https://github.com/404-Repo/404-base-miner-mesh) (Ready for Commercial Use. Produces Mesh Models Only);
+2. Docker File. Location: ["docker"](https://github.com/404-Repo/404-base-miner-mesh/tree/main/docker) folder.
 
-Our Background Remover uses two opensource models for removing the background from the input image:
-([BEN 2](https://github.com/PramaLLC/BEN2/) and [BirefNet](https://github.com/ZhengPeng7/BiRefNet)). 
-On top of that, we also use a VLM model ([InternVL-3.5-2B](https://huggingface.co/OpenGVLab/InternVL3_5-2B)) to select the better result, 
-which is subsequently used by the Trellis model for generating the final Gaussian Splatting Model..
+### Base miner: some points for improvement:
+1. Current UV-unwrapping can be unreliable and slow;
+2. Generated materials for the meshes have artifacts (most likely related to uv unwrapping);
+3. Mesh rasterization can be improved or replaced with a better method;
 
 ### Requirements for Submitted Solution:
-1. **Packages/libraries**: must be permitted for Commercial Use;
-2. **Correct File Format**: Models should be stored in <span style="color:green"> 3DGS PLY </span> file format with an approximate size of no more than <span style="color:green"> 200 mb </span>;
-3. **Correct Orientation**: <span style="color:green"> Y-axis up </span>; for reference: when you upload your generated model to [SuperSplat editor](https://superspl.at/editor). It should not be tilted or upside down;
-4. **Asset Quality**: the Solution must significantly visually improve the quality of the generated assets compared to the output of our base miner;
-5. **Generation time** must be within <span style="color:green"> 30 seconds </span>;
+1. **Packages/Libraries/Code**: must be permitted for Commercial Use;
+2. **Mesh Generator**: you can use any mesh generator that has a permissive licenses for commercial use. 
+Our base miner serves as a guidance or starting point.
+2. **Correct Mesh File Format**: Models should be stored in <span style="color:green"> GLB </span> file format with an 
+approximate size of no more than <span style="color:green"> 200 mb </span>;
+3. **Correct Mesh Orientation**: <span style="color:green"> Y-axis up </span>;
+4. **Correct Mesh Size**: mesh model must be scaled to fit within a unit cube. If it will be of wrong size, 
+your results might not pass Duels evaluation. 
+4. **Asset Quality**: the Solution must significantly visually improve the quality of the generated assets compared 
+to the output of our base miner;
+5. **Proof of work**: We will require Miner to generate Models for 128 prompts per evaluation.
+5. **Generation time**: <span style="color:green"> Trimmed Median: ≤ 90 s. Hard Timeout: 180 s (= Failure). </span>;
 6. **The Solution** must be published in a <span style="color:green"> public Git repository </span>;
-
-#### Update on Correct Orientation:
-In the previous version of the subnet we followed the orientation rules for the generated model proposed by early 3D generative 
-AI models. Our previous frame of reference was defined as +Y Axis pointing down. As a result the generated model in standard 
-viewers were loaded upside down. This is not compatible with industry standards, therefore, new models 
-should be aligned with +Y Axis pointing up.
-
+7. **All External Dependencies** must be pinned to specific versions or commit hashes for reproducibility. This includes:
+   - **pip packages**: use exact versions (e.g., `torch==2.1.0`, not `torch>=2.0`)
+   - **Huggingface models/repos**: pin to a specific revision hash
+   - **Git dependencies**: use commit SHAs, not branch names
+   - **Docker base images**: use digest or specific tag (e.g., `nvidia/cuda:12.1.0-runtime-ubuntu22.04`)
+   
+   ⚠️ Submissions with unpinned or floating dependencies may be disqualified, as non-reproducible builds cannot be fairly evaluated.
 
 ### Requirements for Docker File:
 1. The Repository must include a <span style="color:green"> "docker/Dockerfile" </span>;
