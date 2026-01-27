@@ -1,4 +1,4 @@
-## Competition 1: "Image to 3D Generation (Gaussian Splatting)"
+## Competition 0: "Image to 3D Generation (Gaussian Splatting)"
 
 ### What we provide:
 1. A Set of 140k+ 2D Image Prompts for Testing;
