@@ -29,7 +29,13 @@ to the output of our base miner;
 5. **Proof of work**: We will require Miner to generate Models for 128 prompts per evaluation.
 5. **Generation time**: <span style="color:green"> Trimmed Median: ≤ 90 s. Hard Timeout: 180 s (= Failure). </span>;
 6. **The Solution** must be published in a <span style="color:green"> public Git repository </span>;
-
+7. **All External Dependencies** must be pinned to specific versions or commit hashes for reproducibility. This includes:
+   - **pip packages**: use exact versions (e.g., `torch==2.1.0`, not `torch>=2.0`)
+   - **Huggingface models/repos**: pin to a specific revision hash
+   - **Git dependencies**: use commit SHAs, not branch names
+   - **Docker base images**: use digest or specific tag (e.g., `nvidia/cuda:12.1.0-runtime-ubuntu22.04`)
+   
+   ⚠️ Submissions with unpinned or floating dependencies may be disqualified, as non-reproducible builds cannot be fairly evaluated.
 
 ### Requirements for Docker File:
 1. The Repository must include a <span style="color:green"> "docker/Dockerfile" </span>;
