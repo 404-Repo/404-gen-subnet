@@ -71,7 +71,6 @@ async def render_ply(
 @app.post("/render_glb")
 async def render_glb(
     file: UploadFile = File(...),
-    device: Literal["cuda", "cpu"] | None = None,
 ) -> Response:
     filename = file.filename or ""
     logger.info(f"render_glb request received: filename={filename!r}")
@@ -82,9 +81,6 @@ async def render_glb(
 
     payload = await _read_upload_with_limit(file, MAX_UPLOAD_SIZE)
     logger.info(f"File uploaded: {len(payload)} bytes")
-    
-    torch_device = _resolve_device(device)
-    logger.debug(f"Using device: {torch_device}")
 
     try:
         logger.info("Starting GLB render...")

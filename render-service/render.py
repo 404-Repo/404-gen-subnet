@@ -116,7 +116,7 @@ def grid_from_glb_bytes(glb_bytes: bytes):
     view_count = 0
 
     for theta, phi in zip(theta_angles, phi_angles):
-        cam_pos = coords.spherical_to_cartesian(theta, phi, const.CAM_RAD)
+        cam_pos = coords.spherical_to_cartesian(theta, phi, const.CAM_RAD_MESH)
         pose = coords.look_at(cam_pos)
 
         scene.set_pose(cam_node, pose)
