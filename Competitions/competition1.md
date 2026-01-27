@@ -1,4 +1,4 @@
-## Competition 2: "Image to 3D Generation (Mesh)"
+## Competition 1: "Image to 3D Generation (Mesh)"
 
 ### What we provide:
 1. A Set of 140k+ 2D Image Prompts for Testing;
