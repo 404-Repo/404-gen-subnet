@@ -9,7 +9,6 @@ from transformers import AutoImageProcessor, AutoModel
 from image_distance_service.settings import settings
 
 
-# Global model state
 _processor: AutoImageProcessor | None = None
 _model: AutoModel | None = None
 _current_device: torch.device | None = None
@@ -27,13 +26,11 @@ def load_model() -> None:
 
     token = settings.hf_token.get_secret_value() if settings.hf_token else None
 
-    # Load processor without revision - processor config rarely changes between revisions
     _processor = AutoImageProcessor.from_pretrained(
         settings.model_id,
         revision=settings.model_revision,
         token=token,
     )
-    # Load model with specific revision
     _model = AutoModel.from_pretrained(
         settings.model_id,
         revision=settings.model_revision,
@@ -57,7 +54,6 @@ def unload_model() -> None:
     _processor = None
     _current_device = None
 
-    # Clear CUDA cache if available
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
