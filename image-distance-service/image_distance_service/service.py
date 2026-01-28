@@ -93,4 +93,4 @@ async def distance(request: DistanceRequestModel) -> DistanceResponseModel:
 
     logger.info(f"Calculated distance: {distance:.6f}")
 
-    return {"distance": distance}
+    return {"distance": distance, "error": None}
