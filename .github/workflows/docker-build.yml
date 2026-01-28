@@ -48,3 +48,24 @@ jobs:
           push: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
           tags: ${{ steps.meta.outputs.tags }}
           platforms: linux/amd64
+
+  # Cleanup old container images - keeps registry clean
+  cleanup:
+    runs-on: 404Runner
+    needs: build-render-service
+    # Only run cleanup after pushing to default branch
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    permissions:
+      packages: write
+    
+    steps:
+      - name: Delete old container images
+        uses: snok/container-retention-policy@v3
+        with:
+          account: ${{ github.repository_owner }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+          image-names: render-service
+          cut-off: 0 seconds ago UTC
+          keep-n-most-recent: 3
+          tag-selection: both
+          skip-tags: latest
