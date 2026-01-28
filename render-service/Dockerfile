@@ -35,7 +35,7 @@ ENV LD_LIBRARY_PATH="${CUDA_HOME}/lib64:${LD_LIBRARY_PATH}"
 ENV TORCH_CUDA_ARCH_LIST="7.0;7.5;8.0;8.6;8.9;9.0"
 
 # Install PyTorch with CUDA 12.8 first (needed to build gsplat)
-RUN pip install torch --index-url https://download.pytorch.org/whl/cu128
+RUN pip install torch==2.9.1 --index-url https://download.pytorch.org/whl/cu128
 
 # Build and install gsplat
 RUN pip install --no-build-isolation git+https://github.com/nerfstudio-project/gsplat.git@v1.5.3
