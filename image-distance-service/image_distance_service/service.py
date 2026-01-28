@@ -7,23 +7,19 @@ import torch
 from fastapi import FastAPI, HTTPException
 from loguru import logger
 from PIL import Image
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel
 
 from image_distance_service.distance import compute_distance, load_model, unload_model
 from image_distance_service.settings import settings
 
 
-class DistanceRequest(BaseModel):
+class DistanceRequestModel(BaseModel):
     url_a: str
     url_b: str
 
-    @field_validator("url_a", "url_b")
-    @classmethod
-    def validate_url_not_empty(cls, v: str) -> str:
-        if not v or not v.strip():
-            raise ValueError("URL cannot be empty")
-        return v
-
+class DistanceResponseModel(BaseModel):
+    distance: float | None
+    error: str | None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -45,18 +41,11 @@ def resolve_device() -> torch.device:
 
 async def download_image(client: httpx.AsyncClient, url: str) -> Image.Image:
     """Download an image from a URL and return as PIL Image."""
-    try:
-        response = await client.get(url, follow_redirects=True)
-        response.raise_for_status()
-    except httpx.HTTPStatusError as e:
-        raise HTTPException(status_code=400, detail=f"HTTP {e.response.status_code}")
-    except httpx.RequestError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+    response = await client.get(url, follow_redirects=True)
+    response.raise_for_status()
 
-    try:
-        return Image.open(BytesIO(response.content)).convert("RGB")
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Failed to decode image: {e}")
+    return Image.open(BytesIO(response.content)).convert("RGB")
+
 
 
 @app.get("/health")
@@ -66,7 +55,7 @@ async def health() -> dict[str, str]:
 
 
 @app.post("/distance")
-async def distance(request: DistanceRequest) -> dict[str, float]:
+async def distance(request: DistanceRequestModel) -> DistanceResponseModel:
     """
     Compute the perceptual distance between two images.
 
@@ -81,33 +70,27 @@ async def distance(request: DistanceRequest) -> dict[str, float]:
 
     timeout = httpx.Timeout(settings.download_timeout_seconds)
 
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        try:
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
             logger.debug(f"Downloading image A: {request.url_a}")
             image_a = await download_image(client, request.url_a)
-        except HTTPException as e:
-            raise HTTPException(status_code=e.status_code, detail=f"url_a: {e.detail}")
 
-        try:
             logger.debug(f"Downloading image B: {request.url_b}")
             image_b = await download_image(client, request.url_b)
-        except HTTPException as e:
-            raise HTTPException(status_code=e.status_code, detail=f"url_b: {e.detail}")
 
-    logger.info(f"Images downloaded: A={image_a.size}, B={image_b.size}")
+        logger.info(f"Images downloaded: A={image_a.size}, B={image_b.size}")
 
-    try:
-        result = compute_distance(image_a, image_b, device)
-    except RuntimeError as e:
-        logger.error(f"Model not ready: {e}")
-        raise HTTPException(status_code=503, detail="Model not loaded")
-    except ValueError as e:
-        logger.warning(f"Invalid input: {e}")
-        raise HTTPException(status_code=400, detail=f"Invalid image input: {e}")
+        distance = compute_distance(image_a, image_b, device)
+
+    except httpx.HTTPStatusError as e:
+        return {"distance": None, "error": "file_not_found"}
+    except httpx.RequestError as e:
+        return {"distance": None, "error": "request_error"}
     except Exception as e:
         logger.exception(f"Unexpected error during distance computation: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
-    logger.info(f"Calculated distance: {result:.6f}")
 
-    return {"distance": result}
+    logger.info(f"Calculated distance: {distance:.6f}")
+
+    return {"distance": distance}
