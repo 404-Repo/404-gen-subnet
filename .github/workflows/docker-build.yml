@@ -1,4 +1,6 @@
-n:
+name: Build and Push Render Service
+
+on:
   push:
     paths:
       - 'render-service/**'
