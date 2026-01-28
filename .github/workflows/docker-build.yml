@@ -13,7 +13,7 @@ env:
 
 jobs:
   build-render-service:
-    runs-on: acr-x86
+    runs-on: 404Runner
     permissions:
       contents: read
       packages: write
