@@ -5,7 +5,7 @@ imageio==2.35.1
 open3d==0.18.0
 pydantic==2.12.3
 meshio==5.3.5
-pyyaml>=6.0
+pyyaml==6.0.3
 fastapi==0.115.5
 uvicorn==0.32.1
 python-multipart==0.0.20

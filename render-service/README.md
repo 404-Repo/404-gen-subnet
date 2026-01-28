@@ -33,7 +33,7 @@ docker run --gpus all -p 8000:8000 render-service:latest
 ./setup_env.sh
 
 # Activate environment
-conda activate splat-rendering
+conda activate rendering-env
 
 # Run the service
 uvicorn render_service:app --host 0.0.0.0 --port 8000

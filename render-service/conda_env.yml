@@ -1,4 +1,4 @@
-name: splat-rendering
+name: rendering-service
 channels: 
   - defaults
   - nvidia

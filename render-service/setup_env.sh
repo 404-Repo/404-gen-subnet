@@ -29,14 +29,14 @@ source "${CONDA_BASE}/etc/profile.d/conda.sh"
 
 # Create conda environment and activate it
 conda env create -f conda_env.yml
-conda activate splat-rendering
+conda activate rendering-service
 conda info --env
 
 export CUDA_HOME=${CONDA_PREFIX}
 export CPATH="$CONDA_PREFIX/targets/x86_64-linux/include:$CONDA_PREFIX/include"
 export LD_LIBRARY_PATH="$CONDA_PREFIX/targets/x86_64-linux/lib:$CONDA_PREFIX/lib"
 
-pip install torch --index-url https://download.pytorch.org/whl/cu128
+pip install torch==2.9.1 --index-url https://download.pytorch.org/whl/cu128
 pip install -r requirements.txt
 
 pip install --no-build-isolation git+https://github.com/nerfstudio-project/gsplat.git@v1.5.3
