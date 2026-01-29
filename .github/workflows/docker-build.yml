@@ -9,7 +9,7 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}/render-service
+  IMAGE_NAME: 404-repo/render-service
 
 jobs:
   build-render-service:
@@ -62,7 +62,7 @@ jobs:
       - name: Delete old container images
         uses: snok/container-retention-policy@v3
         with:
-          account: ${{ github.repository_owner }}
+          account: 404-repo
           token: ${{ secrets.GITHUB_TOKEN }}
           image-names: render-service
           cut-off: 0 seconds ago UTC
