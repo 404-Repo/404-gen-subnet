@@ -13,6 +13,6 @@ GRID_VIEW_GAP = 5
 BG_COLOR = [1.0, 1.0, 1.0]
 
 # Camera settings
-CAM_RAD = 2.5
-CAM_FOV_DEG = 49.1
+CAM_RAD = 2.5           # Used for Gaussian Splat (PLY) rendering
+CAM_RAD_MESH = 2.0      # Used for Mesh (GLB) rendering - adjust as neededCAM_FOV_DEG = 49.1
 REF_BBOX_SIZE = 1.5

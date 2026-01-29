@@ -10,4 +10,4 @@ else
   conda deactivate
 fi
 
-conda env remove -y --name splat-rendering
+conda env remove -y --name rendering-service
