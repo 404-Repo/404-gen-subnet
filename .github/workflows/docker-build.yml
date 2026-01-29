@@ -63,7 +63,7 @@ jobs:
         uses: snok/container-retention-policy@v3
         with:
           account: 404-repo
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.PACKAGES_GITHUB_TOKEN }}
           image-names: render-service
           cut-off: 0 seconds ago UTC
           keep-n-most-recent: 3
