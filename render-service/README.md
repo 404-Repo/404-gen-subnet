@@ -33,7 +33,7 @@ docker run --gpus all -p 8000:8000 render-service:latest
 ./setup_env.sh
 
 # Activate environment
-conda activate splat-rendering
+conda activate rendering-env
 
 # Run the service
 uvicorn render_service:app --host 0.0.0.0 --port 8000
@@ -132,7 +132,8 @@ with open("output.png", "wb") as f:
 |-----------|-------|-------------|
 | `IMG_WIDTH` | 518 | Single view width (px) |
 | `IMG_HEIGHT` | 518 | Single view height (px) |
-| `CAM_RAD` | 2.5 | Camera distance from origin |
+| `CAM_RAD` | 2.5 | Camera distance from origin (PLY splats) |
+| `CAM_RAD_MESH` | 2.0 | Camera distance from origin (GLB mesh) |
 | `CAM_FOV_DEG` | 49.1 | Camera field of view (degrees) |
 | `REF_BBOX_SIZE` | 1.5 | Reference bounding box for normalization |
 | `GRID_VIEW_GAP` | 5 | Gap between grid cells (px) |
@@ -147,25 +148,26 @@ The 4 grid views are sampled at θ = [22.5°, 112.5°, 202.5°, 292.5°] with φ
 
 ```
 render-service/
-├── Dockerfile              # Multi-stage Docker build
+├── Dockerfile                  # Multi-stage Docker build with CUDA/GL
 ├── .dockerignore
-├── conda_env.yml           # Conda environment (CUDA 12.8)
-├── requirements.txt        # Python dependencies
-├── setup_env.sh            # Local setup script
-├── cleanup_env.sh          # Remove conda environment
-├── render_service.py       # FastAPI application
-├── splats_render_2x2_grid.py  # CLI batch renderer
+├── requirements.txt            # Python dependencies
+├── constants.py                # Rendering/view parameters
+├── render_service.py           # FastAPI application
+├── render.py                   # Grid rendering logic for PLY/GLB (mesh rendering via pyrender)
+├── utils/
+│   ├── coords.py               # Camera pose and transformations
+│   └── image.py                # Image combining, grid logic
 └── renderers/
-    ├── gs_renderer/        # Gaussian splat rendering
-    │   ├── renderer.py
-    │   ├── camera_utils.py
-    │   └── gaussian_splatting/
+    ├── gs_renderer/            # Gaussian splat rendering
+    │   ├── renderer.py         
+    │   ├── camera_utils.py     
+    │   └── gaussian_splatting/ 
     │       ├── gs_camera.py
     │       ├── gs_renderer.py
     │       └── gs_utils.py
-    └── ply_loader/         # PLY file parsing
-        ├── base.py
-        └── loader.py
+    └── ply_loader/             # PLY loader
+        ├── base.py             
+        └── loader.py           
 ```
 
 ---
@@ -184,6 +186,5 @@ render-service/
 - Miniconda or Anaconda
 - NVIDIA CUDA Toolkit 12.8
 - GCC 13.x
-
 
 

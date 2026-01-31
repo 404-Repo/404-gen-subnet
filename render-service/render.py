@@ -96,7 +96,7 @@ def grid_from_glb_bytes(glb_bytes: bytes):
     logger.debug("Camera added to scene")
 
     # Light
-    light = pyrender.DirectionalLight(color=[255,255,255], intensity=3.0)
+    light = pyrender.DirectionalLight(color=[255,255,255], intensity=15.0)
     light_node = scene.add(light)
     logger.debug("Light added to scene")
 
@@ -116,13 +116,17 @@ def grid_from_glb_bytes(glb_bytes: bytes):
     view_count = 0
 
     for theta, phi in zip(theta_angles, phi_angles):
-        cam_pos = coords.spherical_to_cartesian(theta, phi, const.CAM_RAD)
+        cam_pos = coords.spherical_to_cartesian(theta, phi, const.CAM_RAD_MESH)
         pose = coords.look_at(cam_pos)
 
         scene.set_pose(cam_node, pose)
-        scene.set_pose(light_node, pose)
+        light_offset = np.array([1.0, 1.0, 0]) 
+        light_pos = cam_pos + light_offset
+        light_pose = coords.look_at(light_pos)
+        scene.set_pose(light_node, light_pose)
 
         image, _ = renderer.render(scene)
+        
         # Downsample with high-quality Lanczos filter for antialiasing
         image_pil = Image.fromarray(image).resize(
             (const.IMG_WIDTH, const.IMG_HEIGHT),
