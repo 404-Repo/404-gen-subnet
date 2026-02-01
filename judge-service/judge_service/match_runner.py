@@ -119,6 +119,10 @@ class MatchRunner:
     def _ref(self) -> str:
         return str(self._git_batcher.base_sha)
 
+    def _get_generation_source(self, hotkey: str) -> GenerationSource:
+        """Leader uses generated outputs, challengers use submitted outputs."""
+        return GenerationSource.GENERATED if hotkey == "leader" else GenerationSource.SUBMITTED
+
     @classmethod
     async def create(
         cls,
@@ -298,10 +302,18 @@ class MatchRunner:
     ) -> MatchOutcome:
         """Run a match between two miners."""
         left_gens = await get_generations(
-            git=self._git, round_num=self._round_num, hotkey=left, source=GenerationSource.SUBMITTED, ref=self._ref
+            git=self._git,
+            round_num=self._round_num,
+            hotkey=left,
+            source=self._get_generation_source(left),
+            ref=self._ref,
         )
         right_gens = await get_generations(
-            git=self._git, round_num=self._round_num, hotkey=right, source=GenerationSource.SUBMITTED, ref=self._ref
+            git=self._git,
+            round_num=self._round_num,
+            hotkey=right,
+            source=self._get_generation_source(right),
+            ref=self._ref,
         )
 
         if not left_gens and not right_gens:
@@ -325,6 +337,8 @@ class MatchRunner:
             left=left,
             right=right,
             max_concurrent_duels=self._settings.max_concurrent_duels,
+            overtime_tolerance_ratio=self._settings.overtime_tolerance_ratio,
+            max_generation_time_seconds=self._settings.max_generation_time_seconds,
             shutdown=shutdown,
         )
 

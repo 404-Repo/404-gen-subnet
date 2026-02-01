@@ -23,7 +23,7 @@ Reads and writes to the competition Git repository:
 | `state.json` | R | Current round and stage |
 | `rounds/{n}/matches_matrix.csv` | R/W | All match results |
 | `rounds/{n}/require_audit.json` | R/W | Miners needing verification |
-| `rounds/{n}/output_verification.json` | R | Verification results |
+| `rounds/{n}/generation_audits.json` | R | Verification results |
 | `rounds/{n}/source_audit.json` | R | Source audit results |
 | `rounds/{n}/{hotkey}/duels_*.json` | W | Detailed match reports |
 | `rounds/{n}/winner.json` | W | Final winner |
