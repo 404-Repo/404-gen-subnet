@@ -96,7 +96,7 @@ def grid_from_glb_bytes(glb_bytes: bytes):
     logger.debug("Camera added to scene")
 
     # Light
-    light = pyrender.DirectionalLight(color=[255,255,255], intensity=15.0)
+    light = pyrender.DirectionalLight(color=[255,255,255], intensity=6.0)
     light_node = scene.add(light)
     logger.debug("Light added to scene")
 
