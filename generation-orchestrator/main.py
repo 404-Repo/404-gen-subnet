@@ -5,7 +5,7 @@ from loguru import logger
 from subnet_common.graceful_shutdown import (
     GracefulShutdown,
 )
-from subnet_common.utils import format_duration
+from subnet_common.utils import calculate_wait_time, format_duration
 
 from generation_orchestrator.generation_iteration import run_generation_iteration
 from generation_orchestrator.settings import settings
@@ -33,15 +33,21 @@ async def main() -> None:
     logger.info("Generation orchestrator started")
 
     while not shutdown.should_stop:
+        next_stage_eta = None
         try:
-            await run_generation_iteration(shutdown)
+            next_stage_eta = await run_generation_iteration(shutdown)
         except asyncio.CancelledError:
             break
         except Exception as e:
             logger.exception(f"Generation cycle failed with {e}")
 
-        logger.debug(f"Next cycle in {format_duration(settings.check_state_interval_seconds)}")
-        await shutdown.wait(timeout=settings.check_state_interval_seconds)
+        wait_seconds = calculate_wait_time(
+            eta=next_stage_eta,
+            min_wait_seconds=settings.min_check_state_interval_seconds,
+            max_wait_seconds=settings.max_check_state_interval_seconds,
+        )
+        logger.debug(f"Next cycle in {format_duration(wait_seconds)}")
+        await shutdown.wait(timeout=wait_seconds)
 
     logger.info("Orchestrator stopped gracefully")
 

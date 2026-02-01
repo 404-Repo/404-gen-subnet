@@ -1,9 +1,9 @@
 import asyncio
+from collections.abc import Callable
 
 import httpx
 from loguru import logger
 from pydantic import BaseModel
-from subnet_common.graceful_shutdown import GracefulShutdown
 
 from generation_orchestrator.settings import settings
 
@@ -14,22 +14,24 @@ class GenerationResponse(BaseModel):
     generation_time: float | None = None
 
 
-def _is_retryable_status(status: int) -> bool:
-    """Check if the HTTP status code is retryable (server errors and rate limiting)."""
-    return status >= 500 or status == 429
-
-
 async def generate(
-    request_sem: asyncio.Semaphore,
+    gpu_generation_sem: asyncio.Semaphore,
     endpoint: str,
     image: bytes,
     seed: int,
     log_id: str,
-    shutdown: GracefulShutdown,
-) -> GenerationResponse:
-    if shutdown.should_stop:
-        return GenerationResponse(success=False)
+    auth_token: str | None = None,
+    is_canceled: Callable[[], bool] | None = None,
+) -> GenerationResponse | None:
+    """Request a generation and measure time-to-first-bytes.
 
+    We release `gpu_generation_sem` as soon as the first response bytes arrive so the
+    next generation can start while the current payload is still downloading.
+
+    is_canceled: Optional check called after acquiring a GPU slot. If returns True,
+            skips generation and releases the slot immediately. Useful when another
+            worker may have completed the same task while this one was queued.
+    """
     timeout = httpx.Timeout(
         connect=30.0,
         write=30.0,
@@ -37,75 +39,41 @@ async def generate(
         pool=30.0,
     )
 
-    max_attempts = settings.generation_http_attempts
-
-    for attempt in range(max_attempts):
-        if shutdown.should_stop:
-            return GenerationResponse(success=False)
-
-        if attempt > 0:
-            backoff = min(
-                settings.generation_http_backoff_base * (2 ** (attempt - 1)),
-                settings.generation_http_backoff_max,
-            )
-            logger.info(f"{log_id}: Retry {attempt + 1}/{max_attempts} after {backoff:.1f}s")
-            await asyncio.sleep(backoff)
-
-        result = await _generate_attempt(
-            request_sem=request_sem,
-            endpoint=endpoint,
-            image=image,
-            seed=seed,
-            log_id=log_id,
-            timeout=timeout,
-            attempt=attempt,
-            max_attempts=max_attempts,
-        )
-
-        if result is not None:  # None means retryable failure — continue to next attempt
-            return result
-
-    logger.error(f"{log_id}: All {max_attempts} generation attempts failed")
-    return GenerationResponse(success=False)
-
-
-async def _generate_attempt(
-    request_sem: asyncio.Semaphore,
-    endpoint: str,
-    image: bytes,
-    seed: int,
-    log_id: str,
-    timeout: httpx.Timeout,  # noqa: ASYNC109
-    attempt: int,
-    max_attempts: int,
-) -> GenerationResponse | None:
-    """Single generation attempt.
-
-    Returns:
-        GenerationResponse on success or non-retryable failure.
-        None on retryable failure (signals caller to retry).
-    """
     sem_released = False
-    await request_sem.acquire()
+    # This semaphore represents a GPU "generation slot": we hold it until the
+    # first response bytes arrive (generation complete), then release it while
+    # the payload is still downloading to maximize GPU utilization.
+    await gpu_generation_sem.acquire()
+
+    if is_canceled and is_canceled():
+        gpu_generation_sem.release()
+        logger.debug(f"{log_id}: cancelled while waiting for GPU slot")
+        return None
 
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
             try:
                 start_time = asyncio.get_running_loop().time()
 
-                logger.debug(f"{log_id}: generating (attempt {attempt + 1}/{max_attempts})")
+                logger.debug(f"{log_id}: generating")
+
+                headers = {}
+                if auth_token:
+                    headers["Authorization"] = f"Bearer {auth_token}"
 
                 async with client.stream(
                     "POST",
                     f"{endpoint}/generate",
                     files={"prompt_image_file": ("prompt.jpg", image, "image/jpeg")},
                     data={"seed": seed},
+                    headers=headers,
                 ) as response:
                     response.raise_for_status()
 
                     elapsed = asyncio.get_running_loop().time() - start_time
 
-                    request_sem.release()
+                    # Release the GPU slot as soon as generation finishes (first bytes).
+                    gpu_generation_sem.release()
                     sem_released = True
 
                     logger.debug(f"{log_id}: generation completed in {elapsed:.1f}s")
@@ -113,11 +81,8 @@ async def _generate_attempt(
                     try:
                         content = await response.aread()
                     except Exception as e:
-                        # Failed to read body — could be truncated, worth retrying
-                        logger.warning(
-                            f"{log_id}: failed to read response body (attempt {attempt + 1}/{max_attempts}): {e}"
-                        )
-                        return None
+                        logger.warning(f"{log_id}: failed to read response body: {e}")
+                        return GenerationResponse(success=False)
 
                     download_time = asyncio.get_running_loop().time() - start_time - elapsed
                     mb_size = len(content) / 1024 / 1024
@@ -133,8 +98,8 @@ async def _generate_attempt(
                     )
 
             except httpx.TimeoutException:
-                logger.warning(f"{log_id}: generation timed out (attempt {attempt + 1}/{max_attempts})")
-                return None  # Retryable
+                logger.warning(f"{log_id}: generation timed out")
+                return GenerationResponse(success=False)
 
             except httpx.HTTPStatusError as exc:
                 status = exc.response.status_code
@@ -144,17 +109,13 @@ async def _generate_attempt(
                 except Exception:
                     error_preview = "(could not read body)"
 
-                if _is_retryable_status(status):
-                    logger.warning(f"{log_id}: HTTP {status} (attempt {attempt + 1}/{max_attempts}): {error_preview}")
-                    return None  # Retryable
-                else:
-                    logger.error(f"{log_id}: HTTP {status} (not retryable): {error_preview}")
-                    return GenerationResponse(success=False)
+                logger.error(f"{log_id}: HTTP {status}: {error_preview}")
+                return GenerationResponse(success=False)
 
             except httpx.RequestError as e:
                 # Connection errors, DNS failures, etc.
-                logger.warning(f"{log_id}: request error (attempt {attempt + 1}/{max_attempts}): {e}")
-                return None  # Retryable
+                logger.warning(f"{log_id}: request error: {e}")
+                return GenerationResponse(success=False)
 
             except Exception as e:
                 logger.error(f"{log_id}: unexpected error during generation: {e}")
@@ -162,4 +123,4 @@ async def _generate_attempt(
 
     finally:
         if not sem_released:
-            request_sem.release()
+            gpu_generation_sem.release()

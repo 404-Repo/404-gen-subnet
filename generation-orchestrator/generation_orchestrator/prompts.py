@@ -11,26 +11,24 @@ from subnet_common.github import GitHubClient
 
 
 class Prompt(BaseModel):
-    name: str
+    stem: str
     url: str
     path: Path
 
 
-class PromptsNotFoundError(Exception):
-    pass
-
-
 async def ensure_prompts_cached_from_git(
+    *,
     git: GitHubClient,
     round_num: int,
     cache_dir: Path,
-    *,
     ref: str = "main",
     max_concurrent: int = 10,
 ) -> list[Prompt]:
-    """Download prompts from a git-tracked TSV file."""
+    """Download prompts from a git-tracked file."""
     urls = await require_prompts(git, round_num, ref=ref)
-    return await ensure_prompts_cached(urls, get_prompts_cache_dir(cache_dir), max_concurrent=max_concurrent)
+    return await ensure_prompts_cached(
+        urls=urls, cache_dir=get_prompts_cache_dir(cache_dir), max_concurrent=max_concurrent
+    )
 
 
 def get_prompts_cache_dir(cache_dir: Path) -> Path:
@@ -38,9 +36,9 @@ def get_prompts_cache_dir(cache_dir: Path) -> Path:
 
 
 async def ensure_prompts_cached(
+    *,
     urls: list[str],
     cache_dir: Path,
-    *,
     max_concurrent: int = 20,
 ) -> list[Prompt]:
     """Download missing prompts to cache. Returns only successfully cached prompts."""
@@ -68,12 +66,12 @@ async def ensure_prompts_cached(
 
         logger.info(f"Downloaded {len(missing) - failed}/{len(missing)} prompts")
     else:
-        logger.info(f"All {len(urls)} prompts already cached")
+        logger.debug(f"All {len(urls)} prompts already cached")
 
     # Only return prompts that exist on disk
     existing = {f.name for f in cache_dir.iterdir()}
     return [
-        Prompt(name=Path(url).stem, url=url, path=cache_dir / Path(url).name)
+        Prompt(stem=Path(url).stem, url=url, path=cache_dir / Path(url).name)
         for url in urls
         if Path(url).name in existing
     ]
@@ -98,7 +96,6 @@ async def download_file(
                         await f.write(chunk)
 
             await aiofiles.os.rename(tmp_dest, dest)
-
         except BaseException:
             try:
                 await aiofiles.os.remove(tmp_dest)

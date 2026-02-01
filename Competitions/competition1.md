@@ -54,14 +54,14 @@ You need to implement two endpoints:
   - Image File - multipart/form-data; 
   - Seed - fixed generation seed number (for reproducibility);
 - Output: 
-  - PLY File Stream - application/octet-stream
+  - GLB File Stream - application/octet-stream
 
 ```python
 # FastAPI example:
 @app.post("/generate")
 async def generate_model(prompt_image_file: UploadFile = File(...), seed: int = Form()) -> Response:
     # Your generation logic here
-    return StreamingResponse(ply_stream, media_type="application/octet-stream")
+    return StreamingResponse(glb_stream, media_type="application/octet-stream")
 ```
 <span style="color:green"> GET /health </span>:
 

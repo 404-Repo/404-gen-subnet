@@ -10,10 +10,9 @@ python = ">=3.11,<=3.13"
 subnet-common = {path = "../shared", develop = true}
 pydantic-settings = "2.12.0"
 loguru = "0.7.3"
-aioboto3 = "15.5.0"
-types-aiobotocore-s3 = "2.26.0"
 openai = "2.9.0"
 httpx = "0.28.1"
+tenacity = "^9.1.2"
 
 [tool.poetry.group.dev.dependencies]
 poetry = "2.2.1"

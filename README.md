@@ -1,114 +1,151 @@
 # 404-GEN Competition System
 
-A decentralized 3D content generation competition running on Bittensor Subnet 17. 
-Miners submit open-source solutions for AI-powered 3D model generation, and validators run transparent competitions 
-to determine the best solution.
+A decentralized 3D content generation competition running on Bittensor Subnet 17.
+Miners submit open-source solutions for AI-powered 3D model generation, and validators run transparent competitions to determine the best solution.
 
 ## Competitions
 
-Miners will compete by providing the best Solution. Descriptions of the competitions can be found in folder "Competitions".
+Miners compete by providing the best 3D generation solution. Competition descriptions are in the `Competitions/` folder.
 
 ## Competition Mechanics
 
-The competition follows a **winner-stays-in** format. A defending champion holds the leader position, 
-and challengers attempt to dethrone them each round. When multiple miners submit their solution in the same round, 
-they compete against the current leader with their solution sequentially by submission time. If a challenger wins, they become the 
-new leader and subsequent challengers must beat them.
+The competition follows a **winner-stays-in** format with a **proof-of-work model**:
+
+1. **Miners generate**: When a round opens, miners use published seed and prompts to generate 3D models and upload to their CDNs
+2. **Validators collect**: Submissions are downloaded and rendered for comparison
+3. **VLM judges**: A vision-language model compares outputs in pairwise duels
+4. **Validators audit**: Winners are verified by regenerating their outputs using the miner's Docker image on serverless GPUs
 
 All competition state is stored in a public git repository, making every decision auditable and every transition traceable.
 
 ## Stage Machine
 
-The competition progresses through well-defined stages, each owned by a single service:
+The competition progresses through well-defined stages:
 
 | Stage | Owner | Description |
 |-------|-------|-------------|
-| COLLECTING | submission-collector | Gathering miner submissions within the block window |
-| GENERATING | generation-orchestrator | Building containers, deploying models, generating 3D outputs, rendering previews |
-| DUELS | judge-service | Comparing generated outputs to determine the round winner |
+| OPEN | submission-collector | Submission window open, miners register on-chain |
+| MINER_GENERATION | submission-collector | Seed published, miners generate and upload 3D files |
+| DOWNLOADING | submission-collector | Fetching 3D files from miner CDNs, rendering previews |
+| DUELS | judge-service | VLM-based pairwise comparisons, verification requests |
 | FINALIZING | round-manager | Updating the leader and creating the next round schedule |
 | FINISHED | — | Competition complete, no further rounds |
 | PAUSED | — | Manual hold for inspection or intervention |
+
+```
+FINALIZING ──► OPEN ──► MINER_GENERATION ──► DOWNLOADING ──► DUELS ──► FINALIZING
+     │                                                                      │
+     ▼                                                                      │
+  FINISHED ◄────────────────────────────────────────────────────────────────┘
+```
 
 ## Services
 
 | Service | Description |
 |---------|-------------|
-| `submission-collector` | Monitors the round schedule, collects miner submissions within the block window. Owns the COLLECTING stage. |
-| `generation-orchestrator` | Coordinates the generation pipeline: waits for container builds, deploys models, runs generation, triggers rendering, and stores results. Owns the GENERATING stage. |
-| `render-service` | Standalone GPU service that converts PLY files to PNG renders. Called by `generation-orchestrator`. |
-| `judge-service` | Compares generation results using a vision-language model, selects the round winner. Owns the DUELS stage. |
-| `round-manager` | Manages competition lifecycle: updates the global leader, creates new rounds with schedules, and decides when the competition ends. Owns the FINALIZING stage. |
-| `vllm` | Hosts the VLM used by judge-service for pairwise comparisons. |
+| `submission-collector` | Monitors the round schedule, collects miner submissions, downloads 3D files, renders previews. Owns OPEN, MINER_GENERATION, and DOWNLOADING stages. |
+| `generation-orchestrator` | Verifies miner outputs by regenerating them using miner Docker images on serverless GPUs. Also generates baseline outputs using the leader's image. |
+| `render-service` | GPU service that converts PLY (Gaussian Splats) and GLB (meshes) to 2×2 multi-view PNG renders. |
+| `image-distance-service` | Computes perceptual distance between images using DINOv3 embeddings. Used to verify regenerated outputs match submissions. |
+| `judge-service` | Runs VLM-based pairwise duels, requests verification for winners, selects the round winner. Owns the DUELS stage. |
+| `round-manager` | Updates the global leader, creates new rounds with schedules, decides when the competition ends. Owns the FINALIZING stage. |
+| `vllm` | External vLLM instance hosting the vision-language model for pairwise comparisons. |
 
 ## State Files
 
-All state is stored in the competition git repository under a deterministic structure.
+All state is stored in the competition git repository.
 
 ### Global State
 
 | File | Writer | Description |
 |------|--------|-------------|
 | `state.json` | All stage owners | Current round number and stage |
-| `leader.json` | round-manager | Active leader and pending leader transition |
+| `config.json` | — | Competition configuration (dates, timing, thresholds) |
+| `leader.json` | round-manager | Leader transition history with weights |
+| `prompts.txt` | — | Global prompt pool |
 
 ### Per-Round State (`rounds/{round_number}/`)
 
-| File | Writer | Stage | Description                                                   |
-|------|--------|-------|---------------------------------------------------------------|
-| `schedule.json` | round-manager | FINALIZING | Block window for submissions (earliest/latest reveal blocks)  |
-| `submission.json` | submission-collector | COLLECTING | Collected miner submissions with timestamps                   |
-| `seed.json` | generation-orchestrator | GENERATING | Randomly selected seed for deterministic generation and duels |
-| `prompts.txt` | generation-orchestrator | GENERATING | Image prompts for 3D generation                               |
-| `builds.json` | generation-orchestrator | GENERATING | Container build status per miner                              |
-| `{hotkey}/generations.json` | generation-orchestrator | GENERATING | Generation results and R2 references                          |
-| `{hotkey}/duels.json` | judge-service | DUELS | Duel outcomes for this miner                                  |
-| `judge_progress.json` | judge-service | DUELS | Progress tracking for sequential duels                        |
+| File | Writer | Description |
+|------|--------|-------------|
+| `schedule.json` | round-manager | Block window (earliest/latest reveal, generation deadline) |
+| `seed.json` | submission-collector | Random seed for deterministic generation |
+| `prompts.txt` | submission-collector | Selected prompts for the round |
+| `submissions.json` | submission-collector | Miner submissions from chain |
+| `builds.json` | generation-orchestrator | Docker build status per miner |
+| `require_audit.json` | judge-service | Miners requiring output verification |
+| `generation_audits.json` | generation-orchestrator | Verification results (pass/reject) |
+| `matches_matrix.csv` | judge-service | All match results (margin values) |
+| `winner.json` | judge-service | Final round winner |
 
-### Leader Transition
+### Per-Miner State (`rounds/{round_number}/{hotkey}/`)
 
-The `leader.json` file tracks both the current leader and any pending transition:
+| File | Writer | Description |
+|------|--------|-------------|
+| `submitted.json` | submission-collector | Downloaded PLY/PNG locations |
+| `generated.json` | generation-orchestrator | Regenerated GLB/PNG locations for verification |
+| `duels_*.json` | judge-service | Detailed match reports with per-prompt outcomes |
+
+## Verification Pipeline
+
+When a miner becomes a candidate winner, they are sent for verification:
+
+1. **Build tracking**: Monitor GitHub Actions for the miner's Docker image build
+2. **Pod deployment**: Deploy the image to serverless GPU (Targon/Verda)
+3. **Regeneration**: Run all prompts with the same seed used in the round
+4. **Rendering**: Convert outputs to PNG for comparison
+5. **Distance check**: Compare regenerated PNGs to submitted ones using DINOv3
+6. **Verdict**: Pass if regenerated outputs match submissions within tolerance
+
+If verification fails, the timeline is discarded and alternative winners are evaluated.
+
+## Leader Transitions
+
+The `leader.json` file tracks leadership history:
 
 ```json
 {
-  "active": {
-    "hotkey": "5ABC123...",
-    "since_block": 12345
-  },
-  "pending": {
-    "hotkey": "5DEF456...",
-    "effective_block": 12500
-  }
+  "transitions": [
+    {
+      "hotkey": "5ABC123...",
+      "effective_block": 12345,
+      "weight": 1.0
+    },
+    {
+      "hotkey": "5DEF456...",
+      "effective_block": 12500,
+      "weight": 1.0
+    }
+  ]
 }
 ```
 
-New leaders are determined at the end of DUELS but become active at the start of the next round. This scheduled transition ensures fairness — all participants know in advance when leadership changes take effect.
-
-## Transparency
-
-Every aspect of the competition is designed for public verification:
-
-- **Git-based state**: All decisions are recorded as commits with full history
-- **Open source**: Competition logic, judging prompts, and evaluation criteria are public
-- **Deterministic replay**: Seeds and prompts are stored, allowing independent reproduction of results
-- **Staged transitions**: Leadership changes are announced before they take effect
-
-Validators can independently verify competition outcomes by examining the public state repository and replaying any contested decisions.
-
-## Stage Transitions
-
-```
-FINALIZING ──► COLLECTING ──► GENERATING ──► DUELS ──► FINALIZING
-     │                                                      │
-     │                                                      │
-     ▼                                                      │
-  FINISHED ◄────────────────────────────────────────────────┘
-```
+When a leader successfully defends, their weight decays (down to a floor). New winners start with weight 1.0.
 
 ## Storage
 
 - **Git repository**: All state files and competition history
-- **R2 (Cloudflare)**: PLY files and rendered PNG previews
+- **R2 (Cloudflare)**: PLY files, GLB files, and rendered PNG previews
+
+## GPU Providers
+
+The generation-orchestrator supports multiple serverless GPU providers:
+
+- **Targon**: Default provider
+- **Verda**: Optional backup
+
+Configure via `GPU_PROVIDERS` env var (e.g., `"targon,verda"` for Targon-first with Verda fallback).
+
+## Development
+
+Each service uses Poetry for dependency management:
+
+```bash
+cd <service-directory>
+poetry install
+poetry poe lint
+```
 
 ## License
+
 The provided code is MIT License compatible.

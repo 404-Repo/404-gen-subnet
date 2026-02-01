@@ -1,4 +1,4 @@
-from pydantic import Field, SecretStr
+from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -33,8 +33,14 @@ class Settings(BaseSettings):
         default=2, alias="MAX_CONCURRENT_DUELS", description="Maximum number of concurrent duels"
     )
 
-    max_generation_time_seconds: int = Field(
-        default=35, alias="MAX_GENERATION_TIME", description="Maximum generation time in seconds"
+    max_mismatched_margin: float = Field(
+        default=0.05,
+        alias="MAX_MISMATCHED_MARGIN",
+        description="Maximum tolerated mismatched prompts, percent",
+    )
+
+    max_generation_time_seconds: float = Field(
+        default=180, alias="MAX_GENERATION_TIME", description="Maximum generation time in seconds"
     )
 
     overtime_tolerance_ratio: float = Field(
@@ -48,6 +54,11 @@ class Settings(BaseSettings):
     )
 
     log_level: str = Field(default="DEBUG", alias="LOG_LEVEL", description="Logging level")
+
+    @field_validator("openai_base_url")
+    @classmethod
+    def normalize_url(cls, v: str) -> str:
+        return v.rstrip("/")
 
 
 settings = Settings()  # type: ignore[call-arg]
