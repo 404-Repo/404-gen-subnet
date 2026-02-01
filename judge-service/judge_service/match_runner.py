@@ -17,6 +17,7 @@ from subnet_common.competition.audit_requests import (
 from subnet_common.competition.config import require_competition_config
 from subnet_common.competition.generations import GenerationSource, get_generations
 from subnet_common.competition.match_matrix import MatchMatrix, get_match_matrix, save_match_matrix
+from subnet_common.competition.match_report import DuelWinner, MatchReport, get_match_report, save_match_report
 from subnet_common.competition.prompts import require_prompts
 from subnet_common.competition.seed import require_seed_from_git
 from subnet_common.competition.state import (
@@ -30,7 +31,7 @@ from subnet_common.github import GitHubClient
 from subnet_common.graceful_shutdown import GracefulShutdown
 
 from judge_service.match_execution import run_match
-from judge_service.models import DuelWinner, MatchOutcome, MatchReport
+from judge_service.models import MatchOutcome
 from judge_service.settings import Settings
 
 
@@ -216,7 +217,7 @@ class MatchRunner:
             if hotkey in self._rejected_hotkeys:
                 continue
 
-            match = await self._ensure_match("leader", hotkey, shutdown)
+            match = await self._ensure_match("leader", hotkey, shutdown, reload_decisive_prompts=True)
 
             if match.margin >= self._win_margin:
                 qualified.append(hotkey)
@@ -241,7 +242,7 @@ class MatchRunner:
             return MatchOutcome(left=left, right=right, margin=-100.0)
 
         logger.info(f"Timeline match. Running: {left[:10]} vs {right[:10]}")
-        match = await self._ensure_match(left, right, shutdown)
+        match = await self._ensure_match(left, right, shutdown, reload_decisive_prompts=True)
 
         if match.margin >= self._win_margin:
             self._timeline.local_leaders.append(right)
@@ -260,19 +261,34 @@ class MatchRunner:
     async def _run_exploratory_duel(self, left: str, right: str, shutdown: GracefulShutdown) -> MatchOutcome:
         """Run a duel between two miners. Returns MatchOutcome."""
         logger.info(f"Exploratory duel. Running: {left[:10]} vs {right[:10]}")
-        match = await self._ensure_match(left, right, shutdown=shutdown)
+        match = await self._ensure_match(left, right, shutdown=shutdown, reload_decisive_prompts=False)
         return match
 
-    async def _ensure_match(self, left: str, right: str, shutdown: GracefulShutdown) -> MatchOutcome:
+    async def _ensure_match(
+        self, left: str, right: str, shutdown: GracefulShutdown, reload_decisive_prompts: bool
+    ) -> MatchOutcome:
         """Run match if not in matrix, save a result. Returns MatchOutcome with a cached flag."""
         margin = self._match_matrix.get(left=left, right=right)
         if margin is not None:
-            return MatchOutcome(left=left, right=right, margin=margin, from_cache=True)
+            if reload_decisive_prompts:
+                decisive_prompts = await self._load_decisive_prompts(left, right)
+            else:
+                decisive_prompts = []
+            return MatchOutcome(
+                left=left, right=right, margin=margin, decisive_prompts=decisive_prompts, from_cache=True
+            )
 
         match = await self._run_match_between(left=left, right=right, shutdown=shutdown)
         self._match_matrix.add(left, right, match.margin)
         await save_match_matrix(self._git_batcher, self._round_num, self._match_matrix)
         return match
+
+    async def _load_decisive_prompts(self, left: str, right: str) -> list[str]:
+        """Load decisive prompts from a saved match report."""
+        report = await get_match_report(git=self._git, round_num=self._round_num, left=left, right=right, ref=self._ref)
+        if report is None:
+            return []
+        return self._extract_decisive_prompts(report)
 
     async def _run_match_between(
         self,
@@ -309,16 +325,10 @@ class MatchRunner:
             left=left,
             right=right,
             max_concurrent_duels=self._settings.max_concurrent_duels,
-            overtime_tolerance_ratio=self._settings.overtime_tolerance_ratio,
-            max_generation_time_seconds=self._settings.max_generation_time_seconds,
             shutdown=shutdown,
         )
 
-        await self._git_batcher.write(
-            path=f"rounds/{self._round_num}/{right}/duels_{left[:10]}.json",
-            content=report.model_dump_json(indent=2),
-            message=f"Match report: {left[:10]} vs {right[:10]}",
-        )
+        await save_match_report(self._git_batcher, self._round_num, report)
 
         decisive = self._extract_decisive_prompts(report)
         logger.info(f"Match {left[:10]} vs {right[:10]}: margin={report.margin:+.2%}, decisive={len(decisive)}")
@@ -381,7 +391,7 @@ class MatchRunner:
         - Margin <= win_margin: All right-winning prompts are decisive
         - Margin in between: Randomly select win_margin of total prompts
         """
-        full_tolerance_margin = self._settings.overtime_tolerance_ratio + self._win_margin
+        full_tolerance_margin = self._settings.max_mismatched_margin + self._win_margin
         if report.margin >= full_tolerance_margin:
             return []
 

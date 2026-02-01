@@ -33,14 +33,10 @@ class Settings(BaseSettings):
         default=2, alias="MAX_CONCURRENT_DUELS", description="Maximum number of concurrent duels"
     )
 
-    max_generation_time_seconds: float = Field(
-        default=35, alias="MAX_GENERATION_TIME", description="Maximum generation time in seconds"
-    )
-
-    overtime_tolerance_ratio: float = Field(
-        default=0.1,
-        alias="OVERTIME_TOLERANCE_RATIO",
-        description="Ratio of overtime prompts allowed before penalization (e.g., 0.1 = first 10% are not penalized)",
+    max_mismatched_margin: float = Field(
+        default=0.05,
+        alias="MAX_MISMATCHED_MARGIN",
+        description="Maximum tolerated mismatched prompts, percent",
     )
 
     pause_on_stage_end: bool = Field(
