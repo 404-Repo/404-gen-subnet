@@ -175,6 +175,7 @@ async def _generate_leader(
         stop=stop,
         audit_request=None,  # generation-only mode, no audit
     )
+    await git_batcher.flush()
 
 
 async def _generate_for_audits(
