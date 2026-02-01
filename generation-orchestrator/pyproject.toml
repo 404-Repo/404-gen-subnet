@@ -14,7 +14,7 @@ aiofiles = "25.1.0"
 platformdirs = "4.5.0"
 httpx = "0.28.1"
 tenacity = "^9.1.2"
-targon-sdk = { git = "https://github.com/manifold-inc/targon-sdk.git", branch = "config" }
+targon-sdk = { git = "https://github.com/manifold-inc/targon-sdk.git"}
 
 
 [tool.poetry.group.dev.dependencies]
