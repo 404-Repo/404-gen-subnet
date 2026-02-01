@@ -17,9 +17,9 @@ class DuelReport(BaseModel):
 
     name: str
     prompt: str
-    left_ply: str | None = None
+    left_glb: str | None = None
     left_png: str | None = None
-    right_ply: str | None = None
+    right_glb: str | None = None
     right_png: str | None = None
     winner: DuelWinner = DuelWinner.SKIPPED
     issues: str = ""

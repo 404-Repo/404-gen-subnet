@@ -55,6 +55,8 @@ class Settings(BaseSettings):
         description="Interval between audit checks in seconds (default 2 min)",
     )
 
+    hf_token: SecretStr | None = Field(..., alias="HF_TOKEN", description="HF personal access token")
+
     targon_api_key: SecretStr = Field(..., alias="TARGON_API_KEY", description="Targon API key")
 
     verda_enabled: bool = Field(
@@ -182,10 +184,10 @@ class Settings(BaseSettings):
     )
 
     render_service_url: str = Field(
-        default="http://localhost:8000/", alias="RENDER_URL", description="Render service base URL"
+        default="http://localhost:8000", alias="RENDER_URL", description="Render service base URL"
     )
     image_distance_service_url: str = Field(
-        default="http://localhost:8001/", alias="IMAGE_DISTANCE_SERVICE_URL", description="Image distance service URL"
+        default="http://localhost:8001", alias="IMAGE_DISTANCE_SERVICE_URL", description="Image distance service URL"
     )
 
     r2_access_key_id: SecretStr = Field(..., alias="R2_ACCESS_KEY_ID", description="R2 access key ID")
@@ -210,6 +212,11 @@ class Settings(BaseSettings):
     debug_keep_pods_alive: bool = Field(
         default=False, alias="DEBUG_KEEP_PODS_ALIVE", description="Do not terminate pods when generation is completed"
     )
+
+    @field_validator("render_service_url", "image_distance_service_url", "cdn_url")
+    @classmethod
+    def normalize_url(cls, v: str) -> str:
+        return v.rstrip("/")
 
     @field_validator("cache_dir", mode="before")
     @classmethod

@@ -8,6 +8,7 @@ class MinerSubmission(BaseModel):
 
     repo: str = Field(..., description="GitHub repository in format 'owner/repo'")
     commit: str = Field(..., description="Git commit SHA")
+    cdn_url: str = Field(..., description="CDN URL for downloading generated GLB files")
     revealed_at_block: int = Field(..., description="Block number when miner's submission was revealed")
     round: str = Field(..., description="Full round name: competition name and round number")
 

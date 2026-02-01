@@ -6,14 +6,14 @@ import httpx
 from loguru import logger
 from subnet_common.competition.generations import GenerationResult, GenerationSource, save_generations
 from subnet_common.git_batcher import GitBatcher
+from subnet_common.r2_client import R2Client
+from subnet_common.render import render
 
 from generation_orchestrator.failure_tracker import FailureTracker
 from generation_orchestrator.generate import generate
 from generation_orchestrator.generation_stop import GenerationStop
 from generation_orchestrator.image_distance import measure_distance
 from generation_orchestrator.prompt_queue import PromptQueue, PromptTask
-from generation_orchestrator.r2_client import R2Client
-from generation_orchestrator.render import render
 from generation_orchestrator.settings import Settings
 
 
@@ -159,7 +159,7 @@ class GenerationPipeline:
 
         result.generation_time = gen_result.generation_time or 0.0
         result.size = len(gen_result.content)
-        result.ply = await self._upload(r2, stem, "ply", gen_result.content, log_id)
+        result.glb = await self._upload(r2, stem, "glb", gen_result.content, log_id)
 
         png = await render(service_client, self._settings.render_service_url, gen_result.content, log_id)
         if png is None:

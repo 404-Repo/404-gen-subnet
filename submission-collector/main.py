@@ -3,7 +3,7 @@ import sys
 
 from loguru import logger
 from subnet_common.graceful_shutdown import GracefulShutdown
-from subnet_common.utils import format_duration
+from subnet_common.utils import calculate_wait_time, format_duration
 
 from submission_collector.collection_iteration import run_collection_iteration
 from submission_collector.settings import settings
@@ -32,19 +32,19 @@ async def main() -> None:
     logger.info(f"Network: {settings.network}, NetUID: {settings.netuid}")
 
     while not shutdown.should_stop:
+        next_stage_eta = None
         try:
-            wait_seconds = await run_collection_iteration()
-
-            if wait_seconds is None:
-                wait_seconds = settings.check_state_interval_seconds
-            else:
-                wait_seconds = max(60, min(wait_seconds, settings.check_state_interval_seconds))
+            next_stage_eta = await run_collection_iteration()
         except asyncio.CancelledError:
             break
         except Exception as e:
             logger.exception(f"Collection cycle failed: {e}")
-            wait_seconds = settings.check_state_interval_seconds
 
+        wait_seconds = calculate_wait_time(
+            eta=next_stage_eta,
+            min_wait_seconds=settings.min_check_state_interval_seconds,
+            max_wait_seconds=settings.max_check_state_interval_seconds,
+        )
         logger.debug(f"Next cycle in {format_duration(wait_seconds)}")
         await shutdown.wait(timeout=wait_seconds)
 

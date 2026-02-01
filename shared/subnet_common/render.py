@@ -18,13 +18,13 @@ def _log_retry(retry_state: RetryCallState) -> None:
     before_sleep=_log_retry,
     reraise=True,
 )
-async def _render_with_retry(client: httpx.AsyncClient, endpoint: str, ply_content: bytes, log_id: str) -> bytes:
+async def _render_with_retry(client: httpx.AsyncClient, endpoint: str, glb_content: bytes, log_id: str) -> bytes:
     """Internal render function with retry logic."""
     start = asyncio.get_running_loop().time()
 
     response = await client.post(
-        f"{endpoint}/render_ply",
-        files={"file": ("content.ply", ply_content, "application/octet-stream")},
+        f"{endpoint.rstrip("/")}/render_glb",
+        files={"file": ("content.glb", glb_content, "application/octet-stream")},
     )
     response.raise_for_status()
 
@@ -33,14 +33,14 @@ async def _render_with_retry(client: httpx.AsyncClient, endpoint: str, ply_conte
     return response.content
 
 
-async def render(client: httpx.AsyncClient, endpoint: str, ply_content: bytes, log_id: str) -> bytes | None:
+async def render(client: httpx.AsyncClient, endpoint: str, glb_content: bytes, log_id: str) -> bytes | None:
     """
-    Render a PLY file to PNG.
+    Render a GLB file to PNG.
     Returns PNG bytes on success, None on failure.
     Retries up to 3 times on failure.
     """
     try:
-        return await _render_with_retry(client, endpoint, ply_content, log_id=log_id)
+        return await _render_with_retry(client, endpoint, glb_content, log_id=log_id)
     except (httpx.HTTPStatusError, httpx.TimeoutException, httpx.RequestError):
         logger.error(f"{log_id}: render failed after 3 retries")
         return None

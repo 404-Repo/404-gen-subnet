@@ -92,9 +92,9 @@ async def _evaluate_prompt(
     duel = DuelReport(
         name=stem,
         prompt=prompt,
-        left_ply=left_gen.ply,
+        left_glb=left_gen.glb,
         left_png=left_gen.png,
-        right_ply=right_gen.ply,
+        right_glb=right_gen.glb,
         right_png=right_gen.png,
         winner=DuelWinner.SKIPPED,
         issues="Preview is missing",

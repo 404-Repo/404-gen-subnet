@@ -32,14 +32,14 @@ The competition progresses through well-defined stages, each owned by a single s
 
 ## Services
 
-| Service | Description |
-|---------|-------------|
-| `submission-collector` | Monitors the round schedule, collects miner submissions within the block window. Owns the COLLECTING stage. |
+| Service | Description                                                                                                                                                          |
+|---------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `submission-collector` | Monitors the round schedule, collects miner submissions within the block window. Owns the COLLECTING stage.                                                          |
 | `generation-orchestrator` | Coordinates the generation pipeline: waits for container builds, deploys models, runs generation, triggers rendering, and stores results. Owns the GENERATING stage. |
-| `render-service` | Standalone GPU service that converts PLY files to PNG renders. Called by `generation-orchestrator`. |
-| `judge-service` | Compares generation results using a vision-language model, selects the round winner. Owns the DUELS stage. |
-| `round-manager` | Manages competition lifecycle: updates the global leader, creates new rounds with schedules, and decides when the competition ends. Owns the FINALIZING stage. |
-| `vllm` | Hosts the VLM used by judge-service for pairwise comparisons. |
+| `render-service` | Standalone GPU service that converts GLB files to PNG renders. Called by `generation-orchestrator`.                                                                  |
+| `judge-service` | Compares generation results using a vision-language model, selects the round winner. Owns the DUELS stage.                                                           |
+| `round-manager` | Manages competition lifecycle: updates the global leader, creates new rounds with schedules, and decides when the competition ends. Owns the FINALIZING stage.       |
+| `vllm` | Hosts the VLM used by judge-service for pairwise comparisons.                                                                                                        |
 
 ## State Files
 
@@ -108,7 +108,7 @@ FINALIZING ──► COLLECTING ──► GENERATING ──► DUELS ──► F
 ## Storage
 
 - **Git repository**: All state files and competition history
-- **R2 (Cloudflare)**: PLY files and rendered PNG previews
+- **R2 (Cloudflare)**: GLB files and rendered PNG previews
 
 ## License
 The provided code is MIT License compatible.

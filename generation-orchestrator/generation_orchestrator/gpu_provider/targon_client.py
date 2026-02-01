@@ -33,6 +33,7 @@ class ContainerDeployConfig(BaseModel):
     max_replicas: int = 1
     target_concurrency: int | None = None  # Defaults to container_concurrency
     visibility: str = "external"
+    env: dict[str, str] = {}
 
     def get_target_concurrency(self) -> int:
         """Return target_concurrency, defaulting to container_concurrency."""
@@ -112,11 +113,12 @@ class TargonClient:
         resource_name: str | None = None,
         port: int | None = None,
         concurrency: int | None = None,
+        env: dict[str, str] | None = None,
     ) -> None:
         """
         Deploy a new container. Does not wait for it to be visible.
 
-        Either provide a full config, or use individual parameters (which override config).
+        Either provide a full config or use individual parameters (which override config).
         """
         # Resolve: explicit param > config > default
         _image = image or (config.image if config else None)
@@ -130,10 +132,11 @@ class TargonClient:
         _min_replicas = config.min_replicas if config else 1
         _max_replicas = config.max_replicas if config else 1
         _target_concurrency = config.get_target_concurrency() if config else _concurrency
+        _env = {**(config.env if config else {}), **(env or {})}
 
         request = CreateServerlessResourceRequest(
             name=name,
-            container=TargonContainerConfig(image=_image),
+            container=TargonContainerConfig(image=_image, env=_env or None),
             resource_name=_resource,
             network=NetworkConfig(
                 port=PortConfig(port=_port),

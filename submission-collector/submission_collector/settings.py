@@ -1,4 +1,4 @@
-from pydantic import Field, SecretStr
+from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -20,15 +20,43 @@ class Settings(BaseSettings):
     )
     netuid: int = Field(default=17, alias="NETUID", description="Network ID")
 
-    check_state_interval_seconds: int = Field(
-        default=1800,
-        alias="CHECK_STATE_INTERVAL",
-        description="Interval between competition stage checks in seconds",
+    min_check_state_interval_seconds: int = Field(
+        default=120,
+        alias="MIN_CHECK_STATE_INTERVAL",
+        description="Minimum interval between competition stage checks in seconds (default 2 min)",
     )
-    submission_delay_blocks: int = Field(
-        default=150,
-        alias="SUBMISSION_DELAY_BLOCKS",
-        description="Submission collection delay after latest_reveal_block in blocks (default: 150 blocks = 30 min)",
+    max_check_state_interval_seconds: int = Field(
+        default=1800,
+        alias="MAX_CHECK_STATE_INTERVAL",
+        description="Maximum interval between competition stage checks in seconds (default 30 min)",
+    )
+
+    max_concurrent_downloads: int = Field(
+        default=10,
+        alias="MAX_CONCURRENT_DOWNLOADS",
+        description="Maximum number of concurrent submission downloads",
+    )
+    max_glb_size_bytes: int = Field(
+        default=200 * 1024 * 1024,
+        alias="MAX_GLB_SIZE_BYTES",
+        description="Maximum GLB file size in bytes (default 200 MB)",
+    )
+
+    r2_access_key_id: SecretStr = Field(..., alias="R2_ACCESS_KEY_ID", description="R2 access key ID")
+    r2_secret_access_key: SecretStr = Field(..., alias="R2_SECRET_ACCESS_KEY", description="R2 secret access key")
+    r2_endpoint: SecretStr = Field(..., alias="R2_ENDPOINT", description="R2 endpoint")
+
+    render_service_url: str = Field(
+        default="http://localhost:8000", alias="RENDER_URL", description="Render service base URL"
+    )
+
+    storage_key_template: str = Field(
+        default="rounds/{round}/{hotkey}/submitted/{filename}",
+        alias="STORAGE_KEY_TEMPLATE",
+        description="Storage key template for uploaded files",
+    )
+    cdn_url: str = Field(
+        default="https://subnet404.xyz", alias="CDN_URL", description="CDN base URL for uploaded files"
     )
 
     pause_on_stage_end: bool = Field(
@@ -36,6 +64,11 @@ class Settings(BaseSettings):
     )
 
     log_level: str = Field(default="DEBUG", alias="LOG_LEVEL", description="Logging level")
+
+    @field_validator("render_service_url", "cdn_url")
+    @classmethod
+    def normalize_url(cls, v: str) -> str:
+        return v.rstrip("/")
 
 
 settings = Settings()  # type: ignore[call-arg]

@@ -11,6 +11,9 @@ python = ">=3.11,<3.14"
 httpx = "0.28.1"
 loguru = "0.7.3"
 pydantic = "2.12.5"
+aioboto3 = "^15.5.0"
+tenacity = "^9.1.2"
+types-aiobotocore-s3 = "^3.1.1"
 
 [tool.poetry.group.dev.dependencies]
 poetry = "2.2.1"

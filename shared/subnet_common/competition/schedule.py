@@ -8,6 +8,7 @@ class RoundSchedule(BaseModel):
 
     earliest_reveal_block: int
     latest_reveal_block: int
+    generation_deadline_block: int
 
     model_config = ConfigDict(populate_by_name=True)
 

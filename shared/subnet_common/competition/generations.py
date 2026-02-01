@@ -12,17 +12,17 @@ class GenerationSource(StrEnum):
 
 
 class GenerationResult(BaseModel):
-    ply: str | None = Field(default=None, description="CDN URL to PLY file")
+    glb: str | None = Field(default=None, description="CDN URL to GLB file")
     png: str | None = Field(default=None, description="CDN URL to rendered preview")
     generation_time: float = Field(default=0, description="Time taken to generate the result in seconds")
-    size: int = Field(default=0, description="Size of the PLY file in bytes")
+    size: int = Field(default=0, description="Size of the GLB file in bytes")
     attempts: int = Field(default=0, description="Number of generation attempts (persisted for restart continuity)")
     distance: float = Field(
         default=0.0, description="Cosine distance between submitted and generated results using DINOv3 embeddings"
     )
 
     def is_failed(self) -> bool:
-        return self.ply is None or self.png is None
+        return self.glb is None or self.png is None
 
     def is_overtime(self, timeout: float) -> bool:
         return self.generation_time > timeout

@@ -1,4 +1,4 @@
-from pydantic import Field, SecretStr
+from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -48,6 +48,11 @@ class Settings(BaseSettings):
     )
 
     log_level: str = Field(default="DEBUG", alias="LOG_LEVEL", description="Logging level")
+
+    @field_validator("openai_base_url")
+    @classmethod
+    def normalize_url(cls, v: str) -> str:
+        return v.rstrip("/")
 
 
 settings = Settings()  # type: ignore[call-arg]

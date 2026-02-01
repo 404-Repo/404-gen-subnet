@@ -11,8 +11,11 @@ class CompetitionConfig(BaseModel):
     name: str = Field(..., description="Competition name")
     description: str = Field(..., description="Competition description")
     first_evaluation_date: date = Field(..., description="First day of evaluation rounds")
-    last_competition_date: date = Field(description="Last allowed day for round start")
-    round_start_time: time = Field(default=time(12, 0), description="Daily round start time (UTC)")
+    last_competition_date: date = Field(..., description="Last allowed day for round start")
+    round_start_time: time = Field(default=time(8, 0), description="Daily round start time (UTC)")
+    generation_stage_minutes: int = Field(
+        ..., description="Minutes miners have to generate and upload 3D after seed reveal"
+    )
     finalization_buffer_hours: float = Field(
         default=1.0, description="Skip day if FINALIZING with less than this remaining"
     )
