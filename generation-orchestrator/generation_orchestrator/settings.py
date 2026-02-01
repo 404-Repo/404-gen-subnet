@@ -57,11 +57,13 @@ class Settings(BaseSettings):
 
     hf_token: SecretStr | None = Field(..., alias="HF_TOKEN", description="HF personal access token")
 
-    targon_api_key: SecretStr = Field(..., alias="TARGON_API_KEY", description="Targon API key")
-
-    verda_enabled: bool = Field(
-        default=False, alias="VERDA_ENABLED", description="Enable Verda as a backup GPU provider"
+    gpu_providers: str = Field(
+        default="targon",
+        alias="GPU_PROVIDERS",
+        description="Comma-separated list of GPU providers in priority order (e.g., 'targon,verda')",
     )
+
+    targon_api_key: SecretStr | None = Field(default=None, alias="TARGON_API_KEY", description="Targon API key")
     verda_client_id: SecretStr | None = Field(
         default=None, alias="VERDA_CLIENT_ID", description="Verda OAuth client ID"
     )
@@ -243,16 +245,31 @@ class Settings(BaseSettings):
         return self
 
     @model_validator(mode="after")
-    def validate_verda_config(self) -> Self:
-        """Ensure Verda credentials are present when Verda is enabled."""
-        if self.verda_enabled and not all(
+    def validate_gpu_providers(self) -> Self:
+        """Ensure credentials are present for each enabled GPU provider."""
+        providers = [p.strip().lower() for p in self.gpu_providers.split(",") if p.strip()]
+        if not providers:
+            raise ValueError("GPU_PROVIDERS must contain at least one provider")
+
+        for provider in providers:
+            if provider not in ("targon", "verda"):
+                raise ValueError(f"Unknown GPU provider: {provider}. Valid options: targon, verda")
+
+        if "targon" in providers and not self.targon_api_key:
+            raise ValueError("TARGON_API_KEY is required when targon is in GPU_PROVIDERS")
+
+        if "verda" in providers and not all(
             [
                 self.verda_client_id,
                 self.verda_client_secret,
                 self.verda_generation_token,
             ]
         ):
-            raise ValueError("VERDA_ENABLED requires VERDA_CLIENT_ID, VERDA_CLIENT_SECRET, and VERDA_GENERATION_TOKEN")
+            raise ValueError(
+                "VERDA_CLIENT_ID, VERDA_CLIENT_SECRET, and VERDA_GENERATION_TOKEN "
+                "are required when verda is in GPU_PROVIDERS"
+            )
+
         return self
 
 

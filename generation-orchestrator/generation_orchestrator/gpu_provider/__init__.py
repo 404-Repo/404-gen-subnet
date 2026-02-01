@@ -61,10 +61,13 @@ class GPUProviderManager:
         self._providers = self._build_provider_list()
 
     def _build_provider_list(self) -> list[GPUProvider]:
-        """Build list of enabled providers."""
-        providers = [GPUProvider.TARGON]
-        if self._settings.verda_enabled:
-            providers.append(GPUProvider.VERDA)
+        """Build a list of enabled providers from settings, preserving order."""
+        provider_map = {"targon": GPUProvider.TARGON, "verda": GPUProvider.VERDA}
+        providers = []
+        for name in self._settings.gpu_providers.split(","):
+            name = name.strip().lower()
+            if name in provider_map:
+                providers.append(provider_map[name])
         return providers
 
     @property
@@ -203,9 +206,12 @@ class GPUProviderManager:
     def _create_client(self, provider: GPUProvider) -> TargonClient | VerdaClient:
         """Create a client for the given provider."""
         if provider == GPUProvider.TARGON:
+            # Settings validation enforces credentials when provider is in GPU_PROVIDERS
+            if not self._settings.targon_api_key:
+                raise GPUProviderError("Targon API key not configured", GPUProvider.TARGON)
             return TargonClient(api_key=self._settings.targon_api_key.get_secret_value())
         elif provider == GPUProvider.VERDA:
-            # Settings validation enforces required Verda credentials when enabled.
+            # Settings validation enforces credentials when provider is in GPU_PROVIDERS
             if not self._settings.verda_client_id or not self._settings.verda_client_secret:
                 raise GPUProviderError("Verda credentials not configured", GPUProvider.VERDA)
             return VerdaClient(
