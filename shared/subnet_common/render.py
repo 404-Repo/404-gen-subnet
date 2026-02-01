@@ -23,7 +23,7 @@ async def _render_with_retry(client: httpx.AsyncClient, endpoint: str, glb_conte
     start = asyncio.get_running_loop().time()
 
     response = await client.post(
-        f"{endpoint.rstrip("/")}/render_glb",
+        f"{endpoint}/render_glb",
         files={"file": ("content.glb", glb_content, "application/octet-stream")},
     )
     response.raise_for_status()

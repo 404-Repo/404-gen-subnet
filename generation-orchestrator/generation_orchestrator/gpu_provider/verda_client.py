@@ -33,6 +33,7 @@ class ContainerDeployConfig(BaseModel):
     healthcheck_path: str = "/health"
     scale_down_delay_seconds: int = 3600
     scale_up_delay_seconds: int = 600
+    env: dict[str, str] = {}
 
 
 class VerdaContainerResponse(BaseModel):
@@ -220,6 +221,7 @@ class VerdaClient:
         resource_name: str | None = None,
         port: int | None = None,
         concurrency: int | None = None,
+        env: dict[str, str] | None = None,
     ) -> None:
         """
         Deploy a new container.
@@ -234,6 +236,7 @@ class VerdaClient:
         _resource = resource_name or (config.compute_name if config else "H200")
         _port = port or (config.exposed_port if config else 10006)
         _concurrency = concurrency or (config.concurrent_requests_per_replica if config else 8)
+        _env = {**(config.env if config else {}), **(env or {})}
 
         # Other settings from config or defaults
         _healthcheck_enabled = config.healthcheck_enabled if config else True
@@ -245,20 +248,25 @@ class VerdaClient:
         _scale_up_delay = config.scale_up_delay_seconds if config else 600
         _is_spot = config.is_spot if config else True
 
+        # Build container config
+        container_config: dict[str, Any] = {
+            "image": _image,
+            "exposed_port": _port,
+            "healthcheck": {
+                "enabled": _healthcheck_enabled,
+                "port": _port,
+                "path": _healthcheck_path,
+            },
+        }
+        if _env:
+            container_config["env"] = [
+                {"name": k, "value_or_reference_to_secret": v, "type": "plain"} for k, v in _env.items()
+            ]
+
         payload = {
             "name": name,
             "container_registry_settings": {"is_private": False},
-            "containers": [
-                {
-                    "image": _image,
-                    "exposed_port": _port,
-                    "healthcheck": {
-                        "enabled": _healthcheck_enabled,
-                        "port": _port,
-                        "path": _healthcheck_path,
-                    },
-                }
-            ],
+            "containers": [container_config],
             "compute": {
                 "name": _resource,
                 "size": _compute_size,

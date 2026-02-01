@@ -239,6 +239,9 @@ class GPUProviderManager:
 
                 logger.info(f"Deploying {name} on {provider.value}")
                 resource_name = self._get_resource_name(gpu_type, provider)
+                env = {}
+                if self._settings.hf_token:
+                    env["HF_TOKEN"] = self._settings.hf_token.get_secret_value()
                 await client.deploy_container(
                     name,
                     image=image,
@@ -247,6 +250,7 @@ class GPUProviderManager:
                     # We cap in-flight prompts with a semaphore but allow a +1 cushion
                     # so provider autoscalers don't reject brief spikes while scaling.
                     concurrency=self._settings.max_concurrent_prompts_per_pod + 1,
+                    env=env or None,
                 )
 
                 # Wait for the container to become visible with URL

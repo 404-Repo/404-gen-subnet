@@ -51,9 +51,6 @@ class MatchMatrix:
 
 
 async def get_match_matrix(git: GitHubClient, round_num: int, ref: str) -> MatchMatrix:
-    # TODO: save decisive prompts or re-load them from duels.
-    raise RuntimeError("Not implemented")
-
     content = await git.get_file(f"rounds/{round_num}/matches_matrix.csv", ref=ref)
     if not content:
         return MatchMatrix()
