@@ -58,7 +58,7 @@ async def run_match(
             for p in prompts
         ]
     )
-    duels = sorted(duels, key=lambda d: d.stem)
+    duels = sorted(duels, key=lambda d: d.name)
 
     score = sum(WINNER_TO_SCORE[d.winner] for d in duels)
     margin = score / len(duels) if duels else 0
@@ -100,9 +100,6 @@ async def _evaluate_prompt(
         issues="Preview is missing",
     )
 
-    if shutdown.should_stop:
-        return duel
-
     if result := _check_missing_previews(left_gen, right_gen, stem):
         duel.winner, duel.issues = result
         return duel
@@ -110,6 +107,11 @@ async def _evaluate_prompt(
     if result := _check_overtime(left_overtime, right_overtime):
         duel.winner, duel.issues = result
         return duel
+
+    left_url = left_gen.png
+    right_url = right_gen.png
+    if not left_url or not right_url:
+        return duel  # unreachable after _check_missing_previews
 
     async with sem:
         if shutdown.should_stop:
@@ -119,8 +121,8 @@ async def _evaluate_prompt(
         duel_result = await evaluate_duel(
             client=openai,
             prompt_url=prompt,
-            left_url=left_gen.png,
-            right_url=right_gen.png,
+            left_url=left_url,
+            right_url=right_url,
             seed=seed,
         )
         elapsed = asyncio.get_running_loop().time() - start

@@ -7,7 +7,7 @@ from pathlib import Path
 from loguru import logger
 from openai import AsyncOpenAI
 from pydantic import BaseModel, Field
-from subnet_common.competition import source_audit
+from subnet_common.competition import generation_audit, source_audit
 from subnet_common.competition.audit_requests import (
     AuditRequest,
     AuditRequests,
@@ -15,6 +15,7 @@ from subnet_common.competition.audit_requests import (
     save_audit_requests,
 )
 from subnet_common.competition.config import require_competition_config
+from subnet_common.competition.generations import GenerationSource, get_generations
 from subnet_common.competition.match_matrix import MatchMatrix, get_match_matrix, save_match_matrix
 from subnet_common.competition.prompts import require_prompts
 from subnet_common.competition.seed import require_seed_from_git
@@ -280,8 +281,12 @@ class MatchRunner:
         shutdown: GracefulShutdown,
     ) -> MatchOutcome:
         """Run a match between two miners."""
-        left_gens = await get_miner_generations(self._git, left, self._round_num, ref=self._ref)
-        right_gens = await get_miner_generations(self._git, right, self._round_num, ref=self._ref)
+        left_gens = await get_generations(
+            git=self._git, round_num=self._round_num, hotkey=left, source=GenerationSource.SUBMITTED, ref=self._ref
+        )
+        right_gens = await get_generations(
+            git=self._git, round_num=self._round_num, hotkey=right, source=GenerationSource.SUBMITTED, ref=self._ref
+        )
 
         if not left_gens and not right_gens:
             logger.warning(f"No generations for {left[:10]} and {right[:10]}")
@@ -337,11 +342,11 @@ class MatchRunner:
 
         await self._git_batcher.refresh_base_sha()
 
-        verifications = await output_verifications.get_output_verifications(
+        gen_audits = await generation_audit.get_generation_audits(
             git=self._git, round_num=self._round_num, ref=self._ref
         )
-        verified = output_verifications.get_passed_hotkeys(verifications)
-        failed = output_verifications.get_failed_hotkeys(verifications)
+        verified = generation_audit.get_passed_hotkeys(gen_audits)
+        failed = generation_audit.get_rejected_hotkeys(gen_audits)
 
         audits = await source_audit.get_source_audits(git=self._git, round_num=self._round_num, ref=self._ref)
         passed = source_audit.get_passed_hotkeys(audits)
