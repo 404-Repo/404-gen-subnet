@@ -111,6 +111,8 @@ class GenerationPipeline:
             if result is None:
                 continue
 
+            result.attempts = task.attempts
+
             if task.submitted_png is not None and result.png is not None:
                 result.distance = await self._measure_distance(
                     service_client, result.png, task.submitted_png, prompt_log_id
