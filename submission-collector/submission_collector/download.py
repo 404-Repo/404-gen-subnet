@@ -11,7 +11,7 @@ from subnet_common.competition.submissions import MinerSubmission, require_submi
 from subnet_common.git_batcher import GitBatcher
 from subnet_common.r2_client import R2Client
 from subnet_common.render import render
-from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
+from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_fixed
 
 from submission_collector.settings import settings
 
@@ -41,8 +41,8 @@ async def download_and_render(git_batcher: GitBatcher, state: CompetitionState, 
         ) as r2,
         httpx.AsyncClient(timeout=httpx.Timeout(60, connect=10)) as http_client,
     ):
-        for hotkey in hotkeys:
-            await _download_submission(
+        await asyncio.gather(*[
+            _download_submission(
                 git_batcher=git_batcher,
                 hotkey=hotkey,
                 submission=submissions[hotkey],
@@ -53,6 +53,8 @@ async def download_and_render(git_batcher: GitBatcher, state: CompetitionState, 
                 r2=r2,
                 http_client=http_client,
             )
+            for hotkey in hotkeys
+        ])
 
 
 async def _download_submission(
@@ -167,7 +169,7 @@ async def _upload_to_r2(r2: R2Client, key: str, data: bytes, content_type: str, 
 
 @retry(
     stop=stop_after_attempt(3),
-    wait=wait_exponential(multiplier=1, min=1, max=10),
+    wait=wait_fixed(10),
     retry=retry_if_exception_type((httpx.HTTPStatusError, httpx.TimeoutException, httpx.RequestError)),
 )
 async def _fetch_glb(cdn_url: str, prompt: str, log_id: str) -> bytes:
