@@ -168,8 +168,8 @@ async def _upload_to_r2(r2: R2Client, key: str, data: bytes, content_type: str, 
 
 
 @retry(
-    stop=stop_after_attempt(3),
-    wait=wait_fixed(10),
+    stop=stop_after_attempt(2),
+    wait=wait_fixed(3),
     retry=retry_if_exception_type((httpx.HTTPStatusError, httpx.TimeoutException, httpx.RequestError)),
 )
 async def _fetch_glb(cdn_url: str, prompt: str, log_id: str) -> bytes:
