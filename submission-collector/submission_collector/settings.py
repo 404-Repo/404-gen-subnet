@@ -36,6 +36,11 @@ class Settings(BaseSettings):
         alias="MAX_CONCURRENT_DOWNLOADS",
         description="Maximum number of concurrent submission downloads",
     )
+    download_jitter_seconds: int = Field(
+        default=300,
+        alias="DOWNLOAD_JITTER_SECONDS",
+        description="Max random delay before each download to spread load across CDNs (default 5 min)",
+    )
     max_glb_size_bytes: int = Field(
         default=200 * 1024 * 1024,
         alias="MAX_GLB_SIZE_BYTES",

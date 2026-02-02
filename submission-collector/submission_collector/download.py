@@ -125,6 +125,10 @@ async def _fetch_render_upload(
         return settings.storage_key_template.format(round=round_num, hotkey=hotkey, filename=f"{prompt}.{ext}")
 
     try:
+        if settings.download_jitter_seconds > 0:
+            jitter = random.uniform(0, settings.download_jitter_seconds)
+            await asyncio.sleep(jitter)
+            
         async with semaphore:
             glb_data = await _fetch_glb(cdn_url=submission.cdn_url, prompt=prompt, log_id=log_id)
             glb_url = await _upload_to_r2(r2, make_key("glb"), glb_data, "application/octet-stream", log_id)
