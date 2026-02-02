@@ -30,6 +30,7 @@ class GitBatcher(BaseModel):
 
     _last_commit_time: float = PrivateAttr(default=0.0)
     _current_interval: float = PrivateAttr(default=600.0)  # starts equal to an interval
+    _commit_in_progress: bool = PrivateAttr(default=False)
 
     model_config = {"arbitrary_types_allowed": True}
 
@@ -75,6 +76,9 @@ class GitBatcher(BaseModel):
         if not self._pending_files:
             return
 
+        if self._commit_in_progress:
+            return
+
         now = asyncio.get_running_loop().time()
         if now - self._last_commit_time >= self._current_interval:
             await self._commit()
@@ -90,6 +94,8 @@ class GitBatcher(BaseModel):
             - interval reset
         Returns a success flag.
         """
+        if self._commit_in_progress:
+            return False
 
         # Snapshot and swap (atomic before any await!)
         files_snapshot = self._pending_files
@@ -97,6 +103,8 @@ class GitBatcher(BaseModel):
 
         if not files_snapshot:
             return True
+
+        self._commit_in_progress = True
 
         # Swap to fresh containers so writers during commit go to the new ones
         self._pending_files = {}
@@ -139,6 +147,9 @@ class GitBatcher(BaseModel):
             # Shorten the interval so we try again soon
             self._current_interval = self.conflict_interval
             return False
+
+        finally:
+            self._commit_in_progress = False
 
     def _restore_pending_without_overwrite(self, files: dict[str, str], messages: set[str]) -> None:
         """
