@@ -5,7 +5,15 @@ import httpx
 from loguru import logger
 from openai import APIConnectionError, APIStatusError, AsyncOpenAI
 from pydantic import BaseModel, Field
-from tenacity import RetryCallState, retry, retry_if_exception, stop_after_attempt, wait_exponential
+from tenacity import (
+    RetryCallState,
+    retry,
+    retry_if_exception,
+    stop_after_attempt,
+    wait_chain,
+    wait_fixed,
+    wait_random,
+)
 
 
 MODEL = "zai-org/GLM-4.1V-9B-Thinking"
@@ -62,7 +70,7 @@ def _log_retry(retry_state: RetryCallState) -> None:
 @retry(
     retry=retry_if_exception(_is_retryable),
     stop=stop_after_attempt(3),
-    wait=wait_exponential(multiplier=1, min=1, max=10),
+    wait=wait_chain(wait_fixed(10), wait_fixed(30)) + wait_random(0, 5),
     before_sleep=_log_retry,
 )
 async def ask_judge(
