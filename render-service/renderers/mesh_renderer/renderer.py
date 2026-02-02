@@ -57,19 +57,7 @@ class GLBRenderer:
         init_time = time.perf_counter() - init_start
         logger.info(f"GLBRenderer initialized in {init_time:.3f}s ({render_width}x{render_height}, {self._ssaa_factor}x SSAA)")
 
-    def cleanup(self) -> None:
-        """Release renderer resources."""
-        if self._renderer is None:
-            logger.warning("GLBRenderer not initialized, nothing to cleanup")
-            return
 
-        logger.info("Cleaning up GLBRenderer...")
-        self._renderer.delete()
-        self._renderer = None
-        self._scene = None
-        self._cam_node = None
-        self._light_node = None
-        logger.info("GLBRenderer cleanup complete")
 
     def render_grid(self, glb_bytes: bytes) -> bytes:
         """Load mesh, add to scene, render views, remove mesh, return PNG."""
