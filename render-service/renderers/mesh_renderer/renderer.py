@@ -80,6 +80,8 @@ class GLBRenderer:
         load_time = time.perf_counter() - load_start
         logger.info(f"Mesh loaded in {load_time:.3f}s: {mesh}")
 
+        self._assert_model_size(mesh)
+
         # Convert to pyrender mesh and disable mipmaps
         pyr_mesh = pyrender.Mesh.from_trimesh(mesh, smooth=True)
         for primitive in pyr_mesh.primitives:
@@ -138,3 +140,10 @@ class GLBRenderer:
         png_bytes = buffer.read()
         logger.info(f"GLB rendering complete, output size: {len(png_bytes)} bytes")
         return png_bytes
+
+    def _assert_model_size(self, mesh: trimesh.Trimesh) -> None:
+        """Check if model fits within a unit cube."""
+        if mesh.bounds.max() <= 0.5 and mesh.bounds.min() >= -0.5:
+            return
+        else:
+            raise ValueError("Model exceeds unit cube size constraint")
