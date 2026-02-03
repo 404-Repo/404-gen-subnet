@@ -204,7 +204,7 @@ class MatchRunner:
                     logger.info("All duels complete, waiting for verification")
                     await self._git_batcher.flush()
                     await shutdown.wait(timeout=self._settings.check_state_interval_seconds)
-                    refresh_needed = False
+                    refresh_needed = True
 
             if refresh_needed:
                 await self._refresh_verification_state()
