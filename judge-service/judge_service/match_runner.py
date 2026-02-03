@@ -1,4 +1,3 @@
-import json
 import random
 from collections import deque
 from math import ceil
@@ -14,11 +13,14 @@ from subnet_common.competition.audit_requests import (
     get_audit_requests,
     save_audit_requests,
 )
+from subnet_common.competition.build_info import require_builds
 from subnet_common.competition.config import require_competition_config
 from subnet_common.competition.generations import GenerationSource, get_generations
+from subnet_common.competition.leader import require_leader_state
 from subnet_common.competition.match_matrix import MatchMatrix, get_match_matrix, save_match_matrix
 from subnet_common.competition.match_report import DuelWinner, MatchReport, get_match_report, save_match_report
 from subnet_common.competition.prompts import require_prompts
+from subnet_common.competition.round_result import RoundResult, save_round_result
 from subnet_common.competition.seed import require_seed_from_git
 from subnet_common.competition.state import (
     CompetitionState,
@@ -427,11 +429,32 @@ class MatchRunner:
         await update_competition_state(self._git_batcher, self._state)
         await self._git_batcher.flush()
 
-    async def _finalize(self, winner: str) -> None:
-        await self._git_batcher.write(
-            path=f"rounds/{self._round_num}/winner.json",
-            content=json.dumps({"hotkey": winner}, indent=2),
-            message=f"Winner determined {winner[:10]}",
+    async def _resolve_winner(self, winner: str) -> RoundResult:
+        if winner != "leader":
+            builds = await require_builds(self._git, round_num=self._round_num, ref=self._ref)
+            build = builds.get(winner)
+            if build is None or build.docker_image is None:
+                raise RuntimeError(f"Build not found for {winner[:10]}")
+            return RoundResult(
+                winner_hotkey=winner,
+                repo=build.repo,
+                commit=build.commit,
+                docker_image=build.docker_image,
+            )
+
+        leader_state = await require_leader_state(self._git, ref=self._ref)
+        leader = leader_state.get_latest()
+        if leader is None:
+            raise RuntimeError("Leader state not found")
+
+        return RoundResult(
+            winner_hotkey="leader",
+            repo=leader.repo,
+            commit=leader.commit,
+            docker_image=leader.docker,
         )
 
-        await self._transition_to_next_stage(reason=f"Winner {winner[:10]}")
+    async def _finalize(self, winner: str) -> None:
+        result = await self._resolve_winner(winner)
+        await save_round_result(self._git_batcher, self._round_num, result)
+        await self._transition_to_next_stage(reason=f"Winner {result.winner_hotkey[:10]}")
