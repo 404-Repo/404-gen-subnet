@@ -2,10 +2,9 @@ from datetime import UTC, datetime, time, timedelta
 
 import bittensor as bt
 from loguru import logger
-from subnet_common.competition.build_info import BuildInfo, get_builds
 from subnet_common.competition.config import CompetitionConfig, require_competition_config
-from subnet_common.competition.judge_progress import JudgeProgress, get_judge_progress
 from subnet_common.competition.leader import LeaderEntry, LeaderListAdapter, LeaderState, require_leader_state
+from subnet_common.competition.round_result import RoundResult, require_round_result
 from subnet_common.competition.schedule import RoundSchedule, get_schedule
 from subnet_common.competition.state import CompetitionState, RoundStage, require_state
 from subnet_common.github import GitHubClient
@@ -21,22 +20,18 @@ async def run_manage_round_iteration() -> None:
         repo=settings.github_repo,
         token=settings.github_token.get_secret_value(),
     ) as git:
-        latest_commit_sha = await git.get_ref_sha(ref=settings.github_branch)
-        logger.info(f"Latest commit SHA: {latest_commit_sha}")
-
-        state = await require_state(git, ref=latest_commit_sha)
-        logger.info(f"Current state: {state}")
+        ref = await git.get_ref_sha(ref=settings.github_branch)
+        state: CompetitionState = await require_state(git=git, ref=ref)
+        logger.info(f"Commit: {ref[:10]}, state: {state}")
 
         if state.stage != RoundStage.FINALIZING:
             return
 
-        config = await require_competition_config(git, ref=latest_commit_sha)
-        logger.debug(f"Current competition config: {config}")
+        config = await require_competition_config(git, ref=ref)
+        previous_schedule = await get_schedule(git, state.current_round, ref=ref)
 
         current_block = await _get_current_block()
         current_time = datetime.now(UTC)
-
-        previous_schedule = await get_schedule(git, state.current_round, ref=latest_commit_sha)
 
         previous_round_start = (
             _estimate_round_start(
@@ -63,16 +58,16 @@ async def run_manage_round_iteration() -> None:
             previous_latest_reveal_block=previous_schedule.latest_reveal_block if previous_schedule else None,
         )
 
-        leader_state = await require_leader_state(git, ref=latest_commit_sha)
-        judge_progress = await get_judge_progress(git, state.current_round, ref=latest_commit_sha)
-        logger.debug(f"Judge progress for previous round: {judge_progress}")
+        leader_state = await require_leader_state(git, ref=ref)
+        round_result = await require_round_result(git, round_num=state.current_round, ref=ref)
 
-        builds = await get_builds(git, round_num=state.current_round, ref=latest_commit_sha)
+        current_leader = leader_state.get_latest()
+        if current_leader is None:
+            raise RuntimeError("Leader state is unexpectedly empty - competition must have a leader")
 
         leader_transition = _compute_leader_transition(
-            judge_progress=judge_progress,
-            builds=builds,
-            current_leader=leader_state.get_latest(),
+            round_result=round_result,
+            current_leader=current_leader,
             config=config,
             effective_block=next_round_start_block,
         )
@@ -90,13 +85,14 @@ async def run_manage_round_iteration() -> None:
             leader_state=leader_state,
             leader_changed=leader_transition is not None,
             next_round_schedule=next_round_schedule,
-            latest_commit_sha=latest_commit_sha,
+            latest_commit_sha=ref,
+            next_stage_eta=next_round_start if next_round_schedule else None,
         )
 
 
 async def _get_current_block() -> int:
-    subtensor = await bt.get_async_subtensor(network=settings.network)
-    block: int = await subtensor.get_current_block()
+    async with bt.async_subtensor(network=settings.network) as subtensor:
+        block: int = await subtensor.get_current_block()
     return block
 
 
@@ -169,9 +165,13 @@ def _build_next_schedule(
 
     logger.info(f"Next round start: ~{next_round_start}, block {next_round_start_block}")
 
+    generation_blocks = int(config.generation_stage_minutes * 60 / BLOCK_TIME_SECONDS)
+    generation_deadline_block = next_round_start_block + generation_blocks
+
     return RoundSchedule(
         earliest_reveal_block=previous_latest_reveal_block + 1 if previous_latest_reveal_block is not None else 0,
         latest_reveal_block=next_round_start_block,
+        generation_deadline_block=generation_deadline_block,
     )
 
 
@@ -179,12 +179,11 @@ def _determine_next_stage(next_round_schedule: RoundSchedule | None) -> RoundSta
     """Determine what stage the competition should transition to."""
     if next_round_schedule is None:
         return RoundStage.FINISHED
-    return RoundStage.PAUSED if settings.pause_on_stage_end else RoundStage.COLLECTING
+    return RoundStage.PAUSED if settings.pause_on_stage_end else RoundStage.OPEN
 
 
 def _compute_leader_transition(
-    judge_progress: JudgeProgress,
-    builds: dict[str, BuildInfo],
+    round_result: RoundResult,
     current_leader: LeaderEntry,
     config: CompetitionConfig,
     effective_block: int,
@@ -194,7 +193,7 @@ def _compute_leader_transition(
 
     Returns a new LeaderEntry to append to transitions, or None if no transition is needed.
     """
-    new_leader = _find_new_leader(judge_progress, builds, current_leader, effective_block)
+    new_leader = _find_new_leader(round_result, current_leader, effective_block)
     if new_leader:
         logger.info(f"New leader: {new_leader.hotkey} ({new_leader.repo}@{new_leader.commit[:8]})")
         return new_leader
@@ -215,8 +214,7 @@ def _compute_leader_transition(
 
 
 def _find_new_leader(
-    judge_progress: JudgeProgress,
-    builds: dict[str, BuildInfo],
+    round_result: RoundResult,
     current_leader: LeaderEntry,
     effective_block: int,
 ) -> LeaderEntry | None:
@@ -225,25 +223,17 @@ def _find_new_leader(
 
     Returns new LeaderEntry or None if the current leader defended.
     """
-    winner = judge_progress.leader
-
-    if winner == "leader":
+    if round_result.winner_hotkey == "leader":
         return None
 
-    if winner not in builds:
-        logger.warning(f"Winner {winner} not found in builds")
-        return None
-
-    build = builds[winner]
-
-    if build.repo == current_leader.repo and build.commit == current_leader.commit:
+    if round_result.repo == current_leader.repo and round_result.commit == current_leader.commit:
         return None
 
     return LeaderEntry(
-        hotkey=winner,
-        repo=build.repo,
-        commit=build.commit,
-        docker=build.docker_image,
+        hotkey=round_result.winner_hotkey,
+        repo=round_result.repo,
+        commit=round_result.commit,
+        docker=round_result.docker_image,
         weight=1.0,
         effective_block=effective_block,
     )
@@ -257,9 +247,10 @@ async def _commit_round_updates(
     leader_changed: bool,
     next_round_schedule: RoundSchedule | None,
     latest_commit_sha: str,
+    next_stage_eta: datetime | None,
 ) -> None:
     """Commit all round updates atomically."""
-    state = CompetitionState(stage=next_stage, current_round=next_round)
+    state = CompetitionState(stage=next_stage, current_round=next_round, next_stage_eta=next_stage_eta)
 
     files = {"state.json": state.model_dump_json(indent=2)}
     parts = [f"state ({next_stage.value})"]
