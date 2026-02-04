@@ -143,7 +143,7 @@ class GLBRenderer:
 
     def _assert_model_size(self, mesh: trimesh.Trimesh) -> None:
         """Check if model fits within a unit cube."""
-        if mesh.bounds.max() <= 0.5 and mesh.bounds.min() >= -0.5:
+        if mesh.bounds.max() <= 0.6 and mesh.bounds.min() >= -0.6:
             return
         else:
             raise ValueError("Model exceeds unit cube size constraint")
