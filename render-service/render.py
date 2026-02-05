@@ -1,4 +1,5 @@
 import io
+import threading
 
 from loguru import logger
 import numpy as np
@@ -15,6 +16,15 @@ from utils import image as img_utils
 # Module-level renderer instance
 glb_renderer = GLBRenderer()
 
+_thread_local = threading.local()
+
+
+def _get_glb_renderer() -> GLBRenderer:
+    """Get or create a GLBRenderer for the current thread."""
+    if not hasattr(_thread_local, 'glb_renderer'):
+        logger.info(f"Creating GLBRenderer for thread {threading.current_thread().name}")
+        _thread_local.glb_renderer = GLBRenderer()
+    return _thread_local.glb_renderer
 
 def grid_from_ply_bytes(ply_bytes: bytes, device: torch.device) -> bytes:
     logger.info(f"Starting PLY rendering, payload size: {len(ply_bytes)} bytes")
@@ -61,5 +71,6 @@ def grid_from_ply_bytes(ply_bytes: bytes, device: torch.device) -> bytes:
 
 
 def grid_from_glb_bytes(glb_bytes: bytes) -> bytes:
-    """Convenience wrapper that uses the module-level GLBRenderer instance."""
-    return glb_renderer.render_grid(glb_bytes)
+    """Convenience wrapper that uses the thread-local GLBRenderer instance."""
+    renderer = _get_glb_renderer()
+    return renderer.render_grid(glb_bytes)
