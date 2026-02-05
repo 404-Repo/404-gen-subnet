@@ -169,14 +169,14 @@ class MatchRunner:
     async def run(self, shutdown: GracefulShutdown) -> None:
         """Main loop: qualification → timelines → finalize."""
         if not self._hotkeys:
-            await self._transition_to_next_stage(reason="No submissions found")
+            await self._finalize(winner="leader", reason="No submissions found")
             return
 
         await self._refresh_verification_state()
         self._hotkeys = self._filter_rejected(self._hotkeys)
 
         if not self._hotkeys:
-            await self._transition_to_next_stage(reason="All submissions rejected")
+            await self._finalize(winner="leader", reason="All submissions rejected")
             return
 
         qualified = await self._run_qualification(shutdown)
@@ -184,7 +184,7 @@ class MatchRunner:
 
         while not shutdown.should_stop:
             if not qualified:
-                await self._transition_to_next_stage(reason="No qualified submissions")
+                await self._finalize(winner="leader", reason="No qualified submissions")
                 return
 
             if self._timeline.is_rejected(self._rejected_hotkeys):
@@ -454,7 +454,7 @@ class MatchRunner:
             docker_image=leader.docker,
         )
 
-    async def _finalize(self, winner: str) -> None:
+    async def _finalize(self, winner: str, reason: str | None = None) -> None:
         result = await self._resolve_winner(winner)
         await save_round_result(self._git_batcher, self._round_num, result)
-        await self._transition_to_next_stage(reason=f"Winner {result.winner_hotkey[:10]}")
+        await self._transition_to_next_stage(reason=reason or f"Winner {result.winner_hotkey[:10]}")
