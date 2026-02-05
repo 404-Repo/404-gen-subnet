@@ -42,6 +42,7 @@ class MockGitHubClient(GitHubClient):
                 "base_sha": base_sha,
             }
         )
+        self.files.update(files)
         return f"{self.ref_sha}_new"
 
     @property

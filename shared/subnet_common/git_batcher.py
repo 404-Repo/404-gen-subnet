@@ -40,6 +40,13 @@ class GitBatcher(BaseModel):
             base_sha = await git.get_ref_sha(branch)
         return cls(git=git, branch=branch, base_sha=base_sha)
 
+    async def read(self, path: str) -> str | None:
+        """Read-your-own-writes: check pending files first, then git."""
+        content = self._pending_files.get(path)
+        if content is not None:
+            return content
+        return await self.git.get_file(path, ref=self.base_sha)
+
     async def write(self, path: str, content: str, message: str) -> None:
         """
         Queue a change. If enough time passed, perform a commit.

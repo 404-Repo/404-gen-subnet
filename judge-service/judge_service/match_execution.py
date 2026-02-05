@@ -110,7 +110,7 @@ async def _evaluate_prompt(
 
     left_url = left_gen.png
     right_url = right_gen.png
-    if not left_url or not right_url:
+    if not left_url or not right_url:  # pragma: no cover
         return duel  # unreachable after _check_missing_previews
 
     async with sem:

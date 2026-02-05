@@ -4,7 +4,6 @@ from loguru import logger
 from pydantic import BaseModel
 
 from subnet_common.git_batcher import GitBatcher
-from subnet_common.github import GitHubClient
 
 
 class DuelWinner(str, Enum):
@@ -50,16 +49,15 @@ def _path(round_num: int, left: str, right: str) -> str:
 
 
 async def get_match_report(
-    git: GitHubClient,
+    git_batcher: GitBatcher,
     round_num: int,
     left: str,
     right: str,
-    ref: str,
 ) -> MatchReport | None:
-    """Load match report from git. Returns None if not found or invalid."""
+    """Load match report from git (checks pending writes first). Returns None if not found or invalid."""
     path = _path(round_num, left, right)
     try:
-        content = await git.get_file(path=path, ref=ref)
+        content = await git_batcher.read(path)
         if not content:
             return None
         return MatchReport.model_validate_json(content)

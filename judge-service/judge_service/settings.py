@@ -59,6 +59,3 @@ class Settings(BaseSettings):
     @classmethod
     def normalize_url(cls, v: str) -> str:
         return v.rstrip("/")
-
-
-settings = Settings()  # type: ignore[call-arg]
