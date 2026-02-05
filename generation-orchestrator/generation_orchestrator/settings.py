@@ -44,7 +44,7 @@ class Settings(BaseSettings):
         description="Docker image build timeout in seconds",
     )
     docker_image_format: str = Field(
-        default="europe-docker.pkg.dev/gen-456515/competition-0/{hotkey10}:{tag}",
+        default="europe-west3-docker.pkg.dev/gen-456515/active-competition/{hotkey10}:{tag}",
         alias="DOCKER_IMAGE_FORMAT",
         description="Docker image format string",
     )
