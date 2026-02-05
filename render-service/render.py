@@ -68,6 +68,8 @@ def grid_from_glb_bytes(glb_bytes: bytes):
         force='mesh'
     )
     logger.debug(f"Mesh loaded: {mesh}")
+
+    _assert_model_size(mesh=mesh)
     
     logger.debug("Creating pyrender scene")
     scene = pyrender.Scene(bg_color=[255, 255, 255, 0], ambient_light=[0.3, 0.3, 0.3])
@@ -144,3 +146,11 @@ def grid_from_glb_bytes(glb_bytes: bytes):
     png_bytes = buffer.read()
     logger.info(f"GLB rendering complete, output size: {len(png_bytes)} bytes")
     return png_bytes
+
+
+def _assert_model_size(mesh: trimesh.Trimesh) -> None:
+    """Check if the model fits within a unit cube."""
+    if mesh.bounds.max() <= 0.6 and mesh.bounds.min() >= -0.6:
+        return
+    else:
+        raise ValueError("Model exceeds unit cube size constraint")
