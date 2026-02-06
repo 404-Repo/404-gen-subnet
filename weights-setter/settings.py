@@ -35,7 +35,7 @@ class Settings(BaseSettings):
     wallet_hotkey: str = Field(description="Hotkey of the wallet")
     wallet_path: str | None = Field(default=None, description="Path to the wallet")
 
-    github_winner_info_repo: str = Field(default="404-Repo/404-competition-0")
+    github_winner_info_repo: str = Field(default="404-Repo/404-active-competition")
     github_winner_info_branch: str = Field(default="main")
     github_token: str | None = Field(default=None)
 
