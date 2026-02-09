@@ -78,17 +78,18 @@ def grid_from_glb_bytes(glb_bytes: bytes):
     logger.debug("Converting trimesh to pyrender mesh")
     pyr_mesh = pyrender.Mesh.from_trimesh(mesh, smooth=True)
 
-    # Disable mipmaps on all textures
+    # Configure materials: double-sided and disable mipmaps
     for primitive in pyr_mesh.primitives:
         if primitive.material is not None:
             mat = primitive.material
+            mat.doubleSided = True
             for attr in ['baseColorTexture', 'metallicRoughnessTexture', 'normalTexture',
                          'occlusionTexture', 'emissiveTexture']:
                 tex = getattr(mat, attr, None)
                 if tex is not None and hasattr(tex, 'sampler') and tex.sampler is not None:
                     tex.sampler.minFilter = GL_LINEAR
                     tex.sampler.magFilter = GL_LINEAR
-    logger.debug("Mipmaps disabled on mesh textures")
+    logger.debug("Materials configured: double-sided, mipmaps disabled")
 
     scene.add(pyr_mesh)
 
