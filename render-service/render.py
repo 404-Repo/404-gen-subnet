@@ -62,12 +62,8 @@ def grid_from_glb_bytes(glb_bytes: bytes):
     logger.info(f"Starting GLB rendering, payload size: {len(glb_bytes)} bytes")
     
     logger.debug("Loading mesh with trimesh")
-    mesh = trimesh.load(
-        file_obj=io.BytesIO(glb_bytes),
-        file_type='glb',
-        force='mesh'
-    )
-    logger.debug(f"Mesh loaded: {mesh}")
+    mesh = _load_single_mesh(glb_bytes)
+    logger.debug(f"Mesh loaded: {len(mesh.vertices)} vertices, {len(mesh.faces)} faces")
 
     _assert_model_size(mesh=mesh)
     
@@ -78,17 +74,18 @@ def grid_from_glb_bytes(glb_bytes: bytes):
     logger.debug("Converting trimesh to pyrender mesh")
     pyr_mesh = pyrender.Mesh.from_trimesh(mesh, smooth=True)
 
-    # Disable mipmaps on all textures
+    # Configure materials: double-sided and disable mipmaps
     for primitive in pyr_mesh.primitives:
         if primitive.material is not None:
             mat = primitive.material
+            mat.doubleSided = False
             for attr in ['baseColorTexture', 'metallicRoughnessTexture', 'normalTexture',
                          'occlusionTexture', 'emissiveTexture']:
                 tex = getattr(mat, attr, None)
                 if tex is not None and hasattr(tex, 'sampler') and tex.sampler is not None:
                     tex.sampler.minFilter = GL_LINEAR
                     tex.sampler.magFilter = GL_LINEAR
-    logger.debug("Mipmaps disabled on mesh textures")
+    logger.debug("Materials configured: double-sided, mipmaps disabled")
 
     scene.add(pyr_mesh)
 
@@ -154,3 +151,33 @@ def _assert_model_size(mesh: trimesh.Trimesh) -> None:
         return
     else:
         raise ValueError("Model exceeds unit cube size constraint")
+
+
+def _load_single_mesh(glb_bytes: bytes) -> trimesh.Trimesh:
+    """
+    Load GLB and return the mesh, asserting it contains exactly one mesh object.
+    
+    Raises ValueError if the file contains multiple meshes or non-mesh objects.
+    """
+    loaded = trimesh.load(
+        file_obj=io.BytesIO(glb_bytes),
+        file_type='glb',
+        force=None
+    )
+    
+    # Single mesh is valid
+    if isinstance(loaded, trimesh.Trimesh):
+        return loaded
+    
+    if isinstance(loaded, trimesh.Scene):
+        geoms = list(loaded.geometry.values())
+        
+        if len(geoms) != 1:
+            raise ValueError(f"GLB file contains {len(geoms)} objects (expected 1)")
+
+        if not isinstance(geoms[0], trimesh.Trimesh):
+            raise ValueError(f"GLB file contains non-mesh object: {type(geoms[0]).__name__}")
+        
+        return geoms[0]
+    
+    raise ValueError(f"Unexpected GLB content type: {type(loaded).__name__}")
