@@ -5,8 +5,11 @@ from loguru import logger
 from subnet_common.graceful_shutdown import GracefulShutdown
 from subnet_common.utils import format_duration
 
-from round_manager.manage_round_iteration import run_manage_round_iteration
-from round_manager.settings import settings
+from round_manager.finalize_round import run_finalize_round
+from round_manager.settings import Settings
+
+
+settings = Settings()  # type: ignore[call-arg]
 
 
 def setup_logging(log_level: str) -> None:
@@ -32,7 +35,7 @@ async def main() -> None:
 
     while not shutdown.should_stop:
         try:
-            await run_manage_round_iteration()
+            await run_finalize_round(settings)
         except asyncio.CancelledError:
             break
         except Exception as e:

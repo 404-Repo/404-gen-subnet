@@ -3,7 +3,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", case_sensitive=False)
+    model_config = SettingsConfigDict(
+        env_file=".env", env_file_encoding="utf-8", case_sensitive=False, populate_by_name=True
+    )
 
     github_token: SecretStr = Field(..., alias="GITHUB_TOKEN", description="GitHub personal access token")
     github_repo: str = Field(
@@ -30,6 +32,3 @@ class Settings(BaseSettings):
     )
 
     log_level: str = Field(default="DEBUG", alias="LOG_LEVEL", description="Logging level")
-
-
-settings = Settings()  # type: ignore[call-arg]

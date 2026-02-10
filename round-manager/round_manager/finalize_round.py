@@ -1,3 +1,4 @@
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, time, timedelta
 
 import bittensor as bt
@@ -9,91 +10,99 @@ from subnet_common.competition.schedule import RoundSchedule, get_schedule
 from subnet_common.competition.state import CompetitionState, RoundStage, require_state
 from subnet_common.github import GitHubClient
 
-from round_manager.settings import settings
+from round_manager.settings import Settings
 
 
 BLOCK_TIME_SECONDS = 12
 
 
-async def run_manage_round_iteration() -> None:
+async def run_finalize_round(settings: Settings) -> None:
+    async def get_block() -> int:
+        async with bt.async_subtensor(network=settings.network) as subtensor:
+            block: int = await subtensor.get_current_block()
+        return block
+
     async with GitHubClient(
         repo=settings.github_repo,
         token=settings.github_token.get_secret_value(),
     ) as git:
-        ref = await git.get_ref_sha(ref=settings.github_branch)
-        state: CompetitionState = await require_state(git=git, ref=ref)
-        logger.info(f"Commit: {ref[:10]}, state: {state}")
+        await finalize_round(git=git, get_block=get_block, settings=settings)
 
-        if state.stage != RoundStage.FINALIZING:
-            return
 
-        config = await require_competition_config(git, ref=ref)
-        previous_schedule = await get_schedule(git, state.current_round, ref=ref)
+async def finalize_round(
+    git: GitHubClient,
+    get_block: Callable[[], Awaitable[int]],
+    settings: Settings,
+) -> None:
+    ref = await git.get_ref_sha(ref=settings.github_branch)
+    state: CompetitionState = await require_state(git=git, ref=ref)
+    logger.info(f"Commit: {ref[:10]}, state: {state}")
 
-        current_block = await _get_current_block()
-        current_time = datetime.now(UTC)
+    if state.stage != RoundStage.FINALIZING:
+        return
 
-        previous_round_start = (
-            _estimate_round_start(
-                reveal_block=previous_schedule.latest_reveal_block,
-                current_block=current_block,
-                current_time=current_time,
-                round_start_time=config.round_start_time,
-            )
-            if previous_schedule
-            else None
-        )
+    config = await require_competition_config(git, ref=ref)
+    previous_schedule = await get_schedule(git, state.current_round, ref=ref)
 
-        next_round_start, next_round_start_block = _compute_next_round_start(
-            current_time=current_time,
+    current_block = await get_block()
+    current_time = datetime.now(UTC)
+
+    previous_round_start = (
+        _estimate_round_start(
+            reveal_block=previous_schedule.latest_reveal_block,
             current_block=current_block,
-            config=config,
-            previous_round_start=previous_round_start,
+            current_time=current_time,
+            round_start_time=config.round_start_time,
         )
+        if previous_schedule
+        else None
+    )
 
-        next_round_schedule = _build_next_schedule(
-            next_round_start=next_round_start,
-            next_round_start_block=next_round_start_block,
-            config=config,
-            previous_latest_reveal_block=previous_schedule.latest_reveal_block if previous_schedule else None,
-        )
+    next_round_start, next_round_start_block = _compute_next_round_start(
+        current_time=current_time,
+        current_block=current_block,
+        config=config,
+        previous_round_start=previous_round_start,
+    )
 
-        leader_state = await require_leader_state(git, ref=ref)
-        round_result = await require_round_result(git, round_num=state.current_round, ref=ref)
+    next_round_schedule = _build_next_schedule(
+        next_round_start=next_round_start,
+        next_round_start_block=next_round_start_block,
+        config=config,
+        previous_latest_reveal_block=previous_schedule.latest_reveal_block if previous_schedule else None,
+    )
 
-        current_leader = leader_state.get_latest()
-        if current_leader is None:
-            raise RuntimeError("Leader state is unexpectedly empty - competition must have a leader")
+    leader_state = await require_leader_state(git, ref=ref)
+    round_result = await require_round_result(git, round_num=state.current_round, ref=ref)
 
-        leader_transition = _compute_leader_transition(
-            round_result=round_result,
-            current_leader=current_leader,
-            config=config,
-            effective_block=next_round_start_block,
-        )
+    current_leader = leader_state.get_latest()
+    if current_leader is None:
+        raise RuntimeError("Leader state is unexpectedly empty - competition must have a leader")
 
-        if leader_transition:
-            leader_state.transitions.append(leader_transition)
+    leader_transition = _compute_leader_transition(
+        round_result=round_result,
+        current_leader=current_leader,
+        config=config,
+        effective_block=next_round_start_block,
+    )
 
-        next_stage = _determine_next_stage(next_round_schedule)
-        next_round = state.current_round if next_round_schedule is None else state.current_round + 1
+    if leader_transition:
+        leader_state.transitions.append(leader_transition)
 
-        await _commit_round_updates(
-            git=git,
-            next_round=next_round,
-            next_stage=next_stage,
-            leader_state=leader_state,
-            leader_changed=leader_transition is not None,
-            next_round_schedule=next_round_schedule,
-            latest_commit_sha=ref,
-            next_stage_eta=next_round_start if next_round_schedule else None,
-        )
+    next_stage = _determine_next_stage(next_round_schedule, settings.pause_on_stage_end)
+    next_round = state.current_round if next_round_schedule is None else state.current_round + 1
 
-
-async def _get_current_block() -> int:
-    async with bt.async_subtensor(network=settings.network) as subtensor:
-        block: int = await subtensor.get_current_block()
-    return block
+    await _commit_round_updates(
+        git=git,
+        next_round=next_round,
+        next_stage=next_stage,
+        leader_state=leader_state,
+        leader_changed=leader_transition is not None,
+        next_round_schedule=next_round_schedule,
+        latest_commit_sha=ref,
+        next_stage_eta=next_round_start if next_round_schedule else None,
+        branch=settings.github_branch,
+    )
 
 
 def _estimate_round_start(
@@ -175,11 +184,11 @@ def _build_next_schedule(
     )
 
 
-def _determine_next_stage(next_round_schedule: RoundSchedule | None) -> RoundStage:
+def _determine_next_stage(next_round_schedule: RoundSchedule | None, pause_on_stage_end: bool) -> RoundStage:
     """Determine what stage the competition should transition to."""
     if next_round_schedule is None:
         return RoundStage.FINISHED
-    return RoundStage.PAUSED if settings.pause_on_stage_end else RoundStage.OPEN
+    return RoundStage.PAUSED if pause_on_stage_end else RoundStage.OPEN
 
 
 def _compute_leader_transition(
@@ -248,6 +257,7 @@ async def _commit_round_updates(
     next_round_schedule: RoundSchedule | None,
     latest_commit_sha: str,
     next_stage_eta: datetime | None,
+    branch: str,
 ) -> None:
     """Commit all round updates atomically."""
     state = CompetitionState(stage=next_stage, current_round=next_round, next_stage_eta=next_stage_eta)
@@ -269,5 +279,5 @@ async def _commit_round_updates(
         files=files,
         message=message,
         base_sha=latest_commit_sha,
-        branch=settings.github_branch,
+        branch=branch,
     )
