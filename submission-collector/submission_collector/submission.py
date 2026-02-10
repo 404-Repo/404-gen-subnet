@@ -26,7 +26,7 @@ def parse_commitment(
     valid_commits = [(block, data_str) for block, data_str in commitment if earliest_block <= block <= latest_block]
 
     if not valid_commits:
-        logger.debug(f"No commits in window for {hotkey}")
+        # logger.debug(f"No commits in window for {hotkey}")
         return None
 
     repo_commits = []

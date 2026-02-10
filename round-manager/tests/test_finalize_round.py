@@ -7,10 +7,11 @@ from subnet_common.competition.leader import LeaderEntry, LeaderListAdapter
 from subnet_common.competition.round_result import RoundResult
 from subnet_common.competition.schedule import RoundSchedule
 from subnet_common.competition.state import CompetitionState, RoundStage
+from subnet_common.testing import MockGitHubClient
 
 from round_manager.finalize_round import finalize_round
 from round_manager.settings import Settings
-from tests.conftest import MockGitHubClient, make_get_block
+from tests.conftest import make_get_block
 
 
 def add_state(
@@ -120,7 +121,6 @@ async def test_new_leader_takes_over(git: MockGitHubClient, settings: Settings) 
     leaders = LeaderListAdapter.validate_json(committed["leader.json"])
     assert leaders[-1].hotkey == "miner_hotkey"
     assert leaders[-1].weight == 1.0
-
 
 
 async def test_early_exit_when_not_finalizing(git: MockGitHubClient, settings: Settings) -> None:
@@ -241,5 +241,3 @@ async def test_leader_remains_same_repo_and_commit(git: MockGitHubClient, settin
     leaders = LeaderListAdapter.validate_json(committed["leader.json"])
     assert leaders[-1].hotkey == "leader_hotkey"  # original leader kept
     assert leaders[-1].weight == pytest.approx(0.6)
-
-

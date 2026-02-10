@@ -21,6 +21,9 @@ bandit = "1.9.2"
 black = "25.11.0"
 mypy = "1.18.2"
 ruff = "0.14.6"
+pytest = "8.3.5"
+pytest-asyncio = "0.25.3"
+time-machine = "2.16.0"
 
 [build-system]
 requires = ["poetry-core", "setuptools", "wheel"]
@@ -64,6 +67,9 @@ select = [
 fixable = ["ALL"]
 unfixable = []
 
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101"]
+
 [tool.ruff.lint.flake8-quotes]
 docstring-quotes = "double"
 
@@ -73,7 +79,7 @@ lines-after-imports = 2
 
 [tool.bandit]
 skips = ["B104"]
-exclude_dirs = ["./.*/**"]
+exclude_dirs = ["./.*/**", "./tests/**"]
 
 [tool.mypy]
 cache_dir = ".reports/mypy_cache/"
@@ -86,7 +92,12 @@ warn_no_return = false
 warn_unreachable = true
 strict_equality = true
 warn_redundant_casts = true
-exclude = ['.venv/.*']
+exclude = ['.venv/.*', 'tests/.*']
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
 
 [tool.poe]
 poetry_command = ""
@@ -100,6 +111,10 @@ sequence = [
     { cmd = "bandit . -rq -c pyproject.toml" },
     { cmd = "mypy ." },
 ]
+
+[tool.poe.tasks.test]
+help = "Run tests"
+cmd = "pytest"
 
 [tool.poe.tasks.export-requirements]
 help = "Export requirements.txt for Docker"
