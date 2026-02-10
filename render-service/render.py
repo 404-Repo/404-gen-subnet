@@ -78,7 +78,7 @@ def grid_from_glb_bytes(glb_bytes: bytes):
     for primitive in pyr_mesh.primitives:
         if primitive.material is not None:
             mat = primitive.material
-            mat.doubleSided = True
+            mat.doubleSided = False
             for attr in ['baseColorTexture', 'metallicRoughnessTexture', 'normalTexture',
                          'occlusionTexture', 'emissiveTexture']:
                 tex = getattr(mat, attr, None)
