@@ -6,7 +6,10 @@ from subnet_common.graceful_shutdown import GracefulShutdown
 from subnet_common.utils import calculate_wait_time, format_duration
 
 from submission_collector.collection_iteration import run_collection_iteration
-from submission_collector.settings import settings
+from submission_collector.settings import Settings
+
+
+settings = Settings()  # type: ignore[call-arg]
 
 
 def setup_logging(log_level: str) -> None:
@@ -34,7 +37,7 @@ async def main() -> None:
     while not shutdown.should_stop:
         next_stage_eta = None
         try:
-            next_stage_eta = await run_collection_iteration()
+            next_stage_eta = await run_collection_iteration(settings)
         except asyncio.CancelledError:
             break
         except Exception as e:

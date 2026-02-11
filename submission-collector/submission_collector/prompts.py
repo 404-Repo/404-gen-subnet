@@ -14,7 +14,11 @@ async def select_prompts(
 ) -> list[str]:
     """Select prompts for the round: carryover from previous plus new from pool."""
     all_prompts = await _require_prompts(git, round_num=None, ref=ref)
-    previous_prompts = [] if round_num == 0 else await _require_prompts(git, round_num - 1, ref=ref)
+
+    if round_num > 0 and config.carryover_prompts > 0:
+        previous_prompts = await _require_prompts(git, round_num - 1, ref=ref)
+    else:
+        previous_prompts = []
 
     rng = random.Random(seed)  # nosec B311 # noqa: S311
 

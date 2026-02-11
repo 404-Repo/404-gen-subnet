@@ -66,6 +66,9 @@ select = [
 fixable = ["ALL"]
 unfixable = []
 
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101"]
+
 [tool.ruff.lint.flake8-quotes]
 docstring-quotes = "double"
 
@@ -75,7 +78,7 @@ lines-after-imports = 2
 
 [tool.bandit]
 skips = ["B104"]
-exclude_dirs = ["./.*/**"]
+exclude_dirs = ["./.*/**", "./tests/**"]
 
 [tool.mypy]
 cache_dir = ".reports/mypy_cache/"
