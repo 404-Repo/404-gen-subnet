@@ -76,8 +76,7 @@ class PromptCoordinator:
             if prior is not None:
                 entry.best_result = prior
                 entry.attempts = prior.attempts
-                if self._is_acceptable(prior) or self._is_mismatched(prior) or entry.attempts >= self._max_attempts:
-                    entry.done = True
+                entry.done = not self._needs_retry(prior)
 
     def assign(self, short_id: str, allow_retry: bool = False) -> tuple[PromptEntry | None, bool]:
         """Assign the highest-priority available prompt to a pod.
@@ -113,13 +112,8 @@ class PromptCoordinator:
             return False
 
         entry.attempts += 1
-        self._update_best(entry, result)
-        best = entry.best_result
-        if best is not None:
-            best.attempts = entry.attempts
-
-        if self._is_acceptable(result) or self._is_mismatched(result) or entry.attempts >= self._max_attempts:
-            entry.done = True
+        best = self._update_best(entry, result)
+        entry.done = not self._needs_retry(best)
 
         self._notify()
         return True
@@ -148,7 +142,8 @@ class PromptCoordinator:
             logger.warning(f"{short_id}: mismatch limit reached ({self.mismatch_count})")
 
     def all_done(self) -> bool:
-        return all(e.done for e in self._entries.values())
+        entry, _ = self._find(short_id="all-done-check", allow_retry=True, ignore_locks=True)
+        return entry is None
 
     async def wait_for_change(self, stop: GenerationStop) -> bool:
         """Block until state changes or stop is signaled.
@@ -228,23 +223,17 @@ class PromptCoordinator:
             return self._hard_limit
         return min(r.generation_time, self._hard_limit)
 
-    def _is_acceptable(self, result: GenerationResult) -> bool:
-        """Result that needs no further attempts."""
-        return (
-            not result.is_failed()
-            and result.distance <= self._acceptable_distance
-            and result.generation_time <= self._median_limit
-        )
+    def _needs_retry(self, result: GenerationResult) -> bool:
+        """Result that needs retry."""
+        return result.distance <= self._acceptable_distance and result.needs_retry(self._median_limit, self._max_attempts)
 
-    def _is_mismatched(self, result: GenerationResult) -> bool:
-        """Output doesn't match the prompt — retrying won't help."""
-        return not result.is_failed() and result.distance > self._acceptable_distance
-
-    def _update_best(self, entry: PromptEntry, new: GenerationResult) -> None:
+    def _update_best(self, entry: PromptEntry, new: GenerationResult) -> GenerationResult:
         """Keep the best result. Any non-failed beats failed. Lower time wins among non-failed."""
         old = entry.best_result
         if old is None or self._is_better(new, old):
             entry.best_result = new
+        entry.best_result.attempts = entry.attempts
+        return entry.best_result
 
     def _is_better(self, new: GenerationResult, old: GenerationResult) -> bool:
         if new.is_failed():
