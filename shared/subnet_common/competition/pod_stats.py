@@ -10,9 +10,10 @@ class PodStats(BaseModel):
     successful: int = Field(default=0, description="Generations completed under the hard time limit")
     hard_failed: int = Field(default=0, description="Generations that produced no output (crash, HTTP error)")
     hard_overtime: int = Field(default=0, description="Generations that completed but exceeded the hard time limit")
-    performance_samples: list[float] = Field(
-        default_factory=list, description="Generation times from fresh (non-retry) prompts in seconds"
-    )
+    time_min: float = Field(default=0.0, description="Minimum generation time in seconds")
+    time_max: float = Field(default=0.0, description="Maximum generation time in seconds")
+    time_avg: float = Field(default=0.0, description="Average generation time in seconds")
+    time_median: float = Field(default=0.0, description="Median generation time in seconds")
     marked_bad: bool = Field(default=False, description="Whether the pod was marked bad and terminated early")
     retry_cumulative_delta: float = Field(default=0.0, description="Sum of (retry_time - original_time) across retries")
     retry_delta_count: int = Field(default=0, description="Number of retry deltas recorded")

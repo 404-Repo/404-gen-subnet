@@ -225,15 +225,20 @@ class PromptCoordinator:
 
     def _needs_retry(self, result: GenerationResult) -> bool:
         """Result that needs retry."""
-        return result.distance <= self._acceptable_distance and result.needs_retry(self._median_limit, self._max_attempts)
+        return result.distance <= self._acceptable_distance and result.needs_retry(
+            self._median_limit, self._max_attempts
+        )
 
     def _update_best(self, entry: PromptEntry, new: GenerationResult) -> GenerationResult:
         """Keep the best result. Any non-failed beats failed. Lower time wins among non-failed."""
         old = entry.best_result
         if old is None or self._is_better(new, old):
-            entry.best_result = new
-        entry.best_result.attempts = entry.attempts
-        return entry.best_result
+            best = new
+        else:
+            best = old
+        best.attempts = entry.attempts
+        entry.best_result = best
+        return best
 
     def _is_better(self, new: GenerationResult, old: GenerationResult) -> bool:
         if new.is_failed():

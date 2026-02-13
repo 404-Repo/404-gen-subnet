@@ -106,13 +106,17 @@ class PodTracker(BaseModel):
 
     def to_stats(self, pod_id: str) -> PodStats:
         """Create a PodStats snapshot from the tracker's counter fields."""
+        samples = self.performance_samples
         return PodStats(
             pod_id=pod_id,
             processed=self.processed,
             successful=self.successful,
             hard_failed=self.hard_failed,
             hard_overtime=self.hard_overtime,
-            performance_samples=list(self.performance_samples),
+            time_min=min(samples) if samples else 0.0,
+            time_max=max(samples) if samples else 0.0,
+            time_avg=statistics.mean(samples) if samples else 0.0,
+            time_median=statistics.median(samples) if samples else 0.0,
             marked_bad=self.marked_bad,
             retry_cumulative_delta=self.retry_cumulative_delta,
             retry_delta_count=self.retry_delta_count,
