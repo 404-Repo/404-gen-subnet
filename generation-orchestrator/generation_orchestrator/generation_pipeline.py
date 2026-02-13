@@ -9,11 +9,11 @@ from subnet_common.git_batcher import GitBatcher
 from subnet_common.r2_client import R2Client
 from subnet_common.render import render
 
-from generation_orchestrator.failure_tracker import FailureTracker
 from generation_orchestrator.generate import generate
 from generation_orchestrator.generation_stop import GenerationStop
 from generation_orchestrator.image_distance import measure_distance
-from generation_orchestrator.prompt_queue import PromptQueue, PromptTask
+from generation_orchestrator.pod_tracker import PodTracker
+from generation_orchestrator.prompt_coordinator import PromptCoordinator, PromptEntry
 from generation_orchestrator.settings import Settings
 
 
@@ -25,8 +25,7 @@ class GenerationPipeline:
         settings: Settings,
         pod_endpoint: str,
         generation_token: str | None,
-        queue: PromptQueue,  # Shared across all pods for this miner
-        generations: dict[str, GenerationResult],  # Mutable shared dict, updated in place
+        coordinator: PromptCoordinator,
         git_batcher: GitBatcher,
         hotkey: str,
         current_round: int,
@@ -36,15 +35,14 @@ class GenerationPipeline:
         self._settings = settings
         self._pod_endpoint = pod_endpoint
         self._generation_token = generation_token
-        self._queue = queue
-        self._generations = generations
+        self._coordinator = coordinator
         self._git_batcher = git_batcher
         self._hotkey = hotkey
         self._current_round = current_round
         self._seed = seed
         self._stop = stop
 
-    async def run(self, worker_id: str, tracker: FailureTracker) -> None:
+    async def run(self, pod_id: str, tracker: PodTracker) -> None:
         """Start concurrent processing loops for this worker."""
 
         # GPU generation slot: released on first response bytes to keep GPU saturated.
@@ -60,74 +58,108 @@ class GenerationPipeline:
             httpx.AsyncClient(timeout=service_timeout) as service_client,
         ):
             tasks = [
-                self._process_loop(worker_id, gpu_generation_sem, r2, tracker, service_client)
+                self._process_loop(pod_id, gpu_generation_sem, r2, tracker, service_client)
                 for _ in range(self._settings.max_concurrent_prompts_per_pod)
             ]
             await asyncio.gather(*tasks, return_exceptions=True)
 
-    @staticmethod
-    def _make_is_canceled(task: PromptTask) -> Callable[[], bool]:
-        return lambda: task.completed
-
     async def _process_loop(
         self,
-        worker_id: str,
+        pod_id: str,
         gpu_generation_sem: asyncio.Semaphore,
         r2: R2Client,
-        tracker: FailureTracker,
+        tracker: PodTracker,
         service_client: httpx.AsyncClient,
     ) -> None:
-        """Process prompts until queue empty, pod bad, or stopped."""
+        """Process prompts until all done, pod bad, or stopped."""
 
-        short_id = worker_id[len("miner-00-") :]
+        short_id = pod_id[len("miner-00-") :]
 
         while not self._stop.should_stop:
-            is_pod_bad, reason = tracker.is_pod_bad()
-            if is_pod_bad:
-                tracker.log_bad_pod_once(worker_id, reason)
-                break
+            terminate, reason = tracker.should_terminate()
+            if terminate:
+                tracker.mark_pod_bad(short_id, reason)
+                return
 
-            task = self._queue.get(worker_id=worker_id)
-            if task is None:
-                logger.debug(f"{short_id}: task queue exhausted")
-                break
+            if self._coordinator.mismatch_count >= 2 * self._settings.max_mismatched_prompts:
+                self._coordinator.log_mismatch_limit_once(short_id)
+                tracker.termination_reason = "mismatch limit"
+                return
 
-            async with aiofiles.open(task.prompt.path, "rb") as f:
-                image = await f.read()
+            allow_retry = tracker.should_accept_retries()
+            entry, is_retry = self._coordinator.assign(short_id, allow_retry=allow_retry)
 
-            stem = task.prompt.stem
-            prompt_log_id = f"{short_id} / {stem}"
-
-            result = await self._generate_render_upload(
-                image=image,
-                gpu_generation_sem=gpu_generation_sem,
-                r2=r2,
-                service_client=service_client,
-                stem=stem,
-                log_id=prompt_log_id,
-                is_canceled=self._make_is_canceled(task),
-            )
-
-            if result is None:
+            if entry is None:
+                if not self._coordinator.has_work(short_id, allow_retry=allow_retry):
+                    tracker.termination_reason = "no work available"
+                    logger.debug(f"{short_id}: no work available")
+                    return
+                if not await self._coordinator.wait_for_change(self._stop):
+                    return
                 continue
 
-            result.attempts = task.attempts
-
-            if task.submitted_png is not None and result.png is not None:
-                result.distance = await self._measure_distance(
-                    service_client, result.png, task.submitted_png, prompt_log_id
-                )
-
-            tracker.record(
-                success=not result.is_failed(),
-                generation_time=result.generation_time,
-                distance=result.distance,
+            await self._process_entry(
+                entry=entry,
+                short_id=short_id,
+                gpu_generation_sem=gpu_generation_sem,
+                r2=r2,
+                tracker=tracker,
+                service_client=service_client,
+                is_retry=is_retry,
             )
 
-            if not result.needs_retry(tracker.effective_timeout()):
-                self._queue.complete(task)
+    async def _process_entry(
+        self,
+        entry: PromptEntry,
+        short_id: str,
+        gpu_generation_sem: asyncio.Semaphore,
+        r2: R2Client,
+        tracker: PodTracker,
+        service_client: httpx.AsyncClient,
+        is_retry: bool,
+    ) -> None:
+        stem = entry.prompt.stem
+        log_id = f"{short_id} / {stem}"
 
-            await self._update_generations(stem, result)
+        async with aiofiles.open(entry.prompt.path, "rb") as f:
+            image = await f.read()
+
+        result = await self._generate_render_upload(
+            image=image,
+            gpu_generation_sem=gpu_generation_sem,
+            r2=r2,
+            service_client=service_client,
+            stem=stem,
+            log_id=log_id,
+            is_canceled=lambda: entry.done or self._stop.should_stop,
+        )
+
+        if result is None:
+            return  # Canceled. Lock expires on its own.
+
+        if entry.submitted_png is not None and result.png is not None:
+            result.distance = await self._measure_distance(service_client, result.png, entry.submitted_png, log_id)
+
+        original_time: float | None = None
+        if is_retry and entry.best_result is not None and not entry.best_result.is_failed():
+            original_time = entry.best_result.generation_time
+
+        tracker.record(
+            success=not result.is_failed(),
+            generation_time=result.generation_time,
+            is_retry=is_retry,
+            original_time=original_time,
+        )
+
+        updated = self._coordinator.record_result(short_id, stem, result)
+        if updated:
+            await save_generations(
+                git_batcher=self._git_batcher,
+                hotkey=self._hotkey,
+                round_num=self._current_round,
+                generations=self._coordinator.generations,
+                source=GenerationSource.GENERATED,
+            )
 
     async def _generate_render_upload(
         self,
@@ -202,27 +234,3 @@ class GenerationPipeline:
             logger.warning(f"{log_id}: failed to measure distance, accepting")
             return 0.0
         return measured
-
-    async def _update_generations(self, stem: str, result: GenerationResult) -> None:
-        """Update generations dict and save if a result is better than existing."""
-        existing = self._generations.get(stem)
-        existing_failed = existing is not None and (
-            existing.is_failed() or existing.distance > self._settings.acceptable_distance
-        )
-        updated_failed = result.is_failed() or result.distance > self._settings.acceptable_distance
-
-        should_update = (
-            existing is None
-            or existing_failed
-            or (not updated_failed and existing.generation_time > result.generation_time)
-        )
-
-        if should_update:
-            self._generations[stem] = result
-            await save_generations(
-                git_batcher=self._git_batcher,
-                hotkey=self._hotkey,
-                round_num=self._current_round,
-                generations=self._generations,
-                source=GenerationSource.GENERATED,
-            )

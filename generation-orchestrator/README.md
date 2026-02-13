@@ -18,7 +18,7 @@ Verifies miner submissions by regenerating 3D outputs using miner Docker images 
 
 4. **Multi-pod orchestration**: For each miner, deploy multiple GPU pods concurrently:
    - Start with initial pods, expand to the target count
-   - Work-stealing queue distributes prompts across pods
+   - Coordinator assigns prompts with per-pod locking and retries
    - Track failures per pod, replace bad pods
    - Cleanup pods after completion
 
@@ -43,6 +43,7 @@ Reads and writes to the competition Git repository:
 | `rounds/{n}/builds.json` | W | Docker build status per miner |
 | `rounds/{n}/generation_audits.json` | W | Audit results (pass/reject) |
 | `rounds/{n}/{hotkey}/generated.json` | W | Regenerated GLB/PNG locations |
+| `rounds/{n}/{hotkey}/pod_stats.json` | W | Per-pod generation stats and termination reasons |
 
 ## GPU Providers
 
