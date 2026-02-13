@@ -111,7 +111,7 @@ class Settings(BaseSettings):
         description="N: target concurrent PODs per miner (N=1 for testing only, N>=2 for production)",
     )
     max_pod_attempts: int = Field(
-        default=4,
+        default=6,
         alias="MAX_POD_ATTEMPTS",
         description="K: total POD start attempts budget (K >= N)",
     )
