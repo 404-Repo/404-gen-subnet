@@ -131,7 +131,7 @@ class Settings(BaseSettings):
         description="Max attempts per prompt across all PODs (must be <= pods_per_miner)",
     )
     prompt_lock_timeout_seconds: float = Field(
-        default=300.0,
+        default=600.0,
         alias="PROMPT_LOCK_TIMEOUT",
         description="Max seconds a prompt stays assigned to a pod before other pods can claim it",
     )
