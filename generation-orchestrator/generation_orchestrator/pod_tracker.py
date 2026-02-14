@@ -39,6 +39,10 @@ class PodTracker(BaseModel):
             self.hard_failed += 1
             return
 
+        if is_retry and original_time is not None:
+            self.retry_cumulative_delta += generation_time - original_time
+            self.retry_delta_count += 1
+
         if generation_time >= self.hard_limit:
             self.hard_overtime += 1
             return
@@ -47,10 +51,6 @@ class PodTracker(BaseModel):
 
         if not is_retry:
             self.performance_samples.append(generation_time)
-
-        if is_retry and original_time is not None:
-            self.retry_cumulative_delta += generation_time - original_time
-            self.retry_delta_count += 1
 
     def rolling_median_performance(self, window: int = 8) -> float | None:
         """Median of the last `window` performance samples."""
