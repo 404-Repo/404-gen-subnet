@@ -5,14 +5,15 @@ from loguru import logger
 from subnet_common.competition.audit_requests import AuditRequest
 from subnet_common.competition.generation_audit import GenerationAudit, GenerationAuditOutcome
 from subnet_common.competition.generations import GenerationResult, GenerationSource, get_generations
+from subnet_common.competition.pod_stats import PodStats, save_pod_stats
 from subnet_common.git_batcher import GitBatcher
 
-from generation_orchestrator.failure_tracker import FailureTracker
 from generation_orchestrator.generation_pipeline import GenerationPipeline
 from generation_orchestrator.generation_stop import GenerationStop
 from generation_orchestrator.gpu_provider import DeployedContainer, GPUProviderManager
 from generation_orchestrator.miner_audit import audit_generations
-from generation_orchestrator.prompt_queue import PromptQueue, PromptTask
+from generation_orchestrator.pod_tracker import PodTracker
+from generation_orchestrator.prompt_coordinator import PromptCoordinator, PromptEntry
 from generation_orchestrator.prompts import Prompt
 from generation_orchestrator.settings import Settings
 from generation_orchestrator.staggered_semaphore import StaggeredSemaphore
@@ -69,9 +70,16 @@ class MinerRunner:
         self._workers: dict[str, asyncio.Task[None]] = {}
         self._first_healthy = asyncio.Event()
 
-        self._queue = PromptQueue(log_id=self._log_id, max_attempts=settings.max_prompt_attempts)
-        self._generations: dict[str, GenerationResult] = {}
+        self._coordinator = PromptCoordinator(
+            max_attempts=settings.max_prompt_attempts,
+            lock_timeout=settings.prompt_lock_timeout_seconds,
+            acceptable_distance=settings.acceptable_distance,
+            median_limit=settings.generation_median_limit_seconds,
+            hard_limit=settings.generation_timeout_seconds,
+            median_trim_count=settings.generation_median_trim_count,
+        )
         self._submitted: dict[str, GenerationResult] = {}
+        self._pod_stats: dict[str, PodStats] = {}
 
     async def run(self) -> GenerationAudit | None:
         """
@@ -98,7 +106,7 @@ class MinerRunner:
             )
             self._submitted = {k: v for k, v in all_submitted.items() if not v.is_failed()}
 
-        self._generations = await get_generations(
+        generations = await get_generations(
             git=self._git_batcher.git,
             hotkey=self._hotkey,
             round_num=self._current_round,
@@ -106,16 +114,17 @@ class MinerRunner:
             ref=self._settings.github_branch,
         )
 
-        tasks = self._build_tasks()
-        if not tasks:
-            if self._audit_request is not None:
-                logger.info(f"{self._log_id}: no prompts to process ({len(self._submitted)} valid submissions)")
-            else:
-                logger.info(f"{self._log_id}: no prompts to process (all already generated)")
+        if self._audit_request is not None:
+            entries = self._audit_entries()
+        else:
+            entries = [PromptEntry(prompt=p) for p in self._prompts]
+
+        self._coordinator.seed(entries, generations)
+        if self._coordinator.all_done():
+            logger.info(f"{self._log_id}: all {len(self._coordinator)} prompts already done")
             return self._build_audit(_Verdict.COMPLETED)
 
-        self._queue.fill(tasks)
-        logger.info(f"{self._log_id}: {len(self._queue)} prompts to process")
+        logger.info(f"{self._log_id}: {len(self._coordinator)} prompts to process")
 
         try:
             await self._expand_pods(target=self._settings.initial_pod_count)
@@ -138,29 +147,14 @@ class MinerRunner:
         finally:
             await self._cleanup_all()
 
-    def _build_tasks(self) -> list[PromptTask]:
-        """Build task list from prompts."""
-        tasks: list[PromptTask] = []
-
+    def _audit_entries(self) -> list[PromptEntry]:
+        """Build entries for audit mode: only prompts with valid submissions."""
+        entries: list[PromptEntry] = []
         for prompt in self._prompts:
-            submitted_png: str | None = None
-
-            if self._audit_request is not None:
-                sub = self._submitted.get(prompt.stem)
-                if sub is None:
-                    continue
-                submitted_png = sub.png
-
-            existing = self._generations.get(prompt.stem)
-            if existing is None:
-                tasks.append(PromptTask(prompt=prompt, submitted_png=submitted_png, attempts=0))
-            elif existing.needs_retry(
-                timeout=self._settings.generation_median_limit_seconds,
-                max_attempts=self._settings.max_prompt_attempts,
-            ):
-                tasks.append(PromptTask(prompt=prompt, submitted_png=submitted_png, attempts=existing.attempts))
-
-        return tasks
+            sub = self._submitted.get(prompt.stem)
+            if sub is not None:
+                entries.append(PromptEntry(prompt=prompt, submitted_png=sub.png))
+        return entries
 
     def _build_audit(self, verdict: _Verdict) -> GenerationAudit | None:
         """Build audit result based on the verdict."""
@@ -181,7 +175,7 @@ class MinerRunner:
             hotkey=self._hotkey,
             audit_request=self._audit_request,
             submitted=self._submitted,
-            generations=self._generations,
+            generations=self._coordinator.generations,
             settings=self._settings,
         )
 
@@ -190,7 +184,7 @@ class MinerRunner:
         return (
             not self._stop.should_stop
             and self._pods_started < self._settings.max_pod_attempts
-            and not self._queue.empty()
+            and not self._coordinator.all_done()
         )
 
     async def _expand_pods(self, target: int) -> None:
@@ -215,13 +209,13 @@ class MinerRunner:
         idx = self._pods_started
         self._pods_started += 1
 
-        worker_id = f"{self._miner_prefix}-{idx}"
+        pod_id = f"{self._miner_prefix}-{idx}"
 
         task = asyncio.create_task(
-            self._worker_task(worker_id=worker_id, provider_start_index=idx),
-            name=worker_id,
+            self._worker_task(pod_id=pod_id, provider_start_index=idx),
+            name=pod_id,
         )
-        self._workers[worker_id] = task
+        self._workers[pod_id] = task
 
     async def _wait_for_first_healthy_or_all_failed(self) -> None:
         """Block until at least one pod is healthy or all workers have exited."""
@@ -245,7 +239,7 @@ class MinerRunner:
             done, _ = await asyncio.wait(self._workers.values(), return_when=asyncio.FIRST_COMPLETED)
             self._reap_workers(done)
 
-            if self._queue.empty() and self._workers:
+            if self._coordinator.all_done() and self._workers:
                 self._stop.cancel("no_tasks")
                 break
 
@@ -259,45 +253,45 @@ class MinerRunner:
     def _reap_workers(self, done: set[asyncio.Task]) -> None:
         """Remove completed workers and log any errors."""
         for task in done:
-            worker_id = task.get_name()
-            self._workers.pop(worker_id, None)
+            pod_id = task.get_name()
+            self._workers.pop(pod_id, None)
             try:
                 task.result()
-                logger.debug(f"{self._log_id}: worker {worker_id} finished")
+                logger.debug(f"{self._log_id}: worker {pod_id} finished")
             except Exception as e:
-                logger.exception(f"{self._log_id}: worker {worker_id} crashed with {e}")
+                logger.exception(f"{self._log_id}: worker {pod_id} crashed with {e}")
 
     def _determine_verdict(self) -> _Verdict:
         """Determine a final verdict based on queue and stop state."""
-        if self._queue.empty():
+        if self._coordinator.all_done():
             return _Verdict.COMPLETED
         if self._stop.should_stop:
             return _Verdict.PARTIAL
         return _Verdict.EARLY_STOP
 
-    async def _worker_task(self, worker_id: str, provider_start_index: int) -> None:
+    async def _worker_task(self, pod_id: str, provider_start_index: int) -> None:
         """Worker lifecycle: deploy pod, process prompts, cleanup."""
-        deployed = await self._deploy_and_wait_healthy(worker_id, provider_start_index)
+        deployed = await self._deploy_and_wait_healthy(pod_id, provider_start_index)
         if deployed is None:
             return
 
         self._first_healthy.set()
 
         try:
-            tracker = FailureTracker(
+            tracker = PodTracker(
                 min_samples=self._settings.pod_min_samples,
                 failure_threshold=self._settings.pod_failure_threshold,
-                median_limit=self._settings.generation_median_limit_seconds,
+                warmup_half_window=self._settings.warmup_half_window,
+                rolling_median_limit=self._settings.rolling_median_limit_seconds,
                 hard_limit=self._settings.generation_timeout_seconds,
-                acceptable_distance=self._settings.acceptable_distance,
+                retry_delta_min_samples=self._settings.retry_delta_min_samples,
             )
 
             pipeline = GenerationPipeline(
                 settings=self._settings,
                 pod_endpoint=deployed.info.url,
                 generation_token=deployed.generation_token,
-                queue=self._queue,
-                generations=self._generations,
+                coordinator=self._coordinator,
                 git_batcher=self._git_batcher,
                 hotkey=self._hotkey,
                 current_round=self._current_round,
@@ -305,21 +299,28 @@ class MinerRunner:
                 stop=self._stop,
             )
 
-            await pipeline.run(worker_id=worker_id, tracker=tracker)
+            await pipeline.run(pod_id=pod_id, tracker=tracker)
         finally:
+            self._pod_stats[pod_id] = tracker.to_stats(pod_id=pod_id)
+            await save_pod_stats(
+                git_batcher=self._git_batcher,
+                round_num=self._current_round,
+                hotkey=self._hotkey,
+                stats=self._pod_stats,
+            )
             if not self._settings.debug_keep_pods_alive:
                 await self._gpu_manager.delete_container(deployed.info)
 
     async def _deploy_and_wait_healthy(
         self,
-        worker_id: str,
+        pod_id: str,
         provider_start_index: int,
     ) -> DeployedContainer | None:
         """Deploy a pod and wait for it to become healthy."""
-        logger.debug(f"{worker_id}: deploying with provider_start_index={provider_start_index}")
+        logger.debug(f"{pod_id}: deploying with provider_start_index={provider_start_index}")
 
         deployed = await self._gpu_manager.get_healthy_pod(
-            name=worker_id,
+            name=pod_id,
             image=self._docker_image,
             gpu_type="H200",
             stop=self._stop,
@@ -328,10 +329,10 @@ class MinerRunner:
 
         if deployed is None:
             if not self._stop.should_stop:
-                logger.warning(f"{worker_id}: failed to get healthy pod")
+                logger.warning(f"{pod_id}: failed to get healthy pod")
             return None
 
-        logger.info(f"{worker_id}: pod healthy at {deployed.info.url}")
+        logger.info(f"{pod_id}: pod healthy at {deployed.info.url}")
         return deployed
 
     async def _cleanup_all(self) -> None:

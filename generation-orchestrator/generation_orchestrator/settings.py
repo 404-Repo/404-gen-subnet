@@ -111,7 +111,7 @@ class Settings(BaseSettings):
         description="N: target concurrent PODs per miner (N=1 for testing only, N>=2 for production)",
     )
     max_pod_attempts: int = Field(
-        default=4,
+        default=6,
         alias="MAX_POD_ATTEMPTS",
         description="K: total POD start attempts budget (K >= N)",
     )
@@ -126,9 +126,14 @@ class Settings(BaseSettings):
         description="Delay between POD starts",
     )
     max_prompt_attempts: int = Field(
-        default=4,
+        default=3,
         alias="MAX_PROMPT_ATTEMPTS",
         description="Max attempts per prompt across all PODs (must be <= pods_per_miner)",
+    )
+    prompt_lock_timeout_seconds: float = Field(
+        default=600.0,
+        alias="PROMPT_LOCK_TIMEOUT",
+        description="Max seconds a prompt stays assigned to a pod before other pods can claim it",
     )
     pod_min_samples: int = Field(
         default=8,
@@ -138,12 +143,27 @@ class Settings(BaseSettings):
     pod_failure_threshold: int = Field(
         default=8,
         alias="POD_FAILURE_THRESHOLD",
-        description="Mark POD as bad after this many failures",
+        description="Mark POD as bad after this many hard failures",
+    )
+    warmup_half_window: int = Field(
+        default=4,
+        alias="WARMUP_HALF_WINDOW",
+        description="Half-window size for warmup trend detection (compares median of last N vs previous N)",
     )
     generation_median_limit_seconds: float = Field(
         default=90.0,
         alias="GENERATION_MEDIAN_LIMIT",
-        description="Soft limit for trimmed median generation time (marks pod as slow if exceeded)",
+        description="Quality bar for trimmed median generation time",
+    )
+    rolling_median_limit_seconds: float = Field(
+        default=120.0,
+        alias="ROLLING_MEDIAN_LIMIT",
+        description="Infrastructure bar for rolling median (marks pod as bad if exceeded)",
+    )
+    retry_delta_min_samples: int = Field(
+        default=3,
+        alias="RETRY_DELTA_MIN_SAMPLES",
+        description="Minimum retry samples before checking if retries are helping",
     )
     generation_median_trim_count: int = Field(
         default=6,

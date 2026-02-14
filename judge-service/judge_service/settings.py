@@ -44,7 +44,7 @@ class Settings(BaseSettings):
     )
 
     overtime_tolerance_ratio: float = Field(
-        default=0.1,
+        default=0.05,
         alias="OVERTIME_TOLERANCE_RATIO",
         description="Ratio of overtime prompts allowed before penalization (e.g., 0.1 = first 10% are not penalized)",
     )
