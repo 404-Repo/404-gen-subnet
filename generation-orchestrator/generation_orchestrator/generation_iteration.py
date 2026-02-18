@@ -22,11 +22,11 @@ from generation_orchestrator.generation_stop import GenerationStop, GenerationSt
 from generation_orchestrator.gpu_provider import GPUProviderManager
 from generation_orchestrator.miner_runner import run_miner
 from generation_orchestrator.prompts import Prompt, ensure_prompts_cached_from_git
-from generation_orchestrator.settings import settings
+from generation_orchestrator.settings import Settings
 from generation_orchestrator.staggered_semaphore import StaggeredSemaphore
 
 
-async def run_generation_iteration(shutdown: GracefulShutdown) -> datetime | None:
+async def run_generation_iteration(settings: Settings, shutdown: GracefulShutdown) -> datetime | None:
     """Run one generation iteration.
 
     Orchestrates three concurrent tasks:
@@ -55,6 +55,7 @@ async def run_generation_iteration(shutdown: GracefulShutdown) -> datetime | Non
 
         try:
             await _run_generation(
+                settings=settings,
                 git=git,
                 state=state,
                 submissions=submissions,
@@ -70,6 +71,7 @@ async def run_generation_iteration(shutdown: GracefulShutdown) -> datetime | Non
 
 
 async def _run_generation(
+    settings: Settings,
     git: GitHubClient,
     state: CompetitionState,
     submissions: dict[str, MinerSubmission],
@@ -111,6 +113,7 @@ async def _run_generation(
         tg.create_task(_cancel_on_shutdown(shutdown=shutdown, stop_manager=stop_manager))
         tg.create_task(
             _generate_leader(
+                settings=settings,
                 git_batcher=git_batcher,
                 gpu_manager=gpu_manager,
                 semaphore=semaphore,
@@ -123,6 +126,7 @@ async def _run_generation(
         tg.create_task(build_tracker.track(round_num=state.current_round, submissions=submissions))
         tg.create_task(
             _generate_for_audits(
+                settings=settings,
                 gpu_manager=gpu_manager,
                 git_batcher=git_batcher,
                 build_tracker=build_tracker,
@@ -144,6 +148,7 @@ async def _cancel_on_shutdown(shutdown: GracefulShutdown, stop_manager: Generati
 
 
 async def _generate_leader(
+    settings: Settings,
     git_batcher: GitBatcher,
     gpu_manager: GPUProviderManager,
     semaphore: StaggeredSemaphore,
@@ -179,6 +184,7 @@ async def _generate_leader(
 
 
 async def _generate_for_audits(
+    settings: Settings,
     gpu_manager: GPUProviderManager,
     git_batcher: GitBatcher,
     build_tracker: BuildTracker,
@@ -237,6 +243,7 @@ async def _generate_for_audits(
                 continue
             hotkey_tasks[hotkey] = asyncio.create_task(
                 _generate_for_audit(
+                    settings=settings,
                     semaphore=semaphore,
                     gpu_manager=gpu_manager,
                     git_batcher=git_batcher,
@@ -258,6 +265,7 @@ async def _generate_for_audits(
 
 
 async def _generate_for_audit(
+    settings: Settings,
     semaphore: StaggeredSemaphore,
     gpu_manager: GPUProviderManager,
     git_batcher: GitBatcher,

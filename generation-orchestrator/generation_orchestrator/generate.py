@@ -5,8 +5,6 @@ import httpx
 from loguru import logger
 from pydantic import BaseModel
 
-from generation_orchestrator.settings import settings
-
 
 class GenerationResponse(BaseModel):
     success: bool = False
@@ -20,6 +18,8 @@ async def generate(
     image: bytes,
     seed: int,
     log_id: str,
+    generation_timeout: float,
+    download_timeout: float,
     auth_token: str | None = None,
     is_canceled: Callable[[], bool] | None = None,
 ) -> GenerationResponse | None:
@@ -35,7 +35,7 @@ async def generate(
     timeout = httpx.Timeout(
         connect=30.0,
         write=30.0,
-        read=settings.generation_timeout_seconds + settings.download_timeout_seconds,
+        read=generation_timeout + download_timeout,
         pool=30.0,
     )
 

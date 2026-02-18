@@ -180,6 +180,8 @@ class GenerationPipeline:
             image=image,
             seed=self._seed,
             log_id=log_id,
+            generation_timeout=self._settings.generation_timeout_seconds,
+            download_timeout=self._settings.download_timeout_seconds,
             auth_token=self._generation_token,
             is_canceled=is_canceled,
         )
