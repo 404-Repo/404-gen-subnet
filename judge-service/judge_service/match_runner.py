@@ -169,14 +169,14 @@ class MatchRunner:
     async def run(self, shutdown: GracefulShutdown) -> None:
         """Main loop: qualification → timelines → finalize."""
         if not self._hotkeys:
-            await self._transition_to_next_stage(reason="No submissions found")
+            await self._finalize(winner="leader", reason="No submissions found")
             return
 
         await self._refresh_verification_state()
         self._hotkeys = self._filter_rejected(self._hotkeys)
 
         if not self._hotkeys:
-            await self._transition_to_next_stage(reason="All submissions rejected")
+            await self._finalize(winner="leader", reason="All submissions rejected")
             return
 
         qualified = await self._run_qualification(shutdown)
@@ -184,7 +184,7 @@ class MatchRunner:
 
         while not shutdown.should_stop:
             if not qualified:
-                await self._transition_to_next_stage(reason="No qualified submissions")
+                await self._finalize(winner="leader", reason="No qualified submissions")
                 return
 
             if self._timeline.is_rejected(self._rejected_hotkeys):
@@ -211,6 +211,8 @@ class MatchRunner:
             if refresh_needed:
                 await self._refresh_verification_state()
                 qualified = self._filter_rejected(qualified)
+
+        await self._git_batcher.flush()
 
     async def _run_qualification(self, shutdown: GracefulShutdown) -> list[str]:
         """Run all miners against the base leader. Request audit for the first qualified."""
@@ -286,13 +288,19 @@ class MatchRunner:
             )
 
         match = await self._run_match_between(left=left, right=right, shutdown=shutdown)
+
+        if shutdown.should_stop:
+            return match
+
         self._match_matrix.add(left, right, match.margin)
         await save_match_matrix(self._git_batcher, self._round_num, self._match_matrix)
         return match
 
     async def _load_decisive_prompts(self, left: str, right: str) -> list[str]:
         """Load decisive prompts from a saved match report."""
-        report = await get_match_report(git=self._git, round_num=self._round_num, left=left, right=right, ref=self._ref)
+        report = await get_match_report(
+            git_batcher=self._git_batcher, round_num=self._round_num, left=left, right=right
+        )
         if report is None:
             return []
         return self._extract_decisive_prompts(report)
@@ -344,6 +352,10 @@ class MatchRunner:
             max_generation_time_seconds=self._settings.max_generation_time_seconds,
             shutdown=shutdown,
         )
+
+        if shutdown.should_stop:
+            logger.info(f"Match {left[:10]} vs {right[:10]} interrupted by shutdown, discarding partial result")
+            return MatchOutcome(left=left, right=right, margin=0.0)
 
         await save_match_report(self._git_batcher, self._round_num, report)
 
@@ -400,13 +412,16 @@ class MatchRunner:
         return [hk for hk in hotkeys if hk not in self._rejected_hotkeys]
 
     def _extract_decisive_prompts(self, report: MatchReport) -> list[str]:
-        """Extract decisive/critical prompts that need verification.
+        """Identify pivotal prompts that require strict audit verification.
 
-        Logic based on margin thresholds:
-        - Margin >= (overtime_tolerance + win_margin): No prompts need verification
-          (even with full fault tolerance, the margin remains above a win threshold)
-        - Margin <= win_margin: All right-winning prompts are decisive
-        - Margin in between: Randomly select win_margin of total prompts
+        All generations are re-checked during audit, but up to max_mismatched_margin
+        mismatches are tolerated when they are not pivotal. Pivotal prompts are held
+        to a stricter standard.
+
+        If the margin is large enough (>= max_mismatched_margin + win_margin), even
+        the tolerant standard check is enough — no pivotal prompts are flagged.
+        Otherwise we flag right-winning prompts as pivotal: all of them when there
+        are few, or a random subset proportional to win_margin when there are many.
         """
         full_tolerance_margin = self._settings.max_mismatched_margin + self._win_margin
         if report.margin >= full_tolerance_margin:
@@ -454,7 +469,7 @@ class MatchRunner:
             docker_image=leader.docker,
         )
 
-    async def _finalize(self, winner: str) -> None:
+    async def _finalize(self, winner: str, reason: str | None = None) -> None:
         result = await self._resolve_winner(winner)
         await save_round_result(self._git_batcher, self._round_num, result)
-        await self._transition_to_next_stage(reason=f"Winner {result.winner_hotkey[:10]}")
+        await self._transition_to_next_stage(reason=reason or f"Winner {result.winner_hotkey[:10]}")

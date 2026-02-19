@@ -6,7 +6,10 @@ from subnet_common.graceful_shutdown import GracefulShutdown
 from subnet_common.utils import format_duration
 
 from judge_service.judge_iteration import run_judge_iteration
-from judge_service.settings import settings
+from judge_service.settings import Settings
+
+
+settings = Settings()  # type: ignore[call-arg]
 
 
 def setup_logging(log_level: str) -> None:
