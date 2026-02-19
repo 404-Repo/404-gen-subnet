@@ -8,7 +8,7 @@ from subnet_common.graceful_shutdown import (
 from subnet_common.utils import calculate_wait_time, format_duration
 
 from generation_orchestrator.generation_iteration import run_generation_iteration
-from generation_orchestrator.settings import settings
+from generation_orchestrator.settings import Settings
 
 
 def setup_logging(log_level: str) -> None:
@@ -25,6 +25,7 @@ def setup_logging(log_level: str) -> None:
 
 
 async def main() -> None:
+    settings = Settings()  # type: ignore[call-arg]
     setup_logging(log_level=settings.log_level)
 
     shutdown = GracefulShutdown()
@@ -35,7 +36,7 @@ async def main() -> None:
     while not shutdown.should_stop:
         next_stage_eta = None
         try:
-            next_stage_eta = await run_generation_iteration(shutdown)
+            next_stage_eta = await run_generation_iteration(settings, shutdown)
         except asyncio.CancelledError:
             break
         except Exception as e:
