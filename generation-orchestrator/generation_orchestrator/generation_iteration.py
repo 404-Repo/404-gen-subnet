@@ -108,7 +108,7 @@ async def _run_generation(
     # - Leader: generates baseline models (~2h, resumable)
     # - Build watcher: tracks miner Docker builds, updates `builds` dict
     # - Miner generator: processes generation requests, skips unready builds
-    # - Shutdown watcher: cancels all generation stops
+    # - Shutdown watcher: cancels all generation stops on shutdown or stage change
     async with asyncio.TaskGroup() as tg:
         tg.create_task(_cancel_on_shutdown(shutdown=shutdown, stop_manager=stop_manager))
         tg.create_task(
@@ -143,8 +143,16 @@ async def _run_generation(
 
 
 async def _cancel_on_shutdown(shutdown: GracefulShutdown, stop_manager: GenerationStopManager) -> None:
-    await shutdown.wait()
-    stop_manager.cancel_all("service shutdown")
+    stop = stop_manager.new_stop()
+    shutdown_task = asyncio.create_task(shutdown.wait())
+    stop_task = asyncio.create_task(stop.wait())
+    try:
+        await asyncio.wait([shutdown_task, stop_task], return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        shutdown_task.cancel()
+        stop_task.cancel()
+    if shutdown.should_stop:
+        stop_manager.cancel_all("service shutdown")
 
 
 async def _generate_leader(
