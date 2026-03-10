@@ -214,9 +214,18 @@ async def _generate_for_audits(
     hotkey_tasks: dict[str, asyncio.Task[GenerationAudit | None]] = {}
 
     while not shutdown.should_stop:
-        await git_batcher.refresh_base_sha()
+        try:
+            await git_batcher.refresh_base_sha()
+            state = await require_state(git=git_batcher.git, ref=git_batcher.base_sha)
+            audit_requests = await get_audit_requests(
+                git=git_batcher.git, round_num=round_num, ref=git_batcher.base_sha
+            )
+            # TODO: read source audits and cancel generation if needed
+        except Exception as e:
+            logger.warning(f"Failed to refresh state: {e}")
+            await shutdown.wait(timeout=settings.check_audit_interval_seconds)
+            continue
 
-        state = await require_state(git=git_batcher.git, ref=git_batcher.base_sha)
         if state.stage not in {RoundStage.MINER_GENERATION, RoundStage.DOWNLOADING, RoundStage.DUELS}:
             stop_manager.cancel_all(reason="round stage change")
             break
@@ -236,10 +245,7 @@ async def _generate_for_audits(
                 del hotkey_tasks[hotkey]
 
         # Find new work
-        audit_requests = await get_audit_requests(git=git_batcher.git, round_num=round_num, ref=git_batcher.base_sha)
         new_hotkeys = audit_requests.hotkeys - processed
-
-        # TODO: read source audits and cancel generation if needed
 
         for hotkey in new_hotkeys:
             stop = stop_manager.new_stop()
@@ -267,9 +273,15 @@ async def _generate_for_audits(
 
         await shutdown.wait(timeout=settings.check_audit_interval_seconds)
 
-    # Wait for remaining tasks and collect their results
-    for task in hotkey_tasks.values():
-        await task
+    # Wait for remaining tasks; on cancellation, cancel them to prevent outliving the git client
+    try:
+        for task in hotkey_tasks.values():
+            await task
+    except asyncio.CancelledError:
+        for task in hotkey_tasks.values():
+            task.cancel()
+        await asyncio.gather(*hotkey_tasks.values(), return_exceptions=True)
+        raise
 
 
 async def _generate_for_audit(

@@ -135,7 +135,11 @@ class BuildTracker:
 
     async def _fetch_build_jobs(self, run_id: int) -> dict[str, GitHubJob]:
         """Fetch build jobs keyed by miner hotkey."""
-        jobs = await self._git_batcher.git.get_jobs(run_id=run_id)
+        try:
+            jobs = await self._git_batcher.git.get_jobs(run_id=run_id)
+        except Exception as e:
+            logger.warning(f"Failed to fetch build jobs: {e}")
+            return {}
         return {hotkey: job for job in jobs if (hotkey := _parse_hotkey(job_name=job.name))}
 
     def _sync_build_statuses(self, jobs: dict[str, GitHubJob]) -> set[str]:
