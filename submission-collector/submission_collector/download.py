@@ -47,7 +47,7 @@ class DownloadPipeline:
         random.shuffle(hotkeys)
         logger.info(f"Processing {len(hotkeys)} submissions × {len(prompts)} prompts")
 
-        await asyncio.gather(
+        results = await asyncio.gather(
             *[
                 self._download_submission(
                     hotkey=hotkey,
@@ -60,6 +60,9 @@ class DownloadPipeline:
             ],
             return_exceptions=True,
         )
+        for hotkey, result in zip(hotkeys, results):
+            if isinstance(result, BaseException):
+                logger.error(f"{hotkey[:10]}: download failed: {result}")
 
     async def _download_submission(
         self,
@@ -96,7 +99,10 @@ class DownloadPipeline:
             )
             for prompt in prompts_to_process
         ]
-        await asyncio.gather(*tasks)
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for prompt, result in zip(prompts_to_process, results):
+            if isinstance(result, BaseException):
+                logger.error(f"{hotkey[:10]} / {prompt}: fetch failed: {result}")
 
     async def _fetch_render_upload(
         self,
@@ -155,16 +161,13 @@ class DownloadPipeline:
             logger.warning(f"{log_id}: failed with {e}")
             generations[prompt] = GenerationResult()
 
-        try:
-            await save_generations(
-                git_batcher=self.git_batcher,
-                round_num=round_num,
-                hotkey=hotkey,
-                source=GenerationSource.SUBMITTED,
-                generations=generations,
-            )
-        except Exception as e:
-            logger.error(f"{log_id}: failed to save progress: {e}")
+        await save_generations(
+            git_batcher=self.git_batcher,
+            round_num=round_num,
+            hotkey=hotkey,
+            source=GenerationSource.SUBMITTED,
+            generations=generations,
+        )
 
 
 async def _upload_to_r2(r2: R2Client, key: str, data: bytes, content_type: str, log_id: str, cdn_url: str) -> str:
