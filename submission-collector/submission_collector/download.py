@@ -57,7 +57,8 @@ class DownloadPipeline:
                     ref=ref,
                 )
                 for hotkey in hotkeys
-            ]
+            ],
+            return_exceptions=True,
         )
 
     async def _download_submission(
@@ -154,13 +155,16 @@ class DownloadPipeline:
             logger.warning(f"{log_id}: failed with {e}")
             generations[prompt] = GenerationResult()
 
-        await save_generations(
-            git_batcher=self.git_batcher,
-            round_num=round_num,
-            hotkey=hotkey,
-            source=GenerationSource.SUBMITTED,
-            generations=generations,
-        )
+        try:
+            await save_generations(
+                git_batcher=self.git_batcher,
+                round_num=round_num,
+                hotkey=hotkey,
+                source=GenerationSource.SUBMITTED,
+                generations=generations,
+            )
+        except Exception as e:
+            logger.error(f"{log_id}: failed to save progress: {e}")
 
 
 async def _upload_to_r2(r2: R2Client, key: str, data: bytes, content_type: str, log_id: str, cdn_url: str) -> str:
