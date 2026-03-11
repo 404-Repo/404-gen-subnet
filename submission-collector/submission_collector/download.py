@@ -47,7 +47,7 @@ class DownloadPipeline:
         random.shuffle(hotkeys)
         logger.info(f"Processing {len(hotkeys)} submissions × {len(prompts)} prompts")
 
-        await asyncio.gather(
+        results = await asyncio.gather(
             *[
                 self._download_submission(
                     hotkey=hotkey,
@@ -57,8 +57,12 @@ class DownloadPipeline:
                     ref=ref,
                 )
                 for hotkey in hotkeys
-            ]
+            ],
+            return_exceptions=True,
         )
+        for hotkey, result in zip(hotkeys, results):
+            if isinstance(result, BaseException):
+                logger.error(f"{hotkey[:10]}: download failed: {result}")
 
     async def _download_submission(
         self,
@@ -95,7 +99,10 @@ class DownloadPipeline:
             )
             for prompt in prompts_to_process
         ]
-        await asyncio.gather(*tasks)
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for prompt, result in zip(prompts_to_process, results):
+            if isinstance(result, BaseException):
+                logger.error(f"{hotkey[:10]} / {prompt}: fetch failed: {result}")
 
     async def _fetch_render_upload(
         self,

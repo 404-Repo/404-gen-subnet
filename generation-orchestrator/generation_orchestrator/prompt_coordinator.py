@@ -217,7 +217,7 @@ class PromptCoordinator:
         return statistics.median(times)
 
     def _effective_time(self, entry: PromptEntry) -> float:
-        """Generation time capped at hard_limit. Failures and missing treated as hard_limit."""
+        """Generation time capped at hard_limit. Failures and missing are treated as hard_limit."""
         r = entry.best_result
         if r is None or r.is_failed():
             return self._hard_limit
