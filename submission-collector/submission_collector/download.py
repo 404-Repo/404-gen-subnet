@@ -4,7 +4,13 @@ from pathlib import Path
 
 import httpx
 from loguru import logger
-from subnet_common.competition.generations import GenerationResult, GenerationSource, get_generations, save_generations
+from subnet_common.competition.generations import (
+    GenerationResult,
+    GenerationsMap,
+    GenerationSource,
+    get_generations,
+    save_generations,
+)
 from subnet_common.competition.prompts import require_prompts
 from subnet_common.competition.state import CompetitionState
 from subnet_common.competition.submissions import MinerSubmission, require_submissions
@@ -32,12 +38,14 @@ class DownloadPipeline:
         self.settings = settings
         self.semaphore = asyncio.Semaphore(settings.max_concurrent_downloads)
 
-    async def run(self, state: CompetitionState, ref: str) -> None:
+    async def run(self, state: CompetitionState, ref: str) -> dict[str, GenerationsMap]:
         """Download generated files from miner CDNs, render previews, and upload to R2.
 
         Processes submissions in random order to avoid bias.
         Supports resume - skips already completed generations.
         Saves progress after each generation for crash recovery.
+
+        Returns hotkey → prompt → GenerationResult for all miners.
         """
         submissions = await require_submissions(git=self.git_batcher.git, round_num=state.current_round, ref=ref)
         prompt_urls = await require_prompts(git=self.git_batcher.git, round_num=state.current_round, ref=ref)
@@ -47,7 +55,7 @@ class DownloadPipeline:
         random.shuffle(hotkeys)
         logger.info(f"Processing {len(hotkeys)} submissions × {len(prompts)} prompts")
 
-        results = await asyncio.gather(
+        raw_results = await asyncio.gather(
             *[
                 self._download_submission(
                     hotkey=hotkey,
@@ -60,9 +68,13 @@ class DownloadPipeline:
             ],
             return_exceptions=True,
         )
-        for hotkey, result in zip(hotkeys, results):
+        generations_by_hotkey: dict[str, GenerationsMap] = {}
+        for hotkey, result in zip(hotkeys, raw_results, strict=True):
             if isinstance(result, BaseException):
                 logger.error(f"{hotkey[:10]}: download failed: {result}")
+            else:
+                generations_by_hotkey[hotkey] = result
+        return generations_by_hotkey
 
     async def _download_submission(
         self,
@@ -71,8 +83,11 @@ class DownloadPipeline:
         prompts: list[str],
         round_num: int,
         ref: str,
-    ) -> None:
-        """Download all outputs for one miner, saving progress after each prompt."""
+    ) -> GenerationsMap:
+        """Download all outputs for one miner, saving progress after each prompt.
+
+        Returns the final prompt → GenerationResult dict for this miner.
+        """
         generations = await get_generations(
             git=self.git_batcher.git,
             round_num=round_num,
@@ -85,7 +100,7 @@ class DownloadPipeline:
 
         if not prompts_to_process:
             logger.info(f"Skipping {hotkey[:10]}: all prompts complete")
-            return
+            return generations
 
         logger.info(f"Processing {len(prompts_to_process)}/{len(prompts)} prompts for {hotkey[:10]}")
 
@@ -100,9 +115,10 @@ class DownloadPipeline:
             for prompt in prompts_to_process
         ]
         results = await asyncio.gather(*tasks, return_exceptions=True)
-        for prompt, result in zip(prompts_to_process, results):
+        for prompt, result in zip(prompts_to_process, results, strict=True):
             if isinstance(result, BaseException):
                 logger.error(f"{hotkey[:10]} / {prompt}: fetch failed: {result}")
+        return generations
 
     async def _fetch_render_upload(
         self,
@@ -110,7 +126,7 @@ class DownloadPipeline:
         submission: MinerSubmission,
         prompt: str,
         round_num: int,
-        generations: dict[str, GenerationResult],
+        generations: GenerationsMap,
     ) -> None:
         """Fetch GLB from miner CDN, render PNG, upload both to R2, save progress.
 

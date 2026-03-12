@@ -6,6 +6,7 @@ from subnet_common.graceful_shutdown import GracefulShutdown
 from subnet_common.utils import calculate_wait_time, format_duration
 
 from submission_collector.collection_iteration import run_collection_iteration
+from submission_collector.discord import DiscordNotifier
 from submission_collector.settings import Settings
 
 
@@ -31,17 +32,21 @@ async def main() -> None:
     shutdown = GracefulShutdown()
     shutdown.setup_signal_handlers()
 
+    discord = DiscordNotifier(settings.discord_webhook_url) if settings.discord_webhook_url else None
+
     logger.info("Submission collector started")
     logger.info(f"Network: {settings.network}, NetUID: {settings.netuid}")
 
     while not shutdown.should_stop:
         next_stage_eta = None
         try:
-            next_stage_eta = await run_collection_iteration(settings)
+            next_stage_eta = await run_collection_iteration(settings, discord=discord)
         except asyncio.CancelledError:
             break
         except Exception as e:
             logger.exception(f"Collection cycle failed: {e}")
+            if discord:
+                await discord.notify_cycle_error(e)
 
         wait_seconds = calculate_wait_time(
             eta=next_stage_eta,
