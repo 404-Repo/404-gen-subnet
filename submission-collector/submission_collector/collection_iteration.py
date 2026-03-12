@@ -14,7 +14,7 @@ from subnet_common.git_batcher import GitBatcher
 from subnet_common.github import GitHubClient
 from subnet_common.r2_client import R2Client
 
-from submission_collector.discord import DiscordNotifier
+from submission_collector.discord import NULL_DISCORD_NOTIFIER, DiscordNotifier
 from submission_collector.download import DownloadPipeline
 from submission_collector.prompts import select_prompts
 from submission_collector.settings import Settings
@@ -31,7 +31,9 @@ SECONDS_PER_BLOCK = 12
 """Average block time on Bittensor network."""
 
 
-async def run_collection_iteration(settings: Settings, discord: DiscordNotifier | None = None) -> datetime | None:
+async def run_collection_iteration(
+    settings: Settings, discord: DiscordNotifier = NULL_DISCORD_NOTIFIER
+) -> datetime | None:
     """Entry point: creates I/O dependencies and delegates to collection_iteration."""
     async with bt.async_subtensor(network=settings.network) as subtensor:
 
@@ -54,7 +56,9 @@ async def run_collection_iteration(settings: Settings, discord: DiscordNotifier 
                 ) as r2,
                 httpx.AsyncClient(timeout=httpx.Timeout(60, connect=10)) as http_client,
             ):
-                pipeline = DownloadPipeline(git_batcher=git_batcher, r2=r2, http_client=http_client, settings=settings)
+                pipeline = DownloadPipeline(
+                    git_batcher=git_batcher, r2=r2, http_client=http_client, settings=settings, discord=discord
+                )
                 return await pipeline.run(state=state, ref=ref)
 
         async with GitHubClient(
@@ -77,7 +81,7 @@ async def collection_iteration(
     get_commitments: Callable[[], Awaitable[dict]],
     download_fn: DownloadFn,
     settings: Settings,
-    discord: DiscordNotifier | None = None,
+    discord: DiscordNotifier = NULL_DISCORD_NOTIFIER,
 ) -> datetime | None:
     """Run one submission-collector iteration.
 
@@ -150,7 +154,7 @@ async def _collect_submissions(
     get_block: Callable[[], Awaitable[int]],
     get_commitments: Callable[[], Awaitable[dict]],
     settings: Settings,
-    discord: DiscordNotifier | None = None,
+    discord: DiscordNotifier = NULL_DISCORD_NOTIFIER,
 ) -> datetime | None:
     """Collect miner submissions from a chain after a reveal window closes.
 
@@ -175,8 +179,7 @@ async def _collect_submissions(
 
     if not submissions:
         await _transition_stage(git=git, state=state, ref=ref, settings=settings, stage=RoundStage.FINALIZING)
-        if discord:
-            await discord.notify_no_submissions(state.current_round)
+        await discord.notify_no_submissions(state.current_round)
         return None
 
     seed = secrets.randbits(32)
@@ -200,12 +203,14 @@ async def _collect_submissions(
         branch=settings.github_branch,
     )
 
-    if discord:
-        await discord.notify_submissions_collected(
-            round_num=state.current_round,
-            submission_count=len(submissions),
-            generation_deadline=state.next_stage_eta,
-        )
+    base_url = f"https://github.com/{settings.github_repo}/blob/{settings.github_branch}"
+    await discord.notify_submissions_collected(
+        round_num=state.current_round,
+        submission_count=len(submissions),
+        generation_deadline=state.next_stage_eta,
+        prompts_url=f"{base_url}/{round_dir}/prompts.txt",
+        seed_url=f"{base_url}/{round_dir}/seed.json",
+    )
 
     return state.next_stage_eta
 
@@ -238,7 +243,7 @@ async def _handle_downloading(
     ref: str,
     download_fn: DownloadFn,
     settings: Settings,
-    discord: DiscordNotifier | None = None,
+    discord: DiscordNotifier = NULL_DISCORD_NOTIFIER,
 ) -> None:
     """Run the download pipeline and transition to DUELS."""
     git_batcher = GitBatcher(git=git, base_sha=ref, branch=settings.github_branch)
@@ -252,8 +257,7 @@ async def _handle_downloading(
     )
     await git_batcher.flush()
 
-    if discord:
-        await discord.notify_downloads_complete(round_num=state.current_round, results=results)
+    await discord.notify_downloads_complete(round_num=state.current_round, results=results)
 
 
 async def _read_submissions_from_chain(

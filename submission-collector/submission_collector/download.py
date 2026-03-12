@@ -19,6 +19,7 @@ from subnet_common.r2_client import R2Client
 from subnet_common.render import render
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_fixed
 
+from submission_collector.discord import NULL_DISCORD_NOTIFIER, DiscordNotifier
 from submission_collector.settings import Settings
 
 
@@ -31,12 +32,14 @@ class DownloadPipeline:
         r2: R2Client,
         http_client: httpx.AsyncClient,
         settings: Settings,
+        discord: DiscordNotifier = NULL_DISCORD_NOTIFIER,
     ) -> None:
         self.git_batcher = git_batcher
         self.r2 = r2
         self.http_client = http_client
         self.settings = settings
         self.semaphore = asyncio.Semaphore(settings.max_concurrent_downloads)
+        self._discord = discord
 
     async def run(self, state: CompetitionState, ref: str) -> dict[str, GenerationsMap]:
         """Download generated files from miner CDNs, render previews, and upload to R2.
@@ -100,25 +103,25 @@ class DownloadPipeline:
 
         if not prompts_to_process:
             logger.info(f"Skipping {hotkey[:10]}: all prompts complete")
-            return generations
+        else:
+            logger.info(f"Processing {len(prompts_to_process)}/{len(prompts)} prompts for {hotkey[:10]}")
 
-        logger.info(f"Processing {len(prompts_to_process)}/{len(prompts)} prompts for {hotkey[:10]}")
+            tasks = [
+                self._fetch_render_upload(
+                    hotkey=hotkey,
+                    submission=submission,
+                    prompt=prompt,
+                    round_num=round_num,
+                    generations=generations,
+                )
+                for prompt in prompts_to_process
+            ]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            for prompt, result in zip(prompts_to_process, results, strict=True):
+                if isinstance(result, BaseException):
+                    logger.error(f"{hotkey[:10]} / {prompt}: fetch failed: {result}")
 
-        tasks = [
-            self._fetch_render_upload(
-                hotkey=hotkey,
-                submission=submission,
-                prompt=prompt,
-                round_num=round_num,
-                generations=generations,
-            )
-            for prompt in prompts_to_process
-        ]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        for prompt, result in zip(prompts_to_process, results, strict=True):
-            if isinstance(result, BaseException):
-                logger.error(f"{hotkey[:10]} / {prompt}: fetch failed: {result}")
-        return generations
+        return {p: generations[p] for p in prompts if p in generations}
 
     async def _fetch_render_upload(
         self,
@@ -161,6 +164,9 @@ class DownloadPipeline:
                     glb_content=glb_data,
                     log_id=log_id,
                 )
+
+                if png_data is None:
+                    await self._discord.notify_render_failure(hotkey)
 
                 png_url = None
                 if png_data is not None:

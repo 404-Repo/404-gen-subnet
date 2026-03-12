@@ -68,6 +68,22 @@ class Settings(BaseSettings):
         default=False, alias="PAUSE_ON_STAGE_END", description="Pause for inspection or intervention on stage end"
     )
 
+    render_alert_min_failures: int = Field(
+        default=20,
+        alias="RENDER_ALERT_MIN_FAILURES",
+        description="Minimum render failures before alerting",
+    )
+    render_alert_min_hotkeys: int = Field(
+        default=3,
+        alias="RENDER_ALERT_MIN_HOTKEYS",
+        description="Minimum distinct hotkeys with render failures before alerting",
+    )
+    render_alert_cooldown_seconds: int = Field(
+        default=600,
+        alias="RENDER_ALERT_COOLDOWN_SECONDS",
+        description="Minimum seconds between render failure alerts",
+    )
+
     discord_webhook_url: str | None = Field(
         default=None, alias="DISCORD_WEBHOOK_URL", description="Discord webhook URL for status notifications"
     )

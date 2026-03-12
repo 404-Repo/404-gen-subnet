@@ -5,7 +5,7 @@ from loguru import logger
 from subnet_common.graceful_shutdown import GracefulShutdown
 from subnet_common.utils import format_duration
 
-from round_manager.discord import DiscordNotifier
+from round_manager.discord import DiscordNotifier, NullDiscordNotifier
 from round_manager.finalize_round import run_finalize_round
 from round_manager.settings import Settings
 
@@ -29,7 +29,9 @@ def setup_logging(log_level: str) -> None:
 async def main() -> None:
     setup_logging(log_level=settings.log_level)
 
-    discord = DiscordNotifier(settings.discord_webhook_url) if settings.discord_webhook_url else None
+    discord: DiscordNotifier = (
+        DiscordNotifier(settings.discord_webhook_url) if settings.discord_webhook_url else NullDiscordNotifier()
+    )
 
     shutdown = GracefulShutdown()
     shutdown.setup_signal_handlers()
@@ -43,8 +45,7 @@ async def main() -> None:
             break
         except Exception as e:
             logger.exception(f"Round manager cycle failed: {e}")
-            if discord:
-                await discord.notify_cycle_error(e)
+            await discord.notify_cycle_error(e)
 
         logger.debug(f"Next cycle in {format_duration(settings.check_state_interval_seconds)}")
         await shutdown.wait(timeout=settings.check_state_interval_seconds)

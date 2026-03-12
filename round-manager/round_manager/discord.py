@@ -67,3 +67,30 @@ class DiscordNotifier:
             color=0xE74C3C,
             description=f"```{type(error).__name__}: {error}```",
         )
+
+
+class NullDiscordNotifier(DiscordNotifier):
+    def __init__(self) -> None:
+        pass
+
+    async def notify_round_finalized(
+        self,
+        completed_round: int,
+        next_round: int,
+        next_stage: RoundStage,
+        next_round_start: datetime,
+        leader: LeaderEntry,
+    ) -> None:
+        pass
+
+    async def notify_leader_change(self, old_leader: LeaderEntry, new_leader: LeaderEntry, round_num: int) -> None:
+        pass
+
+    async def notify_competition_ended(self, round_num: int) -> None:
+        pass
+
+    async def notify_cycle_error(self, error: Exception) -> None:
+        pass
+
+
+NULL_DISCORD_NOTIFIER = NullDiscordNotifier()
