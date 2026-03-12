@@ -20,6 +20,7 @@ def settings() -> Settings:
         R2_SECRET_ACCESS_KEY=SecretStr("test-r2-secret"),
         R2_ENDPOINT=SecretStr("https://test-r2-endpoint"),
         DOWNLOAD_JITTER_SECONDS=0,
+        STORAGE_KEY_TEMPLATE="rounds/{round}/{hotkey}/submitted/{filename}",
     )
 
 

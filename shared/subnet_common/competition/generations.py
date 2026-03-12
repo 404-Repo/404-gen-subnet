@@ -40,7 +40,9 @@ class GenerationResult(BaseModel):
         return True
 
 
-GenerationsAdapter = TypeAdapter(dict[str, GenerationResult])
+GenerationsMap = dict[str, GenerationResult]
+
+GenerationsAdapter = TypeAdapter(GenerationsMap)
 
 
 def _path(round_num: int, hotkey: str, source: GenerationSource) -> str:
@@ -49,7 +51,7 @@ def _path(round_num: int, hotkey: str, source: GenerationSource) -> str:
 
 async def get_generations(
     git: GitHubClient, round_num: int, hotkey: str, source: GenerationSource, ref: str
-) -> dict[str, GenerationResult]:
+) -> GenerationsMap:
     content = await git.get_file(
         path=_path(round_num=round_num, hotkey=hotkey, source=source),
         ref=ref,
@@ -64,7 +66,7 @@ async def save_generations(
     round_num: int,
     hotkey: str,
     source: GenerationSource,
-    generations: dict[str, GenerationResult],
+    generations: GenerationsMap,
 ) -> None:
     await git_batcher.write(
         path=_path(round_num=round_num, hotkey=hotkey, source=source),

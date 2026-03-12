@@ -10,13 +10,14 @@ from subnet_common.competition.schedule import RoundSchedule, get_schedule
 from subnet_common.competition.state import CompetitionState, RoundStage, require_state
 from subnet_common.github import GitHubClient
 
+from round_manager.discord import NULL_DISCORD_NOTIFIER, DiscordNotifier
 from round_manager.settings import Settings
 
 
 BLOCK_TIME_SECONDS = 12
 
 
-async def run_finalize_round(settings: Settings) -> None:
+async def run_finalize_round(settings: Settings, discord: DiscordNotifier = NULL_DISCORD_NOTIFIER) -> None:
     async def get_block() -> int:
         async with bt.async_subtensor(network=settings.network) as subtensor:
             block: int = await subtensor.get_current_block()
@@ -26,13 +27,14 @@ async def run_finalize_round(settings: Settings) -> None:
         repo=settings.github_repo,
         token=settings.github_token.get_secret_value(),
     ) as git:
-        await finalize_round(git=git, get_block=get_block, settings=settings)
+        await finalize_round(git=git, get_block=get_block, settings=settings, discord=discord)
 
 
 async def finalize_round(
     git: GitHubClient,
     get_block: Callable[[], Awaitable[int]],
     settings: Settings,
+    discord: DiscordNotifier = NULL_DISCORD_NOTIFIER,
 ) -> None:
     ref = await git.get_ref_sha(ref=settings.github_branch)
     state: CompetitionState = await require_state(git=git, ref=ref)
@@ -103,6 +105,23 @@ async def finalize_round(
         next_stage_eta=next_round_start if next_round_schedule else None,
         branch=settings.github_branch,
     )
+
+    is_new_leader = leader_transition is not None and leader_transition.commit != current_leader.commit
+    if is_new_leader:
+        await discord.notify_leader_change(
+            old_leader=current_leader,
+            new_leader=leader_transition,  # type: ignore[arg-type]
+            round_num=state.current_round,
+        )
+    if next_round_schedule is None:
+        await discord.notify_competition_ended(round_num=state.current_round)
+    else:
+        await discord.notify_round_finalized(
+            completed_round=state.current_round,
+            next_round=next_round,
+            next_round_start=next_round_start,
+            leader=leader_state.get_latest(),  # type: ignore[arg-type]
+        )
 
 
 def _estimate_round_start(
@@ -211,7 +230,7 @@ def _compute_leader_transition(
         logger.info("Leader defended. Weight already at floor.")
         return None
 
-    decayed_weight = max(config.weight_floor, current_leader.weight - config.weight_decay)
+    decayed_weight = round(max(config.weight_floor, current_leader.weight - config.weight_decay), 10)
     logger.info(f"Leader defended. Weight decayed to {decayed_weight}")
 
     return current_leader.model_copy(

@@ -32,6 +32,7 @@ from subnet_common.git_batcher import GitBatcher
 from subnet_common.github import GitHubClient
 from subnet_common.graceful_shutdown import GracefulShutdown
 
+from judge_service.discord import DiscordNotifier
 from judge_service.match_execution import run_match
 from judge_service.models import MatchOutcome
 from judge_service.settings import Settings
@@ -53,15 +54,13 @@ class Timeline(BaseModel):
     def winner(self) -> str:
         return self.local_leaders[-1] if self.local_leaders else "leader"
 
-    def is_rejected(self, rejected_hotkeys: set[str]) -> bool:
+    def is_rejected(self, rejected_hotkeys: set[str]) -> set[str]:
+        """Return rejected local leaders, or empty set if none."""
         local_leaders = set(self.local_leaders)
-
-        intersection = rejected_hotkeys.intersection(local_leaders)
-        if intersection:
-            logger.info(f"Timeline rejected. Local leaders disqualified: {intersection}")
-            return True
-
-        return False
+        rejected = rejected_hotkeys.intersection(local_leaders)
+        if rejected:
+            logger.info(f"Timeline rejected. Local leaders disqualified: {rejected}")
+        return rejected
 
     def has_verified_winner(self, approved_hotkeys: set[str]) -> bool:
         if not self.finished:
@@ -91,6 +90,7 @@ class MatchRunner:
         match_matrix: MatchMatrix,
         audit_requests: AuditRequests,
         settings: Settings,
+        discord: DiscordNotifier,
     ) -> None:
         self._git_batcher = git_batcher
         self._state = state
@@ -106,6 +106,7 @@ class MatchRunner:
         self._rejected_hotkeys: set[str] = set()
 
         self._settings = settings
+        self._discord = discord
 
         self._timeline: Timeline = Timeline()
 
@@ -132,6 +133,7 @@ class MatchRunner:
         state: CompetitionState,
         openai: AsyncOpenAI,
         settings: Settings,
+        discord: DiscordNotifier,
     ) -> "MatchRunner":
         """Load round data and create a runner."""
 
@@ -164,6 +166,7 @@ class MatchRunner:
             match_matrix=match_matrix,
             audit_requests=audit_requests,
             settings=settings,
+            discord=discord,
         )
 
     async def run(self, shutdown: GracefulShutdown) -> None:
@@ -187,8 +190,9 @@ class MatchRunner:
                 await self._finalize(winner="leader", reason="No qualified submissions")
                 return
 
-            if self._timeline.is_rejected(self._rejected_hotkeys):
+            if rejected_leaders := self._timeline.is_rejected(self._rejected_hotkeys):
                 self._timeline.reset(qualified)
+                await self._discord.notify_timeline_reset(round_num=self._round_num, rejected_hotkeys=rejected_leaders)
 
             if self._timeline.has_verified_winner(self._approved_hotkeys):
                 await self._finalize(winner=self._timeline.winner)
@@ -232,13 +236,16 @@ class MatchRunner:
                 qualified.append(hotkey)
 
                 if not first_qualified_audited:
-                    await self._request_audit(hotkey, match.decisive_prompts)
+                    await self._request_audit(hotkey, match.decisive_prompts, match.margin)
                     first_qualified_audited = True
 
             if not match.from_cache:
                 await self._refresh_verification_state()
 
         logger.info(f"Qualification complete: {len(qualified)}/{len(self._hotkeys)} qualified")
+        await self._discord.notify_qualification_complete(
+            round_num=self._round_num, qualified=len(qualified), total=len(self._hotkeys)
+        )
         return qualified
 
     async def _run_timeline(self, qualified: list[str], shutdown: GracefulShutdown) -> MatchOutcome:
@@ -255,7 +262,10 @@ class MatchRunner:
 
         if match.margin >= self._win_margin:
             self._timeline.local_leaders.append(right)
-            await self._request_audit(right, match.decisive_prompts)
+            await self._request_audit(right, match.decisive_prompts, match.margin)
+            await self._discord.notify_new_local_leader(
+                round_num=self._round_num, hotkey=right, defeated=left, margin=match.margin
+            )
 
         return match
 
@@ -357,6 +367,10 @@ class MatchRunner:
             logger.info(f"Match {left[:10]} vs {right[:10]} interrupted by shutdown, discarding partial result")
             return MatchOutcome(left=left, right=right, margin=0.0)
 
+        failed_duels = sum(1 for d in report.duels if d.issues == "Internal error")
+        if failed_duels:
+            await self._discord.notify_judge_error(failed_duels=failed_duels, total_duels=len(report.duels))
+
         await save_match_report(self._git_batcher, self._round_num, report)
 
         decisive = self._extract_decisive_prompts(report)
@@ -369,12 +383,13 @@ class MatchRunner:
             decisive_prompts=decisive,
         )
 
-    async def _request_audit(self, hotkey: str, decisive_prompts: list[str]) -> None:
+    async def _request_audit(self, hotkey: str, decisive_prompts: list[str], margin: float) -> None:
         """Request audit for a miner if not already requested."""
         added = self._audit_requests.add(AuditRequest(hotkey=hotkey, critical_prompts=decisive_prompts))
         if added:
             await save_audit_requests(self._git_batcher, self._round_num, self._audit_requests)
             logger.info(f"Audit requested for {hotkey[:10]}, critical_prompts={len(decisive_prompts)}")
+            await self._discord.notify_audit_requested(round_num=self._round_num, hotkey=hotkey, margin=margin)
 
     async def _refresh_verification_state(self) -> bool:
         """Refresh approved/rejected sets from git. Returns True if changed."""
@@ -472,4 +487,8 @@ class MatchRunner:
     async def _finalize(self, winner: str, reason: str | None = None) -> None:
         result = await self._resolve_winner(winner)
         await save_round_result(self._git_batcher, self._round_num, result)
-        await self._transition_to_next_stage(reason=reason or f"Winner {result.winner_hotkey[:10]}")
+        finalize_reason = reason or f"Winner {result.winner_hotkey[:10]}"
+        await self._transition_to_next_stage(reason=finalize_reason)
+        await self._discord.notify_round_finalized(
+            round_num=self._round_num, winner=result.winner_hotkey, reason=reason
+        )

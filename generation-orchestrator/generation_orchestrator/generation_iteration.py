@@ -18,6 +18,7 @@ from subnet_common.github import GitHubClient
 from subnet_common.graceful_shutdown import GracefulShutdown
 
 from generation_orchestrator.build_tracker import BuildTracker
+from generation_orchestrator.discord import NULL_DISCORD_NOTIFIER, DiscordNotifier
 from generation_orchestrator.generation_stop import GenerationStop, GenerationStopManager
 from generation_orchestrator.gpu_provider import GPUProviderManager
 from generation_orchestrator.miner_runner import run_miner
@@ -26,7 +27,9 @@ from generation_orchestrator.settings import Settings
 from generation_orchestrator.staggered_semaphore import StaggeredSemaphore
 
 
-async def run_generation_iteration(settings: Settings, shutdown: GracefulShutdown) -> datetime | None:
+async def run_generation_iteration(
+    settings: Settings, shutdown: GracefulShutdown, discord: DiscordNotifier = NULL_DISCORD_NOTIFIER
+) -> datetime | None:
     """Run one generation iteration.
 
     Orchestrates three concurrent tasks:
@@ -60,6 +63,7 @@ async def run_generation_iteration(settings: Settings, shutdown: GracefulShutdow
                 state=state,
                 submissions=submissions,
                 shutdown=shutdown,
+                discord=discord,
             )
         finally:
             # Final cleanup of any remaining pods from this round
@@ -76,6 +80,7 @@ async def _run_generation(
     state: CompetitionState,
     submissions: dict[str, MinerSubmission],
     shutdown: GracefulShutdown,
+    discord: DiscordNotifier = NULL_DISCORD_NOTIFIER,
 ) -> None:
     """Run the actual generation tasks."""
     ref = await git.get_ref_sha(ref=settings.github_branch)
@@ -121,6 +126,7 @@ async def _run_generation(
                 seed=seed,
                 round_num=state.current_round,
                 stop=stop_manager.new_stop(),
+                discord=discord,
             )
         )
         tg.create_task(build_tracker.track(round_num=state.current_round, submissions=submissions))
@@ -136,6 +142,7 @@ async def _run_generation(
                 round_num=state.current_round,
                 shutdown=shutdown,
                 stop_manager=stop_manager,
+                discord=discord,
             )
         )
 
@@ -164,6 +171,7 @@ async def _generate_leader(
     seed: int,
     round_num: int,
     stop: GenerationStop,
+    discord: DiscordNotifier = NULL_DISCORD_NOTIFIER,
 ) -> None:
     """Generate baseline 3D models using the current leader's solution.
     Skips prompts that already have results, safe to restart.
@@ -187,6 +195,7 @@ async def _generate_leader(
         seed=seed,
         stop=stop,
         audit_request=None,  # generation-only mode, no audit
+        discord=discord,
     )
     await git_batcher.flush()
 
@@ -202,6 +211,7 @@ async def _generate_for_audits(
     round_num: int,
     shutdown: GracefulShutdown,
     stop_manager: GenerationStopManager,
+    discord: DiscordNotifier = NULL_DISCORD_NOTIFIER,
 ) -> None:
     """Process audit requests, spawn generation tasks for ready builds."""
 
@@ -240,6 +250,7 @@ async def _generate_for_audits(
                         audits[audit.hotkey] = audit
                         await save_generation_audits(git_batcher=git_batcher, round_num=round_num, audits=audits)
                         await git_batcher.flush()
+                        await discord.notify_miner_audit(audit)
                 except Exception as e:
                     logger.exception(f"{hotkey[:10]}: failed to process audit result with {e}")
                 del hotkey_tasks[hotkey]
@@ -268,6 +279,7 @@ async def _generate_for_audits(
                     seed=seed,
                     round_num=round_num,
                     stop=stop,
+                    discord=discord,
                 )
             )
 
@@ -296,6 +308,7 @@ async def _generate_for_audit(
     seed: int,
     round_num: int,
     stop: GenerationStop,
+    discord: DiscordNotifier = NULL_DISCORD_NOTIFIER,
 ) -> GenerationAudit | None:
     """Generate for a single audit, return an audit result."""
     build = await build_tracker.wait_for_build(hotkey=hotkey, generation_stop=stop)
@@ -314,6 +327,7 @@ async def _generate_for_audit(
     return await run_miner(
         settings=settings,
         semaphore=semaphore,
+        discord=discord,
         gpu_manager=gpu_manager,
         git_batcher=git_batcher,
         hotkey=hotkey,

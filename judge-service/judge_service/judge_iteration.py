@@ -6,18 +6,19 @@ from subnet_common.git_batcher import GitBatcher
 from subnet_common.github import GitHubClient
 from subnet_common.graceful_shutdown import GracefulShutdown
 
+from judge_service.discord import DiscordNotifier
 from judge_service.match_runner import MatchRunner
 from judge_service.settings import Settings
 
 
-async def run_judge_iteration(settings: Settings, shutdown: GracefulShutdown) -> None:
+async def run_judge_iteration(settings: Settings, shutdown: GracefulShutdown, discord: DiscordNotifier) -> None:
     """Entry point: creates I/O dependencies and delegates to judge_iteration."""
     async with GitHubClient(
         repo=settings.github_repo,
         token=settings.github_token.get_secret_value(),
     ) as git:
         openai = _create_openai_client(settings)
-        await judge_iteration(git=git, openai=openai, settings=settings, shutdown=shutdown)
+        await judge_iteration(git=git, openai=openai, settings=settings, shutdown=shutdown, discord=discord)
 
 
 async def judge_iteration(
@@ -25,6 +26,7 @@ async def judge_iteration(
     openai: AsyncOpenAI,
     settings: Settings,
     shutdown: GracefulShutdown,
+    discord: DiscordNotifier,
 ) -> None:
     """Run one judge cycle.
 
@@ -44,6 +46,7 @@ async def judge_iteration(
         state=state,
         openai=openai,
         settings=settings,
+        discord=discord,
     )
     await runner.run(shutdown)
 

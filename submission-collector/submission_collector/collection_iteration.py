@@ -1,3 +1,4 @@
+import asyncio
 import json
 import secrets
 from collections.abc import Awaitable, Callable
@@ -7,20 +8,22 @@ import bittensor as bt
 import httpx
 from loguru import logger
 from subnet_common.competition.config import CompetitionConfig, require_competition_config
+from subnet_common.competition.generations import GenerationsMap
 from subnet_common.competition.schedule import RoundSchedule, require_schedule
 from subnet_common.competition.state import CompetitionState, RoundStage, require_state
 from subnet_common.git_batcher import GitBatcher
 from subnet_common.github import GitHubClient
 from subnet_common.r2_client import R2Client
 
+from submission_collector.discord import NULL_DISCORD_NOTIFIER, DiscordNotifier
 from submission_collector.download import DownloadPipeline
 from submission_collector.prompts import select_prompts
 from submission_collector.settings import Settings
 from submission_collector.submission import Submission, parse_commitment
 
 
-DownloadFn = Callable[[GitBatcher, CompetitionState, str, Settings], Awaitable[None]]
-"""Signature: (git_batcher, state, ref, settings) -> None.
+DownloadFn = Callable[[GitBatcher, CompetitionState, str, Settings], Awaitable[dict[str, GenerationsMap]]]
+"""Signature: (git_batcher, state, ref, settings) -> dict[hotkey, GenerationsMap].
 Creates R2/HTTP clients and runs the download pipeline.
 """
 
@@ -29,19 +32,28 @@ SECONDS_PER_BLOCK = 12
 """Average block time on Bittensor network."""
 
 
-async def run_collection_iteration(settings: Settings) -> datetime | None:
+async def run_collection_iteration(
+    settings: Settings, discord: DiscordNotifier = NULL_DISCORD_NOTIFIER
+) -> datetime | None:
     """Entry point: creates I/O dependencies and delegates to collection_iteration."""
     async with bt.async_subtensor(network=settings.network) as subtensor:
 
         async def get_block() -> int:
-            block: int = await subtensor.get_current_block()
+            block: int = await asyncio.wait_for(
+                subtensor.get_current_block(), timeout=settings.subtensor_timeout_seconds
+            )
             return block
 
         async def get_commitments() -> dict:
-            commitments: dict = await subtensor.get_all_revealed_commitments(netuid=settings.netuid)
+            commitments: dict = await asyncio.wait_for(
+                subtensor.get_all_revealed_commitments(netuid=settings.netuid),
+                timeout=settings.subtensor_timeout_seconds,
+            )
             return commitments
 
-        async def download_fn(git_batcher: GitBatcher, state: CompetitionState, ref: str, settings: Settings) -> None:
+        async def download_fn(
+            git_batcher: GitBatcher, state: CompetitionState, ref: str, settings: Settings
+        ) -> dict[str, GenerationsMap]:
             async with (
                 R2Client(
                     access_key_id=settings.r2_access_key_id.get_secret_value(),
@@ -50,8 +62,10 @@ async def run_collection_iteration(settings: Settings) -> datetime | None:
                 ) as r2,
                 httpx.AsyncClient(timeout=httpx.Timeout(60, connect=10)) as http_client,
             ):
-                pipeline = DownloadPipeline(git_batcher=git_batcher, r2=r2, http_client=http_client, settings=settings)
-                await pipeline.run(state=state, ref=ref)
+                pipeline = DownloadPipeline(
+                    git_batcher=git_batcher, r2=r2, http_client=http_client, settings=settings, discord=discord
+                )
+                return await pipeline.run(state=state, ref=ref)
 
         async with GitHubClient(
             repo=settings.github_repo,
@@ -63,6 +77,7 @@ async def run_collection_iteration(settings: Settings) -> datetime | None:
                 get_commitments=get_commitments,
                 download_fn=download_fn,
                 settings=settings,
+                discord=discord,
             )
 
 
@@ -72,6 +87,7 @@ async def collection_iteration(
     get_commitments: Callable[[], Awaitable[dict]],
     download_fn: DownloadFn,
     settings: Settings,
+    discord: DiscordNotifier = NULL_DISCORD_NOTIFIER,
 ) -> datetime | None:
     """Run one submission-collector iteration.
 
@@ -91,7 +107,13 @@ async def collection_iteration(
 
     if state.stage == RoundStage.OPEN:
         return await _collect_submissions(
-            git=git, state=state, ref=ref, get_block=get_block, get_commitments=get_commitments, settings=settings
+            git=git,
+            state=state,
+            ref=ref,
+            get_block=get_block,
+            get_commitments=get_commitments,
+            settings=settings,
+            discord=discord,
         )
 
     if state.stage == RoundStage.MINER_GENERATION:
@@ -101,7 +123,9 @@ async def collection_iteration(
         # Fall through to DOWNLOADING
 
     if state.stage == RoundStage.DOWNLOADING:
-        await _handle_downloading(git=git, state=state, ref=ref, download_fn=download_fn, settings=settings)
+        await _handle_downloading(
+            git=git, state=state, ref=ref, download_fn=download_fn, settings=settings, discord=discord
+        )
         return None
 
     return state.next_stage_eta
@@ -136,6 +160,7 @@ async def _collect_submissions(
     get_block: Callable[[], Awaitable[int]],
     get_commitments: Callable[[], Awaitable[dict]],
     settings: Settings,
+    discord: DiscordNotifier = NULL_DISCORD_NOTIFIER,
 ) -> datetime | None:
     """Collect miner submissions from a chain after a reveal window closes.
 
@@ -160,6 +185,7 @@ async def _collect_submissions(
 
     if not submissions:
         await _transition_stage(git=git, state=state, ref=ref, settings=settings, stage=RoundStage.FINALIZING)
+        await discord.notify_no_submissions(state.current_round)
         return None
 
     seed = secrets.randbits(32)
@@ -181,6 +207,15 @@ async def _collect_submissions(
         message=f"Seed, prompts and submissions for round {state.current_round}",
         base_sha=ref,
         branch=settings.github_branch,
+    )
+
+    base_url = f"https://github.com/{settings.github_repo}/blob/{settings.github_branch}"
+    await discord.notify_submissions_collected(
+        round_num=state.current_round,
+        submission_count=len(submissions),
+        generation_deadline=state.next_stage_eta,
+        prompts_url=f"{base_url}/{round_dir}/prompts.txt",
+        seed_url=f"{base_url}/{round_dir}/seed.json",
     )
 
     return state.next_stage_eta
@@ -214,10 +249,11 @@ async def _handle_downloading(
     ref: str,
     download_fn: DownloadFn,
     settings: Settings,
+    discord: DiscordNotifier = NULL_DISCORD_NOTIFIER,
 ) -> None:
     """Run the download pipeline and transition to DUELS."""
     git_batcher = GitBatcher(git=git, base_sha=ref, branch=settings.github_branch)
-    await download_fn(git_batcher, state, ref, settings)
+    results = await download_fn(git_batcher, state, ref, settings)
     state.stage = RoundStage.DUELS
     state.next_stage_eta = None
     await git_batcher.write(
@@ -226,6 +262,8 @@ async def _handle_downloading(
         message=f"Round {state.current_round}: {RoundStage.DUELS.value}",
     )
     await git_batcher.flush()
+
+    await discord.notify_downloads_complete(round_num=state.current_round, results=results)
 
 
 async def _read_submissions_from_chain(
