@@ -232,7 +232,7 @@ def _compute_leader_transition(
         logger.info("Leader defended. Weight already at floor.")
         return None
 
-    decayed_weight = max(config.weight_floor, current_leader.weight - config.weight_decay)
+    decayed_weight = round(max(config.weight_floor, current_leader.weight - config.weight_decay), 10)
     logger.info(f"Leader defended. Weight decayed to {decayed_weight}")
 
     return current_leader.model_copy(

@@ -5,6 +5,16 @@ from subnet_common.competition.state import RoundStage
 from subnet_common.discord import DiscordWebhook
 
 
+def _commit_url(repo: str, commit: str) -> str:
+    return f"https://github.com/{repo}/commit/{commit}"
+
+
+def _leader_value(leader: LeaderEntry) -> str:
+    short = leader.commit[:8]
+    url = _commit_url(leader.repo, leader.commit)
+    return f"[{leader.repo}@{short}]({url}) · weight: {leader.weight}\n||{leader.hotkey}||"
+
+
 class DiscordNotifier:
     def __init__(self, webhook_url: str) -> None:
         self._webhook = DiscordWebhook(webhook_url)
@@ -17,19 +27,15 @@ class DiscordNotifier:
         next_round_start: datetime,
         leader: LeaderEntry,
     ) -> None:
+        unix_ts = int(next_round_start.timestamp())
         await self._webhook.send_embed(
             title=f"Round {completed_round} Finalized",
             color=0x2ECC71,
             fields=[
                 {"name": "Next Stage", "value": next_stage.value, "inline": True},
                 {"name": "Next Round", "value": str(next_round), "inline": True},
-                {"name": "Next Round Start", "value": next_round_start.strftime("%Y-%m-%d %H:%M UTC"), "inline": True},
-                {
-                    "name": "Current Leader",
-                    "value": f"`{leader.hotkey[:8]}...` — `{leader.repo}@{leader.commit[:8]}`\n"
-                    f"Weight: {leader.weight:.2f}",
-                    "inline": False,
-                },
+                {"name": "Next Round Start", "value": f"<t:{unix_ts}:f>", "inline": True},
+                {"name": "Current Leader", "value": _leader_value(leader), "inline": False},
             ],
         )
 
@@ -43,16 +49,8 @@ class DiscordNotifier:
             title=f"Leader Changed — Round {round_num}",
             color=0xE67E22,
             fields=[
-                {
-                    "name": "Previous Leader",
-                    "value": f"`{old_leader.hotkey[:8]}...` — `{old_leader.repo}@{old_leader.commit[:8]}`",
-                    "inline": False,
-                },
-                {
-                    "name": "New Leader",
-                    "value": f"`{new_leader.hotkey[:8]}...` — `{new_leader.repo}@{new_leader.commit[:8]}`",
-                    "inline": False,
-                },
+                {"name": "Previous Leader", "value": _leader_value(old_leader), "inline": False},
+                {"name": "New Leader", "value": _leader_value(new_leader), "inline": False},
             ],
         )
 
