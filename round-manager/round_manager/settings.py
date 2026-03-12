@@ -31,4 +31,8 @@ class Settings(BaseSettings):
         default=False, alias="PAUSE_ON_STAGE_END", description="Pause for inspection or intervention on stage end"
     )
 
+    discord_webhook_url: str | None = Field(
+        default=None, alias="DISCORD_WEBHOOK_URL", description="Discord webhook URL for status updates and alerts"
+    )
+
     log_level: str = Field(default="DEBUG", alias="LOG_LEVEL", description="Logging level")
