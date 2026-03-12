@@ -72,23 +72,22 @@ class DiscordNotifier:
     async def notify_downloads_complete(self, round_num: int, results: dict[str, GenerationsMap]) -> None:
         total_miners = len(results)
         full = sum(
-            1 for gens in results.values()
+            1
+            for gens in results.values()
             if gens and all(g.glb is not None and g.png is not None for g in gens.values())
         )
         none = sum(1 for gens in results.values() if not any(g.glb is not None for g in gens.values()))
         partial = total_miners - full - none
 
-        no_png = sum(
-            1 for gens in results.values() for g in gens.values() if g.glb is not None and g.png is None
-        )
+        no_png = sum(1 for gens in results.values() for g in gens.values() if g.glb is not None and g.png is None)
 
         await self._webhook.send_embed(
             title=f"Round {round_num} Downloads Complete",
             color=0x2ECC71,
             fields=[
-                {"name": "Full", "value": f"{full} / {total_miners}", "inline": True},
+                {"name": "OK", "value": f"{full} / {total_miners}", "inline": True},
                 {"name": "Partial", "value": f"{partial} / {total_miners}", "inline": True},
-                {"name": "None", "value": f"{none} / {total_miners}", "inline": True},
+                {"name": "Failed", "value": f"{none} / {total_miners}", "inline": True},
                 {"name": "No PNG", "value": str(no_png), "inline": True},
             ],
         )
