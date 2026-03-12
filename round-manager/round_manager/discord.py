@@ -1,7 +1,6 @@
 from datetime import datetime
 
 from subnet_common.competition.leader import LeaderEntry
-from subnet_common.competition.state import RoundStage
 from subnet_common.discord import DiscordWebhook
 
 
@@ -23,7 +22,6 @@ class DiscordNotifier:
         self,
         completed_round: int,
         next_round: int,
-        next_stage: RoundStage,
         next_round_start: datetime,
         leader: LeaderEntry,
     ) -> None:
@@ -32,7 +30,6 @@ class DiscordNotifier:
             title=f"Round {completed_round} Finalized",
             color=0x2ECC71,
             fields=[
-                {"name": "Next Stage", "value": next_stage.value, "inline": True},
                 {"name": "Next Round", "value": str(next_round), "inline": True},
                 {"name": "Next Round Start", "value": f"<t:{unix_ts}:f>", "inline": True},
                 {"name": "Current Leader", "value": _leader_value(leader), "inline": False},
@@ -77,7 +74,6 @@ class NullDiscordNotifier(DiscordNotifier):
         self,
         completed_round: int,
         next_round: int,
-        next_stage: RoundStage,
         next_round_start: datetime,
         leader: LeaderEntry,
     ) -> None:

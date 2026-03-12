@@ -119,7 +119,6 @@ async def finalize_round(
         await discord.notify_round_finalized(
             completed_round=state.current_round,
             next_round=next_round,
-            next_stage=next_stage,
             next_round_start=next_round_start,
             leader=leader_state.get_latest(),  # type: ignore[arg-type]
         )
