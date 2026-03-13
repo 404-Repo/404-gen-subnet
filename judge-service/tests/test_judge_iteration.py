@@ -5,6 +5,7 @@ from subnet_common.competition.state import CompetitionState, RoundStage
 from subnet_common.graceful_shutdown import GracefulShutdown
 from subnet_common.testing import MockGitHubClient
 
+from judge_service.discord import NULL_DISCORD_NOTIFIER
 from judge_service.judge_iteration import judge_iteration
 from judge_service.settings import Settings
 
@@ -24,7 +25,9 @@ async def test_non_duels_stage_is_noop(settings: Settings, stage: RoundStage) ->
     _add_state(git, stage)
 
     with patch("judge_service.judge_iteration.MatchRunner") as mock_runner_cls:
-        await judge_iteration(git=git, openai=AsyncMock(), settings=settings, shutdown=GracefulShutdown())
+        await judge_iteration(
+            git=git, openai=AsyncMock(), settings=settings, shutdown=GracefulShutdown(), discord=NULL_DISCORD_NOTIFIER
+        )
 
     mock_runner_cls.create.assert_not_called()
     assert git.committed == {}
@@ -41,7 +44,9 @@ async def test_duels_stage_creates_and_runs_match_runner(settings: Settings) -> 
     with patch("judge_service.judge_iteration.MatchRunner") as mock_runner_cls:
         mock_runner_cls.create = mock_create
         shutdown = GracefulShutdown()
-        await judge_iteration(git=git, openai=AsyncMock(), settings=settings, shutdown=shutdown)
+        await judge_iteration(
+            git=git, openai=AsyncMock(), settings=settings, shutdown=shutdown, discord=NULL_DISCORD_NOTIFIER
+        )
 
     mock_create.assert_called_once()
     call_kwargs = mock_create.call_args.kwargs

@@ -5,6 +5,7 @@ from loguru import logger
 from subnet_common.graceful_shutdown import GracefulShutdown
 from subnet_common.utils import format_duration
 
+from judge_service.discord import DiscordNotifier, NullDiscordNotifier
 from judge_service.judge_iteration import run_judge_iteration
 from judge_service.settings import Settings
 
@@ -31,15 +32,24 @@ async def main() -> None:
     shutdown = GracefulShutdown()
     shutdown.setup_signal_handlers()
 
+    discord: DiscordNotifier = (
+        DiscordNotifier(
+            settings.discord_webhook_url, judge_error_cooldown_seconds=settings.judge_error_cooldown_seconds
+        )
+        if settings.discord_webhook_url
+        else NullDiscordNotifier()
+    )
+
     logger.info("Judge service started")
 
     while not shutdown.should_stop:
         try:
-            await run_judge_iteration(settings=settings, shutdown=shutdown)
+            await run_judge_iteration(settings=settings, shutdown=shutdown, discord=discord)
         except asyncio.CancelledError:
             break
         except Exception as e:
             logger.exception(f"Judge cycle failed with {e}")
+            await discord.notify_cycle_error(e)
 
         # TODO: smart delay
         logger.debug(f"Next cycle in {format_duration(settings.check_state_interval_seconds)}")

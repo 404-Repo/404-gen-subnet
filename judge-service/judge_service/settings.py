@@ -53,6 +53,16 @@ class Settings(BaseSettings):
         default=False, alias="PAUSE_ON_STAGE_END", description="Pause for inspection or intervention on stage end"
     )
 
+    discord_webhook_url: str | None = Field(
+        default=None, alias="DISCORD_WEBHOOK_URL", description="Discord webhook URL for status notifications"
+    )
+
+    judge_error_cooldown_seconds: int = Field(
+        default=600,
+        alias="JUDGE_ERROR_COOLDOWN",
+        description="Minimum interval between judge error Discord notifications in seconds",
+    )
+
     log_level: str = Field(default="DEBUG", alias="LOG_LEVEL", description="Logging level")
 
     @field_validator("openai_base_url")

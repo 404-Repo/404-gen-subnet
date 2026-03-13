@@ -19,6 +19,7 @@ from subnet_common.git_batcher import GitBatcher
 from subnet_common.graceful_shutdown import GracefulShutdown
 from subnet_common.testing import MockGitHubClient
 
+from judge_service.discord import NULL_DISCORD_NOTIFIER
 from judge_service.match_execution import WINNER_TO_SCORE
 from judge_service.match_runner import MatchRunner, Timeline
 from judge_service.settings import Settings
@@ -43,6 +44,7 @@ def _make_runner(
         match_matrix=MatchMatrix(),
         audit_requests=AuditRequests(),
         settings=settings,
+        discord=NULL_DISCORD_NOTIFIER,
     )
     return runner, mock_github
 
@@ -87,7 +89,7 @@ def test_timeline_lifecycle() -> None:
 
     # Fresh timeline: not finished, not rejected, no winner, defaults to "leader"
     assert tl.finished is False
-    assert tl.is_rejected(rejected_hotkeys=set()) is False
+    assert not tl.is_rejected(rejected_hotkeys=set())
     assert tl.has_verified_winner(approved_hotkeys=set()) is False
     assert tl.winner == "leader"
 
@@ -102,9 +104,9 @@ def test_timeline_lifecycle() -> None:
     assert tl.has_verified_winner(approved_hotkeys={"miner_a", "miner_b"}) is False
 
     # Rejection checks against local leaders
-    assert tl.is_rejected(rejected_hotkeys={"miner_a"}) is True  # first leader rejected
-    assert tl.is_rejected(rejected_hotkeys={"miner_b"}) is True  # second leader rejected
-    assert tl.is_rejected(rejected_hotkeys={"miner_c"}) is False  # pending miner, not a leader
+    assert tl.is_rejected(rejected_hotkeys={"miner_a"}) == {"miner_a"}
+    assert tl.is_rejected(rejected_hotkeys={"miner_b"}) == {"miner_b"}
+    assert not tl.is_rejected(rejected_hotkeys={"miner_c"})  # pending miner, not a leader
 
     # Drain remaining pending
     tl.pending_miners.popleft()
@@ -119,8 +121,8 @@ def test_timeline_lifecycle() -> None:
     assert tl.has_verified_winner(approved_hotkeys={"miner_a", "miner_b"}) is True
 
     # Rejection still works when finished
-    assert tl.is_rejected(rejected_hotkeys={"miner_a"}) is True
-    assert tl.is_rejected(rejected_hotkeys={"miner_b"}) is True
+    assert tl.is_rejected(rejected_hotkeys={"miner_a"}) == {"miner_a"}
+    assert tl.is_rejected(rejected_hotkeys={"miner_b"}) == {"miner_b"}
 
 
 def test_extract_decisive_prompts(settings: Settings) -> None:
@@ -263,6 +265,7 @@ class _Scenario:
             state=state,
             openai=AsyncMock(),
             settings=settings,
+            discord=NULL_DISCORD_NOTIFIER,
         )
         shutdown = GracefulShutdown()
         return cls(runner, git, shutdown, hotkeys)
@@ -562,6 +565,7 @@ async def test_shutdown_mid_match_stops_and_discards_interrupted_work(settings: 
         state=state,
         openai=AsyncMock(),
         settings=settings,
+        discord=NULL_DISCORD_NOTIFIER,
     )
 
     shutdown = GracefulShutdown()
