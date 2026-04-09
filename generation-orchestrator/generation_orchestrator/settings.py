@@ -229,6 +229,15 @@ class Settings(BaseSettings):
         description="Cache directory",
     )
 
+    discord_progress_interval_seconds: int = Field(
+        default=900,
+        alias="DISCORD_PROGRESS_INTERVAL",
+        description="Interval between Discord progress notifications in seconds (default 15 min)",
+    )
+    discord_webhook_url: str | None = Field(
+        default=None, alias="DISCORD_WEBHOOK_URL", description="Discord webhook URL for status notifications"
+    )
+
     log_level: str = Field(default="DEBUG", alias="LOG_LEVEL", description="Logging level")
 
     debug_keep_pods_alive: bool = Field(

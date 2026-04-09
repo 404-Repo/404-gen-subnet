@@ -19,6 +19,11 @@ class Settings(BaseSettings):
         description="Bittensor subtensor endpoint",
     )
     netuid: int = Field(default=17, alias="NETUID", description="Network ID")
+    subtensor_timeout_seconds: int = Field(
+        default=120,
+        alias="SUBTENSOR_TIMEOUT",
+        description="Timeout in seconds for individual subtensor RPC calls (default 120s)",
+    )
 
     min_check_state_interval_seconds: int = Field(
         default=120,
@@ -66,6 +71,26 @@ class Settings(BaseSettings):
 
     pause_on_stage_end: bool = Field(
         default=False, alias="PAUSE_ON_STAGE_END", description="Pause for inspection or intervention on stage end"
+    )
+
+    render_alert_min_failures: int = Field(
+        default=20,
+        alias="RENDER_ALERT_MIN_FAILURES",
+        description="Minimum render failures before alerting",
+    )
+    render_alert_min_hotkeys: int = Field(
+        default=3,
+        alias="RENDER_ALERT_MIN_HOTKEYS",
+        description="Minimum distinct hotkeys with render failures before alerting",
+    )
+    render_alert_cooldown_seconds: int = Field(
+        default=600,
+        alias="RENDER_ALERT_COOLDOWN_SECONDS",
+        description="Minimum seconds between render failure alerts",
+    )
+
+    discord_webhook_url: str | None = Field(
+        default=None, alias="DISCORD_WEBHOOK_URL", description="Discord webhook URL for status notifications"
     )
 
     log_level: str = Field(default="DEBUG", alias="LOG_LEVEL", description="Logging level")

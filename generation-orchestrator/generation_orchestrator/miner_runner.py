@@ -1,4 +1,5 @@
 import asyncio
+import statistics
 from enum import Enum
 
 from loguru import logger
@@ -8,6 +9,7 @@ from subnet_common.competition.generations import GenerationResult, GenerationSo
 from subnet_common.competition.pod_stats import PodStats, save_pod_stats
 from subnet_common.git_batcher import GitBatcher
 
+from generation_orchestrator.discord import NULL_DISCORD_NOTIFIER, DiscordNotifier
 from generation_orchestrator.generation_pipeline import GenerationPipeline
 from generation_orchestrator.generation_stop import GenerationStop
 from generation_orchestrator.gpu_provider import DeployedContainer, GPUProviderManager
@@ -50,6 +52,7 @@ class MinerRunner:
         seed: int,
         stop: GenerationStop,
         audit_request: AuditRequest | None = None,
+        discord: DiscordNotifier = NULL_DISCORD_NOTIFIER,
     ):
         self._settings = settings
         self._semaphore = semaphore
@@ -62,6 +65,7 @@ class MinerRunner:
         self._seed = seed
         self._stop = stop
         self._audit_request = audit_request
+        self._discord = discord
 
         self._log_id = hotkey[:10]
         self._miner_prefix = f"miner-{self._current_round:02d}-{self._hotkey[:10].lower()}"
@@ -136,6 +140,7 @@ class MinerRunner:
 
             if not self._first_healthy.is_set():
                 logger.error(f"{self._log_id}: all {self._settings.initial_pod_count} initial pods failed warmup")
+                await self._discord.notify_pod_warmup_failed(self._hotkey, self._current_round)
                 return self._build_audit(_Verdict.DEPLOY_FAILURE)
 
             await self._expand_pods(target=self._settings.pods_per_miner)
@@ -235,8 +240,19 @@ class MinerRunner:
 
     async def _run_until_complete(self) -> None:
         """Process workers until queue empty or stopped."""
+        progress_interval = self._settings.discord_progress_interval_seconds
+
         while self._workers and not self._stop.should_stop:
-            done, _ = await asyncio.wait(self._workers.values(), return_when=asyncio.FIRST_COMPLETED)
+            done, _ = await asyncio.wait(
+                self._workers.values(),
+                return_when=asyncio.FIRST_COMPLETED,
+                timeout=progress_interval,
+            )
+
+            if not done:
+                await self._send_progress()
+                continue
+
             self._reap_workers(done)
 
             if self._coordinator.all_done() and self._workers:
@@ -250,6 +266,8 @@ class MinerRunner:
             done, _ = await asyncio.wait(self._workers.values(), return_when=asyncio.ALL_COMPLETED)
             self._reap_workers(done)
 
+        await self._send_progress()
+
     def _reap_workers(self, done: set[asyncio.Task]) -> None:
         """Remove completed workers and log any errors."""
         for task in done:
@@ -260,6 +278,42 @@ class MinerRunner:
                 logger.debug(f"{self._log_id}: worker {pod_id} finished")
             except Exception as e:
                 logger.exception(f"{self._log_id}: worker {pod_id} crashed with {e}")
+
+    async def _send_progress(self) -> None:
+        gens = self._coordinator.generations
+        fails = final_fails = overtimes = final_overtimes = mismatches = 0
+        times: list[float] = []
+
+        max_attempts = self._settings.max_prompt_attempts
+        hard_limit = self._settings.generation_timeout_seconds
+        acceptable_distance = self._settings.acceptable_distance
+
+        for r in gens.values():
+            if r.is_failed():
+                fails += 1
+                if r.attempts >= max_attempts:
+                    final_fails += 1
+            if r.generation_time > hard_limit:
+                overtimes += 1
+                if r.attempts >= max_attempts:
+                    final_overtimes += 1
+            if r.distance >= acceptable_distance:
+                mismatches += 1
+            if r.generation_time > 0:
+                times.append(r.generation_time)
+
+        await self._discord.notify_generation_progress(
+            hotkey=self._hotkey,
+            round_num=self._current_round,
+            generated=len(gens),
+            total=len(self._coordinator),
+            fails=fails,
+            final_fails=final_fails,
+            overtimes=overtimes,
+            final_overtimes=final_overtimes,
+            mismatches=mismatches,
+            median_time=statistics.median(times) if times else None,
+        )
 
     def _determine_verdict(self) -> _Verdict:
         """Determine a final verdict based on queue and stop state."""
@@ -273,6 +327,8 @@ class MinerRunner:
         """Worker lifecycle: deploy pod, process prompts, cleanup."""
         deployed = await self._deploy_and_wait_healthy(pod_id, provider_start_index)
         if deployed is None:
+            if not self._stop.should_stop:
+                await self._discord.notify_pod_deploy_failed(self._hotkey, pod_id)
             return
 
         self._first_healthy.set()
@@ -301,6 +357,10 @@ class MinerRunner:
 
             await pipeline.run(pod_id=pod_id, tracker=tracker)
         finally:
+            if tracker.marked_bad:
+                await self._discord.notify_pod_bad(
+                    self._hotkey, pod_id, deployed.info.provider.value, tracker.termination_reason
+                )
             self._pod_stats[pod_id] = tracker.to_stats(pod_id=pod_id)
             await save_pod_stats(
                 git_batcher=self._git_batcher,
@@ -360,6 +420,7 @@ async def run_miner(
     seed: int,
     stop: GenerationStop,
     audit_request: AuditRequest | None = None,
+    discord: DiscordNotifier = NULL_DISCORD_NOTIFIER,
 ) -> GenerationAudit | None:
     """
     Run generation for a single miner.
@@ -378,5 +439,6 @@ async def run_miner(
         seed=seed,
         stop=stop,
         audit_request=audit_request,
+        discord=discord,
     )
     return await runner.run()

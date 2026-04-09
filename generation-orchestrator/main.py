@@ -7,6 +7,7 @@ from subnet_common.graceful_shutdown import (
 )
 from subnet_common.utils import calculate_wait_time, format_duration
 
+from generation_orchestrator.discord import DiscordNotifier, NullDiscordNotifier
 from generation_orchestrator.generation_iteration import run_generation_iteration
 from generation_orchestrator.settings import Settings
 
@@ -31,16 +32,21 @@ async def main() -> None:
     shutdown = GracefulShutdown()
     shutdown.setup_signal_handlers()
 
+    discord: DiscordNotifier = (
+        DiscordNotifier(settings.discord_webhook_url) if settings.discord_webhook_url else NullDiscordNotifier()
+    )
+
     logger.info("Generation orchestrator started")
 
     while not shutdown.should_stop:
         next_stage_eta = None
         try:
-            next_stage_eta = await run_generation_iteration(settings, shutdown)
+            next_stage_eta = await run_generation_iteration(settings, shutdown, discord=discord)
         except asyncio.CancelledError:
             break
         except Exception as e:
             logger.exception(f"Generation cycle failed with {e}")
+            await discord.notify_cycle_error(e)
 
         wait_seconds = calculate_wait_time(
             eta=next_stage_eta,
