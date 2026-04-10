@@ -2,6 +2,8 @@
 
 > **Note:** This document specifies what miners must produce. A separate **Runtime Specification** describes how submissions are loaded, sandboxed, executed, and rendered by the validator. Both documents are required reading.
 
+[↓ TL;DR](#tldr)
+
 ## Concept
 
 For every input prompt, your solution emits one JavaScript module that constructs the corresponding 3D asset from scratch using Three.js primitives. Each module is self-contained: it has no inputs, no dependencies, and no access to the prompt at runtime — your model has already encoded the prompt as code.
@@ -94,11 +96,11 @@ Your script must be fully deterministic. Two executions of the same script must 
 All limits except wall-clock time and heap usage are checked on the returned root **after** `generate` completes. You may briefly allocate more during construction and then clean up — peak working memory is bounded only by the 256 MB heap cap.
 
 - The combined wall-clock time of module evaluation and the `generate` function call must complete within **5 seconds**. Top-level computation in your module counts against the same 5-second budget. There is no way to offload work to the top level to bypass the limit.
-- Maximum **250,000 vertices** total. Computed as the sum of `geometry.attributes.position.count` over every mesh reachable via `root.traverse()`. Geometry shared between meshes is counted once per referencing mesh. For `InstancedMesh`, vertex count is `geometry.position.count` counted once, regardless of instance count.
-- Maximum **200 draw calls**. Computed as the number of nodes in `root.traverse()` where `isMesh`, `isLine`, or `isPoints` is true. `InstancedMesh` counts as 1 draw call regardless of instance count. `Group` and bare `Object3D` do not count.
-- Maximum scene-graph depth: **32**.
-- Maximum total `InstancedMesh` instances across the entire scene: **50,000**.
-- Maximum total texture data: **1 MB (1,048,576 bytes)** across all `DataTexture` instances reachable via materials in the returned scene. Orphan `DataTexture` instances not attached to any rendered material are not counted.
+- Maximum **100,000 face counts** total. Computed as the sum of `geometry.attributes.position.count` over every mesh reachable via `root.traverse()`. Geometry shared between meshes is counted once per referencing mesh. For `InstancedMesh`, vertex count is `geometry.position.count` counted once, regardless of instance count.
+- Maximum **50 draw calls**. Computed as the number of nodes in `root.traverse()` where `isMesh`, `isLine`, or `isPoints` is true. `InstancedMesh` counts as 1 draw call regardless of instance count. `Group` and bare `Object3D` do not count.
+- Maximum scene-graph depth: **16**.
+- Maximum total `InstancedMesh` instances across the entire scene: **10,000**.
+- Maximum total texture data: **256 KB (262,144 bytes)** across all `DataTexture` instances reachable via materials in the returned scene. Orphan `DataTexture` instances not attached to any rendered material are not counted.
 - Maximum JS heap usage during execution: **256 MB**. This cap covers the combined working memory of module evaluation and the `generate` call.
 - Bounding box of the returned root must fit within `[-0.5, 0.5]` on all axes. An empty scene (one where `Box3.setFromObject(root).isEmpty() === true`) is treated as failed.
 
@@ -171,11 +173,11 @@ All limits except wall-clock time and heap usage are checked on the returned roo
 | Execution exceeds 5-second combined timeout | Killed, failed | `TIMEOUT_EXCEEDED` |
 | JS heap exceeds 256 MB during execution | Killed, failed | `HEAP_EXCEEDED` |
 | Object hierarchy contains cycles | Killed during traversal, failed | `CYCLE_DETECTED` |
-| Vertex count exceeds 250,000 | Failed | `VERTEX_LIMIT_EXCEEDED` |
-| Draw call count exceeds 200 | Failed | `DRAW_CALL_LIMIT_EXCEEDED` |
-| Scene-graph depth exceeds 32 | Failed | `DEPTH_LIMIT_EXCEEDED` |
-| Instance count exceeds 50,000 | Failed | `INSTANCE_LIMIT_EXCEEDED` |
-| Texture data exceeds 1 MB | Failed | `TEXTURE_DATA_EXCEEDED` |
+| Face count exceeds 100,000 | Failed | `VERTEX_LIMIT_EXCEEDED` |
+| Draw call count exceeds 50 | Failed | `DRAW_CALL_LIMIT_EXCEEDED` |
+| Scene-graph depth exceeds 16 | Failed | `DEPTH_LIMIT_EXCEEDED` |
+| Instance count exceeds 10,000 | Failed | `INSTANCE_LIMIT_EXCEEDED` |
+| Texture data exceeds 256 KB | Failed | `TEXTURE_DATA_EXCEEDED` |
 | Bounding box exceeds `[-0.5, 0.5]` on any axis | Failed | `BOUNDING_BOX_OUT_OF_RANGE` |
 | Render run failed after passing validation | Failed | `RENDER_RUN_FAILED` |
 
@@ -201,3 +203,23 @@ Code that passes both static and post-execution validation is then handed to the
 - **Runtime Specification** — sandbox model, execution environment, exact Three.js bundle, AST allowlist details, camera/lighting/render setup.
 - **API Specification** — `/generate`, `/status`, `/results` endpoints for batch processing.
 - **Competition Rules** — scoring, prompt sets, time budgets, pod management.
+
+<a id="tldr"></a>
+
+## TL;DR
+
+- **Check & run**
+  - Read the file, parse it, and reject it early if it breaks the rules.
+  - Run miner code in an isolated sandbox, not in the main validator process.
+  - Load the pinned Three.js build there, then call `generate(THREE)`.
+  - The code gets **5 s** total and **256 MB** for load + run.
+
+- **Render**
+  - If validation passes, run the same code a second time in headless Chrome.
+  - Render one **1024×1024** PNG with a fixed camera, lights, background, and environment.
+  - The scene is rebuilt for render, not copied over from the sandbox.
+
+- **Errors & setup**
+  - Failures return `{ stage, rule, detail }`.
+  - Rule names match **Output Spec § Failure Semantics**.
+  - Everything runs in Docker with locked-down limits, and round settings may change between rounds.
