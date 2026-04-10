@@ -320,7 +320,7 @@ Design your solution to be responsive to `/status` polls regardless of generatio
 
 Scoring is based on **output quality**. Speed within the time budget does not matter — finishing in 30 minutes scores the same as finishing in 119 minutes. What matters is the quality of the Three.js scenes you produce.
 
-Each JavaScript module is validated and rendered per the Output and Runtime Specifications. The rendered output is compared against the prompt for quality scoring.
+Each JavaScript module is validated and rendered per the Output and Runtime Specifications. The rendered image is then compared against the original prompt image by a **VLM (Vision-Language Model) judge** — the same evaluation pipeline used in previous 404 competitions. The judge evaluates how well your rendered output matches the prompt image in terms of geometric correctness and visual fidelity.
 
 **Any failed prompt is an automatic loss.** A prompt fails if:
 

@@ -15,15 +15,23 @@ This package mirrors the production runtime's static analysis and post-execution
 
 Rule codes match the `Rule Code` column in `output_specifications.md` § Failure Semantics.
 
+## Execution model
+
+Miner code runs inside a **Node.js worker thread** spawned by `src/execute.js`. The worker loads the miner module, calls `generate(THREE)` synchronously, and runs post-validation. The main thread only sees the JSON summary. This gives us three real guarantees that the previous single-process implementation could not provide:
+
+1. **Preemptive timeout.** `worker.terminate()` from the main thread kills the worker instantly, even in the middle of a synchronous CPU-bound loop. Infinite loops in either module top-level code or `generate()` itself are cut off at exactly the 5-second budget. Matches the behavior of production `isolated-vm`.
+2. **Module load counted against the budget.** The wall-clock timer starts *before* the worker is constructed, so top-level work in the miner's module (constant initializers, class declarations, eager computation) eats the 5-second budget. Matches Runtime Spec § Combined Budget.
+3. **V8 heap cap enforced.** The worker is spawned with `resourceLimits: { maxOldGenerationSizeMb: 256 }`. A miner allocating 10M objects trips `ERR_WORKER_OUT_OF_MEMORY`, and the main thread reports `HEAP_EXCEEDED`. Note: the cap applies to the **V8 JavaScript heap only**, not external `ArrayBuffer` / typed-array memory — same as production `isolated-vm`'s `memoryLimit`. A miner shipping a 400 MB `Float32Array` is caught by `VERTEX_LIMIT_EXCEEDED` long before memory becomes relevant.
+
 ## What it does NOT check
 
 This package is a **conformance tool**, not a security sandbox.
 
-- **No isolated-vm.** The miner's code runs via dynamic import in the same Node process. The miner is running their own code on their own machine, so no isolation is needed.
-- **No heap cap enforcement.** Node has no per-call heap limit. The production validator uses isolated-vm's `memoryLimit`.
-- **No render run.** The conformance tool does not run Puppeteer. The post-execution checks happen on the dynamically imported scene root directly.
+- **No V8 isolate boundary.** The worker shares some built-ins with the host process (e.g. `console`). Static analysis rejects forbidden identifiers, so this is an isolation gap, not a correctness gap — a well-formed submission that passes here also passes production. A malicious miner can do whatever they want on their own machine; the tool only tells them whether their *honest* code conforms.
+- **No render run.** The conformance tool does not run Puppeteer. Production uses a double-execute strategy (validate in `isolated-vm`, render in a Puppeteer page); the local tool only runs the validation half. If your code passes here but fails to *render* in production (extremely unlikely given determinism), you'll see a `RENDER_RUN_FAILED` only in production logs.
+- **No external `ArrayBuffer` memory cap.** The V8 heap cap doesn't cover typed-array backing buffers. Bounded instead by the vertex-count and literal-budget caps.
 
-The static analysis stage is bit-identical to the production validator's. Anything that passes static analysis here will also pass it in production. The execution and post-validation stages match the production *rules* but not the production *isolation* — a malicious miner can do whatever they want on their own machine; the checks here just tell them whether their honest code conforms.
+The static analysis stage is bit-identical to the production validator's. The execution and post-validation stages match the production *rules* exactly, with the isolation gap noted above.
 
 ## Install
 
@@ -71,9 +79,13 @@ node ../tools/validate.js ../examples/car.js
     textureBytes: number,
     bbox: { min: { x, y, z }, max: { x, y, z } } | null,
   } | null,
-  executionMs: number,
+  moduleLoadMs: number | null,  // time spent importing the module (worker-measured)
+  executionMs: number | null,   // time spent inside generate() (worker-measured)
+  totalMs: number,              // total wall-clock time (main-thread measured), always present
 }
 ```
+
+`totalMs` is the total time from the moment the worker is spawned to the moment it posts its result (or is terminated by the timeout). `moduleLoadMs + executionMs` is the worker's accounting of the same budget and is always ≤ `totalMs`. The difference is worker startup and Three.js import overhead, typically 50–150 ms.
 
 ## Spec source of truth
 
