@@ -1,5 +1,7 @@
 # Three.js Runtime Specification
 
+[↓ TL;DR](#tldr)
+
 > **Note:** This document describes how the validator loads, sandboxes, executes, and renders miner submissions. It is the companion to the **Three.js Output Specification**. Both documents are required reading.
 
 ## Overview
@@ -200,12 +202,12 @@ This walk produces all the metrics below in a single pass.
 
 ### Metrics Computed During the Walk
 
-1. **Bounding box.** `new THREE.Box3().setFromObject(root)`. Rejected if any axis is outside `[-0.5, 0.5]` or if the box is empty.
-2. **Vertex count.** Sum of `geometry.attributes.position.count` across all reachable meshes. `InstancedMesh` counted once (not multiplied by instances). Limit: **250,000**.
-3. **Draw call count.** Nodes where `isMesh`, `isLine`, or `isPoints` is true. `InstancedMesh` counted as 1. Limit: **200**.
-4. **Scene-graph depth.** Maximum depth reached during the walk. Limit: **32**.
-5. **Instance count.** Sum of `instance.count` read directly from each `InstancedMesh` at validation time (not from constructor arguments — miners can reassign `count` post-construction). Limit: **50,000**.
-6. **Texture data.** Sum of byte lengths of all `DataTexture.image.data` buffers reachable via material references. Limit: **1 MB (1,048,576 bytes)**.
+1. **Bounding box.** `new THREE.Box3().setFromObject(root)`. Rejected if any axis is outside `[-1, 1]` or if the box is empty.
+2. **Vertex count.** Sum of `geometry.attributes.position.count` across all reachable meshes. `InstancedMesh` counted once (not multiplied by instances).
+3. **Draw call count.** Nodes where `isMesh`, `isLine`, or `isPoints` is true. `InstancedMesh` counted as 1.
+4. **Scene-graph depth.** Maximum depth reached during the walk.
+5. **Instance count.** Sum of `instance.count` read directly from each `InstancedMesh` at validation time (not from constructor arguments — miners can reassign `count` post-construction).
+6. **Texture data.** Sum of byte lengths of all `DataTexture.image.data` buffers reachable via material references.
 
 Any metric exceeding its limit causes failure.
 
@@ -258,14 +260,14 @@ If the render run fails or exceeds budget, the prompt is marked failed even if v
 ### Camera
 
 - `THREE.PerspectiveCamera`
-- FOV: **17.5 degrees** (telephoto-ish, minimizes perspective distortion to match typical product photography in prompt images)
+- FOV: **35 degrees**
 - Aspect: `1.0`
 - Near: `0.01`, Far: `100`
 - Position: `(0, 0.3, 3.5)`
 - Target: `(0, 0, 0)`
 - Up: `(0, 1, 0)` (Y-up)
 
-The camera looks down -Z. Models facing +Z are front-facing. At FOV 17.5° and distance 3.5, the camera frames a region of approximately 1.08 units across the focal plane, which tightly fits an asset filling the `[-0.5, 0.5]` bounding cube.
+The camera looks down -Z. Models facing +Z are front-facing.
 
 ### Lighting
 
@@ -344,3 +346,23 @@ Within a single round, all values are frozen at round start.
 - **Three.js Output Specification** — what miners must produce.
 - **API Specification** — `/generate`, `/status`, `/results` endpoints.
 - **Competition Rules** — scoring, prompt sets, time budgets, pod management.
+
+<a id="tldr"></a>
+
+## TL;DR
+
+- **Check & run**
+  - Read the file, parse it, and reject it early if it breaks the rules.
+  - Run miner code in an isolated sandbox, not in the main validator process.
+  - Load the pinned Three.js build there, then call `generate(THREE)`.
+  - The code gets **5 s** total and **256 MB** for load + run.
+
+- **Render**
+  - If validation passes, run the same code a second time in headless Chrome.
+  - Render one **1024×1024** PNG with a fixed camera, lights, background, and environment.
+  - The scene is rebuilt for render, not copied over from the sandbox.
+
+- **Errors & setup**
+  - Failures return `{ stage, rule, detail }`.
+  - Rule names match **Output Spec § Failure Semantics**.
+  - Everything runs in Docker with locked-down limits, and round settings may change between rounds.
