@@ -1,20 +1,21 @@
 /**
  * Public API: validate(source) → result
  *
- * Runs the four pipeline stages in order:
- *   1. parse           — file size + parse + structural failures
- *   2. static_analysis — AST-based rule checks
- *   3. execution       — dynamic import + call generate(THREE)
- *   4. post_validation — bounded walk over the returned root
+ * Runs the three pipeline stages:
  *
- * If any earlier stage fails, later stages are skipped. The shape of the
- * result is stable so callers (CLI, CI, web UI) can render it directly.
+ *   1. parse           — file size + parse + structural failures (main thread)
+ *   2. static_analysis — AST-based rule checks (main thread)
+ *   3. worker          — module load + generate() + post-validation
+ *                        (Node worker thread with real preemption + heap cap)
+ *
+ * The worker stage covers what the runtime spec calls `module_load`,
+ * `execution`, and `post_validation` — the boundaries between them are
+ * reported via the `failures[].stage` field.
  */
 
 import { parseSource } from './parse.js';
 import { staticAnalyze } from './staticAnalysis.js';
 import { execute } from './execute.js';
-import { postValidate } from './postValidation.js';
 
 export async function validate(source) {
   // Stage 1: parse
@@ -25,7 +26,9 @@ export async function validate(source) {
       stagesRun: ['parse'],
       failures: parseFailures,
       metrics: null,
-      executionMs: 0,
+      moduleLoadMs: null,
+      executionMs: null,
+      totalMs: 0,
     };
   }
 
@@ -37,36 +40,45 @@ export async function validate(source) {
       stagesRun: ['parse', 'static_analysis'],
       failures: staticFailures,
       metrics: null,
-      executionMs: 0,
+      moduleLoadMs: null,
+      executionMs: null,
+      totalMs: 0,
     };
   }
 
-  // Stage 3: execute
-  const { root, elapsedMs, failure: execFailure } = await execute(source);
-  if (execFailure) {
-    return {
-      passed: false,
-      stagesRun: ['parse', 'static_analysis', execFailure.stage],
-      failures: [execFailure],
-      metrics: null,
-      executionMs: elapsedMs,
-    };
-  }
+  // Stage 3: worker — module load + execution + post-validation
+  const workerResult = await execute(source);
+  const passed = workerResult.failures.length === 0;
 
-  // Stage 4: post-validation
-  const { failures: postFailures, metrics } = postValidate(root);
-
-  return {
-    passed: postFailures.length === 0,
-    stagesRun: [
+  // stagesRun reflects the furthest stage reached, determined from the worker
+  // output. A clean pass means every stage ran.
+  let stagesRun;
+  if (passed) {
+    stagesRun = [
       'parse',
       'static_analysis',
       'module_load',
       'execution',
       'post_validation',
-    ],
-    failures: postFailures,
-    metrics,
-    executionMs: elapsedMs,
+    ];
+  } else {
+    const deepest = workerResult.failures[workerResult.failures.length - 1].stage;
+    const worker_stages = ['module_load', 'execution', 'post_validation'];
+    const idx = worker_stages.indexOf(deepest);
+    stagesRun = [
+      'parse',
+      'static_analysis',
+      ...worker_stages.slice(0, idx + 1),
+    ];
+  }
+
+  return {
+    passed,
+    stagesRun,
+    failures: workerResult.failures,
+    metrics: workerResult.metrics,
+    moduleLoadMs: workerResult.moduleLoadMs,
+    executionMs: workerResult.executionMs,
+    totalMs: workerResult.totalMs,
   };
 }

@@ -4,6 +4,36 @@ Reference bundle for 404-GEN miners: specifications, a canonical example, a loca
 
 The protocol: **the orchestrator launches your Docker image on a 4×H200 pod, sends prompts in 4 sequential batches of 32, and collects one JavaScript module per prompt.** Each module `export default`s a function that constructs a Three.js scene. Your model's job is to produce that code.
 
+## The task
+
+Your goal is to build an **image-to-procedural-code** pipeline. Given a prompt image showing a 3D object, your system analyzes the image and produces a JavaScript module that reconstructs that object from Three.js primitives.
+
+This is fundamentally different from direct 3D mesh generation. Your output is not a mesh — it is **code** that builds the mesh procedurally. The generated script must construct all geometry from the allowed Three.js API surface (primitive geometries, extrusions, lathes, buffer geometry, etc.), apply procedural materials and textures, and fit the result within the bounding box constraint. No precomputed vertex data, no embedded assets, no external resources.
+
+### Prompt images
+
+Each prompt is a single image (PNG or JPG) showing a 3D object. Your service downloads the image from the URL provided in the `/generate` batch, analyzes it, and produces a Three.js module that reconstructs the depicted object.
+
+The prompt set may include furniture, vehicles, architectural elements, household objects, and other categories. Some prompts will be well-suited to procedural approaches (geometric objects, hard-surface models); others will be more challenging (organic forms, complex topology).
+
+### Scoring
+
+Each JavaScript module you return is validated and rendered under the canonical camera and lighting setup defined in the [Runtime Specification](runtime_specifications.md). The rendered image is then compared against the original prompt image by a **VLM (Vision-Language Model) judge** — the same evaluation pipeline used in previous 404 competitions.
+
+Key scoring facts:
+
+- **Quality matters, speed doesn't.** Finishing in 30 minutes scores the same as 119 minutes. Optimize for output quality within the time budget.
+- **Failed prompts are automatic losses.** A prompt that fails validation or rendering scores zero against every other miner. Reliability first, then quality.
+- **Partial batches always count.** 31 out of 32 is far better than 0 out of 32.
+- **Geometric correctness and visual fidelity both matter.** The VLM judge evaluates how well your rendered output matches the prompt image overall.
+
+### Model requirements
+
+- All models in your pipeline must be **open-source with commercial-use-compatible licenses**.
+- No closed-source API calls (OpenAI, Anthropic, etc.) during generation.
+- Fine-tuned models are allowed if the base model's license permits it.
+- Multiple models in a single pipeline are allowed and expected.
+
 ## Why batch-based generation
 
 Previous versions used a per-prompt HTTP model where the orchestrator managed retries, pod health checks, and degraded-GPU detection on your behalf. This was expensive to operate and opaque to miners — you had no visibility into scheduling decisions or failure recovery, and no way to optimize for your own hardware.
@@ -121,6 +151,56 @@ poetry run pytest -v
 
 `miner_reference/threejs_placeholder.py` returns the canonical [`examples/car.js`](examples/car.js) module for every prompt — the same fixture the validator treats as known-good. This is end-to-end coherent: the Python service ships exactly what the Node validator will accept. Replace `threejs_placeholder.py` with your inference pipeline when you're ready to generate real per-prompt output.
 
+## Building your generation pipeline
+
+The reference service in [`miner_reference/`](miner_reference/) handles the batch protocol — receiving prompts, managing state, packing results. The part you need to build is the **generation pipeline**: the system that takes a prompt image and produces a conforming Three.js module.
+
+### Suggested architecture
+
+A typical pipeline has multiple stages:
+
+1. **Image analysis.** A vision-language model (VLM) examines the prompt image and identifies the object's structure: what primitives approximate it, their relative sizes, positions, orientations, and spatial relationships.
+
+2. **Code generation.** A code-capable LLM takes the structural analysis and produces a Three.js `generate(THREE)` function. The LLM must be aware of the allowed API surface (see [Output Specification](output_specifications.md#allowed-threejs-apis)) and the constraints (bounding box, vertex limits, literal budget, determinism).
+
+3. **Validation and refinement.** Run the local validator on the generated code. If it fails, feed the error back to the LLM and retry. If it passes but renders poorly, refine. This agentic loop — generate, validate, diagnose, retry — is where much of the competitive advantage lies.
+
+4. **Material and texture application.** Procedural materials (`MeshStandardMaterial`, `MeshPhysicalMaterial`) and programmatically generated `DataTexture` instances can significantly improve visual fidelity. Consider tuning these separately from geometry.
+
+This is one approach. You are free to design any pipeline you want — the orchestrator only cares about the final `.js` files. Smaller models are unlikely to handle this problem well; plan for capable VLMs and code LLMs.
+
+### Key constraints to design around
+
+- **50 KB literal budget** prevents embedding precomputed vertex data. Your code must generate geometry algorithmically — parametric shapes, extrusions, lathes, CSG-style composition, instanced meshes.
+- **5-second execution timeout** means heavy computation (hundreds of thousands of vertices from custom `BufferGeometry`) needs to be efficient.
+- **Determinism** is mandatory — no `Math.random()`, no `Date`. Two executions of the same script must produce identical output.
+- **The code cannot access the prompt image at runtime.** Your model must fully encode the image's content as procedural code at generation time. The `generate(THREE)` function receives only the `THREE` namespace.
+
+### GPU allocation
+
+You have 4× H200 GPUs (141 GB each, ~564 GB total). How you allocate them across pipeline stages is a competitive decision. Common patterns:
+
+- Dedicate GPUs to different models (e.g., VLM on GPU 0, code LLM on GPUs 1–3).
+- Process multiple prompts in parallel across GPUs.
+- Use some GPUs for generation and others for refinement/validation loops.
+
+32 prompts per batch means parallelism matters. A serial pipeline that takes 2 minutes per prompt needs ~64 minutes per batch — tight for 4 batches within the 2-hour generation window.
+
+### The validator as your inner loop
+
+The local validator runs the same static analysis and post-execution checks as production. Build it into your pipeline as a programmatic check:
+
+```js
+import { validate } from '@404-subnet/validator';
+
+const result = await validate(generatedSource);
+if (!result.passed) {
+  // Feed result.failures back to the LLM for correction
+}
+```
+
+Code that passes the local validator will pass production. Use the `--json` flag or the library API for machine-readable output that an agent can parse and act on.
+
 ## Hardware
 
 Each pod has **4× H200 SXM** GPUs (141 GB HBM3e each, ~564 GB total VRAM). How you distribute work across GPUs is entirely up to you — the orchestrator only cares about the final `.js` files you return.
@@ -135,7 +215,7 @@ Each pod has **4× H200 SXM** GPUs (141 GB HBM3e each, ~564 GB total VRAM). How 
 6. When `/status` returns `complete`, the orchestrator downloads a ZIP of `{stem}.js` files from `/results`.
 7. You transition back to `ready` for the next batch. Models stay loaded between batches.
 8. Repeat for 4 batches (128 total prompts).
-9. Each `.js` file is statically analyzed and executed in an `isolated-vm` sandbox, then rendered in a headless Chrome process via a separate double-execute run. The rendered image is compared to the prompt for scoring.
+9. Each `.js` file is statically analyzed and executed in an `isolated-vm` sandbox, then rendered in a headless Chrome process via a separate double-execute run. The rendered image is compared to the original prompt image by a VLM judge for scoring.
 10. **Failed prompts are automatic losses** — there is no partial credit per prompt. Reliability first, then quality.
 
 See the [API Specification](api_specification.md) for the full protocol, pod replacement budget, time budget, and edge cases.
