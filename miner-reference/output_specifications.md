@@ -208,18 +208,19 @@ Code that passes both static and post-execution validation is then handed to the
 
 ## TL;DR
 
-- **Check & run**
-  - Read the file, parse it, and reject it early if it breaks the rules.
-  - Run miner code in an isolated sandbox, not in the main validator process.
-  - Load the pinned Three.js build there, then call `generate(THREE)`.
-  - The code gets **5 s** total and **256 MB** for load + run.
-
-- **Render**
-  - If validation passes, run the same code a second time in headless Chrome.
-  - Render one **1024×1024** PNG with a fixed camera, lights, background, and environment.
-  - The scene is rebuilt for render, not copied over from the sandbox.
-
-- **Errors & setup**
-  - Failures return `{ stage, rule, detail }`.
-  - Rule names match **Output Spec § Failure Semantics**.
-  - Everything runs in Docker with locked-down limits, and round settings may change between rounds.
+- **Module:**
+  - One ES module — default export `function generate(THREE)` only, synchronous, no imports.
+  - `THREE` exists only as that parameter (nothing at module top level).
+- **Result:**
+  - Return a `Group`, `Mesh`, `LineSegments`, or `Points` inside `[-0.5, 0.5]` on every axis (centered, Y-up, **+Z** forward).
+  - You choose geometry/materials; the validator owns camera, resolution, lights, background, and environment.
+- **Determinism & APIs:**
+  - No randomness, `Date`, `performance`, or other banned sources (see § Determinism and § Prohibited APIs).
+  - Only allowed `THREE.*` usage (§ Allowed Three.js APIs); everything else is rejected.
+- **Budgets:**
+  - File ≤ **1 MB**; literals ≤ **50 KB**.
+  - Combined module evaluation + `generate()` within **5 s** wall-clock and **256 MB** heap.
+  - Plus scene limits in § Execution Constraints (faces, draws, depth, instances, `DataTexture` bytes).
+- **Failures:**
+  - Each rejection maps to a **rule code** in § Failure Semantics.
+  - Structured `{ stage, rule, detail }` responses are described in **Runtime Spec § Error Reporting**.

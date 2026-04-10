@@ -351,18 +351,15 @@ Within a single round, all values are frozen at round start.
 
 ## TL;DR
 
-- **Check & run**
-  - Read the file, parse it, and reject it early if it breaks the rules.
-  - Run miner code in an isolated sandbox, not in the main validator process.
-  - Load the pinned Three.js build there, then call `generate(THREE)`.
-  - The code gets **5 s** total and **256 MB** for load + run.
-
-- **Render**
-  - If validation passes, run the same code a second time in headless Chrome.
-  - Render one **1024×1024** PNG with a fixed camera, lights, background, and environment.
-  - The scene is rebuilt for render, not copied over from the sandbox.
-
-- **Errors & setup**
-  - Failures return `{ stage, rule, detail }`.
-  - Rule names match **Output Spec § Failure Semantics**.
-  - Everything runs in Docker with locked-down limits, and round settings may change between rounds.
+- **Validate & execute (isolated-vm):**
+  - Parse and statically analyze first; then compile and run the miner module only inside a fresh V8 isolate (not the validator process).
+  - Pinned `three.module.js` is compiled in-isolate.
+  - Call `generate(THREE)` with **5 s** wall-clock and **256 MB** heap for **module evaluation + `generate()`** combined (host parse/analysis is separate).
+- **Render (Puppeteer):**
+  - After post-execution checks pass, run the **same source** again in headless Chrome — scene is **rebuilt**, not serialized from the sandbox.
+  - Miner code has **5 s** for page load through `generate()`; the canonical framebuffer pass uses a **separate** timeout.
+  - Output: one **1024×1024** PNG under the fixed renderer, camera, lights, background, and environment.
+- **Errors & host:**
+  - Failures use `{ stage, rule, detail }`; `rule` codes are defined in **Output Spec § Failure Semantics**.
+  - Execution is inside **Docker** with tight limits.
+  - Bundle, resolution, camera/light/env, and caps may change **between rounds** only.
