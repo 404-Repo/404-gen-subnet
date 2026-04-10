@@ -1,13 +1,14 @@
 import asyncio
 from pathlib import Path
 
+import httpx
 from loguru import logger
 from openai import AsyncOpenAI
 from subnet_common.competition.generations import GenerationResult
 from subnet_common.competition.match_report import DuelReport, DuelWinner, MatchReport
 from subnet_common.graceful_shutdown import GracefulShutdown
 
-from judge_service.evaluate_duel import evaluate_duel
+from judge_service.judges.multi_stage import evaluate_duel
 
 
 WINNER_TO_SCORE: dict[DuelWinner, int] = {
@@ -26,42 +27,40 @@ async def run_match(
     right_gens: dict[str, GenerationResult],
     left: str,
     right: str,
-    max_concurrent_duels: int,
-    overtime_tolerance_ratio: float,
-    max_generation_time_seconds: float,
+    max_concurrent_vlm_calls: int,
     shutdown: GracefulShutdown,
 ) -> MatchReport:
-    """Run all prompt duels for a match between two miners.
+    """Run all prompt duels for a match between two miners using the multi-stage judge."""
+    sem = asyncio.Semaphore(max_concurrent_vlm_calls)
+    match_label = f"{left[:10]} vs {right[:10]}"
+    match_start = asyncio.get_running_loop().time()
+    logger.info(f"match {match_label}: starting {len(prompts)} duels")
 
-    Evaluates each prompt concurrently (limited by max_concurrent_duels),
-    aggregates scores, and returns the complete match report.
-    """
-    sem = asyncio.Semaphore(max_concurrent_duels)
-    overtime_allowance = int(len(prompts) * overtime_tolerance_ratio)
-
-    left_overtime = _get_overtime_prompts(prompts, left_gens, overtime_allowance, max_generation_time_seconds)
-    right_overtime = _get_overtime_prompts(prompts, right_gens, overtime_allowance, max_generation_time_seconds)
-
-    duels = await asyncio.gather(
-        *[
-            _evaluate_prompt(
-                openai=openai,
-                sem=sem,
-                prompt=p,
-                left_gen=left_gens.get(Path(p).stem, GenerationResult()),
-                right_gen=right_gens.get(Path(p).stem, GenerationResult()),
-                left_overtime=Path(p).stem in left_overtime,
-                right_overtime=Path(p).stem in right_overtime,
-                seed=seed,
-                shutdown=shutdown,
-            )
-            for p in prompts
-        ]
-    )
+    async with httpx.AsyncClient(timeout=httpx.Timeout(60, connect=10)) as http:
+        duels = await asyncio.gather(
+            *[
+                _evaluate_prompt(
+                    openai=openai,
+                    http=http,
+                    sem=sem,
+                    prompt=p,
+                    left_gen=left_gens.get(Path(p).stem, GenerationResult()),
+                    right_gen=right_gens.get(Path(p).stem, GenerationResult()),
+                    seed=seed,
+                    shutdown=shutdown,
+                    log_id=f"{Path(p).stem} / {match_label}",
+                )
+                for p in prompts
+            ]
+        )
     duels = sorted(duels, key=lambda d: d.name)
 
     score = sum(WINNER_TO_SCORE[d.winner] for d in duels)
     margin = score / len(duels) if duels else 0
+    elapsed = asyncio.get_running_loop().time() - match_start
+    logger.info(
+        f"match {match_label}: done in {elapsed:.1f}s, score={score:+d}, margin={margin:+.2%}"
+    )
     return MatchReport(
         left=left,
         right=right,
@@ -71,134 +70,57 @@ async def run_match(
     )
 
 
+def _preview_url(gen: GenerationResult) -> str | None:
+    """Grid PNG for the duel report — 4 views at a glance is more useful than just front."""
+    if not gen.views:
+        return None
+    return f"{gen.views}/grid.png"
+
+
 async def _evaluate_prompt(
     openai: AsyncOpenAI,
+    http: httpx.AsyncClient,
     sem: asyncio.Semaphore,
     prompt: str,
     left_gen: GenerationResult,
     right_gen: GenerationResult,
-    left_overtime: bool,
-    right_overtime: bool,
     seed: int,
     shutdown: GracefulShutdown,
+    log_id: str = "",
 ) -> DuelReport:
-    """Evaluate a single prompt duel between left and right miners.
-
-    Returns early with the appropriate winner if previews are missing or
-    generation time penalties apply. Otherwise, calls the judge VLM.
-    """
+    """Run one prompt duel. Skips with SKIPPED if shutdown fires before evaluation starts."""
     stem = Path(prompt).stem
+    left_url = _preview_url(left_gen)
+    right_url = _preview_url(right_gen)
 
     duel = DuelReport(
         name=stem,
         prompt=prompt,
-        left_glb=left_gen.glb,
-        left_png=left_gen.png,
-        right_glb=right_gen.glb,
-        right_png=right_gen.png,
+        left_js=left_gen.js,
+        left_png=left_url,
+        right_js=right_gen.js,
+        right_png=right_url,
         winner=DuelWinner.SKIPPED,
-        issues="Preview is missing",
     )
 
-    if result := _check_missing_previews(left_gen, right_gen, stem):
-        duel.winner, duel.issues = result
+    if shutdown.should_stop:
         return duel
 
-    if result := _check_overtime(left_overtime, right_overtime):
-        duel.winner, duel.issues = result
-        return duel
-
-    left_url = left_gen.png
-    right_url = right_gen.png
-    if not left_url or not right_url:  # pragma: no cover
-        return duel  # unreachable after _check_missing_previews
-
-    async with sem:
-        if shutdown.should_stop:
-            return duel
-
-        start = asyncio.get_running_loop().time()
-        duel_result = await evaluate_duel(
-            client=openai,
+    try:
+        winner, detail = await evaluate_duel(
+            vlm=openai,
+            http=http,
+            sem=sem,
             prompt_url=prompt,
-            left_url=left_url,
-            right_url=right_url,
+            left_gen=left_gen,
+            right_gen=right_gen,
             seed=seed,
+            log_id=log_id or stem,
         )
-        elapsed = asyncio.get_running_loop().time() - start
-        logger.debug(f"Duel {stem}: {duel_result.outcome:+d} in {elapsed:.1f}s")
-
-        duel.winner = _outcome_to_winner(duel_result.outcome)
-        duel.issues = duel_result.issues
+    except Exception as e:
+        logger.exception(f"duel evaluation failed for {stem}: {e}")
         return duel
 
-
-def _check_missing_previews(
-    left_gen: GenerationResult,
-    right_gen: GenerationResult,
-    stem: str,
-) -> tuple[DuelWinner, str] | None:
-    """Return winner based on missing previews, or None if both present."""
-    if not left_gen.png and not right_gen.png:
-        logger.debug(f"No previews for {stem}")
-        return DuelWinner.DRAW, f"No previews for {stem}"
-
-    if not left_gen.png:
-        logger.debug(f"No preview for {stem} from left")
-        return DuelWinner.RIGHT, f"No preview for {stem} from left"
-
-    if not right_gen.png:
-        logger.debug(f"No preview for {stem} from right")
-        return DuelWinner.LEFT, f"No preview for {stem} from right"
-
-    return None
-
-
-def _check_overtime(
-    left_overtime: bool,
-    right_overtime: bool,
-) -> tuple[DuelWinner, str] | None:
-    """Return winner based on overtime penalties, or None if no penalty."""
-    if left_overtime and right_overtime:
-        return DuelWinner.DRAW, "Generation time exceeded for both"
-
-    if left_overtime:
-        return DuelWinner.RIGHT, "Generation time exceeded for left"
-
-    if right_overtime:
-        return DuelWinner.LEFT, "Generation time exceeded for right"
-
-    return None
-
-
-def _outcome_to_winner(outcome: int) -> DuelWinner:
-    """Convert numeric outcome to DuelWinner."""
-    if outcome < 0:
-        return DuelWinner.LEFT
-    if outcome > 0:
-        return DuelWinner.RIGHT
-    return DuelWinner.DRAW
-
-
-def _get_overtime_prompts(
-    prompts: list[str],
-    gens: dict[str, GenerationResult],
-    allowance: int,
-    max_generation_time_seconds: float,
-) -> set[str]:
-    """Return prompt stems that exceed overtime allowance.
-
-    The first `allowance` overtime prompts are free; the rest are penalized.
-    """
-    penalized: set[str] = set()
-    overtime_count = 0
-
-    for p in prompts:
-        stem = Path(p).stem
-        gen = gens.get(stem)
-        if gen and gen.generation_time and gen.generation_time > max_generation_time_seconds:
-            overtime_count += 1
-            if overtime_count > allowance:
-                penalized.add(stem)
-
-    return penalized
+    duel.winner = winner
+    duel.detail = detail
+    return duel

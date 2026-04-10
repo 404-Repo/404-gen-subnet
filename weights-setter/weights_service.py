@@ -8,6 +8,8 @@ from pydantic import BaseModel
 from shared.subnet_common.github import GitHubClient
 from subnet_common.competition.leader import LeaderState, require_leader_state
 
+from discord import NULL_DISCORD_NOTIFIER, DiscordNotifier
+
 
 class WeightsResult(BaseModel):
     uids: list[int]
@@ -30,6 +32,7 @@ class WeightsService:
         subnet_owner_uid: int,
         netuid: int,
         wallet: bt.wallet,
+        discord: DiscordNotifier = NULL_DISCORD_NOTIFIER,
     ) -> None:
         self._subtensor = subtensor
         """Bittensor subtensor instance."""
@@ -58,6 +61,8 @@ class WeightsService:
         """Subnet UID in bittensor network."""
         self._wallet = wallet
         """Bittensor wallet of the validator."""
+        self._discord = discord
+        """Discord notifier for error alerts."""
         self._set_weights_loop_interval: int = 60  # 1 minute
         """Time interval in seconds for the weights set loop."""
         self._next_set_weights_time: float = 0.0
@@ -95,6 +100,9 @@ class WeightsService:
                     )
                 except TimeoutError:
                     logger.error(f"Weights iteration timed out after {self._set_weights_iteration_timeout_sec}s")
+                    await self._discord.notify_iteration_failed(
+                        f"Weights iteration timed out after {self._set_weights_iteration_timeout_sec}s"
+                    )
                     self._next_set_weights_time = self._schedule_retry(current_time)
                     continue
 
@@ -102,10 +110,12 @@ class WeightsService:
                     self._next_set_weights_time = current_time + self._set_weights_interval_sec
                     logger.info(f"Next weights set scheduled in {self._set_weights_interval_sec}s")
                 else:
+                    await self._discord.notify_iteration_failed("Weights iteration did not complete successfully")
                     self._next_set_weights_time = self._schedule_retry(current_time)
 
             except Exception as e:
                 logger.exception(f"Unexpected error during weights set iteration: {e}")
+                await self._discord.notify_cycle_error(e)
                 self._next_set_weights_time = self._schedule_retry(time.time())
             finally:
                 await asyncio.sleep(self._set_weights_loop_interval)
@@ -170,11 +180,11 @@ class WeightsService:
             return await require_leader_state(git, ref=commit_sha)
 
     def _get_leader_last_block(self, *, leader_state: LeaderState) -> int | None:
-        if leader_state is None:
-            logger.warning("Leader state not found")
+        latest = leader_state.get_latest()
+        if latest is None:
+            logger.warning("Leader state has no transitions")
             return None
-        effective_block: int = leader_state.get_latest().effective_block
-        return effective_block
+        return latest.effective_block
 
     async def _resolve_leader(
         self,

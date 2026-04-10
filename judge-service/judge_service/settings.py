@@ -3,7 +3,12 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", case_sensitive=False)
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        case_sensitive=False,
+        extra="ignore",  # tolerate shared-lib env vars (HF_TOKEN etc.) we don't model here
+    )
 
     github_token: SecretStr = Field(..., alias="GITHUB_TOKEN", description="GitHub personal access token")
     github_repo: str = Field(
@@ -26,27 +31,23 @@ class Settings(BaseSettings):
     openai_api_key: SecretStr = Field(..., alias="OPENAI_API_KEY", description="VLLM server API key")
 
     openai_timeout_seconds: int = Field(
-        default=30, alias="OPENAI_TIMEOUT", description="VLLM server timeout in seconds"
+        default=120,
+        alias="OPENAI_TIMEOUT",
+        description=(
+            "Per-request timeout to the VLM server (seconds). At ~50 tok/s generation a "
+            "1024-token response is ~22s; pad generously for stages that retry on parse failure."
+        ),
     )
 
-    max_concurrent_duels: int = Field(
-        default=2, alias="MAX_CONCURRENT_DUELS", description="Maximum number of concurrent duels"
-    )
-
-    max_mismatched_margin: float = Field(
-        default=0.05,
-        alias="MAX_MISMATCHED_MARGIN",
-        description="Maximum tolerated mismatched prompts, percent",
-    )
-
-    max_generation_time_seconds: float = Field(
-        default=180, alias="MAX_GENERATION_TIME", description="Maximum generation time in seconds"
-    )
-
-    overtime_tolerance_ratio: float = Field(
-        default=0.05,
-        alias="OVERTIME_TOLERANCE_RATIO",
-        description="Ratio of overtime prompts allowed before penalization (e.g., 0.1 = first 10% are not penalized)",
+    max_concurrent_vlm_calls: int = Field(
+        default=32,
+        alias="MAX_CONCURRENT_VLM_CALLS",
+        description=(
+            "Cap on simultaneous VLM calls in flight across the whole match. A duel runs "
+            "~25 VLM calls; with N duels gathered you can have up to 25*N in flight. This "
+            "sem keeps the VLM endpoint loaded but not over-saturated. Watch vLLM's "
+            "Running/Waiting and KV-cache stats — bump until KV cache fills meaningfully."
+        ),
     )
 
     pause_on_stage_end: bool = Field(

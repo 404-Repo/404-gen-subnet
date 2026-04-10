@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field, TypeAdapter
+from pydantic import BaseModel, TypeAdapter
 
 from subnet_common.git_batcher import GitBatcher
 from subnet_common.github import GitHubClient
@@ -9,14 +9,10 @@ class AuditRequest(BaseModel):
     Request for miner verification.
 
     Written by judge-service when a miner becomes a local winner.
-    Read by output-verifier to know what to verify.
-
-    Critical prompts are stems (filenames without extension) of decisive prompts.
-    These have stricter tolerance (max 1 mismatch allowed).
+    Read by the generation orchestrator to know what to regenerate.
     """
 
     hotkey: str
-    critical_prompts: list[str] = Field(description="Stems of decisive prompts")
 
 
 AuditRequestListAdapter = TypeAdapter(list[AuditRequest])

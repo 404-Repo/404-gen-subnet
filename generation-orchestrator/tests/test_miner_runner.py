@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-import asyncio
 import json
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from subnet_common.competition.audit_requests import AuditRequest
-from subnet_common.competition.generation_audit import GenerationAuditOutcome
+from subnet_common.competition.generation_report import GenerationReportOutcome
 from subnet_common.competition.generations import GenerationResult, GenerationSource
 from subnet_common.git_batcher import GitBatcher
 from subnet_common.testing import MockGitHubClient
@@ -14,7 +13,7 @@ from subnet_common.testing import MockGitHubClient
 from generation_orchestrator.generation_stop import GenerationStop
 from generation_orchestrator.gpu_provider import ContainerInfo, DeployedContainer, GPUProvider
 from generation_orchestrator.miner_runner import MinerRunner
-from generation_orchestrator.pod_tracker import PodTracker
+from generation_orchestrator.pod_session import BatchComplete, PodReplaceRequested, ReplaceReason
 from generation_orchestrator.prompts import Prompt
 from generation_orchestrator.settings import Settings
 from generation_orchestrator.staggered_semaphore import StaggeredSemaphore
@@ -56,8 +55,8 @@ def make_prompt(stem: str) -> Prompt:
     return Prompt(stem=stem, url=f"https://cdn/{stem}.jpg", path=FIXTURES_DIR / "prompt1.jpg")
 
 
-def done_result(gen_time: float = 10.0) -> GenerationResult:
-    return GenerationResult(glb="x", png="x", generation_time=gen_time, attempts=1, distance=0.01)
+def done_result() -> GenerationResult:
+    return GenerationResult(js="x", views="x")
 
 
 def make_deployed() -> DeployedContainer:
@@ -82,6 +81,20 @@ def _make_git_files(
     return files
 
 
+def _mock_pod_session(
+    MockSession: MagicMock,
+    *,
+    run_side_effect: list[BatchComplete | PodReplaceRequested],
+) -> AsyncMock:
+    """Configure the PodSession mock so every instantiation yields the same session mock."""
+    session = AsyncMock()
+    session.run = AsyncMock(side_effect=run_side_effect)
+    session.__aenter__ = AsyncMock(return_value=session)
+    session.__aexit__ = AsyncMock(return_value=False)
+    MockSession.return_value = session
+    return session
+
+
 async def test_all_prompts_done_skips_deploy(settings: Settings) -> None:
     """When prior generations cover all prompts, no pods are deployed."""
     prompts = [make_prompt("p1"), make_prompt("p2")]
@@ -93,30 +106,31 @@ async def test_all_prompts_done_skips_deploy(settings: Settings) -> None:
     runner = make_runner(settings, mock_git, prompts=prompts, gpu_manager=gpu_manager)
     result = await runner.run()
 
-    assert result is None  # generation-only mode (no audit_request)
+    assert result is None
     gpu_manager.get_healthy_pod.assert_not_called()
 
 
 async def test_all_prompts_done_audit_mode(settings: Settings) -> None:
-    """In audit mode, all prompts done triggers audit_generations and returns PASSED."""
+    """In audit mode, all prompts done triggers summarize_generation and returns COMPLETED."""
     prompts = [make_prompt("p1"), make_prompt("p2")]
     prior = {"p1": done_result(), "p2": done_result()}
     submitted = {"p1": done_result(), "p2": done_result()}
 
     mock_git = MockGitHubClient(files=_make_git_files(generated=prior, submitted=submitted))
 
-    audit_request = AuditRequest(hotkey=HOTKEY, critical_prompts=[])
+    audit_request = AuditRequest(hotkey=HOTKEY)
     gpu_manager = AsyncMock()
     runner = make_runner(settings, mock_git, prompts=prompts, audit_request=audit_request, gpu_manager=gpu_manager)
     result = await runner.run()
 
     assert result is not None
-    assert result.outcome == GenerationAuditOutcome.PASSED
+    assert result.outcome == GenerationReportOutcome.COMPLETED
     gpu_manager.get_healthy_pod.assert_not_called()
 
 
 async def test_deploy_failure_audit_mode(settings: Settings) -> None:
-    """When all pods fail to deploy in audit mode, returns REJECTED."""
+    """When all initial deploy attempts fail in audit mode, returns REJECTED."""
+    settings.max_initial_deploy_attempts = 2
     prompts = [make_prompt("p1")]
 
     mock_git = MockGitHubClient(files=_make_git_files(submitted={"p1": done_result()}))
@@ -124,13 +138,43 @@ async def test_deploy_failure_audit_mode(settings: Settings) -> None:
     gpu_manager.get_healthy_pod = AsyncMock(return_value=None)
     gpu_manager.cleanup_by_prefix = AsyncMock(return_value=0)
 
-    audit_request = AuditRequest(hotkey=HOTKEY, critical_prompts=[])
+    audit_request = AuditRequest(hotkey=HOTKEY)
     runner = make_runner(settings, mock_git, prompts=prompts, audit_request=audit_request, gpu_manager=gpu_manager)
     result = await runner.run()
 
     assert result is not None
-    assert result.outcome == GenerationAuditOutcome.REJECTED
+    assert result.outcome == GenerationReportOutcome.REJECTED
     assert result.reason == "Failed to deploy a docker image"
+    assert gpu_manager.get_healthy_pod.call_count == 2
+
+
+async def test_initial_deploy_retry_succeeds(settings: Settings) -> None:
+    """First deploy fails but second succeeds — generation proceeds."""
+    settings.max_initial_deploy_attempts = 2
+    prompts = [make_prompt("p1")]
+    submitted = {"p1": done_result()}
+
+    mock_git = MockGitHubClient(files=_make_git_files(submitted=submitted))
+    deployed = make_deployed()
+
+    gpu_manager = AsyncMock()
+    gpu_manager.get_healthy_pod = AsyncMock(side_effect=[None, deployed])
+    gpu_manager.delete_container = AsyncMock()
+    gpu_manager.cleanup_by_prefix = AsyncMock(return_value=0)
+
+    audit_request = AuditRequest(hotkey=HOTKEY)
+    runner = make_runner(settings, mock_git, prompts=prompts, audit_request=audit_request, gpu_manager=gpu_manager)
+
+    with patch("generation_orchestrator.miner_runner.PodSession") as MockSession:
+        _mock_pod_session(
+            MockSession,
+            run_side_effect=[BatchComplete(generations={"p1": done_result()}, batch_time=10.0)],
+        )
+        result = await runner.run()
+
+    assert result is not None
+    assert result.outcome == GenerationReportOutcome.COMPLETED
+    assert gpu_manager.get_healthy_pod.call_count == 2
 
 
 async def test_stop_during_warmup_cleans_up(settings: Settings) -> None:
@@ -154,7 +198,7 @@ async def test_stop_during_warmup_cleans_up(settings: Settings) -> None:
 
 
 async def test_successful_generation(settings: Settings) -> None:
-    """Happy path: pod deploys, pipeline processes prompts, pod is cleaned up."""
+    """Happy path: single pod deploys, session processes prompts, pod is cleaned up."""
     prompts = [make_prompt("p1"), make_prompt("p2")]
     submitted = {"p1": done_result(), "p2": done_result()}
 
@@ -167,152 +211,203 @@ async def test_successful_generation(settings: Settings) -> None:
     gpu_manager.delete_container = AsyncMock()
     gpu_manager.cleanup_by_prefix = AsyncMock(return_value=0)
 
-    test_settings = settings.model_copy(
-        update={"pods_per_miner": 1, "initial_pod_count": 1, "max_pod_attempts": 1, "max_prompt_attempts": 1}
-    )
+    audit_request = AuditRequest(hotkey=HOTKEY)
+    runner = make_runner(settings, mock_git, prompts=prompts, audit_request=audit_request, gpu_manager=gpu_manager)
 
-    audit_request = AuditRequest(hotkey=HOTKEY, critical_prompts=[])
-    runner = make_runner(test_settings, mock_git, prompts=prompts, audit_request=audit_request, gpu_manager=gpu_manager)
-
-    with patch("generation_orchestrator.miner_runner.GenerationPipeline") as MockPipeline:
-
-        async def fake_run(pod_id: str, tracker: PodTracker) -> None:
-            coordinator = MockPipeline.call_args.kwargs["coordinator"]
-            while True:
-                entry, _ = coordinator.assign(pod_id)
-                if entry is None:
-                    break
-                result = GenerationResult(glb="x", png="x", generation_time=10.0, attempts=1, distance=0.01)
-                coordinator.record_result(pod_id, entry.prompt.stem, result)
-
-        MockPipeline.return_value.run = AsyncMock(side_effect=fake_run)
+    with patch("generation_orchestrator.miner_runner.PodSession") as MockSession:
+        _mock_pod_session(
+            MockSession,
+            run_side_effect=[
+                BatchComplete(generations={"p1": done_result(), "p2": done_result()}, batch_time=20.0),
+            ],
+        )
         result = await runner.run()
 
     assert result is not None
-    assert result.outcome == GenerationAuditOutcome.PASSED
+    assert result.outcome == GenerationReportOutcome.COMPLETED
     assert result.checked_prompts == 2
+    gpu_manager.get_healthy_pod.assert_called_once()
     gpu_manager.delete_container.assert_called_once_with(deployed.info)
 
 
-async def test_multiple_pods_deployed_and_cleaned_up(settings: Settings) -> None:
-    """Runner starts pods_per_miner pods and cleans up all of them."""
-    prompts = [make_prompt("p1"), make_prompt("p2")]
-    submitted = {"p1": done_result(), "p2": done_result()}
-
-    mock_git = MockGitHubClient(files=_make_git_files(submitted=submitted))
-
-    deployed = make_deployed()
-
-    gpu_manager = AsyncMock()
-    gpu_manager.get_healthy_pod = AsyncMock(return_value=deployed)
-    gpu_manager.delete_container = AsyncMock()
-    gpu_manager.cleanup_by_prefix = AsyncMock(return_value=0)
-
-    test_settings = settings.model_copy(
-        update={"pods_per_miner": 2, "initial_pod_count": 2, "max_pod_attempts": 2, "max_prompt_attempts": 2}
-    )
-
-    audit_request = AuditRequest(hotkey=HOTKEY, critical_prompts=[])
-    runner = make_runner(test_settings, mock_git, prompts=prompts, audit_request=audit_request, gpu_manager=gpu_manager)
-
-    with patch("generation_orchestrator.miner_runner.GenerationPipeline") as MockPipeline:
-
-        async def fake_run(pod_id: str, tracker: PodTracker) -> None:
-            coordinator = MockPipeline.call_args.kwargs["coordinator"]
-            while True:
-                entry, _ = coordinator.assign(pod_id)
-                if entry is None:
-                    break
-                result = GenerationResult(glb="x", png="x", generation_time=10.0, attempts=1, distance=0.01)
-                coordinator.record_result(pod_id, entry.prompt.stem, result)
-
-        MockPipeline.return_value.run = AsyncMock(side_effect=fake_run)
-        result = await runner.run()
-
-    assert result is not None
-    assert result.outcome == GenerationAuditOutcome.PASSED
-    assert gpu_manager.get_healthy_pod.call_count == 2
-    assert gpu_manager.delete_container.call_count == 2
-
-
-async def test_replaces_failed_worker(settings: Settings) -> None:
-    """When a worker fails deploy, runner starts a replacement from the pod budget."""
-    prompts = [make_prompt("p1"), make_prompt("p2")]
-    submitted = {"p1": done_result(), "p2": done_result()}
-
-    mock_git = MockGitHubClient(files=_make_git_files(submitted=submitted))
-
-    deployed = make_deployed()
-
-    gpu_manager = AsyncMock()
-    gpu_manager.get_healthy_pod = AsyncMock(side_effect=[deployed, None, deployed])
-    gpu_manager.delete_container = AsyncMock()
-    gpu_manager.cleanup_by_prefix = AsyncMock(return_value=0)
-
-    test_settings = settings.model_copy(
-        update={"pods_per_miner": 2, "initial_pod_count": 1, "max_pod_attempts": 3, "max_prompt_attempts": 2}
-    )
-
-    audit_request = AuditRequest(hotkey=HOTKEY, critical_prompts=[])
-    runner = make_runner(test_settings, mock_git, prompts=prompts, audit_request=audit_request, gpu_manager=gpu_manager)
-
-    with patch("generation_orchestrator.miner_runner.GenerationPipeline") as MockPipeline:
-
-        async def fake_run(pod_id: str, tracker: PodTracker) -> None:
-            await asyncio.sleep(0)  # yield so failed worker can be reaped first
-            coordinator = MockPipeline.call_args.kwargs["coordinator"]
-            entry, _ = coordinator.assign(pod_id)
-            if entry:
-                result = GenerationResult(glb="x", png="x", generation_time=10.0, attempts=1, distance=0.01)
-                coordinator.record_result(pod_id, entry.prompt.stem, result)
-
-        MockPipeline.return_value.run = AsyncMock(side_effect=fake_run)
-        result = await runner.run()
-
-    assert result is not None
-    assert result.outcome == GenerationAuditOutcome.PASSED
-    assert gpu_manager.get_healthy_pod.call_count == 3
-    assert gpu_manager.delete_container.call_count == 2  # only successful deploys
-
-
-async def test_cancels_remaining_workers_when_done(settings: Settings) -> None:
-    """When all prompts are done, remaining workers are stopped via no_tasks."""
+async def test_replacement_on_crash(settings: Settings) -> None:
+    """When the pod signals unreachable mid-batch, a replacement is deployed and work continues."""
     prompts = [make_prompt("p1")]
 
     mock_git = MockGitHubClient(files=_make_git_files(submitted={"p1": done_result()}))
 
-    deployed = make_deployed()
-    stop = GenerationStop()
-
     gpu_manager = AsyncMock()
-    gpu_manager.get_healthy_pod = AsyncMock(return_value=deployed)
+    gpu_manager.get_healthy_pod = AsyncMock(side_effect=[make_deployed(), make_deployed()])
     gpu_manager.delete_container = AsyncMock()
     gpu_manager.cleanup_by_prefix = AsyncMock(return_value=0)
 
-    test_settings = settings.model_copy(
-        update={"pods_per_miner": 2, "initial_pod_count": 2, "max_pod_attempts": 2, "max_prompt_attempts": 2}
-    )
+    audit_request = AuditRequest(hotkey=HOTKEY)
+    runner = make_runner(settings, mock_git, prompts=prompts, audit_request=audit_request, gpu_manager=gpu_manager)
 
-    audit_request = AuditRequest(hotkey=HOTKEY, critical_prompts=[])
-    runner = make_runner(
-        test_settings, mock_git, prompts=prompts, audit_request=audit_request, stop=stop, gpu_manager=gpu_manager
-    )
-
-    with patch("generation_orchestrator.miner_runner.GenerationPipeline") as MockPipeline:
-
-        async def fake_run(pod_id: str, tracker: PodTracker) -> None:
-            coordinator = MockPipeline.call_args.kwargs["coordinator"]
-            entry, _ = coordinator.assign(pod_id)
-            if entry:
-                result = GenerationResult(glb="x", png="x", generation_time=10.0, attempts=1, distance=0.01)
-                coordinator.record_result(pod_id, entry.prompt.stem, result)
-            else:
-                await stop.wait()  # an idle worker waits until canceled
-
-        MockPipeline.return_value.run = AsyncMock(side_effect=fake_run)
+    with patch("generation_orchestrator.miner_runner.PodSession") as MockSession:
+        _mock_pod_session(
+            MockSession,
+            run_side_effect=[
+                PodReplaceRequested(reason=ReplaceReason.UNREACHABLE),
+                BatchComplete(generations={"p1": done_result()}, batch_time=15.0),
+            ],
+        )
         result = await runner.run()
 
     assert result is not None
-    assert result.outcome == GenerationAuditOutcome.PASSED
-    assert stop.reason == "no_tasks"
-    assert gpu_manager.delete_container.call_count == 2  # both workers deployed
+    assert result.outcome == GenerationReportOutcome.COMPLETED
+    assert gpu_manager.get_healthy_pod.call_count == 2
+    assert gpu_manager.delete_container.call_count == 2
+
+
+async def test_replacement_on_pod_request(settings: Settings) -> None:
+    """When the pod requests replacement, a new pod is deployed."""
+    prompts = [make_prompt("p1")]
+
+    mock_git = MockGitHubClient(files=_make_git_files(submitted={"p1": done_result()}))
+
+    gpu_manager = AsyncMock()
+    gpu_manager.get_healthy_pod = AsyncMock(side_effect=[make_deployed(), make_deployed()])
+    gpu_manager.delete_container = AsyncMock()
+    gpu_manager.cleanup_by_prefix = AsyncMock(return_value=0)
+
+    audit_request = AuditRequest(hotkey=HOTKEY)
+    runner = make_runner(settings, mock_git, prompts=prompts, audit_request=audit_request, gpu_manager=gpu_manager)
+
+    payload = {"why": "degraded gpu"}
+    with patch("generation_orchestrator.miner_runner.PodSession") as MockSession:
+        _mock_pod_session(
+            MockSession,
+            run_side_effect=[
+                PodReplaceRequested(reason=ReplaceReason.REQUESTED, payload=payload),
+                BatchComplete(generations={"p1": done_result()}, batch_time=10.0),
+            ],
+        )
+        result = await runner.run()
+
+    assert result is not None
+    assert result.outcome == GenerationReportOutcome.COMPLETED
+    assert gpu_manager.get_healthy_pod.call_count == 2
+
+    # The replaced pod's payload must reach the committed pod_stats.json — that's how
+    # operators see *why* a miner asked to be swapped (e.g. degraded GPU diagnostics).
+    pod_stats = json.loads(mock_git.committed[f"rounds/1/{HOTKEY}/pod_stats.json"])
+    requested = [s for s in pod_stats.values() if s["termination_reason"] == ReplaceReason.REQUESTED.value]
+    assert len(requested) == 1
+    assert requested[0]["payload"] == payload
+    # Provider on every pod_stats entry — operators need to know which provider hosted each pod.
+    assert all(s["provider"] == GPUProvider.TARGON.value for s in pod_stats.values())
+
+
+async def test_replacement_limit_reached(settings: Settings) -> None:
+    """When max replacements are exhausted, the run stops."""
+    settings.max_replacements = 1
+    prompts = [make_prompt("p1")]
+
+    mock_git = MockGitHubClient()
+
+    gpu_manager = AsyncMock()
+    gpu_manager.get_healthy_pod = AsyncMock(return_value=make_deployed())
+    gpu_manager.delete_container = AsyncMock()
+    gpu_manager.cleanup_by_prefix = AsyncMock(return_value=0)
+
+    runner = make_runner(settings, mock_git, prompts=prompts, gpu_manager=gpu_manager)
+
+    with patch("generation_orchestrator.miner_runner.PodSession") as MockSession:
+        _mock_pod_session(
+            MockSession,
+            run_side_effect=[
+                PodReplaceRequested(reason=ReplaceReason.UNREACHABLE),
+                PodReplaceRequested(reason=ReplaceReason.UNREACHABLE),
+            ],
+        )
+        result = await runner.run()
+
+    assert result is None
+    assert gpu_manager.get_healthy_pod.call_count == 2
+
+
+async def test_batch_time_limit_preserves_earlier_batches(settings: Settings) -> None:
+    """When a batch times out mid-run, completed batches from that pod survive the swap.
+
+    Pod 1 finishes p1 (partial-batch result: one success, one miner failure), then the next
+    batch times out. Pod 2 picks up the remaining prompts. The final state has all three
+    rows — proving p1 + its miner-failed sibling were persisted before the swap.
+    """
+    settings.max_replacements = 1
+    settings.batch_size = 1
+    prompts = [make_prompt("p1"), make_prompt("p2"), make_prompt("p3")]
+    submitted = {"p1": done_result(), "p2": done_result(), "p3": done_result()}
+
+    mock_git = MockGitHubClient(files=_make_git_files(submitted=submitted))
+
+    gpu_manager = AsyncMock()
+    gpu_manager.get_healthy_pod = AsyncMock(return_value=make_deployed())
+    gpu_manager.delete_container = AsyncMock()
+    gpu_manager.cleanup_by_prefix = AsyncMock(return_value=0)
+
+    audit_request = AuditRequest(hotkey=HOTKEY)
+    runner = make_runner(settings, mock_git, prompts=prompts, audit_request=audit_request, gpu_manager=gpu_manager)
+
+    p2_failed = GenerationResult(failure_reason="miner skipped")
+
+    with patch("generation_orchestrator.miner_runner.PodSession") as MockSession:
+        _mock_pod_session(
+            MockSession,
+            run_side_effect=[
+                # Pod 1, batch 1 (p1): partial — p1 succeeds, p2 declared a miner failure.
+                BatchComplete(generations={"p1": done_result(), "p2": p2_failed}, batch_time=10.0),
+                # Pod 1, batch 2 (p3): pod stalls, time limit fires.
+                PodReplaceRequested(reason=ReplaceReason.BATCH_TIME_LIMIT),
+                # Pod 2 picks up the one remaining prompt (p3). p1 and p2 already have rows.
+                BatchComplete(generations={"p3": done_result()}, batch_time=15.0),
+            ],
+        )
+        result = await runner.run()
+
+    assert result is not None
+    assert result.outcome == GenerationReportOutcome.COMPLETED
+    assert result.checked_prompts == 3
+    # p2 is a permanent miner failure, so it counts as failed in the summary.
+    assert result.failed_prompts == 1
+    # Earlier batch's successes AND failures both survived the swap — time accumulated too.
+    assert result.generation_time == 25.0
+    # Pod 2 should have been invoked with only p3 pending (p1/p2 already resolved).
+    third_call = MockSession.return_value.run.await_args_list[2]
+    _round, batch = third_call.args
+    assert [p.stem for p in batch] == ["p3"]
+
+
+async def test_total_generation_time_accumulated(settings: Settings) -> None:
+    """Total generation time is accumulated across successfully completed batches."""
+    settings.max_replacements = 3
+    settings.batch_size = 1
+    prompts = [make_prompt("p1"), make_prompt("p2"), make_prompt("p3")]
+    submitted = {"p1": done_result(), "p2": done_result(), "p3": done_result()}
+
+    mock_git = MockGitHubClient(files=_make_git_files(submitted=submitted))
+
+    gpu_manager = AsyncMock()
+    gpu_manager.get_healthy_pod = AsyncMock(return_value=make_deployed())
+    gpu_manager.delete_container = AsyncMock()
+    gpu_manager.cleanup_by_prefix = AsyncMock(return_value=0)
+
+    audit_request = AuditRequest(hotkey=HOTKEY)
+    runner = make_runner(settings, mock_git, prompts=prompts, audit_request=audit_request, gpu_manager=gpu_manager)
+
+    with patch("generation_orchestrator.miner_runner.PodSession") as MockSession:
+        _mock_pod_session(
+            MockSession,
+            run_side_effect=[
+                BatchComplete(generations={"p1": done_result()}, batch_time=100.0),
+                PodReplaceRequested(reason=ReplaceReason.UNREACHABLE),
+                BatchComplete(generations={"p2": done_result()}, batch_time=100.0),
+                PodReplaceRequested(reason=ReplaceReason.UNREACHABLE),
+                BatchComplete(generations={"p3": done_result()}, batch_time=50.0),
+            ],
+        )
+        result = await runner.run()
+
+    assert result is not None
+    assert result.outcome == GenerationReportOutcome.COMPLETED
+    assert result.generation_time == 250.0

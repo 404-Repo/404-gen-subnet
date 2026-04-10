@@ -22,12 +22,29 @@ class TargonClientError(GPUClientError):
     """Targon-specific client error."""
 
 
+# Targon bundles (GPU type, count) into single SKU strings. Internal to this client —
+# callers pass `(gpu_type, gpu_count)` and we resolve.
+_TARGON_SKUS: dict[tuple[str, int], str] = {
+    ("H200", 1): "h200-small",
+    ("H200", 4): "h200-large",
+}
+
+
+def _resolve_sku(gpu_type: str, gpu_count: int) -> str:
+    sku = _TARGON_SKUS.get((gpu_type, gpu_count))
+    if sku is None:
+        known = ", ".join(sorted(f"{count}x{gtype}" for (gtype, count) in _TARGON_SKUS))
+        raise TargonClientError(f"Targon has no SKU for {gpu_count}x{gpu_type}. Known: {known}")
+    return sku
+
+
 class ContainerDeployConfig(BaseModel):
     """Configuration for Targon container deployment."""
 
     image: str
     container_concurrency: int
-    resource_name: str = "h200-small"
+    gpu_type: str = "H200"
+    gpu_count: int = 4
     port: int = 10006
     min_replicas: int = 1
     max_replicas: int = 1
@@ -110,7 +127,8 @@ class TargonClient:
         *,
         config: ContainerDeployConfig | None = None,
         image: str | None = None,
-        resource_name: str | None = None,
+        gpu_type: str | None = None,
+        gpu_count: int | None = None,
         port: int | None = None,
         concurrency: int | None = None,
         env: dict[str, str] | None = None,
@@ -125,7 +143,9 @@ class TargonClient:
         if not _image:
             raise ValueError("image is required")
 
-        _resource = resource_name or (config.resource_name if config else "h200-small")
+        _gpu_type = gpu_type or (config.gpu_type if config else "H200")
+        _gpu_count = gpu_count or (config.gpu_count if config else 4)
+        _resource = _resolve_sku(_gpu_type, _gpu_count)
         _port = port or (config.port if config else 10006)
         _concurrency = concurrency or (config.container_concurrency if config else 8)
         _visibility = config.visibility if config else "external"

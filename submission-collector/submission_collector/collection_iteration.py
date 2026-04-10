@@ -36,7 +36,7 @@ async def run_collection_iteration(
     settings: Settings, discord: DiscordNotifier = NULL_DISCORD_NOTIFIER
 ) -> datetime | None:
     """Entry point: creates I/O dependencies and delegates to collection_iteration."""
-    async with bt.async_subtensor(network=settings.network) as subtensor:
+    async with bt.AsyncSubtensor(network=settings.network) as subtensor:
 
         async def get_block() -> int:
             block: int = await asyncio.wait_for(

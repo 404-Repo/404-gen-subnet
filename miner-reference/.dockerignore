@@ -1,0 +1,16 @@
+.venv/
+.pytest_cache/
+.reports/
+.mypy_cache/
+__pycache__/
+*.pyc
+node_modules/
+validator/
+tools/
+tests/
+examples/viewer.html
+*.md
+!examples/car.js
+.git/
+.idea/
+.vscode/

@@ -64,6 +64,9 @@ select = [
     "ASYNC", # flake8-async
     "PTH", # flake8-use-pathlib
 ]
+ignore = [
+    "ASYNC109", # async fn timeout parameter — explicit per-call timeouts are preferred over wrapping every call site in asyncio.timeout()
+]
 fixable = ["ALL"]
 unfixable = []
 

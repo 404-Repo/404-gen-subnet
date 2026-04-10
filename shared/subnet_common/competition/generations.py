@@ -12,32 +12,41 @@ class GenerationSource(StrEnum):
 
 
 class GenerationResult(BaseModel):
-    glb: str | None = Field(default=None, description="CDN URL to GLB file")
-    png: str | None = Field(default=None, description="CDN URL to rendered preview")
-    generation_time: float = Field(default=0, description="Time taken to generate the result in seconds")
-    size: int = Field(default=0, description="Size of the GLB file in bytes")
-    attempts: int = Field(default=0, description="Number of generation attempts (persisted for restart continuity)")
-    distance: float = Field(
-        default=0.0, description="Cosine distance between submitted and generated results using DINOv3 embeddings"
+    """One miner's outcome for a single prompt stem.
+
+    A persisted row is either:
+    - Success: `js` is set (CDN URL to the Three.js module); `views` may or may not be
+      set (None most likely means the JS itself was not renderable — counted as a
+      delivery, but it won't win any matches).
+    - Miner failure: `failure_reason` is set (from the miner's `_failed.json` manifest);
+      `js` is None. Permanent — not retried.
+
+    `views` is a CDN folder prefix. The judge constructs view URLs by convention:
+    `{views}/white/{view_name}.png` for the 8 white-bg views and `{views}/gray/{view_name}.png`
+    for the 4 gray-bg views. View names live in `subnet_common.render.WHITE_VIEWS / GRAY_VIEWS`.
+    Atomic: either all 12 views were uploaded successfully, or `views` is None.
+
+    An empty `GenerationResult()` is used as a "no data" sentinel by consumers and does
+    not represent a persisted outcome.
+    """
+
+    js: str | None = Field(default=None, description="CDN URL to the Three.js module")
+    views: str | None = Field(default=None, description="CDN folder prefix containing white/ and gray/ rendered views")
+    failure_reason: str | None = Field(
+        default=None,
+        description=(
+            "Why this stem has no js. On the GENERATED source: a reason reported by the "
+            "miner via _failed.json. On the SUBMITTED source: a categorical string set "
+            "by the collector when its own pipeline failed (e.g. 'js_fetch_failed: HTTP 404', "
+            "'render_failed', 'embeddings_failed'). None means a clean delivery (or, on "
+            "SUBMITTED, the miner did not submit anything for this stem)."
+        ),
     )
+    size: int = Field(default=0, description="Size of the JS module in bytes")
 
     def is_failed(self) -> bool:
-        return self.glb is None or self.png is None
-
-    def is_overtime(self, timeout: float) -> bool:
-        return self.generation_time > timeout
-
-    def needs_retry(self, timeout: float, max_attempts: int | None = None) -> bool:
-        """Check if generation needs retry.
-
-        Returns True if generation failed or exceeded timeout,
-        AND has attempts remaining (if max_attempts specified).
-        """
-        if not self.is_failed() and not self.is_overtime(timeout):
-            return False
-        if max_attempts is not None and self.attempts >= max_attempts:
-            return False
-        return True
+        """True when the miner declared permanent failure for this stem."""
+        return self.failure_reason is not None
 
 
 GenerationsMap = dict[str, GenerationResult]

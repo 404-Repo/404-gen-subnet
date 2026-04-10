@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 
 class MatchOutcome(BaseModel):
@@ -7,5 +7,4 @@ class MatchOutcome(BaseModel):
     left: str
     right: str
     margin: float
-    decisive_prompts: list[str] = Field(default_factory=list)
     from_cache: bool = False

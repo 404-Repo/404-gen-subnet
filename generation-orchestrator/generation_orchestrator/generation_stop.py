@@ -27,7 +27,7 @@ class GenerationStop:
         self._reason = reason
         self._event.set()
 
-    async def wait(self, timeout: float | None = None) -> bool:  # noqa: ASYNC109
+    async def wait(self, timeout: float | None = None) -> bool:
         """Wait for cancellation. Returns True if canceled, False if timed out."""
         try:
             await asyncio.wait_for(self._event.wait(), timeout=timeout)

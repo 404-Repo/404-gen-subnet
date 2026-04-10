@@ -71,24 +71,66 @@ class DiscordNotifier:
 
     async def notify_downloads_complete(self, round_num: int, results: dict[str, GenerationsMap]) -> None:
         total_miners = len(results)
-        full = sum(
+        if total_miners == 0:
+            await self._webhook.send_embed(
+                title=f"Round {round_num} Downloads Complete",
+                color=0x2ECC71,
+                fields=[{"name": "Miners", "value": "0", "inline": True}],
+            )
+            return
+
+        # Total prompts inferred from the largest GenerationsMap. Miners that crashed before
+        # completing their batch will have fewer entries; "perfect" requires the full count.
+        total_prompts = max((len(gens) for gens in results.values()), default=0)
+
+        perfect = sum(
             1
             for gens in results.values()
-            if gens and all(g.glb is not None and g.png is not None for g in gens.values())
+            if total_prompts > 0 and len(gens) >= total_prompts and all(g.js is not None for g in gens.values())
         )
-        none = sum(1 for gens in results.values() if not any(g.glb is not None for g in gens.values()))
-        partial = total_miners - full - none
 
-        no_png = sum(1 for gens in results.values() for g in gens.values() if g.glb is not None and g.png is None)
+        # "No submission" miners genuinely sent nothing — every entry has neither js nor a
+        # collector-side failure_reason. "Fetch-failed" miners had something on the chain
+        # but our collector couldn't pull any of it (CDN dead, etc.).
+        no_submission = sum(
+            1
+            for gens in results.values()
+            if not any(g.js is not None or g.failure_reason is not None for g in gens.values())
+        )
+        fetch_failed = sum(
+            1
+            for gens in results.values()
+            if not any(g.js is not None for g in gens.values())
+            and any(g.failure_reason is not None for g in gens.values())
+        )
+
+        # Stems where the miner delivered JS but our render/embedding pipeline failed to
+        # produce views. This is *our* problem to act on — every other number is
+        # informational about miner behavior.
+        render_failures = sum(
+            1 for gens in results.values() for g in gens.values() if g.js is not None and g.views is None
+        )
+
+        # Red if anything on the system side is actionable; green otherwise.
+        color = 0xE74C3C if render_failures > 0 or fetch_failed > 0 else 0x2ECC71
 
         await self._webhook.send_embed(
             title=f"Round {round_num} Downloads Complete",
-            color=0x2ECC71,
+            color=color,
             fields=[
-                {"name": "OK", "value": f"{full} / {total_miners}", "inline": True},
-                {"name": "Partial", "value": f"{partial} / {total_miners}", "inline": True},
-                {"name": "Failed", "value": f"{none} / {total_miners}", "inline": True},
-                {"name": "No PNG", "value": str(no_png), "inline": True},
+                {"name": "Miners", "value": str(total_miners), "inline": True},
+                {
+                    "name": "Perfect (100%)",
+                    "value": f"{perfect} ({100 * perfect // total_miners}%)",
+                    "inline": True,
+                },
+                {
+                    "name": "No submission",
+                    "value": f"{no_submission} ({100 * no_submission // total_miners}%)",
+                    "inline": True,
+                },
+                {"name": "Fetch failed", "value": str(fetch_failed), "inline": True},
+                {"name": "Render failures", "value": str(render_failures), "inline": True},
             ],
         )
 
