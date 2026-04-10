@@ -1,0 +1,43 @@
+[tool.poetry]
+name = "miner-reference"
+version = "0.1.0"
+description = "Reference miner implementation for 404-GEN subnet batch generation API"
+authors = ["Maxim Bladyko <max@404.xyz>"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = ">=3.11,<=3.13"
+fastapi = "0.115.12"
+uvicorn = { version = "0.34.3", extras = ["standard"] }
+loguru = "0.7.3"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "8.3.5"
+pytest-asyncio = "0.25.3"
+httpx = "0.28.1"
+
+[build-system]
+requires = ["poetry-core", "setuptools", "wheel"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.black]
+target-version = ['py311']
+line-length = 120
+include = '\.pyi?$'
+
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+fix = true
+
+[tool.ruff.lint]
+select = ["E", "F", "UP", "I", "B", "Q", "ASYNC"]
+fixable = ["ALL"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]

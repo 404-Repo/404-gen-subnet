@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Miner Reference — Fixture Viewer</title>
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      height: 100%;
+      background: #1a1a1f;
+      color: #ddd;
+      font-family: -apple-system, system-ui, sans-serif;
+      overflow: hidden;
+    }
+    #canvas {
+      display: block;
+      width: 100vw;
+      height: 100vh;
+    }
+    #picker {
+      position: absolute;
+      top: 12px;
+      left: 12px;
+      padding: 10px 14px;
+      background: rgba(0, 0, 0, 0.65);
+      border-radius: 6px;
+      font-size: 12px;
+      line-height: 1.5;
+    }
+    #picker label { color: #aaa; margin-right: 6px; }
+    #picker select {
+      background: #2a2a30;
+      color: #fff;
+      border: 1px solid #444;
+      border-radius: 4px;
+      padding: 4px 8px;
+      font-family: inherit;
+      font-size: 12px;
+      cursor: pointer;
+    }
+    #picker select:focus { outline: 1px solid #6688ff; }
+    #info {
+      position: absolute;
+      top: 64px;
+      left: 12px;
+      padding: 10px 14px;
+      background: rgba(0, 0, 0, 0.55);
+      border-radius: 6px;
+      font-size: 12px;
+      line-height: 1.5;
+      pointer-events: none;
+    }
+    #info b { color: #fff; }
+    #info code {
+      background: rgba(255, 255, 255, 0.1);
+      padding: 1px 5px;
+      border-radius: 3px;
+    }
+    #error {
+      position: absolute;
+      top: 12px;
+      right: 12px;
+      max-width: 480px;
+      padding: 10px 14px;
+      background: rgba(140, 20, 20, 0.85);
+      color: #fff;
+      border-radius: 6px;
+      font-size: 12px;
+      line-height: 1.5;
+      display: none;
+      white-space: pre-wrap;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="canvas"></canvas>
+
+  <div id="picker">
+    <label for="fixture-select">fixture</label>
+    <select id="fixture-select">
+      <option value="./car.js">car.js  (reference example)</option>
+      <option value="../validator/test/budget-probes/detailed_car.js">budget-probes / detailed_car.js</option>
+      <option value="../validator/test/budget-probes/wooden_chair.js">budget-probes / wooden_chair.js</option>
+      <option value="../validator/test/budget-probes/leafy_tree.js">budget-probes / leafy_tree.js</option>
+      <option value="../validator/test/budget-probes/cathedral.js">budget-probes / cathedral.js</option>
+      <option value="../validator/test/budget-probes/highpoly_statue.js">budget-probes / highpoly_statue.js</option>
+    </select>
+  </div>
+
+  <div id="info">
+    <b>Miner Reference — Fixture Viewer</b><br/>
+    <span id="loaded-from"></span><br/>
+    Drag to orbit · scroll to zoom<br/>
+    <span id="stats"></span>
+  </div>
+
+  <div id="error"></div>
+
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.183.2/build/three.module.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.2/examples/jsm/"
+      }
+    }
+  </script>
+
+  <script type="module">
+    import * as THREE from 'three';
+    import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+    const errorEl = document.getElementById('error');
+    const statsEl = document.getElementById('stats');
+    const loadedFromEl = document.getElementById('loaded-from');
+    const selectEl = document.getElementById('fixture-select');
+
+    function showError(message) {
+      errorEl.style.display = 'block';
+      errorEl.textContent = message;
+      console.error(message);
+    }
+
+    function clearError() {
+      errorEl.style.display = 'none';
+      errorEl.textContent = '';
+    }
+
+    // ----- Scene, camera, lighting (set up once) -----
+
+    const canvas = document.getElementById('canvas');
+    const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+    renderer.setPixelRatio(window.devicePixelRatio);
+    renderer.setSize(window.innerWidth, window.innerHeight, false);
+    renderer.outputColorSpace = THREE.SRGBColorSpace;
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 1.0;
+
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x1a1a1f);
+
+    // FOV matches the runtime spec (17.5°). Position kept at the same direction
+    // and distance as the canonical render camera (3.5 from origin).
+    const camera = new THREE.PerspectiveCamera(17.5, window.innerWidth / window.innerHeight, 0.01, 100);
+    camera.position.set(2.4, 1.6, 2.8);
+    camera.lookAt(0, 0, 0);
+
+    const controls = new OrbitControls(camera, canvas);
+    controls.enableDamping = true;
+    controls.target.set(0, 0, 0);
+
+    // PBR-friendly lighting
+    scene.add(new THREE.HemisphereLight(0xffffff, 0x222233, 0.6));
+
+    const key = new THREE.DirectionalLight(0xffffff, 1.6);
+    key.position.set(3, 4, 2);
+    scene.add(key);
+
+    const fill = new THREE.DirectionalLight(0xaaccff, 0.4);
+    fill.position.set(-2, 2, -3);
+    scene.add(fill);
+
+    // Reference helpers — unit cube wireframe (the [-0.5, 0.5] valid region) and origin axes
+    const unitBox = new THREE.Box3Helper(
+      new THREE.Box3(new THREE.Vector3(-0.5, -0.5, -0.5), new THREE.Vector3(0.5, 0.5, 0.5)),
+      0x444466,
+    );
+    scene.add(unitBox);
+
+    const axes = new THREE.AxesHelper(0.65);
+    scene.add(axes);
+
+    // ----- Fixture loading (called on initial load and on dropdown change) -----
+
+    let currentFixtureRoot = null;
+
+    async function loadFixture(url) {
+      clearError();
+      statsEl.innerHTML = '<br/><i>loading…</i>';
+      loadedFromEl.innerHTML = `Loaded from <code>${url}</code>`;
+
+      // Remove the previously-loaded fixture root, if any
+      if (currentFixtureRoot) {
+        scene.remove(currentFixtureRoot);
+        disposeObject(currentFixtureRoot);
+        currentFixtureRoot = null;
+      }
+
+      try {
+        // Cache-bust so re-selecting the same fixture re-runs it
+        const module = await import(`${url}?t=${Date.now()}`);
+        const generate = module.default;
+
+        if (typeof generate !== 'function') {
+          throw new Error(`${url} does not have a default export function`);
+        }
+
+        const t0 = performance.now();
+        const root = generate(THREE);
+        const elapsed = performance.now() - t0;
+
+        if (!root || !root.isObject3D) {
+          throw new Error('generate() did not return a Three.js Object3D');
+        }
+
+        scene.add(root);
+        currentFixtureRoot = root;
+
+        updateStats(root, elapsed);
+      } catch (err) {
+        statsEl.innerHTML = '';
+        showError(`Failed to load ${url}:\n${err.stack || err.message || err}`);
+      }
+    }
+
+    function updateStats(root, elapsedMs) {
+      let vertexCount = 0;
+      let drawCalls = 0;
+      let maxDepth = 0;
+      let instances = 0;
+
+      function walk(node, depth) {
+        if (depth > maxDepth) maxDepth = depth;
+        if (node.isMesh || node.isLine || node.isPoints) {
+          drawCalls++;
+          if (node.geometry?.attributes?.position) {
+            vertexCount += node.geometry.attributes.position.count;
+          }
+          if (node.isInstancedMesh) {
+            instances += node.count ?? 0;
+          }
+        }
+        for (const child of node.children) walk(child, depth + 1);
+      }
+      walk(root, 0);
+
+      const box = new THREE.Box3().setFromObject(root);
+      const size = new THREE.Vector3();
+      const center = new THREE.Vector3();
+      box.getSize(size);
+      box.getCenter(center);
+
+      const fits =
+        box.min.x >= -0.5 && box.max.x <= 0.5 &&
+        box.min.y >= -0.5 && box.max.y <= 0.5 &&
+        box.min.z >= -0.5 && box.max.z <= 0.5;
+
+      statsEl.innerHTML =
+        `<br/>generate(): <b>${elapsedMs.toFixed(1)} ms</b>` +
+        `<br/>vertices: <b>${vertexCount}</b> / 250,000` +
+        `<br/>draw calls: <b>${drawCalls}</b> / 200` +
+        `<br/>scene depth: <b>${maxDepth}</b> / 32` +
+        `<br/>instances: <b>${instances}</b> / 50,000` +
+        `<br/>bounds: <b>${fits ? 'fits unit cube ✓' : 'OUT OF BOUNDS ✗'}</b>` +
+        `<br/>size: ${size.x.toFixed(3)} × ${size.y.toFixed(3)} × ${size.z.toFixed(3)}` +
+        `<br/>center: (${center.x.toFixed(3)}, ${center.y.toFixed(3)}, ${center.z.toFixed(3)})`;
+    }
+
+    function disposeObject(obj) {
+      obj.traverse((node) => {
+        if (node.geometry) node.geometry.dispose?.();
+        if (node.material) {
+          const mats = Array.isArray(node.material) ? node.material : [node.material];
+          for (const m of mats) m?.dispose?.();
+        }
+      });
+    }
+
+    selectEl.addEventListener('change', (e) => {
+      loadFixture(e.target.value);
+    });
+
+    // Initial load
+    await loadFixture(selectEl.value);
+
+    // ----- Render loop -----
+
+    function onResize() {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight, false);
+    }
+    window.addEventListener('resize', onResize);
+
+    function animate() {
+      controls.update();
+      renderer.render(scene, camera);
+      requestAnimationFrame(animate);
+    }
+    animate();
+  </script>
+</body>
+</html>
