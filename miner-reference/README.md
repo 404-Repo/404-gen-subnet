@@ -4,6 +4,20 @@ Reference bundle for 404-GEN miners: specifications, a canonical example, a loca
 
 The protocol: **the orchestrator launches your Docker image on a 4×H200 pod, sends prompts in 4 sequential batches of 32, and collects one JavaScript module per prompt.** Each module `export default`s a function that constructs a Three.js scene. Your model's job is to produce that code.
 
+## Why batch-based generation
+
+Previous versions used a per-prompt HTTP model where the orchestrator managed retries, pod health checks, and degraded-GPU detection on your behalf. This was expensive to operate and opaque to miners — you had no visibility into scheduling decisions or failure recovery, and no way to optimize for your own hardware.
+
+The batch model flips ownership. The orchestrator sends prompts and collects results; everything in between is yours. You decide how to parallelize across GPUs, when to retry a failed generation, how to detect hardware degradation, and whether to request a pod replacement or push through. This matters because:
+
+- **Scheduling is a competitive lever.** Running two models in parallel, retrying with different parameters, allocating more compute to harder prompts — all legal, all up to you.
+- **Hardware diagnostics are a competitive lever.** Your code decides when a pod is good enough and when to burn a replacement. Better diagnostics means fewer wasted pods, more completed batches, and a higher score.
+- **No more invisible retries.** In the old system, retries and pod issues were handled behind the scenes. Now everything is transparent — you see your hardware, you make the calls.
+- **Partial results always count.** If you can't generate one prompt, skip it and return the rest. 31 out of 32 beats timing out on the whole batch.
+- **Models stay warm.** No container teardown between batches. Load once, generate four times.
+
+The tradeoff is more responsibility: you're building health checks, scheduling logic, and failure recovery into your solution. A buggy service that crashes on startup burns through your pod budget fast. Test locally before deploying.
+
 ## Contents
 
 | Path | Purpose |

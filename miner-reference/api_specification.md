@@ -6,6 +6,14 @@
 
 The orchestrator launches your Docker image on a GPU pod, sends prompts in sequential batches, and collects JavaScript source files as output. You own scheduling, parallelism, GPU allocation, failure recovery, and hardware diagnostics. The orchestrator only cares about the final output.
 
+### Why this design
+
+The previous per-prompt HTTP model had the orchestrator managing retries, pod health, and degraded-GPU detection centrally. This was expensive and not transparent — miners had no control over scheduling, parallelism, or recovery from flaky inference.
+
+The batch API shifts that control to miners. The orchestrator's job is reduced to delivering prompts and collecting results. Miners own the execution loop: how to distribute work across GPUs, when to retry a failed generation internally, how to diagnose hardware problems, and whether to spend a pod replacement or push through on a degraded node. Smart scheduling and diagnostics are now competitive advantages, not hidden orchestrator logic.
+
+The pod replacement budget (4 pods total — your initial pod plus 3 replacements) makes this concrete. Your code receives `replacements_remaining` on every `/status` poll and decides whether a detected problem is worth burning a replacement for. A miner with better diagnostics wastes fewer pods, completes more batches, and scores higher.
+
 Your service must expose four HTTP endpoints on port **10006**:
 
 | Method | Path | Purpose |
