@@ -61,7 +61,9 @@ Everything accessed via `THREE.X` is checked against this allowlist. Anything no
 
 **Geometry:** `BufferGeometry`, `BufferAttribute`, `InterleavedBuffer`, `InterleavedBufferAttribute`, `Float32BufferAttribute`, `Uint8BufferAttribute`, `Uint16BufferAttribute`, `Uint32BufferAttribute`, `Int8BufferAttribute`, `Int16BufferAttribute`, `Int32BufferAttribute`, `BoxGeometry`, `SphereGeometry`, `CylinderGeometry`, `ConeGeometry`, `TorusGeometry`, `TorusKnotGeometry`, `PlaneGeometry`, `CircleGeometry`, `RingGeometry`, `TetrahedronGeometry`, `OctahedronGeometry`, `DodecahedronGeometry`, `IcosahedronGeometry`, `PolyhedronGeometry`, `ExtrudeGeometry`, `LatheGeometry`, `ShapeGeometry`, `TubeGeometry`, `EdgesGeometry`, `WireframeGeometry`.
 
-**Materials:** `MeshStandardMaterial`, `MeshPhysicalMaterial`, `MeshBasicMaterial`.
+**Materials:** `MeshStandardMaterial`, `MeshPhysicalMaterial`, `MeshBasicMaterial`, `PointsMaterial`, `LineBasicMaterial`, `LineDashedMaterial`.
+
+Material / object pairing is **not enforced by the validator** but it matters for what renders. Use mesh materials (`MeshStandardMaterial` / `MeshPhysicalMaterial` / `MeshBasicMaterial`) on `Mesh` and `InstancedMesh`. Use `PointsMaterial` on `Points`. Use `LineBasicMaterial` or `LineDashedMaterial` on `Line` and `LineSegments`. Mis-pairings pass validation but render incorrectly (e.g., `Mesh` with `PointsMaterial` draws nothing because mesh shaders don't set `gl_PointSize`), costing VLM judging points.
 
 **Textures:** `DataTexture` only. Data must be generated procedurally in code.
 

@@ -88,7 +88,7 @@ The [`examples/prompts/`](examples/prompts/) folder contains real prompt images.
 | [`suv.png`](examples/prompts/suv.png) | [`suv.js`](examples/generated/suv.js) | 3,331 | 67 | Complex hard-surface: many BoxGeometry parts, TubeGeometry roof rack, TorusGeometry tires |
 | [`clock.png`](examples/prompts/clock.png) | [`clock.js`](examples/generated/clock.js) | 5,957 | 109 | Mixed: TorusGeometry frame, CylinderGeometry hands, procedural face texture |
 
-Open the [viewer](examples/viewer.html) and select from the "generated from prompts" group to preview these alongside their prompt images. Compare the generated outputs against the prompt images to calibrate your expectations — these represent the kind of procedural approximation the competition produces.
+Open the [viewer](examples/viewer.html) and select any entry from the "generated from prompts" dropdown group to preview the generated Three.js output. To compare against the source prompt, open the corresponding image from [`examples/prompts/`](examples/prompts/) in a separate browser tab — the viewer renders only the generated `.js`, not the prompt image itself. The pairs are meant to calibrate your expectations — this is the kind of procedural approximation the competition produces.
 
 ## For miners: iterating on your `generate.js`
 
