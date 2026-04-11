@@ -2,6 +2,11 @@
  * A tree: trunk + branches as cylinders + InstancedMesh leaves.
  * Tests the InstancedMesh constraint with realistic foliage density.
  */
+// @vertices 488
+// @drawCalls 8
+// @maxDepth 1
+// @instances 2000
+// @textureBytes 0
 
 export default function generate(THREE) {
   const tree = new THREE.Group();

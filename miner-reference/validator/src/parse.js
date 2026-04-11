@@ -13,7 +13,7 @@ export function parseSource(source) {
       ast: null,
       failures: [
         {
-          stage: 'static_analysis',
+          stage: 'parse',
           rule: 'FILE_SIZE_EXCEEDED',
           detail: `${bytes} bytes (limit ${MAX_FILE_BYTES})`,
         },
@@ -33,7 +33,7 @@ export function parseSource(source) {
       ast: null,
       failures: [
         {
-          stage: 'static_analysis',
+          stage: 'parse',
           rule: 'PARSE_ERROR',
           detail: err.message,
         },

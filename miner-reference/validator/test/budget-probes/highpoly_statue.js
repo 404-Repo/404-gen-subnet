@@ -3,6 +3,11 @@
  * stand-in for a procedurally-sculpted hero asset. Tests how close to the
  * vertex cap a single hero mesh can get.
  */
+// @vertices 25221
+// @drawCalls 2
+// @maxDepth 1
+// @instances 0
+// @textureBytes 0
 
 export default function generate(THREE) {
   const root = new THREE.Group();

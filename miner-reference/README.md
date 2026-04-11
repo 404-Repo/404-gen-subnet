@@ -52,6 +52,7 @@ The tradeoff is more responsibility: you're building health checks, scheduling l
 
 | Path | Purpose |
 |---|---|
+| [`AGENTS.md`](AGENTS.md) | Compact rules reference for code-generation LLMs — all constraints, allowed APIs, and patterns in one file |
 | [`api_specification.md`](api_specification.md) | HTTP contract between orchestrator and miner pod |
 | [`output_specifications.md`](output_specifications.md) | What miners must produce — JS module format, constraints, allowed Three.js APIs |
 | [`runtime_specifications.md`](runtime_specifications.md) | How submissions are validated and rendered — sandbox, static analysis, rendering pipeline |

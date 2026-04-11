@@ -2,6 +2,11 @@
  * A simple wooden dining chair: seat, backrest with vertical slats, 4 legs
  * with stretchers. Demonstrates a furniture-class output.
  */
+// @vertices 832
+// @drawCalls 17
+// @maxDepth 1
+// @instances 0
+// @textureBytes 0
 
 export default function generate(THREE) {
   const chair = new THREE.Group();

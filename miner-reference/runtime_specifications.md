@@ -295,14 +295,15 @@ For each failed prompt, miners receive a structured failure reason:
 
 ```json
 {
-  "stage": "static_analysis" | "module_load" | "execution" | "post_validation" | "render",
+  "stage": "parse" | "static_analysis" | "module_load" | "execution" | "post_validation" | "render",
   "rule": "FORBIDDEN_IDENTIFIER",
   "detail": "fetch"
 }
 ```
 
 - `stage` tells the miner which phase failed:
-  - `static_analysis` — AST parsing or static rule violation, before any code runs.
+  - `parse` — file size check or AST parser rejected the source. Distinct from `static_analysis` because parse failures mean the source is not valid JavaScript at all (or the file is too large to even consider), whereas static analysis failures mean the source is well-formed but violates a rule. Rule codes that surface here: `FILE_SIZE_EXCEEDED`, `PARSE_ERROR`.
+  - `static_analysis` — well-formed JavaScript that violates an AST-level rule, before any code runs.
   - `module_load` — compiling and evaluating the miner's module body, before `generate()` is called. Errors here include instantiation failures or top-level code throwing.
   - `execution` — the call to `generate(THREE)` itself.
   - `post_validation` — checks on the returned root (vertex count, bounding box, etc.).
