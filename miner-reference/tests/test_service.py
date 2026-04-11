@@ -116,7 +116,17 @@ async def test_generate_idempotent_retry(client: AsyncClient):
 
 
 async def test_generate_rejected_when_not_ready(client: AsyncClient):
-    """Cannot submit a new batch while already generating a different one."""
+    """Cannot submit a new batch while already generating a different one.
+
+    Also locks in the EXACT 409 body shape required by the API spec:
+
+        {"detail": "Cannot accept batch", "current_status": "generating"}
+
+    NOT the nested
+    `{"detail": {"detail": "...", "current_status": "..."}}` that FastAPI's
+    HTTPException produces by default. The handler bypasses HTTPException
+    and returns a JSONResponse directly to get this exact shape.
+    """
     app.state.miner.status = PodStatus.GENERATING
     app.state.miner.batch_stems = frozenset(["existingprompt"])
     resp = await client.post(
@@ -124,6 +134,36 @@ async def test_generate_rejected_when_not_ready(client: AsyncClient):
         json={"prompts": [{"stem": "differentprompt", "image_url": "https://example.com/img.jpg"}], "seed": 1},
     )
     assert resp.status_code == 409
+
+    body = resp.json()
+    # Exact shape match — no extra keys, no nesting under `detail`.
+    assert body == {
+        "detail": "Cannot accept batch",
+        "current_status": "generating",
+    }, f"409 body drift from spec: got {body}"
+
+
+async def test_generate_409_current_status_values(client: AsyncClient):
+    """The /generate 409 body should report each valid `current_status`
+    value exactly as the state machine reports it. This checks warming_up
+    and replace — the remaining non-accepting states beyond `generating`
+    (which is covered by test_generate_rejected_when_not_ready above).
+    """
+    for blocking_status in (PodStatus.WARMING_UP, PodStatus.REPLACE):
+        app.state.miner.status = blocking_status
+        app.state.miner.batch_stems = frozenset()  # no idempotency match
+        resp = await client.post(
+            "/generate",
+            json={
+                "prompts": [{"stem": "aaa", "image_url": "https://example.com/a.jpg"}],
+                "seed": 1,
+            },
+        )
+        assert resp.status_code == 409, f"expected 409 in {blocking_status}"
+        assert resp.json() == {
+            "detail": "Cannot accept batch",
+            "current_status": blocking_status.value,
+        }, f"body drift for status={blocking_status}"
 
 
 async def test_results_rejected_when_not_complete(client: AsyncClient):

@@ -238,7 +238,12 @@
     async function loadFixture(url) {
       prepareLoad(url);
       try {
-        const module = await import(`${url}?t=${Date.now()}`);
+        // File URLs need cache-busting so re-selecting the same dropdown entry
+        // re-evaluates the fixture (handy during iteration). Blob URLs are
+        // already unique per createObjectURL call, and the browser resolves
+        // them by exact URL — appending ?t=... makes the blob unreachable.
+        const importUrl = url.startsWith('blob:') ? url : `${url}?t=${Date.now()}`;
+        const module = await import(importUrl);
         const generate = module.default;
         if (typeof generate !== 'function') {
           throw new Error(`${url} does not have a default export function`);
@@ -250,26 +255,28 @@
       }
     }
 
-    function loadFixtureFromSource(source, fileName) {
-      prepareLoad(fileName);
-      try {
-        // Rewrite `export default` so the source is evaluable outside a module context
-        const rewritten = source.replace(/\bexport\s+default\b/, 'var __export__ =');
-        const generate = new Function(rewritten + '\nreturn __export__;')();
-        if (typeof generate !== 'function') {
-          throw new Error(`${fileName} does not have a default export function`);
-        }
-        runGenerate(generate, fileName);
-      } catch (err) {
-        statsEl.innerHTML = '';
-        showError(`Failed to load ${fileName}:\n${err.stack || err.message || err}`);
-      }
-    }
-
     function updateStats(root, elapsedMs) {
+      // Mirror the validator's auto-wrap rule: a bare Mesh / LineSegments /
+      // Points / InstancedMesh return is wrapped in a Group before
+      // measurement, so `maxDepth` reports 1 (Group wrapper at 0, mesh at 1)
+      // instead of 0. This keeps the viewer HUD consistent with what
+      // `node tools/validate.js` reports for the same fixture. See
+      // Output Spec § Return Value and validator/src/postValidation.js.
+      //
+      // We simulate the wrap by starting the walk at `startDepth = 1` for
+      // bare roots instead of actually parenting `root` under a new Group.
+      // A real wrap would call `wrapper.add(root)`, which reparents `root`
+      // and removes it from the scene — invisible rendering. The depth
+      // offset produces the same `maxDepth` value without touching the
+      // scene graph. All other metrics (vertex count, draw calls,
+      // instances, bounding box) are unaffected because an identity-wrap
+      // Group contributes nothing to any of them.
+      const isBareRoot = root.type !== 'Group';
+      const startDepth = isBareRoot ? 1 : 0;
+
       let vertexCount = 0;
       let drawCalls = 0;
-      let maxDepth = 0;
+      let maxDepth = startDepth;
       let instances = 0;
 
       function walk(node, depth) {
@@ -285,7 +292,7 @@
         }
         for (const child of node.children) walk(child, depth + 1);
       }
-      walk(root, 0);
+      walk(root, startDepth);
 
       const box = new THREE.Box3().setFromObject(root);
       const size = new THREE.Vector3();
@@ -358,20 +365,33 @@
         return;
       }
 
+      // Load the dropped source as a real ES module via a blob URL, not by
+      // rewriting the source string. This routes drag-and-drop through the
+      // same dynamic import() path as the dropdown fixtures, so the browser's
+      // native parser handles `export default` correctly regardless of what
+      // appears in comments, strings, or elsewhere in the file.
       const source = await file.text();
+      const blobUrl = URL.createObjectURL(
+        new Blob([source], { type: 'application/javascript' }),
+      );
 
+      // Reuse the single "dropped" option slot in the dropdown. Revoke the
+      // previous blob URL before overwriting so memory doesn't leak across
+      // repeated drops.
       const label = `${file.name}  (dropped)`;
       let opt = selectEl.querySelector('option[data-dropped]');
       if (!opt) {
         opt = document.createElement('option');
         opt.setAttribute('data-dropped', '');
         selectEl.prepend(opt);
+      } else if (opt.value && opt.value.startsWith('blob:')) {
+        URL.revokeObjectURL(opt.value);
       }
-      opt.value = `dropped:${file.name}`;
+      opt.value = blobUrl;
       opt.textContent = label;
-      selectEl.value = opt.value;
+      selectEl.value = blobUrl;
 
-      loadFixtureFromSource(source, file.name);
+      loadFixture(blobUrl);
     });
 
     // Initial load
