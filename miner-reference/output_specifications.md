@@ -39,7 +39,7 @@ Single `Mesh`, `LineSegments`, or `Points` returns are automatically wrapped in 
 ## What You Control
 
 - Geometry (vertices, faces, normals, UVs)
-- Materials (`MeshStandardMaterial`, `MeshPhysicalMaterial`, `MeshBasicMaterial` for meshes; `PointsMaterial` for `Points`; `LineBasicMaterial` / `LineDashedMaterial` for `Line` / `LineSegments`)
+- Materials (`MeshStandardMaterial`, `MeshPhysicalMaterial`, `MeshBasicMaterial`, `PointsMaterial`, `LineBasicMaterial`, `LineDashedMaterial`)
 - Procedurally generated textures via `DataTexture` only
 - Vertex colors
 - Object hierarchy within the returned root
@@ -132,12 +132,24 @@ All limits except wall-clock time and heap usage are checked on the returned roo
 ## Allowed Three.js APIs
 
 - **Geometry:** `BufferGeometry`, `BufferAttribute`, `InterleavedBuffer`, `InterleavedBufferAttribute`, `Float32BufferAttribute`, `Uint8BufferAttribute`, `Uint16BufferAttribute`, `Uint32BufferAttribute`, `Int8BufferAttribute`, `Int16BufferAttribute`, `Int32BufferAttribute`, all primitive geometries (`BoxGeometry`, `SphereGeometry`, `CylinderGeometry`, `ConeGeometry`, `TorusGeometry`, `TorusKnotGeometry`, `PlaneGeometry`, `CircleGeometry`, `RingGeometry`, `TetrahedronGeometry`, `OctahedronGeometry`, `DodecahedronGeometry`, `IcosahedronGeometry`, `PolyhedronGeometry`), `ExtrudeGeometry`, `LatheGeometry`, `ShapeGeometry`, `TubeGeometry`, `EdgesGeometry`, `WireframeGeometry`.
-- **Materials:** `MeshStandardMaterial`, `MeshPhysicalMaterial`, `MeshBasicMaterial`, `PointsMaterial` (only for use with `Points`), `LineBasicMaterial` and `LineDashedMaterial` (only for use with `Line` / `LineSegments`).
+- **Materials:** `MeshStandardMaterial`, `MeshPhysicalMaterial`, `MeshBasicMaterial`, `PointsMaterial`, `LineBasicMaterial`, `LineDashedMaterial`. Any of these may be passed to any object type — the validator does not enforce pairing. See the note under "Material / object pairing" below.
 - **Textures:** `DataTexture` only. Texture data must be generated procedurally in code.
 - **Math:** `Vector2`, `Vector3`, `Vector4`, `Matrix3`, `Matrix4`, `Quaternion`, `Euler`, `Box3`, `Sphere`, `Plane`, `Ray`, `Color`, `MathUtils` (excluding `seededRandom` and `generateUUID`).
 - **Curves & shapes:** `Curve`, `CurvePath`, `Shape`, `Path`, `CatmullRomCurve3`, `CubicBezierCurve3`, `LineCurve3`, `QuadraticBezierCurve3`.
 - **Objects:** `Object3D`, `Group`, `Mesh`, `InstancedMesh`, `Line`, `LineSegments`, `Points`.
 - **Constants:** `SRGBColorSpace`, `LinearSRGBColorSpace`, `NoColorSpace`, `FrontSide`, `BackSide`, `DoubleSide`, `NormalBlending`, `AdditiveBlending`, `SubtractiveBlending`, `MultiplyBlending`, `NoBlending`, `NearestFilter`, `LinearFilter`, `NearestMipmapNearestFilter`, `LinearMipmapNearestFilter`, `NearestMipmapLinearFilter`, `LinearMipmapLinearFilter`, `RepeatWrapping`, `ClampToEdgeWrapping`, `MirroredRepeatWrapping`, `RGBAFormat`, `RGBFormat`, `RedFormat`, `UnsignedByteType`, `FloatType`.
+
+### Material / object pairing
+
+Three.js lets you construct any of the objects above (`Mesh`, `InstancedMesh`, `Points`, `Line`, `LineSegments`) with any of the allowed materials, but only some pairings render correctly:
+
+| Object type | Conventional material |
+|---|---|
+| `Mesh`, `InstancedMesh` | `MeshStandardMaterial`, `MeshPhysicalMaterial`, `MeshBasicMaterial` |
+| `Points` | `PointsMaterial` |
+| `Line`, `LineSegments` | `LineBasicMaterial`, `LineDashedMaterial` |
+
+Mis-paired combinations (e.g., `Points` with `MeshBasicMaterial`, `Mesh` with `PointsMaterial`) **are not rejected by the validator** — they pass every stage and the script runs to completion. But they render incorrectly: `Mesh` with `PointsMaterial` draws no visible pixels because mesh shaders don't set `gl_PointSize`; `Points` with a mesh material renders as a single point per draw call at default 1-pixel size. The rendered frame is what the VLM judge scores against the prompt image, so a mis-paired material costs you quality points even though it doesn't cost you a validator failure. Use the conventional pairings in the table above unless you have a specific visual reason not to.
 
 ## Prohibited Three.js APIs
 
