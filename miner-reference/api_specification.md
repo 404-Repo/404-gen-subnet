@@ -212,8 +212,9 @@ Return `409` when the service cannot accept the batch. The response body **must*
 |-------------------|---------------------|
 | `generating` | Different batch in progress — this is unexpected, not a retry. |
 | `warming_up` | Pod not ready yet — wait and retry later. |
-| `complete` | Previous batch results not collected — call `GET /results` first. |
 | `replace` | Pod requesting replacement — proceed with replacement flow. |
+
+Note: `complete` is **not** a valid 409 reason. The service accepts new batches from `complete` (this is the normal subsequent-batch path) and accepts retries with matching stems via the idempotency rule above. There is no API signal that distinguishes "complete with results uncollected" from "complete with results collected" — the orchestrator is responsible for calling `GET /results` before sending the next `POST /generate`.
 
 ### `GET /results`
 

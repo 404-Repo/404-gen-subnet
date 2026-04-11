@@ -41,7 +41,7 @@ Single `Mesh`, `LineSegments`, or `Points` returns are automatically wrapped in 
 ## What You Control
 
 - Geometry (vertices, faces, normals, UVs)
-- Materials (`MeshStandardMaterial`, `MeshPhysicalMaterial`, `MeshBasicMaterial`)
+- Materials (`MeshStandardMaterial`, `MeshPhysicalMaterial`, `MeshBasicMaterial` for meshes; `PointsMaterial` for `Points`; `LineBasicMaterial` / `LineDashedMaterial` for `Line` / `LineSegments`)
 - Procedurally generated textures via `DataTexture` only
 - Vertex colors
 - Object hierarchy within the returned root
@@ -134,7 +134,7 @@ All limits except wall-clock time and heap usage are checked on the returned roo
 ## Allowed Three.js APIs
 
 - **Geometry:** `BufferGeometry`, `BufferAttribute`, `InterleavedBuffer`, `InterleavedBufferAttribute`, `Float32BufferAttribute`, `Uint8BufferAttribute`, `Uint16BufferAttribute`, `Uint32BufferAttribute`, `Int8BufferAttribute`, `Int16BufferAttribute`, `Int32BufferAttribute`, all primitive geometries (`BoxGeometry`, `SphereGeometry`, `CylinderGeometry`, `ConeGeometry`, `TorusGeometry`, `TorusKnotGeometry`, `PlaneGeometry`, `CircleGeometry`, `RingGeometry`, `TetrahedronGeometry`, `OctahedronGeometry`, `DodecahedronGeometry`, `IcosahedronGeometry`, `PolyhedronGeometry`), `ExtrudeGeometry`, `LatheGeometry`, `ShapeGeometry`, `TubeGeometry`, `EdgesGeometry`, `WireframeGeometry`.
-- **Materials:** `MeshStandardMaterial`, `MeshPhysicalMaterial`, `MeshBasicMaterial`.
+- **Materials:** `MeshStandardMaterial`, `MeshPhysicalMaterial`, `MeshBasicMaterial`, `PointsMaterial` (only for use with `Points`), `LineBasicMaterial` and `LineDashedMaterial` (only for use with `Line` / `LineSegments`).
 - **Textures:** `DataTexture` only. Texture data must be generated procedurally in code.
 - **Math:** `Vector2`, `Vector3`, `Vector4`, `Matrix3`, `Matrix4`, `Quaternion`, `Euler`, `Box3`, `Sphere`, `Plane`, `Ray`, `Color`, `MathUtils` (excluding `seededRandom` and `generateUUID`).
 - **Curves & shapes:** `Curve`, `CurvePath`, `Shape`, `Path`, `CatmullRomCurve3`, `CubicBezierCurve3`, `LineCurve3`, `QuadraticBezierCurve3`.

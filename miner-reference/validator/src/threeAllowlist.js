@@ -49,6 +49,9 @@ export const THREE_ALLOWED = new Set([
   'MeshStandardMaterial',
   'MeshPhysicalMaterial',
   'MeshBasicMaterial',
+  'PointsMaterial',
+  'LineBasicMaterial',
+  'LineDashedMaterial',
 
   // Textures
   'DataTexture',

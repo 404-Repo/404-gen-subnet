@@ -10,11 +10,21 @@
  *   - MeshStandardMaterial with PBR properties (metalness, roughness)
  *   - A procedurally-generated DataTexture (no embedded image data)
  *   - A small Group hierarchy with positioned and rotated children
- *   - Auto-normalization to the [-1, 1] bounding box at the end, so the
- *     geometry is built at natural scale and only the root transform is
- *     adjusted to satisfy the bounding-box constraint
+ *   - Auto-normalization to the [-0.5, 0.5] bounding box at the end, so
+ *     the geometry is built at natural scale and only the root transform
+ *     is adjusted to satisfy the bounding-box constraint
  *   - The forward axis convention (+Z), so the car points at the camera
+ *
+ * For coverage of the categories this file does NOT exercise (Points,
+ * LineSegments, custom BufferGeometry, vertex colors, MeshPhysicalMaterial,
+ * MeshBasicMaterial, PointsMaterial, LineBasicMaterial), see the other
+ * fixtures in this directory.
  */
+// @vertices 448
+// @drawCalls 6
+// @maxDepth 1
+// @instances 0
+// @textureBytes 1024
 
 export default function generate(THREE) {
   const car = new THREE.Group();

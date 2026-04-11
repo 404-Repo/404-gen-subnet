@@ -50,7 +50,23 @@ import { validate } from '../src/index.js';
 import { LIMITS } from '../src/postValidation.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const PROBE_DIR = path.join(__dirname, 'budget-probes');
+
+// Scan three directories so the runner serves both purposes:
+//   - validator/test/budget-probes/  — synthetic complexity-tier fixtures
+//   - examples/                      — discoverable miner-facing reference
+//                                      examples covering each allowed
+//                                      pattern (custom BufferGeometry,
+//                                      Points, LineSegments, material
+//                                      variants, etc.)
+//   - examples/generated/            — real prompt-to-output pairs from a
+//                                      VLM + code-LLM pipeline
+//
+// All three contribute to CI coverage and metric drift detection.
+const SOURCE_DIRS = [
+  { label: 'budget-probes',     dir: path.join(__dirname, 'budget-probes') },
+  { label: 'examples',          dir: path.join(__dirname, '..', '..', 'examples') },
+  { label: 'examples/generated', dir: path.join(__dirname, '..', '..', 'examples', 'generated') },
+];
 
 const KNOWN_METRICS = new Set([
   'vertices',
@@ -60,12 +76,27 @@ const KNOWN_METRICS = new Set([
   'textureBytes',
 ]);
 
-const probeFiles = (await fs.readdir(PROBE_DIR))
-  .filter((f) => f.endsWith('.js'))
-  .sort();
+const probeFiles = [];
+for (const { label, dir } of SOURCE_DIRS) {
+  let entries;
+  try {
+    entries = await fs.readdir(dir);
+  } catch (err) {
+    if (err.code === 'ENOENT') continue;
+    throw err;
+  }
+  for (const entry of entries.filter((f) => f.endsWith('.js')).sort()) {
+    probeFiles.push({
+      label,
+      file: entry,
+      fullPath: path.join(dir, entry),
+      displayName: `${label}/${entry}`,
+    });
+  }
+}
 
 if (probeFiles.length === 0) {
-  console.error(`No probe fixtures found in ${PROBE_DIR}`);
+  console.error(`No probe fixtures found in any of: ${SOURCE_DIRS.map(s => s.dir).join(', ')}`);
   process.exit(1);
 }
 
@@ -76,8 +107,8 @@ const C = process.stdout.isTTY
 const results = [];
 let failed = 0;
 
-for (const file of probeFiles) {
-  const source = await fs.readFile(path.join(PROBE_DIR, file), 'utf8');
+for (const probe of probeFiles) {
+  const source = await fs.readFile(probe.fullPath, 'utf8');
   const annotations = parseAnnotations(source);
   const result = await validate(source);
 
@@ -88,7 +119,13 @@ for (const file of probeFiles) {
     if (mismatches.length > 0) passed = false;
   }
 
-  results.push({ file, result, annotations, mismatches, passed });
+  results.push({
+    file: probe.displayName,
+    result,
+    annotations,
+    mismatches,
+    passed,
+  });
   if (!passed) failed++;
 }
 
@@ -98,7 +135,7 @@ console.log(`${C.bold}Budget probe results${C.reset}`);
 console.log('');
 
 const cols = [
-  ['fixture',   24, (r) => r.file],
+  ['fixture',   42, (r) => r.file],
   ['verts',      9, (r) => pct(r.result.metrics?.vertices, LIMITS.vertices)],
   ['draws',      8, (r) => pct(r.result.metrics?.drawCalls, LIMITS.drawCalls)],
   ['depth',      8, (r) => pct(r.result.metrics?.maxDepth, LIMITS.depth)],

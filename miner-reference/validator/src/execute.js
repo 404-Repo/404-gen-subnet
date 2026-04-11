@@ -63,6 +63,22 @@ export async function execute(source) {
 
     const worker = new Worker(WORKER_PATH, {
       workerData: { source },
+      // Scrub parent `execArgv`. By default Node workers inherit the
+      // parent process's CLI flags (`process.execArgv`), which breaks the
+      // validator whenever the parent is launched with flags that only
+      // make sense for the parent's invocation:
+      //
+      //   - `--input-type=module` (only valid with `-e` / `-p` / stdin,
+      //     fatal when the worker loads a file)
+      //   - `--eval` / `-e` / `--print` / `-p` (would double-run code)
+      //   - `--inspect` / `--inspect-brk` (port conflict between
+      //     parent and worker debugger)
+      //
+      // The validator must work reliably regardless of how the parent
+      // process was launched — library consumers may wrap `validate()`
+      // from scripts, REPLs, test runners, or one-liners. An explicit
+      // allowlist of safe-to-inherit flags is the only robust default.
+      execArgv: filterSafeExecArgv(process.execArgv),
       resourceLimits: {
         maxOldGenerationSizeMb: HEAP_LIMIT_MB,
         // young-gen kept at Node's default; old-gen dominates long-lived
@@ -151,4 +167,75 @@ export async function execute(source) {
       });
     });
   });
+}
+
+/**
+ * Scrub `process.execArgv` so the worker inherits only flags that are
+ * safe in a worker context. Default-deny: anything not explicitly allowed
+ * is dropped.
+ *
+ * Why a filter instead of `execArgv: []`? A few flags are genuinely useful
+ * to preserve — `--enable-source-maps` for better error traces, `--no-warnings`
+ * for clean library output — and dropping them silently changes behavior
+ * for parents that set them intentionally. An explicit allowlist keeps
+ * those signals flowing while rejecting the known-problematic ones.
+ *
+ * Flags explicitly blocked (the set that breaks the worker or has
+ * dangerous semantics when inherited):
+ *
+ *   --input-type=...          (only valid with -e / -p / stdin)
+ *   --eval / -e               (would mean "run the arg as JS")
+ *   --print / -p              (same as --eval plus print)
+ *   --check / -c              (syntax-check mode, skips execution)
+ *   --inspect / --inspect-brk / --inspect-port  (debugger port conflict)
+ *   --max-old-space-size      (would override our resourceLimits heap cap)
+ *   --max-semi-space-size     (same reason)
+ *   --import / --require      (inject code into worker startup)
+ *   --experimental-loader     (same)
+ *   --loader                  (same)
+ *   --title                   (process title is process-scoped)
+ *
+ * Everything else is preserved — things like `--enable-source-maps`,
+ * `--no-warnings`, `--stack-trace-limit=N`, `--unhandled-rejections=...`,
+ * etc. are fine to inherit.
+ */
+const BLOCKED_EXEC_ARG_PREFIXES = [
+  '--input-type',
+  '--eval',
+  '-e',
+  '--print',
+  '-p',
+  '--check',
+  '-c',
+  '--inspect',
+  '--max-old-space-size',
+  '--max-semi-space-size',
+  '--import',
+  '--require',
+  '-r',
+  '--experimental-loader',
+  '--loader',
+  '--title',
+];
+
+export function filterSafeExecArgv(argv) {
+  const out = [];
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    const blocked = BLOCKED_EXEC_ARG_PREFIXES.some((prefix) =>
+      arg === prefix || arg.startsWith(`${prefix}=`),
+    );
+    if (blocked) {
+      // If the flag takes a separate value argument (not `--flag=value`
+      // form), skip the value too. This is a best-effort heuristic —
+      // Node's own CLI parser is the source of truth — but it covers the
+      // common shapes well enough to prevent stray values leaking through.
+      if (!arg.includes('=') && i + 1 < argv.length && !argv[i + 1].startsWith('-')) {
+        i++;
+      }
+      continue;
+    }
+    out.push(arg);
+  }
+  return out;
 }

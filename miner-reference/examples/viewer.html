@@ -97,12 +97,28 @@
   <div id="picker">
     <label for="fixture-select">fixture</label>
     <select id="fixture-select">
-      <option value="./car.js">car.js  (reference example)</option>
-      <option value="../validator/test/budget-probes/detailed_car.js">budget-probes / detailed_car.js</option>
-      <option value="../validator/test/budget-probes/wooden_chair.js">budget-probes / wooden_chair.js</option>
-      <option value="../validator/test/budget-probes/leafy_tree.js">budget-probes / leafy_tree.js</option>
-      <option value="../validator/test/budget-probes/cathedral.js">budget-probes / cathedral.js</option>
-      <option value="../validator/test/budget-probes/highpoly_statue.js">budget-probes / highpoly_statue.js</option>
+      <optgroup label="examples">
+        <option value="./car.js">car.js  (canonical reference)</option>
+        <option value="./material_variants.js">material_variants.js  (Basic / Standard / Physical)</option>
+        <option value="./custom_buffergeometry.js">custom_buffergeometry.js  (hand-built mesh)</option>
+        <option value="./instanced_mesh.js">instanced_mesh.js  (InstancedMesh helix)</option>
+        <option value="./points_cloud.js">points_cloud.js  (Points + vertex colors)</option>
+        <option value="./line_segments.js">line_segments.js  (LineSegments + EdgesGeometry)</option>
+      </optgroup>
+      <optgroup label="budget probes">
+        <option value="../validator/test/budget-probes/detailed_car.js">detailed_car.js</option>
+        <option value="../validator/test/budget-probes/wooden_chair.js">wooden_chair.js</option>
+        <option value="../validator/test/budget-probes/leafy_tree.js">leafy_tree.js</option>
+        <option value="../validator/test/budget-probes/cathedral.js">cathedral.js</option>
+        <option value="../validator/test/budget-probes/highpoly_statue.js">highpoly_statue.js</option>
+        <option value="../validator/test/budget-probes/bare_mesh_root.js">bare_mesh_root.js</option>
+      </optgroup>
+      <optgroup label="generated from prompts">
+        <option value="./generated/balloon.js">balloon.js  (prompt: prompts/balloon.png)</option>
+        <option value="./generated/pumpkin.js">pumpkin.js  (prompt: prompts/pumpkin.png)</option>
+        <option value="./generated/suv.js">suv.js  (prompt: prompts/suv.png)</option>
+        <option value="./generated/clock.js">clock.js  (prompt: prompts/clock.png)</option>
+      </optgroup>
     </select>
   </div>
 
