@@ -20,7 +20,7 @@ from contextlib import asynccontextmanager
 from enum import StrEnum
 
 from fastapi import FastAPI, Header, HTTPException, Query
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from loguru import logger
 from pydantic import BaseModel, Field
 
@@ -81,6 +81,8 @@ class MinerState:
         self.cached_zip_bytes: bytes | None = None
         self.vram_ok: bool = True
         self.vram_total_gb: float | None = None
+        self.gpu_degraded: bool = False
+        self.benchmark_payload: dict | None = None
         self._generation_task: asyncio.Task | None = None  # type: ignore[type-arg]
 
     def reset_batch(self) -> None:
@@ -91,6 +93,8 @@ class MinerState:
         self.progress = 0
         self.total = 0
         self.cached_zip_bytes = None
+        self.gpu_degraded = False
+        self.benchmark_payload = None
 
 
 @asynccontextmanager
@@ -204,6 +208,18 @@ async def status(
             f"VRAM is insufficient ({state.vram_total_gb} GB) but no replacements left — continuing anyway"
         )
 
+    if state.status == PodStatus.GENERATING and state.gpu_degraded:
+        if replacements_remaining > 0:
+            logger.warning(
+                f"Requesting pod replacement: GPU benchmark failed. "
+                f"Replacements remaining: {replacements_remaining}"
+            )
+            return StatusResponse(
+                status=PodStatus.REPLACE,
+                payload=state.benchmark_payload,
+            )
+        logger.warning("GPU benchmark failed but no replacements left — pushing through")
+
     if state.status == PodStatus.WARMING_UP and state.warming_up_stage is not None:
         return StatusResponse(
             status=PodStatus.WARMING_UP,
@@ -220,11 +236,11 @@ async def status(
     return StatusResponse(status=state.status)
 
 
-@app.post("/generate")
+@app.post("/generate", response_model=GenerateAcceptedResponse)
 async def generate(
     request: GenerateBatchRequest,
     authorization: str | None = Header(default=None),  # noqa: ARG001
-) -> GenerateAcceptedResponse:
+) -> GenerateAcceptedResponse | JSONResponse:
     """Accept a batch of prompts and start generating.
 
     Accepts from `ready` (first batch) or `complete` (subsequent batches).
@@ -244,9 +260,19 @@ async def generate(
         return GenerateAcceptedResponse(accepted=len(request.prompts))
 
     if state.status not in (PodStatus.READY, PodStatus.COMPLETE):
-        raise HTTPException(
+        # Return JSONResponse directly (not HTTPException). FastAPI's
+        # HTTPException wraps its `detail` argument under a top-level
+        # `detail` key, which would produce the nested shape
+        # `{"detail": {"detail": "...", "current_status": "..."}}`.
+        # The API spec requires the flat shape
+        # `{"detail": "...", "current_status": "..."}`, so we build the
+        # response body ourselves and bypass the exception wrapping.
+        return JSONResponse(
             status_code=409,
-            detail={"detail": "Cannot accept batch", "current_status": state.status},
+            content={
+                "detail": "Cannot accept batch",
+                "current_status": state.status.value,
+            },
         )
 
     state.prompts = request.prompts
@@ -339,32 +365,34 @@ def _build_results_zip(results_map: dict[str, bytes], failed_map: dict[str, str]
 
 
 async def _run_generation(state: MinerState, seed: int) -> None:
-    """Background task that generates Three.js scenes for each prompt.
+    """Background task: benchmark GPUs, then return placeholder results.
 
-    A real miner would:
-    - Load prompt images from URLs
-    - Run inference on GPUs (parallelized across 4x H200)
-    - Handle failures per-prompt (skip and return partial results)
+    Phase 1 — GPU benchmark:
+        Stress-tests every GPU in parallel with matrix multiplications.
+        If any GPU falls below the TFLOPS threshold, ``state.gpu_degraded``
+        is set so the next ``/status`` poll can return ``replace``.
+
+    Phase 2 — Placeholder results:
+        Fills in the pre-built car.js for every prompt (a real miner would
+        run inference here).  Runs even when the benchmark failed so the pod
+        can push through if no replacements are left.
 
     Crash safety: the entire body is wrapped in try/except/finally so the
     pod ALWAYS transitions to COMPLETE, even on a top-level failure.
-    The spec is explicit: "If your generation task crashes, transition to
-    `complete` with whatever partial results you have. A pod stuck in
-    `generating` forever will be detected as unresponsive and replaced,
-    costing a pod from your budget." This is the catch-all that enforces
-    that contract — the per-prompt try/except above only protects against
-    inner failures.
     """
     logger.info(f"Starting generation for {len(state.prompts)} prompts")
     start = time.monotonic()
 
     try:
-        for i, prompt in enumerate(state.prompts):
-            # In a real miner, this is where you'd:
-            # 1. Download the prompt image from prompt.image_url
-            # 2. Run your 3D generation model
-            # 3. Handle errors per-prompt (try/except, skip failures)
+        await _run_gpu_benchmark(state)
 
+        if state.gpu_degraded:
+            # Give the orchestrator a chance to poll /status and see the
+            # replace signal before we finish.  If it tears the pod down,
+            # this sleep (and everything after it) is simply interrupted.
+            await asyncio.sleep(15)
+
+        for i, prompt in enumerate(state.prompts):
             try:
                 scene_bytes = generate_car_scene()
                 state.results[prompt.stem] = scene_bytes
@@ -373,26 +401,61 @@ async def _run_generation(state: MinerState, seed: int) -> None:
                 logger.error(f"Failed to generate for {prompt.stem}: {e}")
 
             state.progress = i + 1
-
-            # Simulate generation time
-            await asyncio.sleep(0.1)
     except Exception as e:
-        # Top-level catch: if anything outside the per-prompt try/except
-        # fails (loop termination, async cancellation propagating, state
-        # mutation throwing, asyncio.sleep raising, etc.), mark every
-        # un-recorded prompt as failed and fall through to finally so the
-        # pod transitions to COMPLETE.
         logger.exception(f"Generation task crashed: {e}")
         for prompt in state.prompts:
             if prompt.stem not in state.results and prompt.stem not in state.failed:
                 state.failed[prompt.stem] = f"generation crashed: {e}"
     finally:
         elapsed = time.monotonic() - start
-        # Build the ZIP exactly once, here, while we still own the state.
-        # Subsequent /results calls stream from this cached buffer.
         state.cached_zip_bytes = _build_results_zip(state.results, state.failed)
         state.status = PodStatus.COMPLETE
         logger.info(
             f"Batch complete: {len(state.results)}/{len(state.prompts)} succeeded "
             f"in {elapsed:.1f}s ({len(state.cached_zip_bytes)} byte archive cached)"
         )
+
+
+async def _run_gpu_benchmark(state: MinerState) -> None:
+    """Run the GPU compute benchmark, updating *state* with results.
+
+    Sets ``state.gpu_degraded = True`` (plus a diagnostic payload) when any
+    GPU falls below the configured TFLOPS threshold.  If torch is not
+    installed the benchmark is skipped silently.
+    """
+    try:
+        from miner_reference.gpu_benchmark import MIN_TFLOPS, run_benchmark
+    except ImportError:
+        logger.warning("torch not available — skipping GPU benchmark")
+        return
+
+    logger.info("Running GPU benchmark...")
+    results = await asyncio.to_thread(run_benchmark)
+
+    for r in results:
+        status_icon = "OK" if r.passed else "FAIL"
+        logger.info(
+            f"  GPU {r.gpu_id} ({r.gpu_name}): "
+            f"{r.tflops} TFLOPS — {status_icon}"
+        )
+
+    failed = [r for r in results if not r.passed]
+    if failed:
+        state.gpu_degraded = True
+        state.benchmark_payload = {
+            "reason": "gpu_benchmark_failed",
+            "failed_gpus": [
+                {"gpu_id": r.gpu_id, "gpu_name": r.gpu_name, "tflops": r.tflops}
+                for r in failed
+            ],
+            "threshold_tflops": results[0].tflops if not results else None,
+            "all_results": [
+                {"gpu_id": r.gpu_id, "tflops": r.tflops, "passed": r.passed}
+                for r in results
+            ],
+        }
+        logger.warning(
+            f"GPU benchmark failed for {len(failed)}/{len(results)} GPUs"
+        )
+    else:
+        logger.info("GPU benchmark passed — all GPUs healthy")

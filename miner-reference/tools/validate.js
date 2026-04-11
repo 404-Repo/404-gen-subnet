@@ -98,7 +98,58 @@ if (result.metrics) {
         `[${f(max.x)}, ${f(max.y)}, ${f(max.z)}]  ${mark}`,
     );
   }
-  console.log(`  generate():   ${result.executionMs} ms / 5,000 ms`);
+}
+
+// Timing breakdown. The enforced 5-second budget covers module evaluation
+// PLUS the generate() call — miners often assume it's just generate(),
+// which under-reports real usage. Show both phases, their sum (the actual
+// enforced budget), and the end-to-end wall clock for context.
+//
+// This block runs independently of `result.metrics` so that failure cases
+// (timeout, module-load throw, execution throw) still surface the timing
+// information they have available. Phases that weren't reached show as
+// em-dashes rather than 0, to distinguish "didn't run" from "ran in 0ms".
+//
+// Suppress the block entirely for failures that never spawned a worker
+// (parse errors, static-analysis rejections) — nothing meaningful to report.
+const workerSpawned =
+  (result.totalMs ?? 0) > 0 ||
+  result.moduleLoadMs !== null ||
+  result.executionMs !== null;
+if (workerSpawned) {
+  const moduleLoadMs = result.moduleLoadMs;
+  const executionMs = result.executionMs;
+  const totalMs = result.totalMs;
+  const budgetUsedMs =
+    moduleLoadMs !== null && executionMs !== null
+      ? moduleLoadMs + executionMs
+      : null;
+  const budgetMark =
+    budgetUsedMs === null
+      ? `${C.red}?${C.reset}` // worker was terminated before it could report
+      : budgetUsedMs > 5000
+        ? `${C.red}✗${C.reset}`
+        : budgetUsedMs > 4000
+          ? `${C.red}!${C.reset}`
+          : `${C.green}✓${C.reset}`;
+
+  console.log('');
+  console.log(`${C.bold}timing${C.reset}  (5-second budget covers module load + generate combined)`);
+  console.log(`  module load:  ${fmtMs(moduleLoadMs)} ms`);
+  console.log(`  generate():   ${fmtMs(executionMs)} ms`);
+  if (budgetUsedMs !== null) {
+    const headroom = 5000 - budgetUsedMs;
+    console.log(
+      `  budget used:  ${pad(budgetUsedMs)} ms / 5,000 ms  ${budgetMark}  (${headroom} ms headroom)`,
+    );
+  } else {
+    console.log(
+      `  budget used:  ${pad('—')} ms / 5,000 ms  ${budgetMark}  (worker terminated before reporting phase timings)`,
+    );
+  }
+  console.log(
+    `  ${C.dim}wall clock:   ${pad(totalMs)} ms  (worker spawn + message round trip)${C.reset}`,
+  );
 }
 
 if (result.failures.length > 0) {
@@ -127,6 +178,11 @@ function pad(n) {
   return String(n).padStart(7, ' ');
 }
 
+function fmtMs(n) {
+  if (n === null || n === undefined) return pad('—');
+  return pad(n);
+}
+
 function f(n) {
   return n.toFixed(3);
 }
@@ -134,12 +190,13 @@ function f(n) {
 function colorize() {
   const isTTY = process.stdout.isTTY;
   if (!isTTY) {
-    return { red: '', green: '', bold: '', reset: '' };
+    return { red: '', green: '', bold: '', dim: '', reset: '' };
   }
   return {
     red: '\x1b[31m',
     green: '\x1b[32m',
     bold: '\x1b[1m',
+    dim: '\x1b[2m',
     reset: '\x1b[0m',
   };
 }
