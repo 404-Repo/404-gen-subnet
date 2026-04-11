@@ -66,7 +66,22 @@ for (const file of probeFiles) {
   }
 
   const expectedRule = match[1];
-  const result = await validate(source);
+
+  let result;
+  try {
+    result = await validate(source);
+  } catch (err) {
+    results.push({
+      file,
+      expectedRule,
+      actualRules: [],
+      status: 'ERROR',
+      detail: `validate() threw: ${err.message}`,
+    });
+    failed++;
+    continue;
+  }
+
   const actualRules = result.failures.map((f) => f.rule);
 
   if (result.passed) {
@@ -139,6 +154,7 @@ function statusLabel(status) {
     case 'UNEXPECTED_PASS': return `${C.red}UNEXPECTED_PASS${C.reset}`;
     case 'WRONG_RULE':      return `${C.red}WRONG_RULE${C.reset}`;
     case 'NO_ANNOTATION':   return `${C.yellow}NO_ANNOTATION${C.reset}`;
+    case 'ERROR':           return `${C.red}ERROR${C.reset}`;
     default:                return status;
   }
 }

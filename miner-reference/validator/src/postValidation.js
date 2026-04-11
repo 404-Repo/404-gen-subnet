@@ -79,6 +79,20 @@ export function postValidate(root) {
     return { failures, metrics: null };
   }
 
+  // Auto-wrap bare Mesh / LineSegments / Points returns in a Group, matching
+  // Output Spec § Return Value: "Single Mesh, LineSegments, or Points returns
+  // are automatically wrapped in a Group by the validator."
+  //
+  // The wrap affects depth measurement (a bare Mesh now reports maxDepth 1
+  // instead of 0) but does not change vertex count, draw calls, instance
+  // count, texture data, or the bounding box — the Group wrapper has an
+  // identity transform and contributes nothing of its own.
+  let walkRoot = root;
+  if (root.type !== 'Group') {
+    walkRoot = new THREE.Group();
+    walkRoot.add(root);
+  }
+
   // Bounded walk with cycle detection.
   const visited = new Set();
   const seenTextures = new Set();
@@ -137,7 +151,7 @@ export function postValidate(root) {
     }
   }
 
-  walk(root, 0);
+  walk(walkRoot, 0);
 
   if (cycleDetected) {
     failures.push({
@@ -145,6 +159,12 @@ export function postValidate(root) {
       rule: 'CYCLE_DETECTED',
       detail: 'object hierarchy contains a cycle',
     });
+    // Box3.setFromObject uses Three.js's traverse(), which has no cycle
+    // detection and would infinitely recurse.  Return immediately.
+    return {
+      failures,
+      metrics: { vertices, drawCalls, maxDepth, instances, textureBytes, bbox: null },
+    };
   }
   if (depthExceeded) {
     failures.push({
@@ -190,9 +210,12 @@ export function postValidate(root) {
     });
   }
 
-  // Bounding box — must fit inside [-0.5, 0.5] on all axes
+  // Bounding box — must fit inside [-0.5, 0.5] on all axes.
+  // Computed from walkRoot (the post-wrap root) so the wrap's identity
+  // transform is correctly applied — though for an identity-wrapped Mesh
+  // the result is identical to setFromObject(root).
   let bbox = null;
-  const box = new THREE.Box3().setFromObject(root);
+  const box = new THREE.Box3().setFromObject(walkRoot);
   if (box.isEmpty()) {
     failures.push({
       stage: 'post_validation',

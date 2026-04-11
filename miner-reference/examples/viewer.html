@@ -71,6 +71,24 @@
       display: none;
       white-space: pre-wrap;
     }
+    #drop-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(60, 80, 200, 0.25);
+      border: 3px dashed rgba(100, 140, 255, 0.7);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      z-index: 100;
+      pointer-events: none;
+    }
+    #drop-overlay span {
+      background: rgba(0, 0, 0, 0.7);
+      color: #fff;
+      padding: 14px 28px;
+      border-radius: 8px;
+      font-size: 16px;
+    }
   </style>
 </head>
 <body>
@@ -91,11 +109,12 @@
   <div id="info">
     <b>Miner Reference — Fixture Viewer</b><br/>
     <span id="loaded-from"></span><br/>
-    Drag to orbit · scroll to zoom<br/>
+    Drag to orbit · scroll to zoom · drop .js to load<br/>
     <span id="stats"></span>
   </div>
 
   <div id="error"></div>
+  <div id="drop-overlay"><span>Drop .js fixture</span></div>
 
   <script type="importmap">
     {
@@ -174,42 +193,60 @@
 
     let currentFixtureRoot = null;
 
-    async function loadFixture(url) {
+    function prepareLoad(label) {
       clearError();
       statsEl.innerHTML = '<br/><i>loading…</i>';
-      loadedFromEl.innerHTML = `Loaded from <code>${url}</code>`;
+      loadedFromEl.innerHTML = `Loaded from <code>${label}</code>`;
 
-      // Remove the previously-loaded fixture root, if any
       if (currentFixtureRoot) {
         scene.remove(currentFixtureRoot);
         disposeObject(currentFixtureRoot);
         currentFixtureRoot = null;
       }
+    }
 
+    function runGenerate(generate, label) {
+      const t0 = performance.now();
+      const root = generate(THREE);
+      const elapsed = performance.now() - t0;
+
+      if (!root || !root.isObject3D) {
+        throw new Error('generate() did not return a Three.js Object3D');
+      }
+
+      scene.add(root);
+      currentFixtureRoot = root;
+      updateStats(root, elapsed);
+    }
+
+    async function loadFixture(url) {
+      prepareLoad(url);
       try {
-        // Cache-bust so re-selecting the same fixture re-runs it
         const module = await import(`${url}?t=${Date.now()}`);
         const generate = module.default;
-
         if (typeof generate !== 'function') {
           throw new Error(`${url} does not have a default export function`);
         }
-
-        const t0 = performance.now();
-        const root = generate(THREE);
-        const elapsed = performance.now() - t0;
-
-        if (!root || !root.isObject3D) {
-          throw new Error('generate() did not return a Three.js Object3D');
-        }
-
-        scene.add(root);
-        currentFixtureRoot = root;
-
-        updateStats(root, elapsed);
+        runGenerate(generate, url);
       } catch (err) {
         statsEl.innerHTML = '';
         showError(`Failed to load ${url}:\n${err.stack || err.message || err}`);
+      }
+    }
+
+    function loadFixtureFromSource(source, fileName) {
+      prepareLoad(fileName);
+      try {
+        // Rewrite `export default` so the source is evaluable outside a module context
+        const rewritten = source.replace(/\bexport\s+default\b/, 'var __export__ =');
+        const generate = new Function(rewritten + '\nreturn __export__;')();
+        if (typeof generate !== 'function') {
+          throw new Error(`${fileName} does not have a default export function`);
+        }
+        runGenerate(generate, fileName);
+      } catch (err) {
+        statsEl.innerHTML = '';
+        showError(`Failed to load ${fileName}:\n${err.stack || err.message || err}`);
       }
     }
 
@@ -268,6 +305,57 @@
 
     selectEl.addEventListener('change', (e) => {
       loadFixture(e.target.value);
+    });
+
+    // Drag-and-drop .js files
+
+    const dropOverlay = document.getElementById('drop-overlay');
+    let dragCounter = 0;
+
+    document.addEventListener('dragenter', (e) => {
+      e.preventDefault();
+      dragCounter++;
+      dropOverlay.style.display = 'flex';
+    });
+
+    document.addEventListener('dragleave', (e) => {
+      e.preventDefault();
+      dragCounter--;
+      if (dragCounter <= 0) {
+        dragCounter = 0;
+        dropOverlay.style.display = 'none';
+      }
+    });
+
+    document.addEventListener('dragover', (e) => {
+      e.preventDefault();
+    });
+
+    document.addEventListener('drop', async (e) => {
+      e.preventDefault();
+      dragCounter = 0;
+      dropOverlay.style.display = 'none';
+
+      const file = [...e.dataTransfer.files].find(f => f.name.endsWith('.js'));
+      if (!file) {
+        showError('Please drop a .js file');
+        return;
+      }
+
+      const source = await file.text();
+
+      const label = `${file.name}  (dropped)`;
+      let opt = selectEl.querySelector('option[data-dropped]');
+      if (!opt) {
+        opt = document.createElement('option');
+        opt.setAttribute('data-dropped', '');
+        selectEl.prepend(opt);
+      }
+      opt.value = `dropped:${file.name}`;
+      opt.textContent = label;
+      selectEl.value = opt.value;
+
+      loadFixtureFromSource(source, file.name);
     });
 
     // Initial load

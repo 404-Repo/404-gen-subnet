@@ -3,6 +3,11 @@
  * wheels with rims, headlights, mirrors, exhaust. Roughly what a model output
  * for a recognizable vehicle would look like.
  */
+// @vertices 2458
+// @drawCalls 17
+// @maxDepth 1
+// @instances 0
+// @textureBytes 0
 
 export default function generate(THREE) {
   const car = new THREE.Group();

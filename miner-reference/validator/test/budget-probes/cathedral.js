@@ -3,6 +3,11 @@
  * spires. Stress test for draw-call count: separate meshes for every
  * architectural feature.
  */
+// @vertices 1497
+// @drawCalls 39
+// @maxDepth 1
+// @instances 0
+// @textureBytes 0
 
 export default function generate(THREE) {
   const cathedral = new THREE.Group();
