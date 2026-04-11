@@ -8,9 +8,10 @@
     ".": "./src/index.js"
   },
   "scripts": {
-    "test": "node test/run-budget-probes.js && node test/run-negative-probes.js",
+    "test": "node test/run-budget-probes.js && node test/run-negative-probes.js && node test/run-exec-argv-test.js",
     "test:budget": "node test/run-budget-probes.js",
     "test:negative": "node test/run-negative-probes.js",
+    "test:exec-argv": "node test/run-exec-argv-test.js",
     "validate-car": "node ../tools/validate.js ../examples/car.js"
   },
   "dependencies": {

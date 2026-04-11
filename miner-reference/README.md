@@ -1,8 +1,8 @@
 # 404-GEN Miner Reference
 
-Reference bundle for 404-GEN miners: specifications, a canonical example, a local validator, a visual previewer, and a reference pod-side service implementation.
+Reference bundle for 404-GEN miners: specifications, examples, a local validator, a visual previewer, and a reference service implementation.
 
-The protocol: **the orchestrator launches your Docker image on a 4×H200 pod, sends prompts in 4 sequential batches of 32, and collects one JavaScript module per prompt.** Each module `export default`s a function that constructs a Three.js scene. Your model's job is to produce that code.
+**Your job is to build a pipeline that turns prompt images into procedural Three.js code.** Each round, prompts are published and you generate one JavaScript module per prompt — code that constructs the depicted 3D object from primitives. You submit these to a CDN for pairwise judging against other miners. Separately, your solution must be deployable as a Docker image so validators can regenerate your outputs and verify them.
 
 ## The task
 
@@ -12,7 +12,7 @@ This is fundamentally different from direct 3D mesh generation. Your output is n
 
 ### Prompt images
 
-Each prompt is a single image (PNG or JPG) showing a 3D object. Your service downloads the image from the URL provided in the `/generate` batch, analyzes it, and produces a Three.js module that reconstructs the depicted object.
+Each prompt is a single image (PNG or JPG) showing a 3D object. Your pipeline analyzes the image and produces a Three.js module that reconstructs the depicted object.
 
 The prompt set may include furniture, vehicles, architectural elements, household objects, and other categories. Some prompts will be well-suited to procedural approaches (geometric objects, hard-surface models); others will be more challenging (organic forms, complex topology).
 
@@ -34,19 +34,16 @@ Key scoring facts:
 - Fine-tuned models are allowed if the base model's license permits it.
 - Multiple models in a single pipeline are allowed and expected.
 
-## Why batch-based generation
+## Why a batch API for verification
 
-Previous versions used a per-prompt HTTP model where the orchestrator managed retries, pod health checks, and degraded-GPU detection on your behalf. This was expensive to operate and opaque to miners — you had no visibility into scheduling decisions or failure recovery, and no way to optimize for your own hardware.
+During verification, the orchestrator deploys your Docker image on a 4×H200 pod and sends the same prompts in sequential batches. The batch model gives you full control over how verification runs on your hardware:
 
-The batch model flips ownership. The orchestrator sends prompts and collects results; everything in between is yours. You decide how to parallelize across GPUs, when to retry a failed generation, how to detect hardware degradation, and whether to request a pod replacement or push through. This matters because:
-
-- **Scheduling is a competitive lever.** Running two models in parallel, retrying with different parameters, allocating more compute to harder prompts — all legal, all up to you.
-- **Hardware diagnostics are a competitive lever.** Your code decides when a pod is good enough and when to burn a replacement. Better diagnostics means fewer wasted pods, more completed batches, and a higher score.
-- **No more invisible retries.** In the old system, retries and pod issues were handled behind the scenes. Now everything is transparent — you see your hardware, you make the calls.
-- **Partial results always count.** If you can't generate one prompt, skip it and return the rest. 31 out of 32 beats timing out on the whole batch.
+- **Scheduling is yours.** How to parallelize across GPUs, when to retry a failed generation, how to allocate compute to harder prompts — all up to you.
+- **Hardware diagnostics are yours.** Your code decides when a pod is good enough and when to request a replacement.
+- **Partial results count.** If one prompt fails, skip it and return the rest. 31 out of 32 is far better than timing out.
 - **Models stay warm.** No container teardown between batches. Load once, generate four times.
 
-The tradeoff is more responsibility: you're building health checks, scheduling logic, and failure recovery into your solution. A buggy service that crashes on startup burns through your pod budget fast. Test locally before deploying.
+The tradeoff is responsibility: you're building health checks and failure recovery into your service. A buggy service that crashes on startup burns through your pod budget. Test locally before deploying.
 
 ## Contents
 
@@ -56,8 +53,15 @@ The tradeoff is more responsibility: you're building health checks, scheduling l
 | [`api_specification.md`](api_specification.md) | HTTP contract between orchestrator and miner pod |
 | [`output_specifications.md`](output_specifications.md) | What miners must produce — JS module format, constraints, allowed Three.js APIs |
 | [`runtime_specifications.md`](runtime_specifications.md) | How submissions are validated and rendered — sandbox, static analysis, rendering pipeline |
-| [`examples/car.js`](examples/car.js) | Canonical hand-written `generate.js` — a low-poly car that passes every check |
-| [`examples/viewer.html`](examples/viewer.html) | Live browser previewer for any `generate.js` with HUD metrics |
+| [`examples/car.js`](examples/car.js) | Canonical hand-written `generate.js` — a low-poly car using primitives, PBR, a `DataTexture`, and the `fitToUnitCube` pattern |
+| [`examples/material_variants.js`](examples/material_variants.js) | Three meshes side-by-side using `MeshBasicMaterial`, `MeshStandardMaterial`, and `MeshPhysicalMaterial` (with clearcoat) |
+| [`examples/custom_buffergeometry.js`](examples/custom_buffergeometry.js) | A square pyramid built from raw `BufferAttribute`s with explicit positions, normals, UVs, and an index buffer — the pattern for non-primitive geometry |
+| [`examples/instanced_mesh.js`](examples/instanced_mesh.js) | A double-helix of 240 cubes from a single `InstancedMesh` — per-instance translation and rotation via `setMatrixAt`, for any scene with many repeated elements (forests, particles, brick walls) |
+| [`examples/points_cloud.js`](examples/points_cloud.js) | A Fibonacci-sphere `Points` cloud with per-vertex colors, demonstrating `Points` + `PointsMaterial` + custom `BufferGeometry` + the `color` attribute |
+| [`examples/line_segments.js`](examples/line_segments.js) | A wireframe icosahedron built with `LineSegments` + `LineBasicMaterial` + `EdgesGeometry`, with a height-gradient via per-vertex colors |
+| [`examples/prompts/`](examples/prompts/) | Real prompt images (balloon, pumpkin, SUV, clock) |
+| [`examples/generated/`](examples/generated/) | Three.js modules generated from those prompts by a VLM + code-LLM pipeline |
+| [`examples/viewer.html`](examples/viewer.html) | Live browser previewer for any `generate.js` with HUD metrics; dropdown lists every fixture in this directory and `validator/test/budget-probes/` |
 | [`validator/`](validator/) | Conformance validator package (JS/Node), mirrors the production runtime's static and post-execution checks |
 | [`tools/validate.js`](tools/validate.js) | CLI wrapper around the validator package |
 | [`validator/test/budget-probes/`](validator/test/budget-probes/) | Complexity-tier fixtures showing how realistic outputs sit relative to the caps |
@@ -73,13 +77,37 @@ All three documents are required reading if you're building a miner.
 | [Output Specification](output_specifications.md) | Function signature, execution constraints, literal budget, allowed and prohibited Three.js APIs, failure semantics with rule codes |
 | [Runtime Specification](runtime_specifications.md) | Three.js bundle pinning, static analysis, `isolated-vm` sandbox, double-execute render strategy, camera and lighting setup |
 
+## Example prompts and outputs
+
+The [`examples/prompts/`](examples/prompts/) folder contains real prompt images. [`examples/generated/`](examples/generated/) contains corresponding Three.js modules produced by a VLM + code-LLM pipeline. All generated files pass validation.
+
+| Prompt | Generated | Vertices | Draw calls | Notes |
+|--------|-----------|----------|------------|-------|
+| [`balloon.png`](examples/prompts/balloon.png) | [`balloon.js`](examples/generated/balloon.js) | 1,231 | 4 | Simple: LatheGeometry profile, TubeGeometry string, MeshPhysicalMaterial clearcoat |
+| [`pumpkin.png`](examples/prompts/pumpkin.png) | [`pumpkin.js`](examples/generated/pumpkin.js) | 3,409 | 13 | Organic: LatheGeometry segments with procedural DataTexture for surface detail |
+| [`suv.png`](examples/prompts/suv.png) | [`suv.js`](examples/generated/suv.js) | 3,331 | 67 | Complex hard-surface: many BoxGeometry parts, TubeGeometry roof rack, TorusGeometry tires |
+| [`clock.png`](examples/prompts/clock.png) | [`clock.js`](examples/generated/clock.js) | 5,957 | 109 | Mixed: TorusGeometry frame, CylinderGeometry hands, procedural face texture |
+
+Open the [viewer](examples/viewer.html) and select from the "generated from prompts" group to preview these alongside their prompt images. Compare the generated outputs against the prompt images to calibrate your expectations — these represent the kind of procedural approximation the competition produces.
+
 ## For miners: iterating on your `generate.js`
 
 The primary workflow is writing a `generate.js` file, validating it locally, previewing it visually, and iterating. The validator runs the same static analysis and post-execution checks as the production runtime, so anything that passes locally passes in production.
 
-### 1. Look at the canonical example
+### 1. Look at the examples
 
-[`examples/car.js`](examples/car.js) is a hand-written reference that exercises every category in the Output Spec: primitive geometries, PBR materials, a procedural `DataTexture`, a transform hierarchy, and the `fitToUnitCube` pattern for bounding-box normalization. It passes every validator check with large margins on every cap. Read it first.
+The `examples/` directory holds **hand-written reference fixtures** that demonstrate every allowed pattern in the Output Spec. (For real prompt-to-output pairs from a VLM pipeline, see the "Example prompts and outputs" section above.) Read whichever ones match what your inference pipeline will emit:
+
+| File | Demonstrates |
+|---|---|
+| **`car.js`** | Primitive geometries, `MeshStandardMaterial`, a procedural `DataTexture`, a transform hierarchy, and the `fitToUnitCube` bounding-box normalization pattern. The canonical "start here" example. |
+| **`material_variants.js`** | The three mesh material types: `MeshBasicMaterial` (unlit), `MeshStandardMaterial` (PBR), `MeshPhysicalMaterial` (clearcoat). |
+| **`custom_buffergeometry.js`** | Hand-built `BufferGeometry` with explicit `BufferAttribute`s for position/normal/uv and a `setIndex` index buffer. The pattern for emitting raw vertex data instead of using primitives. |
+| **`instanced_mesh.js`** | `InstancedMesh` with 240 instances of a single geometry, each with a unique `Matrix4` transform via `setMatrixAt`. Counts as 1 draw call and 24 vertices in the budget regardless of instance count — the right pattern for any scene with many repeated elements (forests, particles, brick walls, crowds). |
+| **`points_cloud.js`** | `Points` + `PointsMaterial` + custom `BufferGeometry` + per-vertex colors via the `color` attribute. |
+| **`line_segments.js`** | `LineSegments` + `LineBasicMaterial` + `EdgesGeometry` (a built-in helper for extracting edges from any geometry), with a per-vertex color gradient. |
+
+Together these cover every category in the Output Spec's "Allowed Three.js APIs" section. Every example passes the validator with large margins on every cap. They are also wired into the validator's CI runner with metric annotations, so any future regression in their measured vertex/draw/depth/instance/texture counts is caught automatically.
 
 ### 2. Install the validator (one time)
 
@@ -130,9 +158,51 @@ npm test
 
 Output is a summary table: each probe's vertex / draw-call / depth / instance / texture usage, as an absolute number and a percentage of the limit. A realistic output should sit at 0–20% of every cap. If your own `generate.js` is hitting 80% of something, the probes tell you whether that's normal or excessive.
 
-## Reference pod-side service
+## Building your generation pipeline
 
-Every miner needs an HTTP service running inside their Docker image to receive batches from the orchestrator. You can write yours in any language — there's no requirement to use this reference. But if you want a working starting point, there's a Python/FastAPI implementation in [`miner_reference/`](miner_reference). It implements the four endpoints from the API Specification and demonstrates:
+The part you need to build is the **generation pipeline**: the system that takes a prompt image and produces a conforming Three.js module. This is the core of your miner.
+
+You do not need to own GPUs or rent a dedicated machine just to start iterating on Subnet 17. For prototyping and inner-loop development, you can use serverless inference or serverless GPU providers; `chutes.ai` is a great first option since it is already within the ecosystem, and other hosted services can also help you move faster. Just keep in mind that your final miner must still be reproducible, Dockerized, and compliant with the subnet's open-source and commercial-use rules.
+
+### Suggested architecture
+
+A typical pipeline has multiple stages:
+
+1. **Image analysis.** A vision-language model (VLM) examines the prompt image and identifies the object's structure: what primitives approximate it, their relative sizes, positions, orientations, and spatial relationships.
+
+2. **Code generation.** A code-capable LLM takes the structural analysis and produces a Three.js `generate(THREE)` function. The LLM must be aware of the allowed API surface (see [Output Specification](output_specifications.md#allowed-threejs-apis)) and the constraints (bounding box, vertex limits, literal budget, determinism). Feed it [`AGENTS.md`](AGENTS.md) as context.
+
+3. **Validation and refinement.** Run the local validator on the generated code. If it fails, feed the error back to the LLM and retry. If it passes but renders poorly, refine. This agentic loop — generate, validate, diagnose, retry — is where much of the competitive advantage lies.
+
+4. **Material and texture application.** Procedural materials (`MeshStandardMaterial`, `MeshPhysicalMaterial`) and programmatically generated `DataTexture` instances can significantly improve visual fidelity. Consider tuning these separately from geometry.
+
+This is one approach. You are free to design any pipeline you want. Smaller models are unlikely to handle this problem well; plan for capable VLMs and code LLMs.
+
+### Key constraints to design around
+
+- **50 KB literal budget** prevents embedding precomputed vertex data. Your code must generate geometry algorithmically — parametric shapes, extrusions, lathes, CSG-style composition, instanced meshes.
+- **5-second execution timeout** means heavy computation (hundreds of thousands of vertices from custom `BufferGeometry`) needs to be efficient.
+- **Determinism** is mandatory — no `Math.random()`, no `Date`. Two executions of the same script must produce identical output.
+- **The code cannot access the prompt image at runtime.** Your model must fully encode the image's content as procedural code at generation time. The `generate(THREE)` function receives only the `THREE` namespace.
+
+### The validator as your inner loop
+
+The local validator runs the same static analysis and post-execution checks as production. Build it into your pipeline as a programmatic check:
+
+```js
+import { validate } from '@404-subnet/validator';
+
+const result = await validate(generatedSource);
+if (!result.passed) {
+  // Feed result.failures back to the LLM for correction
+}
+```
+
+Code that passes the local validator will pass production. Use the `--json` flag or the library API for machine-readable output that an agent can parse and act on.
+
+## Reference verification service
+
+Your Docker image must expose an HTTP service for the verification flow (see "How a round works § Verification"). You can write yours in any language. If you want a working starting point, there's a Python/FastAPI implementation in [`miner_reference/`](miner_reference). It implements the four endpoints from the [API Specification](api_specification.md) and demonstrates:
 
 - Pod state machine (`warming_up` → `ready` → `generating` → `complete`)
 - VRAM-based `replace` requests via `nvidia-smi` (expects ~564 GB total for 4×H200 SXM, requests replacement below that if budget allows)
@@ -150,36 +220,15 @@ The service starts on port **10006** (the port the orchestrator polls). Run test
 poetry run pytest -v
 ```
 
-`miner_reference/threejs_placeholder.py` returns the canonical [`examples/car.js`](examples/car.js) module for every prompt — the same fixture the validator treats as known-good. This is end-to-end coherent: the Python service ships exactly what the Node validator will accept. Replace `threejs_placeholder.py` with your inference pipeline when you're ready to generate real per-prompt output.
+`miner_reference/threejs_placeholder.py` returns the canonical [`examples/car.js`](examples/car.js) module for every prompt — the same fixture the validator treats as known-good. Replace `threejs_placeholder.py` with your inference pipeline when you're ready to generate real per-prompt output.
 
-## Building your generation pipeline
+### Hardware
 
-The reference service in [`miner_reference/`](miner_reference/) handles the batch protocol — receiving prompts, managing state, packing results. The part you need to build is the **generation pipeline**: the system that takes a prompt image and produces a conforming Three.js module.
-
-### Suggested architecture
-
-A typical pipeline has multiple stages:
-
-1. **Image analysis.** A vision-language model (VLM) examines the prompt image and identifies the object's structure: what primitives approximate it, their relative sizes, positions, orientations, and spatial relationships.
-
-2. **Code generation.** A code-capable LLM takes the structural analysis and produces a Three.js `generate(THREE)` function. The LLM must be aware of the allowed API surface (see [Output Specification](output_specifications.md#allowed-threejs-apis)) and the constraints (bounding box, vertex limits, literal budget, determinism).
-
-3. **Validation and refinement.** Run the local validator on the generated code. If it fails, feed the error back to the LLM and retry. If it passes but renders poorly, refine. This agentic loop — generate, validate, diagnose, retry — is where much of the competitive advantage lies.
-
-4. **Material and texture application.** Procedural materials (`MeshStandardMaterial`, `MeshPhysicalMaterial`) and programmatically generated `DataTexture` instances can significantly improve visual fidelity. Consider tuning these separately from geometry.
-
-This is one approach. You are free to design any pipeline you want — the orchestrator only cares about the final `.js` files. Smaller models are unlikely to handle this problem well; plan for capable VLMs and code LLMs.
-
-### Key constraints to design around
-
-- **50 KB literal budget** prevents embedding precomputed vertex data. Your code must generate geometry algorithmically — parametric shapes, extrusions, lathes, CSG-style composition, instanced meshes.
-- **5-second execution timeout** means heavy computation (hundreds of thousands of vertices from custom `BufferGeometry`) needs to be efficient.
-- **Determinism** is mandatory — no `Math.random()`, no `Date`. Two executions of the same script must produce identical output.
-- **The code cannot access the prompt image at runtime.** Your model must fully encode the image's content as procedural code at generation time. The `generate(THREE)` function receives only the `THREE` namespace.
+Each verification pod has **4× H200 SXM** GPUs (141 GB HBM3e each, ~564 GB total VRAM). How you distribute work across GPUs is up to you.
 
 ### GPU allocation
 
-You have 4× H200 GPUs (141 GB each, ~564 GB total). How you allocate them across pipeline stages is a competitive decision. Common patterns:
+Common patterns for allocating verification pod GPUs:
 
 - Dedicate GPUs to different models (e.g., VLM on GPU 0, code LLM on GPUs 1–3).
 - Process multiple prompts in parallel across GPUs.
@@ -187,39 +236,29 @@ You have 4× H200 GPUs (141 GB each, ~564 GB total). How you allocate them acros
 
 32 prompts per batch means parallelism matters. A serial pipeline that takes 2 minutes per prompt needs ~64 minutes per batch — tight for 4 batches within the 2-hour generation window.
 
-### The validator as your inner loop
+## How a round works
 
-The local validator runs the same static analysis and post-execution checks as production. Build it into your pipeline as a programmatic check:
+### Generation and submission (your primary workflow)
 
-```js
-import { validate } from '@404-subnet/validator';
+1. A round opens. The **seed** and **prompt images** are published.
+2. You run your pipeline on the prompts — however you want, on your own hardware or any setup.
+3. For each prompt, your pipeline produces a `.js` module conforming to the [Output Specification](output_specifications.md).
+4. You submit the generated `.js` files to your CDN.
 
-const result = await validate(generatedSource);
-if (!result.passed) {
-  // Feed result.failures back to the LLM for correction
-}
-```
+This is the core loop. The quality of the Three.js code you produce here is what determines your score.
 
-Code that passes the local validator will pass production. Use the `--json` flag or the library API for machine-readable output that an agent can parse and act on.
+### Judging
 
-## Hardware
+5. Validators download your submissions, render each `.js` file in a sandboxed environment (static analysis → `isolated-vm` execution → headless Chrome render).
+6. Rendered images are compared against the original prompt images via **pairwise VLM duels** against other miners' outputs.
+7. **Failed prompts are automatic losses** — a prompt that fails validation or rendering scores zero against every other miner. Reliability first, then quality.
 
-Each pod has **4× H200 SXM** GPUs (141 GB HBM3e each, ~564 GB total VRAM). How you distribute work across GPUs is entirely up to you — the orchestrator only cares about the final `.js` files you return.
+### Verification
 
-## How the round works at a glance
+8. Winner candidates are sent for verification: validators deploy your Docker image on a 4×H200 pod and send the same prompts via the batch API (see [API Specification](api_specification.md)).
+9. Your service regenerates the outputs. The regenerated results are compared against your submitted results in a duel — if your Docker image can produce comparable quality, you're accepted; if it can't, you're disqualified.
 
-1. Orchestrator deploys your Docker image on a 4×H200 pod.
-2. It polls `/health` until ready, then polls `/status`.
-3. You report `warming_up` while loading models.
-4. When `/status` returns `ready`, the orchestrator sends a batch of 32 prompts to `/generate`.
-5. You process the batch (in a background task; keep `/status` responsive).
-6. When `/status` returns `complete`, the orchestrator downloads a ZIP of `{stem}.js` files from `/results`.
-7. You transition back to `ready` for the next batch. Models stay loaded between batches.
-8. Repeat for 4 batches (128 total prompts).
-9. Each `.js` file is statically analyzed and executed in an `isolated-vm` sandbox, then rendered in a headless Chrome process via a separate double-execute run. The rendered image is compared to the original prompt image by a VLM judge for scoring.
-10. **Failed prompts are automatic losses** — there is no partial credit per prompt. Reliability first, then quality.
-
-See the [API Specification](api_specification.md) for the full protocol, pod replacement budget, time budget, and edge cases.
+The batch API, Docker image, and pod lifecycle described in this bundle are the **verification interface**. You need to implement them so your solution can be verified, but they are not the primary competition surface — the quality of your generated `.js` files is.
 
 ## See also
 
