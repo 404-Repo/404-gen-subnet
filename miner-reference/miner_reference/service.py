@@ -6,8 +6,7 @@ Endpoints:
     POST /generate — Submit a batch of prompt image URLs for generation
     GET  /results  — Download completed batch results as a ZIP archive
 
-This is a reference implementation. A real miner would replace the placeholder
-generation with actual model inference.
+See api_specification.md for the full protocol contract.
 """
 
 import asyncio
@@ -25,7 +24,6 @@ from loguru import logger
 from pydantic import BaseModel, Field
 
 from miner_reference.threejs_placeholder import generate_car_scene
-from miner_reference.vram import EXPECTED_TOTAL_VRAM_GB, check_vram_adequate
 
 
 class PodStatus(StrEnum):
@@ -68,7 +66,6 @@ class MinerState:
 
     def __init__(self) -> None:
         self.status: PodStatus = PodStatus.WARMING_UP
-        self.warming_up_stage: str | None = None  # demo of /status payload
         self.prompts: list[PromptItem] = []
         self.batch_stems: frozenset[str] = frozenset()
         self.results: dict[str, bytes] = {}
@@ -79,8 +76,6 @@ class MinerState:
         # every /results call until the next /generate. Avoids re-zipping on
         # retries and gives the orchestrator a stable response across drops.
         self.cached_zip_bytes: bytes | None = None
-        self.vram_ok: bool = True
-        self.vram_total_gb: float | None = None
         self.gpu_degraded: bool = False
         self.benchmark_payload: dict | None = None
         self._generation_task: asyncio.Task | None = None  # type: ignore[type-arg]
@@ -99,43 +94,18 @@ class MinerState:
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
-    """Check VRAM and simulate model loading on startup.
-
-    Real miners load models here. This reference simulates a multi-stage
-    warmup so the /status payload demo has something meaningful to report.
+    """FastAPI lifespan runs BEFORE the server accepts connections, so the
+    orchestrator cannot poll /health or /status during this phase. For a
+    service with long startup, yield immediately and run initialization as
+    a background task that transitions the pod to ``ready`` when done.
     """
     state = _app.state.miner
-    logger.info("Starting up — checking VRAM and loading models...")
+    logger.info("Starting up...")
 
-    state.vram_ok, state.vram_total_gb = check_vram_adequate()
-    if not state.vram_ok:
-        if state.vram_total_gb is not None:
-            logger.warning(
-                f"VRAM check failed: detected {state.vram_total_gb:.1f} GB, "
-                f"expected ~{EXPECTED_TOTAL_VRAM_GB} GB (4x H200 SXM)"
-            )
-        else:
-            logger.warning(
-                f"VRAM check failed: could not detect GPUs, "
-                f"expected ~{EXPECTED_TOTAL_VRAM_GB} GB (4x H200 SXM)"
-            )
-    else:
-        logger.info(f"VRAM OK: {state.vram_total_gb:.1f} GB detected")
+    await _run_gpu_benchmark(state)
 
-    # Simulate a multi-stage warmup. Real miners report actual stage names
-    # like "loading_unet", "loading_vae", "compiling_kernels". The /status
-    # handler reads `warming_up_stage` and surfaces it in the payload field.
-    for stage_name, duration in [
-        ("loading_models", 0.7),
-        ("compiling_kernels", 0.7),
-        ("warming_caches", 0.6),
-    ]:
-        state.warming_up_stage = stage_name
-        await asyncio.sleep(duration)
-
-    state.warming_up_stage = None
     state.status = PodStatus.READY
-    logger.info("Models loaded — ready for batches")
+    logger.info("Ready for batches")
     yield
 
 
@@ -149,7 +119,8 @@ app = create_app()
 
 
 def _get_state() -> MinerState:
-    return app.state.miner
+    state: MinerState = app.state.miner
+    return state
 
 
 @app.get("/health")
@@ -158,9 +129,8 @@ async def health(
 ) -> dict[str, str]:
     """Basic health check. Returns 200 when the service is running.
 
-    The Authorization header is captured but unused — see the Authentication
-    section of the API spec for the forwarding pattern. Real miners pass it
-    through to provider-specific APIs (e.g., Verda's GPU health endpoint).
+    The ``Authorization`` header is accepted but unused here. See the
+    Authentication section of api_specification.md for when to forward it.
     """
     return {"status": "ok"}
 
@@ -172,43 +142,16 @@ async def status(
 ) -> StatusResponse:
     """Report current pod status.
 
-    The orchestrator polls this endpoint continuously.
-    `replacements_remaining` tells us how many pod replacements are left in
-    the budget.
+    The orchestrator polls this continuously. ``replacements_remaining``
+    tells us how many pod replacements are still available in the budget.
 
-    Demonstrates two patterns from the spec:
-    - VRAM-based replacement request when bad hardware is detected and
-      replacements are available (suppressed when budget is 0 — returning
-      `replace` then ends the round).
-    - `payload` field used in non-replace states for diagnostic info,
-      mirroring the `{"stage": "loading_unet", ...}` example in the spec.
-
-    Note: `response_model_exclude_none=True` strips null fields from the
-    JSON response, so `progress`/`total`/`payload` only appear when set.
+    ``response_model_exclude_none=True`` strips null fields from the JSON
+    response, so ``progress``/``total``/``payload`` only appear when set.
     """
     state = _get_state()
 
-    # Request replacement on bad hardware — check during warming_up and ready
-    if state.status in (PodStatus.WARMING_UP, PodStatus.READY) and not state.vram_ok:
-        if replacements_remaining > 0:
-            logger.warning(
-                f"Requesting pod replacement: VRAM {state.vram_total_gb} GB "
-                f"is below expected {EXPECTED_TOTAL_VRAM_GB} GB. "
-                f"Replacements remaining: {replacements_remaining}"
-            )
-            return StatusResponse(
-                status=PodStatus.REPLACE,
-                payload={
-                    "reason": "insufficient_vram",
-                    "detected_vram_gb": state.vram_total_gb,
-                    "expected_vram_gb": EXPECTED_TOTAL_VRAM_GB,
-                },
-            )
-        logger.warning(
-            f"VRAM is insufficient ({state.vram_total_gb} GB) but no replacements left — continuing anyway"
-        )
-
-    if state.status == PodStatus.GENERATING and state.gpu_degraded:
+    # Replace on degraded hardware (benchmark checks compute + VRAM per GPU).
+    if state.gpu_degraded:
         if replacements_remaining > 0:
             logger.warning(
                 f"Requesting pod replacement: GPU benchmark failed. "
@@ -220,20 +163,15 @@ async def status(
             )
         logger.warning("GPU benchmark failed but no replacements left — pushing through")
 
-    if state.status == PodStatus.WARMING_UP and state.warming_up_stage is not None:
-        return StatusResponse(
-            status=PodStatus.WARMING_UP,
-            payload={"stage": state.warming_up_stage},
-        )
-
     if state.status == PodStatus.GENERATING:
         return StatusResponse(
             status=PodStatus.GENERATING,
             progress=state.progress,
             total=state.total,
+            payload=state.benchmark_payload,
         )
 
-    return StatusResponse(status=state.status)
+    return StatusResponse(status=state.status, payload=state.benchmark_payload)
 
 
 @app.post("/generate", response_model=GenerateAcceptedResponse)
@@ -282,6 +220,8 @@ async def generate(
     state.progress = 0
     state.total = len(request.prompts)
     state.cached_zip_bytes = None  # discard previous batch's cached results
+    state.gpu_degraded = False
+    state.benchmark_payload = None
     state.status = PodStatus.GENERATING
 
     logger.info(f"Received batch of {state.total} prompts (seed={request.seed})")
@@ -339,9 +279,7 @@ async def results(
             chunk = zip_bytes[offset : offset + RESULTS_CHUNK_SIZE]
             offset += len(chunk)
             yield chunk
-        logger.info(
-            f"Streamed {served} results ({total_size} bytes), staying in complete until next /generate"
-        )
+        logger.info(f"Streamed {served} results ({total_size} bytes), staying in complete until next /generate")
 
     return StreamingResponse(stream_zip(), media_type="application/zip")
 
@@ -365,20 +303,19 @@ def _build_results_zip(results_map: dict[str, bytes], failed_map: dict[str, str]
 
 
 async def _run_generation(state: MinerState, seed: int) -> None:
-    """Background task: benchmark GPUs, then return placeholder results.
+    """Background task: benchmark GPUs, then produce results.
 
-    Phase 1 — GPU benchmark:
-        Stress-tests every GPU in parallel with matrix multiplications.
-        If any GPU falls below the TFLOPS threshold, ``state.gpu_degraded``
-        is set so the next ``/status`` poll can return ``replace``.
+    1. Runs the GPU health benchmark (compute + VRAM). If any GPU is
+       degraded, ``state.gpu_degraded`` is set and the task pauses 15 s
+       so the orchestrator can poll ``/status`` and act on the ``replace``
+       signal before generation proceeds.
+    2. Produces a result for every prompt (placeholder car.js in this
+       reference). Runs even when the benchmark failed so the pod can
+       push through if no replacements are left.
 
-    Phase 2 — Placeholder results:
-        Fills in the pre-built car.js for every prompt (a real miner would
-        run inference here).  Runs even when the benchmark failed so the pod
-        can push through if no replacements are left.
-
-    Crash safety: the entire body is wrapped in try/except/finally so the
-    pod ALWAYS transitions to COMPLETE, even on a top-level failure.
+    Wrapped in try/except/finally so the pod ALWAYS transitions to
+    COMPLETE — a pod stranded in GENERATING is treated as unresponsive
+    and costs a replacement from the budget.
     """
     logger.info(f"Starting generation for {len(state.prompts)} prompts")
     start = time.monotonic()
@@ -401,6 +338,7 @@ async def _run_generation(state: MinerState, seed: int) -> None:
                 logger.error(f"Failed to generate for {prompt.stem}: {e}")
 
             state.progress = i + 1
+            await asyncio.sleep(0)
     except Exception as e:
         logger.exception(f"Generation task crashed: {e}")
         for prompt in state.prompts:
@@ -424,38 +362,43 @@ async def _run_gpu_benchmark(state: MinerState) -> None:
     installed the benchmark is skipped silently.
     """
     try:
-        from miner_reference.gpu_benchmark import MIN_TFLOPS, run_benchmark
+        import torch  # noqa: F401
+
+        from miner_reference.gpu_benchmark import MIN_TFLOPS, MIN_VRAM_GB, run_benchmark
     except ImportError:
-        logger.warning("torch not available — skipping GPU benchmark")
+        logger.warning("torch not available — skipping GPU benchmark (includes VRAM check)")
         return
 
-    logger.info("Running GPU benchmark...")
+    logger.info("Running GPU benchmark (compute + VRAM)...")
     results = await asyncio.to_thread(run_benchmark)
 
     for r in results:
         status_icon = "OK" if r.passed else "FAIL"
-        logger.info(
-            f"  GPU {r.gpu_id} ({r.gpu_name}): "
-            f"{r.tflops} TFLOPS — {status_icon}"
-        )
+        logger.info(f"  GPU {r.gpu_id} ({r.gpu_name}): " f"{r.tflops} TFLOPS, {r.vram_gb} GB VRAM — {status_icon}")
 
     failed = [r for r in results if not r.passed]
+
+    state.benchmark_payload = {
+        "benchmark": "gpu_health",
+        "threshold_tflops": MIN_TFLOPS,
+        "threshold_vram_gb": MIN_VRAM_GB,
+        "all_passed": len(failed) == 0,
+        "gpus": [
+            {
+                "gpu_id": r.gpu_id,
+                "gpu_name": r.gpu_name,
+                "tflops": r.tflops,
+                "compute_passed": r.compute_passed,
+                "vram_gb": r.vram_gb,
+                "vram_passed": r.vram_passed,
+                "passed": r.passed,
+            }
+            for r in results
+        ],
+    }
+
     if failed:
         state.gpu_degraded = True
-        state.benchmark_payload = {
-            "reason": "gpu_benchmark_failed",
-            "failed_gpus": [
-                {"gpu_id": r.gpu_id, "gpu_name": r.gpu_name, "tflops": r.tflops}
-                for r in failed
-            ],
-            "threshold_tflops": results[0].tflops if not results else None,
-            "all_results": [
-                {"gpu_id": r.gpu_id, "tflops": r.tflops, "passed": r.passed}
-                for r in results
-            ],
-        }
-        logger.warning(
-            f"GPU benchmark failed for {len(failed)}/{len(results)} GPUs"
-        )
+        logger.warning(f"GPU benchmark failed for {len(failed)}/{len(results)} GPUs")
     else:
         logger.info("GPU benchmark passed — all GPUs healthy")

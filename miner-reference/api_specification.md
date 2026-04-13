@@ -146,7 +146,16 @@ Reports current pod state. The orchestrator polls this continuously after the po
 ```json
 {
   "status": "replace",
-  "payload": { "reason": "insufficient_vram", "detected_vram_gb": 280.5, "expected_vram_gb": 564 }
+  "payload": {
+    "benchmark": "gpu_health",
+    "threshold_tflops": 30.0,
+    "threshold_vram_gb": 134.0,
+    "all_passed": false,
+    "gpus": [
+      { "gpu_id": 0, "tflops": 55.2, "vram_gb": 141.0, "passed": true },
+      { "gpu_id": 1, "tflops": 12.1, "vram_gb": 141.0, "passed": false }
+    ]
+  }
 }
 ```
 

@@ -16,8 +16,6 @@ def fresh_state():
     """Reset miner state before each test, skipping the lifespan warmup delay."""
     state = MinerState()
     state.status = PodStatus.READY
-    state.vram_ok = True
-    state.vram_total_gb = 564.0
     app.state.miner = state
 
 
@@ -49,10 +47,7 @@ async def test_full_batch_lifecycle(client: AsyncClient):
     assert resp.json()["status"] == "ready"
 
     # 2. Submit a small batch (stems are lowercase alphanumeric per the spec)
-    prompts = [
-        {"stem": f"prompt{i:03d}", "image_url": f"https://example.com/img_{i}.jpg"}
-        for i in range(3)
-    ]
+    prompts = [{"stem": f"prompt{i:03d}", "image_url": f"https://example.com/img_{i}.jpg"} for i in range(3)]
     resp = await client.post("/generate", json={"prompts": prompts, "seed": 42})
     assert resp.status_code == 200
     assert resp.json()["accepted"] == 3
@@ -92,10 +87,7 @@ async def test_full_batch_lifecycle(client: AsyncClient):
     assert set(zipfile.ZipFile(io.BytesIO(resp.content)).namelist()) == names
 
     # 7. Next /generate transitions from complete to generating
-    next_prompts = [
-        {"stem": f"batch2{i:03d}", "image_url": f"https://example.com/b2_{i}.jpg"}
-        for i in range(2)
-    ]
+    next_prompts = [{"stem": f"batch2{i:03d}", "image_url": f"https://example.com/b2_{i}.jpg"} for i in range(2)]
     resp = await client.post("/generate", json={"prompts": next_prompts, "seed": 99})
     assert resp.status_code == 200
     assert resp.json()["accepted"] == 2
@@ -172,35 +164,66 @@ async def test_results_rejected_when_not_complete(client: AsyncClient):
     assert resp.status_code == 409
 
 
-async def test_replacement_request_on_bad_vram(client: AsyncClient):
-    """When VRAM is insufficient and replacements are available, request replacement."""
-    app.state.miner.vram_ok = False
-    app.state.miner.vram_total_gb = 200.0
+async def test_replacement_request_on_degraded_gpu(client: AsyncClient):
+    """When the GPU benchmark detects degradation and replacements are
+    available, /status returns `replace` with the benchmark diagnostic payload."""
+    app.state.miner.gpu_degraded = True
+    app.state.miner.benchmark_payload = {
+        "benchmark": "gpu_health",
+        "threshold_tflops": 30.0,
+        "threshold_vram_gb": 134.0,
+        "all_passed": False,
+        "gpus": [
+            {"gpu_id": 0, "tflops": 55.0, "vram_gb": 141.0, "passed": True},
+            {"gpu_id": 1, "tflops": 12.0, "vram_gb": 141.0, "passed": False},
+        ],
+    }
 
     resp = await client.get("/status", params={"replacements_remaining": 2})
     data = resp.json()
     assert data["status"] == "replace"
-    assert data["payload"]["reason"] == "insufficient_vram"
-    assert data["payload"]["detected_vram_gb"] == 200.0
+    assert data["payload"]["benchmark"] == "gpu_health"
+    assert data["payload"]["all_passed"] is False
+    assert len(data["payload"]["gpus"]) == 2
 
 
 async def test_no_replacement_when_budget_exhausted(client: AsyncClient):
-    """When VRAM is bad but no replacements left, continue anyway."""
-    app.state.miner.vram_ok = False
-    app.state.miner.vram_total_gb = 200.0
+    """When the GPU benchmark fails but no replacements are left, push
+    through on degraded hardware rather than ending the round."""
+    app.state.miner.gpu_degraded = True
+    app.state.miner.benchmark_payload = {
+        "benchmark": "gpu_health",
+        "all_passed": False,
+        "gpus": [{"gpu_id": 0, "passed": False}],
+    }
 
     resp = await client.get("/status", params={"replacements_remaining": 0})
     data = resp.json()
+    # Should NOT return `replace` — that would end the round.
     assert data["status"] == "ready"
 
 
 async def test_replacement_request_during_warmup(client: AsyncClient):
-    """VRAM check should trigger replacement during warming_up too, not just ready."""
+    """GPU degradation triggers replacement during warming_up too, not just
+    during generation — catches bad hardware before any batch is accepted."""
     app.state.miner.status = PodStatus.WARMING_UP
-    app.state.miner.vram_ok = False
-    app.state.miner.vram_total_gb = 100.0
+    app.state.miner.gpu_degraded = True
+    app.state.miner.benchmark_payload = {"benchmark": "gpu_health", "all_passed": False}
 
     resp = await client.get("/status", params={"replacements_remaining": 3})
+    assert resp.json()["status"] == "replace"
+
+
+async def test_replacement_request_during_generating(client: AsyncClient):
+    """GPU degradation detected mid-batch also triggers replacement —
+    the per-batch benchmark runs inside _run_generation."""
+    app.state.miner.status = PodStatus.GENERATING
+    app.state.miner.progress = 0
+    app.state.miner.total = 32
+    app.state.miner.gpu_degraded = True
+    app.state.miner.benchmark_payload = {"benchmark": "gpu_health", "all_passed": False}
+
+    resp = await client.get("/status", params={"replacements_remaining": 1})
     assert resp.json()["status"] == "replace"
 
 
@@ -248,10 +271,7 @@ async def test_generation_crash_transitions_to_complete(
     # own asyncio.sleep calls intact.
     monkeypatch.setattr(service.asyncio, "sleep", crashing_sleep)
 
-    prompts = [
-        {"stem": f"crash{i}", "image_url": f"https://example.com/img_{i}.jpg"}
-        for i in range(5)
-    ]
+    prompts = [{"stem": f"crash{i}", "image_url": f"https://example.com/img_{i}.jpg"} for i in range(5)]
     resp = await client.post("/generate", json={"prompts": prompts, "seed": 1})
     assert resp.status_code == 200
 
@@ -262,9 +282,7 @@ async def test_generation_crash_transitions_to_complete(
             break
         await real_sleep(0.05)
 
-    assert resp.json()["status"] == "complete", (
-        "pod must transition to complete even when the generation task crashes"
-    )
+    assert resp.json()["status"] == "complete", "pod must transition to complete even when the generation task crashes"
 
     # /results must serve a valid ZIP, not 409 or empty.
     resp = await client.get("/results")
@@ -277,11 +295,11 @@ async def test_generation_crash_transitions_to_complete(
     # The catch-all should have populated _failed.json with reasons for
     # every prompt that didn't make it into results.
     assert "_failed.json" in names, (
-        "crashed prompts must be reported in _failed.json so the orchestrator "
-        "knows they didn't generate"
+        "crashed prompts must be reported in _failed.json so the orchestrator " "knows they didn't generate"
     )
 
     import json
+
     failed_manifest = json.loads(zf.read("_failed.json"))
     state = app.state.miner
     succeeded = {n[:-3] for n in names if n.endswith(".js")}
@@ -311,21 +329,6 @@ async def test_generate_rejects_invalid_stem_format(client: AsyncClient):
     assert app.state.miner.status == PodStatus.READY
 
 
-async def test_status_warming_up_payload(client: AsyncClient):
-    """During warming_up the /status payload should report the current
-    stage, demonstrating the diagnostic-payload pattern from the spec."""
-    app.state.miner.status = PodStatus.WARMING_UP
-    app.state.miner.warming_up_stage = "loading_unet"
-
-    resp = await client.get("/status")
-    data = resp.json()
-    assert data["status"] == "warming_up"
-    assert data["payload"] == {"stage": "loading_unet"}
-    # progress/total should NOT be in the response (excluded as None).
-    assert "progress" not in data
-    assert "total" not in data
-
-
 async def test_status_excludes_null_fields(client: AsyncClient):
     """The /status response should omit null fields entirely, not serialize
     them as `null`. Cleaner output for the orchestrator's logs."""
@@ -343,10 +346,7 @@ async def test_results_byte_identical_across_retries(client: AsyncClient):
     return byte-identical responses. The ZIP is built once and cached so
     retries don't re-zip and don't drift on metadata (timestamps etc.).
     """
-    prompts = [
-        {"stem": f"same{i}", "image_url": f"https://example.com/img_{i}.jpg"}
-        for i in range(3)
-    ]
+    prompts = [{"stem": f"same{i}", "image_url": f"https://example.com/img_{i}.jpg"} for i in range(3)]
     resp = await client.post("/generate", json={"prompts": prompts, "seed": 1})
     assert resp.status_code == 200
 
