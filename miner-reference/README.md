@@ -205,7 +205,7 @@ Code that passes the local validator will pass production. Use the `--json` flag
 Your Docker image must expose an HTTP service for the verification flow (see "How a round works § Verification"). You can write yours in any language. If you want a working starting point, there's a Python/FastAPI implementation in [`miner_reference/`](miner_reference). It implements the four endpoints from the [API Specification](api_specification.md) and demonstrates:
 
 - Pod state machine (`warming_up` → `ready` → `generating` → `complete`)
-- VRAM-based `replace` requests via `nvidia-smi` (expects ~564 GB total for 4×H200 SXM, requests replacement below that if budget allows)
+- GPU health benchmark at startup and per-batch: stress-tests each GPU's compute throughput (TFLOPS) and checks per-GPU VRAM via `torch.cuda`, requests `replace` when any GPU is degraded (if budget allows)
 - Partial-batch failure handling with a `_failed.json` manifest
 - Streamed ZIP response from `/results`
 

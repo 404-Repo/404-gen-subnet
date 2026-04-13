@@ -1,21 +1,14 @@
 """Placeholder generator for the reference miner service.
 
-In a real miner, the inference pipeline takes each prompt image and produces a
-unique JavaScript module that constructs a Three.js scene matching the prompt.
-This placeholder skips the model and returns the canonical reference module
-(`examples/car.js`) for every prompt — the same low-poly car scene that the
-local validator treats as a known-good fixture.
+Returns the canonical reference module (``examples/car.js``) for every prompt.
+Replace ``generate_car_scene`` with your own generation logic — the rest of
+``service.py`` (ZIP packing, failure manifest, state machine) does not change.
 
 The returned bytes are UTF-8 JavaScript source conforming to:
     output_specifications.md § Function Signature / Execution Constraints
     runtime_specifications.md § Static Analysis / Post-Execution Validation
 
-Run `node tools/validate.js examples/car.js` to see it pass every rule.
-
-To replace this with a real pipeline, change `generate_car_scene` to return the
-bytes of the JS module produced by your inference stack for the prompt you were
-given. The rest of `service.py` (ZIP packing, failure manifest, state machine)
-does not need to change.
+Validate with: ``node tools/validate.js examples/car.js``
 """
 
 from functools import lru_cache
@@ -47,7 +40,6 @@ def _load_reference_source() -> bytes:
 def generate_car_scene() -> bytes:
     """Return a spec-compliant generate.js module as UTF-8 bytes.
 
-    Every prompt gets the same reference car module. A real miner would emit a
-    different JavaScript module per prompt derived from its inference output.
+    Returns the same car module for every prompt (placeholder behavior).
     """
     return _load_reference_source()
