@@ -355,18 +355,17 @@ async def _run_generation(state: MinerState, seed: int) -> None:
 
 
 async def _run_gpu_benchmark(state: MinerState) -> None:
-    """Run the GPU compute benchmark, updating *state* with results.
+    """Run the GPU health benchmark (compute + VRAM), updating *state*.
 
     Sets ``state.gpu_degraded = True`` (plus a diagnostic payload) when any
-    GPU falls below the configured TFLOPS threshold.  If torch is not
-    installed the benchmark is skipped silently.
+    GPU fails. Requires torch with CUDA — the Docker image must include it.
     """
     try:
         import torch  # noqa: F401
 
         from miner_reference.gpu_benchmark import MIN_TFLOPS, MIN_VRAM_GB, run_benchmark
     except ImportError:
-        logger.warning("torch not available — skipping GPU benchmark (includes VRAM check)")
+        logger.warning("torch not available — skipping GPU benchmark")
         return
 
     logger.info("Running GPU benchmark (compute + VRAM)...")
@@ -374,7 +373,7 @@ async def _run_gpu_benchmark(state: MinerState) -> None:
 
     for r in results:
         status_icon = "OK" if r.passed else "FAIL"
-        logger.info(f"  GPU {r.gpu_id} ({r.gpu_name}): " f"{r.tflops} TFLOPS, {r.vram_gb} GB VRAM — {status_icon}")
+        logger.info(f"  GPU {r.gpu_id} ({r.gpu_name}): {r.tflops} TFLOPS, {r.vram_gb} GB VRAM — {status_icon}")
 
     failed = [r for r in results if not r.passed]
 

@@ -1,14 +1,16 @@
 /**
  * Rendering service — renders Three.js JS submissions to multi-view images.
  *
+ * Three-stage pipeline per request:
+ *   Stage 1: Static analysis (parse + AST rules)
+ *   Stage 2: Execution + post-validation (worker_thread pool)
+ *   Stage 3: Render (Chromium BrowserContext pool)
+ *
  * Endpoints:
  *     POST /render         → list of individual view images (PNG)
  *     POST /render/grid    → single composite grid image (PNG)
  *     GET  /health         → {"status": "ok"}
  *     GET  /ping           → 200 if ready, 204 if initializing
- *
- * JS source is passed as JSON body: {"source": "export default function generate(THREE) { ... }"}
- * Camera parameters are passed as query params (same interface as judge-bench).
  */
 
 import http from 'node:http';
@@ -18,6 +20,7 @@ import { startStaticServer } from './static-server.js';
 import { ensureBrowser } from './browser.js';
 import { renderViews, renderGrid } from './renderer.js';
 import { staticValidate } from './validator/index.js';
+import { validationPool } from './validation-pool.js';
 
 const PORT = parseInt(process.env.PORT || '80', 10);
 
@@ -50,6 +53,9 @@ function parseQuery(urlStr) {
 
   const bgColor = url.searchParams.get('bg_color');
   if (bgColor) params.bgColor = bgColor;
+
+  const lighting = url.searchParams.get('lighting');
+  if (lighting === 'follow') params.lighting = 'follow';
 
   return params;
 }
@@ -93,12 +99,25 @@ async function handleRender(req, res) {
   const body = await readBody(req);
   const source = await getSource(body);
 
-  const tValidate = performance.now();
-  const validation = staticValidate(source);
-  const validateMs = (performance.now() - tValidate).toFixed(1);
-  if (!validation.passed) {
-    console.log(`[render] validation failed (${validateMs}ms)`);
-    sendJson(res, 422, { error: 'validation_failed', failures: validation.failures });
+  const tStatic = performance.now();
+  const staticResult = staticValidate(source);
+  const staticMs = (performance.now() - tStatic).toFixed(1);
+  if (!staticResult.passed) {
+    console.log(`[render] static analysis failed (${staticMs}ms)`);
+    sendJson(res, 422, { error: 'validation_failed', failures: staticResult.failures });
+    return;
+  }
+
+  const tExec = performance.now();
+  const execResult = await validationPool.validate(source);
+  const execMs = (performance.now() - tExec).toFixed(1);
+  if (!execResult.passed) {
+    console.log(`[render] post-validation failed (${execMs}ms)`);
+    sendJson(res, 422, {
+      error: 'post_validation_failed',
+      failures: execResult.failures,
+      metrics: execResult.metrics,
+    });
     return;
   }
 
@@ -107,7 +126,7 @@ async function handleRender(req, res) {
   const images = await renderViews(source, options);
   const renderMs = (performance.now() - tRender).toFixed(1);
   const totalMs = (performance.now() - t0).toFixed(1);
-  console.log(`[render] ${images.length} views — validate ${validateMs}ms, render ${renderMs}ms, total ${totalMs}ms`);
+  console.log(`[render] ${images.length} views — static ${staticMs}ms, exec ${execMs}ms, render ${renderMs}ms, total ${totalMs}ms`);
 
   if (images.length === 1) {
     sendPng(res, images[0]);
@@ -127,12 +146,25 @@ async function handleRenderGrid(req, res) {
   const body = await readBody(req);
   const source = await getSource(body);
 
-  const tValidate = performance.now();
-  const validation = staticValidate(source);
-  const validateMs = (performance.now() - tValidate).toFixed(1);
-  if (!validation.passed) {
-    console.log(`[render/grid] validation failed (${validateMs}ms)`);
-    sendJson(res, 422, { error: 'validation_failed', failures: validation.failures });
+  const tStatic = performance.now();
+  const staticResult = staticValidate(source);
+  const staticMs = (performance.now() - tStatic).toFixed(1);
+  if (!staticResult.passed) {
+    console.log(`[render/grid] static analysis failed (${staticMs}ms)`);
+    sendJson(res, 422, { error: 'validation_failed', failures: staticResult.failures });
+    return;
+  }
+
+  const tExec = performance.now();
+  const execResult = await validationPool.validate(source);
+  const execMs = (performance.now() - tExec).toFixed(1);
+  if (!execResult.passed) {
+    console.log(`[render/grid] post-validation failed (${execMs}ms)`);
+    sendJson(res, 422, {
+      error: 'post_validation_failed',
+      failures: execResult.failures,
+      metrics: execResult.metrics,
+    });
     return;
   }
 
@@ -141,7 +173,7 @@ async function handleRenderGrid(req, res) {
   const gridBuf = await renderGrid(source, options);
   const renderMs = (performance.now() - tRender).toFixed(1);
   const totalMs = (performance.now() - t0).toFixed(1);
-  console.log(`[render/grid] validate ${validateMs}ms, render ${renderMs}ms, total ${totalMs}ms`);
+  console.log(`[render/grid] static ${staticMs}ms, exec ${execMs}ms, render ${renderMs}ms, total ${totalMs}ms`);
 
   sendPng(res, gridBuf);
 }
@@ -182,11 +214,12 @@ async function main() {
   console.log('Starting static file server...');
   await startStaticServer();
 
-  // Start HTTP server before browser so RunPod's /ping health check is
-  // reachable immediately (returns 204 while initializing, 200 when ready).
   server.listen(PORT, '0.0.0.0', () => {
     console.log(`Render service listening on port ${PORT}`);
   });
+
+  console.log('Initializing validation pool...');
+  await validationPool.init();
 
   console.log('Launching browser...');
   await ensureBrowser();

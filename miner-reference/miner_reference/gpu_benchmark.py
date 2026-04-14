@@ -72,7 +72,7 @@ def _benchmark_single_gpu(
 
     # VRAM check — read total memory from the device properties.
     props = torch.cuda.get_device_properties(gpu_id)
-    vram_gb = round(props.total_mem / (1024**3), 1)
+    vram_gb = round(props.total_memory / (1024**3), 1)
     vram_passed = vram_gb >= min_vram_gb
 
     # Compute benchmark — sustained matrix multiply throughput.

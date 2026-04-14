@@ -2,8 +2,8 @@
  * Browser lifecycle management.
  *
  * Launches headless Chromium once on startup, keeps it alive across requests.
- * Provides ensureBrowser() for the happy path and restartBrowser() for recovery
- * after crashes, timeouts, or WebGL context loss.
+ * The render pool manages per-context recovery; restartBrowser() is only
+ * called when the browser process itself is unhealthy.
  */
 
 import puppeteer from 'puppeteer';
@@ -21,11 +21,13 @@ const BASE_ARGS = [
   '--ignore-gpu-blocklist',
 ];
 
-// USE_GL=egl: NVIDIA GPU hardware acceleration (for RunPod GPU workers).
-// Default: SwANGLE (software-rendered WebGL via ANGLE + SwiftShader).
 const GPU_ARGS = process.env.USE_GL === 'egl'
   ? ['--use-gl=egl', '--enable-gpu', '--disable-gpu-sandbox']
   : ['--use-gl=angle', '--use-angle=swiftshader', '--in-process-gpu'];
+
+export function isBrowserHealthy() {
+  return browser != null && browser.connected;
+}
 
 export async function ensureBrowser() {
   if (browser && browser.connected) return browser;
