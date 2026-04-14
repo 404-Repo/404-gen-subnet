@@ -58,7 +58,7 @@ def grid_from_ply_bytes(ply_bytes: bytes, device: torch.device) -> bytes:
 
 
 
-def grid_from_glb_bytes(glb_bytes: bytes):
+def grid_from_glb_bytes(glb_bytes: bytes, lighting: str = 'studio'):
     logger.info(f"Starting GLB rendering, payload size: {len(glb_bytes)} bytes")
     
     logger.debug("Loading mesh with trimesh")
@@ -68,7 +68,8 @@ def grid_from_glb_bytes(glb_bytes: bytes):
     _assert_model_size(mesh=mesh)
     
     logger.debug("Creating pyrender scene")
-    scene = pyrender.Scene(bg_color=[255, 255, 255, 0], ambient_light=[0.3, 0.3, 0.3])
+    ambient = [0.1, 0.1, 0.1] if lighting == 'studio' else [0.3, 0.3, 0.3]
+    scene = pyrender.Scene(bg_color=[255, 255, 255, 0], ambient_light=ambient)
 
     # Convert to pyrender mesh
     logger.debug("Converting trimesh to pyrender mesh")
@@ -94,10 +95,21 @@ def grid_from_glb_bytes(glb_bytes: bytes):
     cam_node = scene.add(cam)
     logger.debug("Camera added to scene")
 
-    # Light
-    light = pyrender.DirectionalLight(color=[255,255,255], intensity=6.0)
-    light_node = scene.add(light)
-    logger.debug("Light added to scene")
+    light_node = None
+    if lighting == 'studio':
+        key_light = pyrender.DirectionalLight(color=[1.0, 1.0, 1.0], intensity=5.0)
+        scene.add(key_light, pose=coords.look_at(np.array([2.0, 3.0, 2.0])))
+
+        fill_light = pyrender.DirectionalLight(color=[1.0, 1.0, 1.0], intensity=2.0)
+        scene.add(fill_light, pose=coords.look_at(np.array([-2.0, 1.0, 1.0])))
+
+        rim_light = pyrender.DirectionalLight(color=[1.0, 1.0, 1.0], intensity=1.5)
+        scene.add(rim_light, pose=coords.look_at(np.array([0.0, 2.0, -3.0])))
+        logger.debug("Studio lighting rig added (key/fill/rim)")
+    else:
+        light = pyrender.DirectionalLight(color=[255, 255, 255], intensity=6.0)
+        light_node = scene.add(light)
+        logger.debug("Camera-following light added")
 
     theta_angles = const.THETA_ANGLES[const.GRID_VIEW_INDICES].astype("float32")
     phi_angles = const.PHI_ANGLES[const.GRID_VIEW_INDICES].astype("float32")
@@ -119,10 +131,10 @@ def grid_from_glb_bytes(glb_bytes: bytes):
         pose = coords.look_at(cam_pos)
 
         scene.set_pose(cam_node, pose)
-        light_offset = np.array([1.0, 1.0, 0]) 
-        light_pos = cam_pos + light_offset
-        light_pose = coords.look_at(light_pos)
-        scene.set_pose(light_node, light_pose)
+        if light_node is not None:
+            light_offset = np.array([1.0, 1.0, 0])
+            light_pos = cam_pos + light_offset
+            scene.set_pose(light_node, coords.look_at(light_pos))
 
         image, _ = renderer.render(scene)
         
