@@ -24,6 +24,7 @@ class ValidationPool {
     this.available = [];
     this.waiting = [];
     this._nextRequestId = 0;
+    this._shuttingDown = false;
   }
 
   async init() {
@@ -108,7 +109,9 @@ class ValidationPool {
           });
         }
         worker._pending.clear();
-        this._replaceWorker(worker);
+        if (!this._shuttingDown) {
+          this._replaceWorker(worker);
+        }
       });
     });
   }
@@ -179,12 +182,14 @@ class ValidationPool {
   }
 
   async shutdown() {
+    this._shuttingDown = true;
     for (const w of this.workers) {
       await w.terminate().catch(() => {});
     }
     this.workers = [];
     this.available = [];
     this.waiting = [];
+    this._shuttingDown = false;
   }
 }
 

@@ -3,45 +3,44 @@
  *
  * Runs in a worker_thread with resourceLimits for V8-level heap enforcement.
  * Loads Three.js once on startup (warm), then processes validation requests:
- *   1. Import miner source via data: URI
+ *   1. Compile miner source via new Function() (no ESM module cache)
  *   2. Execute generate(THREE) with runtime guards
  *   3. Run post-validation checks on the returned root
  *   4. Post structured result back to parent
  *
- * Runtime hardening is applied in two phases:
- *   Phase 1 (before import): locks Function.prototype.constructor on all
- *     function prototypes (blocks codegen via .constructor chains) and traps
- *     all Node.js-available forbidden globals that don't interfere with ESM
- *     module loading.
- *   Phase 2 (after import, before generate): traps Function and eval on
- *     globalThis. These must wait until after import() because Node.js's ESM
- *     loader accesses them during module compilation.
+ * Source is compiled with `new Function()` instead of `import()` to avoid
+ * leaking entries in Node's ESM module cache. The server transforms the
+ * source using exact AST byte offsets (export default → return) before
+ * sending it here, so the worker compiles it directly under strict mode.
+ *
+ * Because there is no ESM loader involvement, ALL runtime traps (including
+ * Function and eval) are installed in a single phase before any miner code
+ * executes — no two-phase dance needed.
  */
 
 import { parentPort } from 'node:worker_threads';
 import * as THREE from 'three';
 import { postValidate } from './post-validate.js';
 
+const SafeFunction = Function;
+
 const TRAPPED_GLOBALS = [
   'setTimeout', 'setInterval', 'setImmediate', 'queueMicrotask',
   'fetch', 'XMLHttpRequest', 'WebSocket',
   'crypto',
   'Date', 'performance',
+  'eval', 'Function',
   'process', 'global',
   'WeakRef', 'FinalizationRegistry',
   'SharedArrayBuffer', 'Atomics',
 ];
 
-const POST_IMPORT_TRAPS = ['eval', 'Function'];
-
 const CODEGEN_PROTOTYPES = [
-  Function.prototype,
+  SafeFunction.prototype,
   Object.getPrototypeOf(function*(){}),
   Object.getPrototypeOf(async function(){}),
   Object.getPrototypeOf(async function*(){}),
 ];
-
-let importCounter = 0;
 
 function trapViolation(name) {
   throw new Error(`Runtime violation: ${name} is forbidden`);
@@ -54,7 +53,6 @@ parentPort.on('message', async (msg) => {
 
   const origRandom = Math.random;
   const savedGlobals = new Map();
-  const savedPostImport = new Map();
   const savedCtors = [];
 
   try {
@@ -88,24 +86,30 @@ parentPort.on('message', async (msg) => {
       });
     }
 
-    const tag = `\n/* __v${importCounter++}__ */`;
-    const encoded = Buffer.from(source + tag).toString('base64');
-    const mod = await import(`data:text/javascript;base64,${encoded}`);
-
-    for (const name of POST_IMPORT_TRAPS) {
-      if (!(name in globalThis)) continue;
-      savedPostImport.set(name, Object.getOwnPropertyDescriptor(globalThis, name));
-      try {
-        Object.defineProperty(globalThis, name, {
-          get() { trapViolation(name); },
-          configurable: true,
-        });
-      } catch {
-        try { globalThis[name] = undefined; } catch {}
-      }
+    const body = `'use strict';\n${source}`;
+    let factory;
+    try {
+      factory = new SafeFunction(body);
+    } catch (err) {
+      parentPort.postMessage({
+        type: 'result',
+        requestId,
+        result: {
+          passed: false,
+          failures: [{
+            stage: 'execution',
+            rule: 'EXECUTION_THREW',
+            detail: `compilation failed: ${err.message}`,
+          }],
+          metrics: null,
+        },
+      });
+      return;
     }
 
-    if (typeof mod.default !== 'function') {
+    const generate = factory();
+
+    if (typeof generate !== 'function') {
       parentPort.postMessage({
         type: 'result',
         requestId,
@@ -122,7 +126,7 @@ parentPort.on('message', async (msg) => {
       return;
     }
 
-    const root = mod.default(THREE);
+    const root = generate(THREE);
 
     if (root instanceof Promise) {
       parentPort.postMessage({
@@ -163,10 +167,6 @@ parentPort.on('message', async (msg) => {
   } finally {
     Math.random = origRandom;
     for (const [name, desc] of savedGlobals) {
-      try { Object.defineProperty(globalThis, name, desc); }
-      catch { try { globalThis[name] = desc?.value; } catch {} }
-    }
-    for (const [name, desc] of savedPostImport) {
       try { Object.defineProperty(globalThis, name, desc); }
       catch { try { globalThis[name] = desc?.value; } catch {} }
     }

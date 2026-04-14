@@ -2,7 +2,8 @@
  * Static-only validation gate for the render service.
  *
  * Runs parse + static analysis from the miner-reference validator.
- * Does NOT run execution or post-validation — that happens in the browser.
+ * On success, also returns `transformed`: source with `export default`
+ * replaced by `return` using exact AST byte offsets (not regex).
  */
 
 import { parseSource } from './parse.js';
@@ -19,5 +20,10 @@ export function staticValidate(source) {
     return { passed: false, failures: staticFailures };
   }
 
-  return { passed: true, failures: [] };
+  const exportDecl = ast.program.body.find(s => s.type === 'ExportDefaultDeclaration');
+  const transformed = source.slice(0, exportDecl.start)
+    + 'return '
+    + source.slice(exportDecl.declaration.start);
+
+  return { passed: true, failures: [], transformed };
 }
