@@ -1,0 +1,20 @@
+{
+  "name": "render-service-js",
+  "version": "0.1.0",
+  "description": "Renders miner Three.js submissions to multi-view PNG previews via headless Chromium with GPU WebGL.",
+  "type": "module",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js"
+  },
+  "dependencies": {
+    "@babel/parser": "^7.24.0",
+    "@babel/traverse": "^7.24.0",
+    "puppeteer": "^24.0.0",
+    "three": "0.183.2"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
