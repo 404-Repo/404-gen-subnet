@@ -10,6 +10,7 @@
  *   FORBIDDEN_THREE_API        → § Prohibited Three.js APIs
  *   THREE_AT_TOP_LEVEL         → § Function Signature
  *   COMPUTED_PROPERTY_ACCESS   → § Code Constraints
+ *   FORBIDDEN_PROPERTY_ACCESS  → § Code Constraints (.constructor, __proto__, etc.)
  *   LITERAL_BUDGET_EXCEEDED    → § Code Constraints
  */
 
@@ -18,6 +19,7 @@ import {
   ALLOWED_ROOT_IDENTIFIERS,
   FORBIDDEN_IDENTIFIERS,
   COMPUTED_ACCESS_GATED,
+  FORBIDDEN_PROPERTY_NAMES,
 } from './identifiers.js';
 import { THREE_ALLOWED, THREE_BLOCKED_SUBMEMBERS } from './threeAllowlist.js';
 
@@ -131,6 +133,24 @@ export function staticAnalyze(ast) {
       });
     },
 
+    'ImportExpression|Import'(path) {
+      failures.push({
+        stage: 'static_analysis',
+        rule: 'FORBIDDEN_IDENTIFIER',
+        detail: `dynamic import() at line ${loc(path.node)}`,
+      });
+    },
+
+    MetaProperty(path) {
+      if (path.node.meta.name === 'import') {
+        failures.push({
+          stage: 'static_analysis',
+          rule: 'FORBIDDEN_IDENTIFIER',
+          detail: `import.meta at line ${loc(path.node)}`,
+        });
+      }
+    },
+
     Identifier(path) {
       const name = path.node.name;
 
@@ -212,6 +232,18 @@ export function staticAnalyze(ast) {
 
     MemberExpression(path) {
       const obj = path.node.object;
+
+      if (
+        !path.node.computed &&
+        path.node.property.type === 'Identifier' &&
+        FORBIDDEN_PROPERTY_NAMES.has(path.node.property.name)
+      ) {
+        failures.push({
+          stage: 'static_analysis',
+          rule: 'FORBIDDEN_PROPERTY_ACCESS',
+          detail: `.${path.node.property.name} at line ${loc(path.node)}`,
+        });
+      }
 
       // Computed access on gated globals
       if (

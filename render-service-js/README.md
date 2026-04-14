@@ -2,7 +2,11 @@
 
 Renders miner Three.js submissions to multi-view PNG images via headless Chromium with WebGL.
 
-Designed to run on RunPod Serverless GPU workers. Each request gets an isolated BrowserContext; if a render fails, Chromium is restarted automatically.
+Designed to run on RunPod Serverless GPU workers. Three-stage pipeline per request:
+
+1. **Static analysis** — parse + AST rules (fast, synchronous)
+2. **Execution + post-validation** — runs `generate(THREE)` in a `worker_threads` pool with V8 heap limits (256 MB) and wall-clock timeout (5 s), then validates the returned scene (bounding box, vertex count, draw calls, depth, instances, texture data)
+3. **Render** — only validated submissions reach Chromium; each render gets a fresh BrowserContext from a bounded render slot pool
 
 ## Local development
 
@@ -14,7 +18,7 @@ npm install
 npm run dev    # starts with --watch for auto-reload
 ```
 
-The server starts on `http://localhost:8000` by default.
+The server starts on `http://localhost:80` by default (set `PORT=8000` for local dev).
 
 ### Environment variables
 
@@ -23,6 +27,9 @@ The server starts on `http://localhost:8000` by default.
 | `PORT` | `80` | HTTP server port |
 | `STATIC_PORT` | `3000` | Internal static file server port (serves Three.js to Chromium) |
 | `RENDER_TIMEOUT_MS` | `10000` | Max time for a single render before timeout |
+| `VALIDATION_POOL_SIZE` | `2` | Number of worker_threads for execution + post-validation |
+| `VALIDATION_TIMEOUT_MS` | `5000` | Wall-clock timeout for miner code execution (spec: 5 s) |
+| `RENDER_POOL_SIZE` | `2` | Max concurrent browser render slots |
 | `USE_GL` | _(unset, uses ANGLE)_ | Chromium GL backend. Set to `egl` on RunPod/NVIDIA GPU workers |
 
 ## Docker
@@ -62,6 +69,7 @@ All render endpoints accept the same query parameters for camera control:
 | `cam_fov_deg` | `49.1` | Camera vertical field of view in degrees |
 | `gap` | `5` | Pixel gap between views in grid mode |
 | `bg_color` | `808080` | Background color as hex string (e.g. `ffffff` for white) |
+| `lighting` | `studio` | Lighting mode: `studio` (fixed key/fill/rim rig + env map) or `follow` (camera-following single light) |
 
 ### `POST /render`
 
@@ -128,6 +136,27 @@ Returns `200` when the service is ready, `204` while still initializing.
 }
 ```
 
+**422** -- post-execution validation failed (code ran but scene violates limits):
+
+```json
+{
+  "error": "post_validation_failed",
+  "failures": [
+    {"stage": "post_validation", "rule": "VERTEX_LIMIT_EXCEEDED", "detail": "312000 > 250000"}
+  ],
+  "metrics": {
+    "vertices": 312000,
+    "drawCalls": 5,
+    "depth": 2,
+    "instances": 0,
+    "textureBytes": 0,
+    "bbox": {"min": {"x": -0.5, "y": -0.5, "z": -0.5}, "max": {"x": 0.5, "y": 0.5, "z": 0.5}}
+  }
+}
+```
+
+Post-validation rule codes: `EMPTY_SCENE`, `BOUNDING_BOX_OUT_OF_RANGE`, `VERTEX_LIMIT_EXCEEDED`, `DRAW_CALL_LIMIT_EXCEEDED`, `DEPTH_LIMIT_EXCEEDED`, `INSTANCE_LIMIT_EXCEEDED`, `TEXTURE_DATA_EXCEEDED`, `CYCLE_DETECTED`, `INVALID_RETURN_TYPE`, `TIMEOUT_EXCEEDED`, `HEAP_EXCEEDED`, `EXECUTION_THREW`.
+
 **500** -- render or internal error:
 
 ```json
@@ -136,6 +165,8 @@ Returns `200` when the service is ready, `204` while still initializing.
 
 ## Security
 
-Before rendering, each submission is run through the static analysis validator (from `miner-reference/validator`). This rejects code that references forbidden APIs like `Math.random`, `Date`, `performance`, `fetch`, `XMLHttpRequest`, etc.
+Each submission passes through three isolation stages:
 
-Each render runs in a fresh Puppeteer BrowserContext (isolated JS heap, cookies, storage). If rendering fails or times out, the entire Chromium process is restarted.
+1. **Static analysis** — AST-level rejection of forbidden identifiers, imports, computed property access, and literal budget violations.
+2. **Execution in worker_threads** — miner code runs in a dedicated V8 thread with `resourceLimits` (256 MB heap), 5 s wall-clock timeout, seeded PRNG replacing `Math.random`, and trapped globals. The returned scene is validated against spec limits (bounding box, vertices, draw calls, depth, instances, textures). Workers are terminated and replaced on timeout or crash.
+3. **Render in Chromium** — only validated code reaches the browser. Each render gets a fresh BrowserContext (isolated JS heap). Runtime guards (seeded PRNG, trapped globals, offline mode, CSP) provide defense-in-depth. Per-slot recovery: a failed render closes only that context, not the whole browser.

@@ -88,3 +88,12 @@ export const COMPUTED_ACCESS_GATED = new Set([
   'Array',
   'Symbol',
 ]);
+
+export const FORBIDDEN_PROPERTY_NAMES = new Set([
+  'constructor',
+  '__proto__',
+  '__defineGetter__',
+  '__defineSetter__',
+  '__lookupGetter__',
+  '__lookupSetter__',
+]);
