@@ -7,7 +7,7 @@
   "scripts": {
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
-    "test": "node test/validator.test.mjs",
+    "test": "node test/validator.test.mjs && node test/post-validate.test.mjs",
     "test:postval": "node test/post-validate.test.mjs",
     "test:endpoint": "node test/endpoint.test.mjs"
   },

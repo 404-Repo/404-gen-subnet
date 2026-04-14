@@ -109,7 +109,7 @@ async function handleRender(req, res) {
   }
 
   const tExec = performance.now();
-  const execResult = await validationPool.validate(source);
+  const execResult = await validationPool.validate(staticResult.transformed);
   const execMs = (performance.now() - tExec).toFixed(1);
   if (!execResult.passed) {
     console.log(`[render] post-validation failed (${execMs}ms)`);
@@ -156,7 +156,7 @@ async function handleRenderGrid(req, res) {
   }
 
   const tExec = performance.now();
-  const execResult = await validationPool.validate(source);
+  const execResult = await validationPool.validate(staticResult.transformed);
   const execMs = (performance.now() - tExec).toFixed(1);
   if (!execResult.passed) {
     console.log(`[render/grid] post-validation failed (${execMs}ms)`);

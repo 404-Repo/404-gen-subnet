@@ -41,7 +41,7 @@ export function postValidate(THREE, root) {
     return { passed: false, failures, metrics: null };
   }
 
-  const validRoot = root.isGroup || root.isMesh || root.isLine || root.isPoints;
+  const validRoot = root.isGroup || root.isMesh || root.isLineSegments || root.isPoints;
   if (!validRoot) {
     failures.push({
       stage: 'post_validation',
