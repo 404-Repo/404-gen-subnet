@@ -1,5 +1,7 @@
 # Three.js Runtime Specification
 
+[↓ TL;DR](#tldr)
+
 > **Note:** This document describes how the validator loads, sandboxes, executes, and renders miner submissions. It is the companion to the **Three.js Output Specification**. Both documents are required reading.
 
 ## Overview
@@ -201,11 +203,11 @@ This walk produces all the metrics below in a single pass.
 ### Metrics Computed During the Walk
 
 1. **Bounding box.** `new THREE.Box3().setFromObject(root)`. Rejected if any axis is outside `[-0.5, 0.5]` or if the box is empty.
-2. **Vertex count.** Sum of `geometry.attributes.position.count` across all reachable meshes. `InstancedMesh` counted once (not multiplied by instances). Limit: **250,000**.
-3. **Draw call count.** Nodes where `isMesh`, `isLine`, or `isPoints` is true. `InstancedMesh` counted as 1. Limit: **200**.
-4. **Scene-graph depth.** Maximum depth reached during the walk. Limit: **32**.
-5. **Instance count.** Sum of `instance.count` read directly from each `InstancedMesh` at validation time (not from constructor arguments — miners can reassign `count` post-construction). Limit: **50,000**.
-6. **Texture data.** Sum of byte lengths of all `DataTexture.image.data` buffers reachable via material references. Limit: **1 MB (1,048,576 bytes)**.
+2. **Face count.** Sum of `geometry.attributes.position.count` across all reachable meshes. `InstancedMesh` counted once (not multiplied by instances). Limit: **100000**
+3. **Draw call count.** Nodes where `isMesh`, `isLine`, or `isPoints` is true. `InstancedMesh` counted as 1. Limit: **50**
+4. **Scene-graph depth.** Maximum depth reached during the walk. Limit: **16**
+5. **Instance count.** Sum of `instance.count` read directly from each `InstancedMesh` at validation time (not from constructor arguments — miners can reassign `count` post-construction). Limit: **10000**
+6. **Texture data.** Sum of byte lengths of all `DataTexture.image.data` buffers reachable via material references. Limit: **256 KB (262,144 bytes)**
 
 Any metric exceeding its limit causes failure.
 
@@ -345,3 +347,20 @@ Within a single round, all values are frozen at round start.
 - **Three.js Output Specification** — what miners must produce.
 - **API Specification** — `/generate`, `/status`, `/results` endpoints.
 - **Competition Rules** — scoring, prompt sets, time budgets, pod management.
+
+<a id="tldr"></a>
+
+## TL;DR
+
+- **Validate & execute (isolated-vm):**
+  - Parse and statically analyze first; then compile and run the miner module only inside a fresh V8 isolate (not the validator process).
+  - Pinned `three.module.js` is compiled in-isolate.
+  - Call `generate(THREE)` with **5 s** wall-clock and **256 MB** heap for **module evaluation + `generate()`** combined (host parse/analysis is separate).
+- **Render (Puppeteer):**
+  - After post-execution checks pass, run the **same source** again in headless Chrome — scene is **rebuilt**, not serialized from the sandbox.
+  - Miner code has **5 s** for page load through `generate()`; the canonical framebuffer pass uses a **separate** timeout.
+  - Output: one **1024×1024** PNG under the fixed renderer, camera, lights, background, and environment.
+- **Errors & host:**
+  - Failures use `{ stage, rule, detail }`; `rule` codes are defined in **Output Spec § Failure Semantics**.
+  - Execution is inside **Docker** with tight limits.
+  - Bundle, resolution, camera/light/env, and caps may change **between rounds** only.
