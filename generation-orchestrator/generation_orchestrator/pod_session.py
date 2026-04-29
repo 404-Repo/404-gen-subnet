@@ -1,5 +1,4 @@
 import asyncio
-import io
 import json
 from dataclasses import dataclass
 from enum import StrEnum
@@ -8,10 +7,9 @@ from types import TracebackType
 from typing import Self
 
 import httpx
-import numpy as np
 from loguru import logger
 from subnet_common.competition.generations import GenerationResult
-from subnet_common.embeddings import calculate_embeddings
+from subnet_common.embeddings import build_embeddings_npz
 from subnet_common.r2_client import R2Client
 from subnet_common.render import GRAY_BG, GRAY_VIEWS, WHITE_BG, WHITE_VIEWS, render_grid, render_views
 from tenacity import RetryCallState, retry, stop_after_attempt, wait_exponential
@@ -111,7 +109,9 @@ class PodSession:
         await self._service_client.aclose()
         await self._r2.__aexit__(exc_type, exc, tb)
 
-    async def run(self, round_num: int, batch: list[Prompt]) -> BatchComplete | PodReplaceRequested:
+    async def run(
+        self, round_num: int, batch: list[Prompt], repeat_index: int = 1
+    ) -> BatchComplete | PodReplaceRequested:
         """Submit a batch, poll until complete, download + process. Returns the delta or a swap signal."""
         batch_start = asyncio.get_running_loop().time()
 
@@ -149,7 +149,7 @@ class PodSession:
             logger.error(f"{self._log_id}: batch download failed")
             return PodReplaceRequested(reason=ReplaceReason.DOWNLOAD_FAILED)
 
-        generations = await self._process_results(round_num, batch, results)
+        generations = await self._process_results(round_num, batch, results, repeat_index)
         logger.info(
             f"{self._log_id}: batch completed in {batch_elapsed:.1f}s "
             f"({len(results.successes)}/{len(batch)} successes, {len(results.failures)} failures)"
@@ -183,6 +183,7 @@ class PodSession:
                 endpoint=self._pod_endpoint,
                 auth_token=self._auth_token,
                 replacements_remaining=self._remaining_replacements,
+                log_id=self._log_id,
             )
 
             if response is None:
@@ -208,6 +209,7 @@ class PodSession:
         round_num: int,
         batch: list[Prompt],
         results: BatchResults,
+        repeat_index: int,
     ) -> dict[str, GenerationResult]:
         """Build one GenerationResult per batch stem (success or miner failure)."""
         batch_stems = {p.stem for p in batch}
@@ -225,7 +227,7 @@ class PodSession:
         for stem, js_bytes in results.successes.items():
             if stem not in batch_stems or stem in both:
                 continue
-            new[stem] = await self._process_one_result(round_num, stem, js_bytes, prompt_paths[stem])
+            new[stem] = await self._process_one_result(round_num, stem, js_bytes, prompt_paths[stem], repeat_index)
 
         for stem, reason in results.failures.items():
             if stem not in batch_stems:
@@ -245,6 +247,7 @@ class PodSession:
         stem: str,
         js_bytes: bytes,
         prompt_path: Path,
+        repeat_index: int,
     ) -> GenerationResult:
         """Upload the JS module, render the 12 view PNGs + grid, compute embeddings.
 
@@ -254,7 +257,9 @@ class PodSession:
         log_id = f"{self._log_id} / {stem}"
         result = GenerationResult(size=len(js_bytes))
 
-        result.js = await self._upload(round_num, f"{stem}.js", js_bytes, log_id, kind="JS")
+        result.js = await self._upload(
+            round_num, repeat_index, f"{stem}.js", js_bytes, log_id, kind="JS", content_type="text/javascript"
+        )
 
         render_key = self._settings.render_api_key.get_secret_value() if self._settings.render_api_key else None
         white, gray, grid = await asyncio.gather(
@@ -294,60 +299,56 @@ class PodSession:
             return result
 
         # Upload everything in parallel; abort the whole bundle on any failure.
-        uploads: list[tuple[str, bytes, str]] = (
-            [(f"{stem}/white/{view.name}.png", white[view.name], "VIEW") for view in WHITE_VIEWS]
-            + [(f"{stem}/gray/{view.name}.png", gray[view.name], "VIEW") for view in GRAY_VIEWS]
+        uploads: list[tuple[str, bytes, str, str]] = (
+            [(f"{stem}/white/{view.name}.png", white[view.name], "VIEW", "image/png") for view in WHITE_VIEWS]
+            + [(f"{stem}/gray/{view.name}.png", gray[view.name], "VIEW", "image/png") for view in GRAY_VIEWS]
             + [
-                (f"{stem}/grid.png", grid, "GRID"),
-                (f"{stem}/embeddings.npz", embeddings_npz, "EMB"),
+                (f"{stem}/grid.png", grid, "GRID", "image/png"),
+                (f"{stem}/embeddings.npz", embeddings_npz, "EMB", "application/octet-stream"),
             ]
         )
         urls = await asyncio.gather(
-            *[self._upload(round_num, filename, data, log_id, kind=kind) for filename, data, kind in uploads]
+            *[
+                self._upload(round_num, repeat_index, filename, data, log_id, kind=kind, content_type=content_type)
+                for filename, data, kind, content_type in uploads
+            ]
         )
         if any(u is None for u in urls):
             logger.warning(f"{log_id}: at least one preview upload failed; dropping views for this stem")
             return result
 
-        result.views = self._views_prefix(round_num, stem)
+        result.views = self._views_prefix(round_num, repeat_index, stem)
         return result
 
     async def _build_embeddings_npz(self, prompt_path: Path, white_views: dict[str, bytes], log_id: str) -> bytes:
-        """Compute DINOv3 embeddings for prompt + 8 white views; pack into a single .npz.
-
-        Embeddings of the same view are identical between white and gray bg in practice,
-        so we only embed the white set — saves 4 forward passes per stem.
-        """
+        """Read prompt bytes, then delegate to the shared embeddings/npz packer."""
         prompt_bytes = await asyncio.to_thread(prompt_path.read_bytes)
-        view_names = [v.name for v in WHITE_VIEWS]
-        view_bytes = [white_views[name] for name in view_names]
-
         hf_token = self._settings.hf_token.get_secret_value() if self._settings.hf_token else None
-        logger.debug(f"{log_id}: computing embeddings for prompt + {len(view_names)} views")
-        start = asyncio.get_running_loop().time()
-        all_embeds = await calculate_embeddings([prompt_bytes, *view_bytes], hf_token=hf_token)
-        elapsed = asyncio.get_running_loop().time() - start
-        if all_embeds.shape[0] != 1 + len(view_names):
-            raise RuntimeError(f"expected {1 + len(view_names)} embeddings, got {all_embeds.shape[0]}")
+        return await build_embeddings_npz(
+            prompt_bytes, white_views, log_id, revision=self._settings.dinov3_revision, hf_token=hf_token
+        )
 
-        arrays: dict[str, np.ndarray] = {"prompt": all_embeds[0]}
-        for i, name in enumerate(view_names, start=1):
-            arrays[f"view_{name}"] = all_embeds[i]
+    def _r2_key(self, round_num: int, repeat_index: int, filename: str) -> str:
+        return f"{self._settings.storage_root_folder}/{round_num}/{self._hotkey}/generated_{repeat_index}/{filename}"
 
-        buf = io.BytesIO()
-        np.savez(buf, **arrays)  # type: ignore[arg-type]  # numpy stubs miss the **kwargs form
-        logger.debug(f"{log_id}: embeddings computed in {elapsed:.1f}s; " f"npz packed ({buf.tell() / 1024:.1f}KB)")
-        return buf.getvalue()
-
-    def _views_prefix(self, round_num: int, stem: str) -> str:
+    def _views_prefix(self, round_num: int, repeat_index: int, stem: str) -> str:
         """CDN URL of the per-stem folder; views live under `{prefix}/white/...` and `{prefix}/gray/...`."""
-        key = self._settings.storage_key_template.format(round=round_num, hotkey=self._hotkey, filename=stem)
-        return f"{self._settings.cdn_url}/{key}"
+        return f"{self._settings.cdn_url}/{self._r2_key(round_num, repeat_index, stem)}"
 
-    async def _upload(self, round_num: int, filename: str, data: bytes, log_id: str, *, kind: str) -> str | None:
+    async def _upload(
+        self,
+        round_num: int,
+        repeat_index: int,
+        filename: str,
+        data: bytes,
+        log_id: str,
+        *,
+        kind: str,
+        content_type: str,
+    ) -> str | None:
         """Upload data to R2 and return CDN URL. Retries up to 3 times on transient errors."""
         r2 = self._r2
-        key = self._settings.storage_key_template.format(round=round_num, hotkey=self._hotkey, filename=filename)
+        key = self._r2_key(round_num, repeat_index, filename)
 
         def _log_retry(state: RetryCallState) -> None:
             exc = state.outcome.exception() if state.outcome else None
@@ -360,7 +361,7 @@ class PodSession:
             reraise=True,
         )
         async def _do_upload() -> None:
-            await r2.upload(key=key, data=data)
+            await r2.upload(key=key, data=data, content_type=content_type)
 
         try:
             await _do_upload()

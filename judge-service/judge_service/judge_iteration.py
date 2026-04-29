@@ -1,3 +1,5 @@
+from datetime import datetime
+
 import httpx
 from loguru import logger
 from openai import AsyncOpenAI
@@ -7,18 +9,20 @@ from subnet_common.github import GitHubClient
 from subnet_common.graceful_shutdown import GracefulShutdown
 
 from judge_service.discord import DiscordNotifier
-from judge_service.match_runner import MatchRunner
+from judge_service.round_runner import RoundRunner
 from judge_service.settings import Settings
 
 
-async def run_judge_iteration(settings: Settings, shutdown: GracefulShutdown, discord: DiscordNotifier) -> None:
+async def run_judge_iteration(
+    settings: Settings, shutdown: GracefulShutdown, discord: DiscordNotifier
+) -> datetime | None:
     """Entry point: creates I/O dependencies and delegates to judge_iteration."""
     async with GitHubClient(
         repo=settings.github_repo,
         token=settings.github_token.get_secret_value(),
     ) as git:
         openai = _create_openai_client(settings)
-        await judge_iteration(git=git, openai=openai, settings=settings, shutdown=shutdown, discord=discord)
+        return await judge_iteration(git=git, openai=openai, settings=settings, shutdown=shutdown, discord=discord)
 
 
 async def judge_iteration(
@@ -27,21 +31,24 @@ async def judge_iteration(
     settings: Settings,
     shutdown: GracefulShutdown,
     discord: DiscordNotifier,
-) -> None:
+) -> datetime | None:
     """Run one judge cycle.
 
-    Loads state from Git, delegates to MatchRunner if in Duels stage,
+    Loads state from Git, delegates to RoundRunner if in Duels stage,
     and persists results. Stops early if the round winner is verified.
+
+    Returns the current state's `next_stage_eta` (when the round transitions out of the
+    current stage) so the caller can schedule the next wake-up.
     """
     ref = await git.get_ref_sha(ref=settings.github_branch)
     state = await require_state(git, ref=ref)
     logger.info(f"Commit: {ref[:10]}, state: {state}")
 
     if state.stage != RoundStage.DUELS:
-        return
+        return state.next_stage_eta
 
     git_batcher = await GitBatcher.create(git=git, branch=settings.github_branch, base_sha=ref)
-    runner = await MatchRunner.create(
+    runner = await RoundRunner.create(
         git_batcher=git_batcher,
         state=state,
         openai=openai,
@@ -49,6 +56,7 @@ async def judge_iteration(
         discord=discord,
     )
     await runner.run(shutdown)
+    return state.next_stage_eta
 
 
 def _create_openai_client(settings: Settings) -> AsyncOpenAI:
@@ -59,7 +67,5 @@ def _create_openai_client(settings: Settings) -> AsyncOpenAI:
         base_url=settings.openai_base_url,
         api_key=settings.openai_api_key.get_secret_value(),
         timeout=settings.openai_timeout_seconds,
-        http_client=httpx.AsyncClient(
-            limits=httpx.Limits(max_keepalive_connections=64, max_connections=128)
-        ),
+        http_client=httpx.AsyncClient(limits=httpx.Limits(max_keepalive_connections=64, max_connections=128)),
     )

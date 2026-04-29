@@ -61,6 +61,13 @@ class Settings(BaseSettings):
     )
 
     hf_token: SecretStr | None = Field(..., alias="HF_TOKEN", description="HF personal access token")
+    dinov3_revision: str = Field(
+        ...,
+        alias="DINOV3_REVISION",
+        description="Hugging Face revision (branch/tag/commit) for the DINOv3 embedding model. "
+        "Pin to a commit hash in production — drift across revisions changes embedding "
+        "outputs and corrupts judge comparisons.",
+    )
 
     gpu_providers: str = Field(
         default="targon",
@@ -174,7 +181,7 @@ class Settings(BaseSettings):
         description="Maximum total generation time across all batches before audit rejection",
     )
     max_mismatched_prompts: int = Field(
-        default=6,
+        default=12,
         alias="MAX_MISMATCHED_PROMPTS",
         description="Maximum tolerated mismatched prompts before early stop",
     )
@@ -232,10 +239,10 @@ class Settings(BaseSettings):
     r2_secret_access_key: SecretStr = Field(..., alias="R2_SECRET_ACCESS_KEY", description="R2 secret access key")
     r2_endpoint: SecretStr = Field(..., alias="R2_ENDPOINT", description="R2 endpoint")
 
-    storage_key_template: str = Field(
-        default="rounds/{round}/{hotkey}/generated/{filename}",
-        alias="STORAGE_PATH_TEMPLATE",
-        description="Storage key template",
+    storage_root_folder: str = Field(
+        default="rounds",
+        alias="STORAGE_ROOT_FOLDER",
+        description="R2 root folder for generated artifacts",
     )
     cdn_url: str = Field(default="https://subnet404.xyz", alias="CDN_URL", description="R2 public domain url")
 

@@ -25,6 +25,13 @@ class CompetitionConfig(BaseModel):
     prompts_per_round: int = Field(..., description="Number of prompts to select for each round")
     carryover_prompts: int = Field(..., description="Number of prompts retained from the previous round")
     round_duration_days: int = Field(default=1, description="Round duration in days")
+    audit_repeats: int = Field(
+        default=3,
+        description=(
+            "Number of times the audit pod regenerates the full prompt set. "
+            "Judge runs both audit duels once per repeat."
+        ),
+    )
 
 
 async def require_competition_config(git: GitHubClient, ref: str) -> CompetitionConfig:

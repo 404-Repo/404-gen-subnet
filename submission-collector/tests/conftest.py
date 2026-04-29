@@ -21,6 +21,7 @@ def settings() -> Settings:
         R2_ENDPOINT=SecretStr("https://test-r2-endpoint"),
         DOWNLOAD_JITTER_SECONDS=0,
         STORAGE_KEY_TEMPLATE="rounds/{round}/{hotkey}/submitted/{filename}",
+        DINOV3_REVISION="test-revision",
     )
 
 
@@ -106,6 +107,29 @@ def make_get_commitments(commitments: dict | None = None):
         return commitments or {}
 
     return get_commitments
+
+
+def make_get_hotkey_owners(owners: dict[str, str] | None = None):
+    """Factory to create a controllable get_hotkey_owners function (metagraph hotkey -> coldkey)."""
+
+    async def get_hotkey_owners() -> dict[str, str]:
+        return owners or {}
+
+    return get_hotkey_owners
+
+
+def make_get_locked_alpha(locked: dict[str, float] | None = None, default: float = 100.0):
+    """Factory to create a controllable get_locked_alpha function.
+
+    Without explicit locks, every coldkey has `default` ρ locked (enough for one hotkey).
+    """
+
+    async def get_locked_alpha(coldkey: str) -> float:
+        if locked is None:
+            return default
+        return locked.get(coldkey, 0.0)
+
+    return get_locked_alpha
 
 
 class SpyDownloadFn:

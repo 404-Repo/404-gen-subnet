@@ -15,6 +15,8 @@ from tests.conftest import (
     make_commitment,
     make_get_block,
     make_get_commitments,
+    make_get_hotkey_owners,
+    make_get_locked_alpha,
 )
 
 
@@ -35,6 +37,8 @@ async def test_unhandled_stage_returns_next_stage_eta_and_does_nothing(
         git=git,
         get_block=make_get_block(),
         get_commitments=make_get_commitments(),
+        get_hotkey_owners=make_get_hotkey_owners(),
+        get_locked_alpha=make_get_locked_alpha(),
         download_fn=download,
         settings=settings,
     )
@@ -54,6 +58,8 @@ async def test_open_before_reveal_window_returns_eta(git: MockGitHubClient, sett
         git=git,
         get_block=make_get_block(100),
         get_commitments=make_get_commitments(),
+        get_hotkey_owners=make_get_hotkey_owners(),
+        get_locked_alpha=make_get_locked_alpha(),
         download_fn=download,
         settings=settings,
     )
@@ -73,6 +79,8 @@ async def test_open_no_submissions_transitions_to_finalizing(git: MockGitHubClie
         git=git,
         get_block=make_get_block(200),
         get_commitments=make_get_commitments({}),
+        get_hotkey_owners=make_get_hotkey_owners(),
+        get_locked_alpha=make_get_locked_alpha(),
         download_fn=download,
         settings=settings,
     )
@@ -93,6 +101,8 @@ async def test_miner_generation_before_deadline_returns_eta(git: MockGitHubClien
         git=git,
         get_block=make_get_block(300),
         get_commitments=make_get_commitments(),
+        get_hotkey_owners=make_get_hotkey_owners(),
+        get_locked_alpha=make_get_locked_alpha(),
         download_fn=download,
         settings=settings,
     )
@@ -113,6 +123,8 @@ async def test_miner_generation_past_deadline_transitions_to_downloading_and_cal
         git=git,
         get_block=make_get_block(500),
         get_commitments=make_get_commitments(),
+        get_hotkey_owners=make_get_hotkey_owners(),
+        get_locked_alpha=make_get_locked_alpha(),
         download_fn=download,
         settings=settings,
     )
@@ -146,6 +158,8 @@ async def test_open_collects_submissions_and_transitions_to_miner_generation(
         git=git,
         get_block=make_get_block(200),
         get_commitments=make_get_commitments(commitments),
+        get_hotkey_owners=make_get_hotkey_owners({HOTKEY: "coldkey-1"}),
+        get_locked_alpha=make_get_locked_alpha(),
         download_fn=download,
         settings=settings,
     )
@@ -180,3 +194,103 @@ async def test_open_collects_submissions_and_transitions_to_miner_generation(
     assert HOTKEY in submissions
     assert submissions[HOTKEY]["repo"] == "test/model"
     assert submissions[HOTKEY]["commit"] == "a" * 40
+
+
+HOTKEY_2 = "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY"
+
+
+async def test_open_insufficient_lock_drops_submission(git: MockGitHubClient, settings: Settings) -> None:
+    add_state(git, stage=RoundStage.OPEN, round_num=0)
+    add_schedule(git, round_num=0, latest_reveal_block=200, generation_deadline_block=500)
+    add_config(git)
+    add_prompts(git, ["prompt_a", "prompt_b", "prompt_c"])
+
+    commitments = {HOTKEY: make_commitment(block=150)}
+    download = SpyDownloadFn()
+
+    result = await collection_iteration(
+        git=git,
+        get_block=make_get_block(200),
+        get_commitments=make_get_commitments(commitments),
+        get_hotkey_owners=make_get_hotkey_owners({HOTKEY: "coldkey-1"}),
+        get_locked_alpha=make_get_locked_alpha({"coldkey-1": 99.0}),
+        download_fn=download,
+        settings=settings,
+    )
+
+    # The only submission is dropped, so the round finalizes with no submissions
+    assert result is None
+    new_state = CompetitionState.model_validate_json(git.committed["state.json"])
+    assert new_state.stage == RoundStage.FINALIZING
+
+
+async def test_open_lock_requirement_scales_with_submitting_hotkeys_per_coldkey(
+    git: MockGitHubClient, settings: Settings
+) -> None:
+    add_state(git, stage=RoundStage.OPEN, round_num=0)
+    add_schedule(git, round_num=0, latest_reveal_block=200, generation_deadline_block=500)
+    add_config(git)
+    add_prompts(git, ["prompt_a", "prompt_b", "prompt_c"])
+
+    # Both hotkeys belong to one coldkey: 100 ρ covers one hotkey, but 200 is required
+    commitments = {HOTKEY: make_commitment(block=150), HOTKEY_2: make_commitment(block=151)}
+    download = SpyDownloadFn()
+
+    await collection_iteration(
+        git=git,
+        get_block=make_get_block(200),
+        get_commitments=make_get_commitments(commitments),
+        get_hotkey_owners=make_get_hotkey_owners({HOTKEY: "coldkey-1", HOTKEY_2: "coldkey-1"}),
+        get_locked_alpha=make_get_locked_alpha({"coldkey-1": 100.0}),
+        download_fn=download,
+        settings=settings,
+    )
+
+    new_state = CompetitionState.model_validate_json(git.committed["state.json"])
+    assert new_state.stage == RoundStage.FINALIZING
+
+
+async def test_open_sufficient_lock_keeps_all_coldkey_hotkeys(git: MockGitHubClient, settings: Settings) -> None:
+    add_state(git, stage=RoundStage.OPEN, round_num=0)
+    add_schedule(git, round_num=0, latest_reveal_block=200, generation_deadline_block=500)
+    add_config(git)
+    add_prompts(git, ["prompt_a", "prompt_b", "prompt_c"])
+
+    commitments = {HOTKEY: make_commitment(block=150), HOTKEY_2: make_commitment(block=151)}
+    download = SpyDownloadFn()
+
+    await collection_iteration(
+        git=git,
+        get_block=make_get_block(200),
+        get_commitments=make_get_commitments(commitments),
+        get_hotkey_owners=make_get_hotkey_owners({HOTKEY: "coldkey-1", HOTKEY_2: "coldkey-1"}),
+        get_locked_alpha=make_get_locked_alpha({"coldkey-1": 200.0}),
+        download_fn=download,
+        settings=settings,
+    )
+
+    submissions = json.loads(git.committed["rounds/0/submissions.json"])
+    assert set(submissions) == {HOTKEY, HOTKEY_2}
+
+
+async def test_open_hotkey_not_in_metagraph_is_dropped(git: MockGitHubClient, settings: Settings) -> None:
+    add_state(git, stage=RoundStage.OPEN, round_num=0)
+    add_schedule(git, round_num=0, latest_reveal_block=200, generation_deadline_block=500)
+    add_config(git)
+    add_prompts(git, ["prompt_a", "prompt_b", "prompt_c"])
+
+    commitments = {HOTKEY: make_commitment(block=150), HOTKEY_2: make_commitment(block=151)}
+    download = SpyDownloadFn()
+
+    await collection_iteration(
+        git=git,
+        get_block=make_get_block(200),
+        get_commitments=make_get_commitments(commitments),
+        get_hotkey_owners=make_get_hotkey_owners({HOTKEY: "coldkey-1"}),
+        get_locked_alpha=make_get_locked_alpha({"coldkey-1": 100.0}),
+        download_fn=download,
+        settings=settings,
+    )
+
+    submissions = json.loads(git.committed["rounds/0/submissions.json"])
+    assert set(submissions) == {HOTKEY}

@@ -43,11 +43,3 @@ async def save_source_audits(git_batcher: GitBatcher, round_num: int, results: l
         content=AuditListAdapter.dump_json(results, indent=2).decode(),
         message=f"Update source audits for round {round_num}",
     )
-
-
-def get_passed_hotkeys(results: list[AuditResult]) -> set[str]:
-    return {r.hotkey for r in results if r.verdict == AuditVerdict.PASSED}
-
-
-def get_failed_hotkeys(results: list[AuditResult]) -> set[str]:
-    return {r.hotkey for r in results if r.verdict == AuditVerdict.FAILED}

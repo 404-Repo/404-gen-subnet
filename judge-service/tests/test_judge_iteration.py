@@ -24,7 +24,7 @@ async def test_non_duels_stage_is_noop(settings: Settings, stage: RoundStage) ->
     git = MockGitHubClient()
     _add_state(git, stage)
 
-    with patch("judge_service.judge_iteration.MatchRunner") as mock_runner_cls:
+    with patch("judge_service.judge_iteration.RoundRunner") as mock_runner_cls:
         await judge_iteration(
             git=git, openai=AsyncMock(), settings=settings, shutdown=GracefulShutdown(), discord=NULL_DISCORD_NOTIFIER
         )
@@ -33,15 +33,15 @@ async def test_non_duels_stage_is_noop(settings: Settings, stage: RoundStage) ->
     assert git.committed == {}
 
 
-async def test_duels_stage_creates_and_runs_match_runner(settings: Settings) -> None:
-    """judge_iteration creates a MatchRunner and calls run() when in DUELS stage."""
+async def test_duels_stage_creates_and_runs_round_runner(settings: Settings) -> None:
+    """judge_iteration creates a RoundRunner and calls run() when in DUELS stage."""
     git = MockGitHubClient()
     _add_state(git, RoundStage.DUELS)
 
     mock_runner = AsyncMock()
     mock_create = AsyncMock(return_value=mock_runner)
 
-    with patch("judge_service.judge_iteration.MatchRunner") as mock_runner_cls:
+    with patch("judge_service.judge_iteration.RoundRunner") as mock_runner_cls:
         mock_runner_cls.create = mock_create
         shutdown = GracefulShutdown()
         await judge_iteration(

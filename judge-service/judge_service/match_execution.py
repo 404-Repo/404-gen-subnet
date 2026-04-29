@@ -30,37 +30,40 @@ async def run_match(
     max_concurrent_vlm_calls: int,
     shutdown: GracefulShutdown,
 ) -> MatchReport:
-    """Run all prompt duels for a match between two miners using the multi-stage judge."""
+    """Run all prompt duels for a match between two miners using the multi-stage judge.
+
+    Duels run strictly one at a time so each duel's reference image and view PNGs stay
+    resident in vLLM's prefix cache for its whole pipeline, instead of being evicted by
+    sibling duels' prefixes. Within a duel the stages still fan out their VLM calls,
+    bounded by `max_concurrent_vlm_calls`.
+    """
     sem = asyncio.Semaphore(max_concurrent_vlm_calls)
     match_label = f"{left[:10]} vs {right[:10]}"
     match_start = asyncio.get_running_loop().time()
-    logger.info(f"match {match_label}: starting {len(prompts)} duels")
+    logger.info(f"match {match_label}: starting {len(prompts)} duels (vlm_call_cap={max_concurrent_vlm_calls})")
 
+    duels: list[DuelReport] = []
     async with httpx.AsyncClient(timeout=httpx.Timeout(60, connect=10)) as http:
-        duels = await asyncio.gather(
-            *[
-                _evaluate_prompt(
+        for prompt in prompts:
+            duels.append(
+                await _evaluate_prompt(
                     openai=openai,
                     http=http,
                     sem=sem,
-                    prompt=p,
-                    left_gen=left_gens.get(Path(p).stem, GenerationResult()),
-                    right_gen=right_gens.get(Path(p).stem, GenerationResult()),
+                    prompt=prompt,
+                    left_gen=left_gens.get(Path(prompt).stem, GenerationResult()),
+                    right_gen=right_gens.get(Path(prompt).stem, GenerationResult()),
                     seed=seed,
                     shutdown=shutdown,
-                    log_id=f"{Path(p).stem} / {match_label}",
+                    log_id=f"{Path(prompt).stem} / {match_label}",
                 )
-                for p in prompts
-            ]
-        )
+            )
     duels = sorted(duels, key=lambda d: d.name)
 
     score = sum(WINNER_TO_SCORE[d.winner] for d in duels)
     margin = score / len(duels) if duels else 0
     elapsed = asyncio.get_running_loop().time() - match_start
-    logger.info(
-        f"match {match_label}: done in {elapsed:.1f}s, score={score:+d}, margin={margin:+.2%}"
-    )
+    logger.info(f"match {match_label}: done in {elapsed:.1f}s, score={score:+d}, margin={margin:+.2%}")
     return MatchReport(
         left=left,
         right=right,
@@ -105,7 +108,6 @@ async def _evaluate_prompt(
 
     if shutdown.should_stop:
         return duel
-
     try:
         winner, detail = await evaluate_duel(
             vlm=openai,
@@ -117,10 +119,8 @@ async def _evaluate_prompt(
             seed=seed,
             log_id=log_id or stem,
         )
+        duel.winner = winner
+        duel.detail = detail
     except Exception as e:
         logger.exception(f"duel evaluation failed for {stem}: {e}")
-        return duel
-
-    duel.winner = winner
-    duel.detail = detail
     return duel

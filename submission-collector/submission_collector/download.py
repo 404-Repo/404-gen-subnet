@@ -1,10 +1,8 @@
 import asyncio
-import io
 import random
 from pathlib import Path
 
 import httpx
-import numpy as np
 from loguru import logger
 from subnet_common.competition.generations import (
     GenerationResult,
@@ -16,7 +14,7 @@ from subnet_common.competition.generations import (
 from subnet_common.competition.prompts import require_prompts
 from subnet_common.competition.state import CompetitionState
 from subnet_common.competition.submissions import MinerSubmission, require_submissions
-from subnet_common.embeddings import calculate_embeddings
+from subnet_common.embeddings import build_embeddings_npz
 from subnet_common.git_batcher import GitBatcher
 from subnet_common.r2_client import R2Client
 from subnet_common.render import GRAY_BG, GRAY_VIEWS, WHITE_BG, WHITE_VIEWS, render_grid, render_views
@@ -65,7 +63,13 @@ class DownloadPipeline:
         random.shuffle(hotkeys)
         logger.info(f"Processing {len(hotkeys)} submissions × {len(prompts)} prompts")
 
-        raw_results = await asyncio.gather(
+        # No return_exceptions: any escape from `_download_submission` is an
+        # infrastructure error (typically a git read failing) or an unhandled bug —
+        # both should restart the iteration, not silently mark the miner as zero.
+        # Per-miner content failures (CDN dead, oversized JS, render rejection) are
+        # categorized via `failure_reason` inside `_fetch_render_upload` and travel
+        # through the success path, so they don't reach this gather.
+        results = await asyncio.gather(
             *[
                 self._download_submission(
                     hotkey=hotkey,
@@ -77,15 +81,8 @@ class DownloadPipeline:
                 )
                 for hotkey in hotkeys
             ],
-            return_exceptions=True,
         )
-        generations_by_hotkey: dict[str, GenerationsMap] = {}
-        for hotkey, result in zip(hotkeys, raw_results, strict=True):
-            if isinstance(result, BaseException):
-                logger.error(f"{hotkey[:10]}: download failed: {result}")
-            else:
-                generations_by_hotkey[hotkey] = result
-        return generations_by_hotkey
+        return dict(zip(hotkeys, results, strict=True))
 
     async def _fetch_prompt_images(self, prompt_urls: list[str]) -> dict[str, bytes]:
         """Download all prompt images for the round once. Stem -> bytes; missing on failure."""
@@ -131,6 +128,10 @@ class DownloadPipeline:
         else:
             logger.info(f"Processing {len(prompts_to_process)}/{len(prompts)} prompts for {hotkey[:10]}")
 
+            # No return_exceptions: `_fetch_render_upload` catches per-prompt failures
+            # internally and persists them as failure_reason. Anything escaping is a
+            # `persist()` git-write failure or an unhandled bug — both warrant an
+            # iteration restart rather than a silent missing-prompt entry.
             tasks = [
                 self._fetch_render_upload(
                     hotkey=hotkey,
@@ -142,10 +143,7 @@ class DownloadPipeline:
                 )
                 for prompt in prompts_to_process
             ]
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            for prompt, result in zip(prompts_to_process, results, strict=True):
-                if isinstance(result, BaseException):
-                    logger.error(f"{hotkey[:10]} / {prompt}: fetch failed: {result}")
+            await asyncio.gather(*tasks)
 
         return {p: generations[p] for p in prompts if p in generations}
 
@@ -160,12 +158,10 @@ class DownloadPipeline:
     ) -> None:
         """Fetch .js, render 12 views + grid, compute embeddings, upload everything to R2.
 
-        Atomic over the preview bundle: if any render, embedding, or upload fails,
-        `views` stays None — the judge treats the stem as preview-less.
-
-        On any per-stem failure, `failure_reason` is set to a short categorical string
-        so operators can distinguish "miner CDN 404'd" from "render service died" from
-        "miner truly didn't submit" by reading the persisted GenerationResult.
+        Each phase either succeeds and continues, or persists a partial GenerationResult
+        and returns. `failure_reason` on the persisted result is a short categorical
+        string so operators can distinguish "miner CDN 404'd" from "render service died"
+        from "miner truly didn't submit" by reading the persisted GenerationResult.
 
         generations: Mutable dict updated in-place with results. Used as a shared state
             across concurrent tasks - each task writes its prompt's result and persists
@@ -177,12 +173,23 @@ class DownloadPipeline:
         def key_for(filename: str) -> str:
             return template.format(round=round_num, hotkey=hotkey, filename=filename)
 
-        render_key = self.settings.render_api_key.get_secret_value() if self.settings.render_api_key else None
+        async def persist(
+            *,
+            js: str | None = None,
+            views: str | None = None,
+            size: int = 0,
+            failure_reason: str | None = None,
+        ) -> None:
+            generations[prompt] = GenerationResult(js=js, views=views, size=size, failure_reason=failure_reason)
+            await save_generations(
+                git_batcher=self.git_batcher,
+                round_num=round_num,
+                hotkey=hotkey,
+                source=GenerationSource.SUBMITTED,
+                generations=generations,
+            )
 
-        js_url: str | None = None
-        views_url: str | None = None
-        size = 0
-        failure_reason: str | None = None
+        render_key = self.settings.render_api_key.get_secret_value() if self.settings.render_api_key else None
 
         if self.settings.download_jitter_seconds > 0:
             jitter = random.uniform(0, self.settings.download_jitter_seconds)  # nosec B311 # noqa: S311
@@ -190,40 +197,16 @@ class DownloadPipeline:
 
         async with self.semaphore:
             # Phase 1: fetch JS from miner CDN.
-            try:
-                js_data = await _fetch_js(
-                    cdn_url=submission.cdn_url,
-                    prompt=prompt,
-                    log_id=log_id,
-                    max_js_size_bytes=self.settings.max_js_size_bytes,
-                )
-                size = len(js_data)
-            except Exception as e:
-                # Unwrap tenacity RetryError so we see the underlying cause (status + URL).
-                cause: BaseException = e
-                if isinstance(e, RetryError) and e.last_attempt is not None:
-                    inner = e.last_attempt.exception()
-                    if inner is not None:
-                        cause = inner
-                if isinstance(cause, httpx.HTTPStatusError):
-                    failure_reason = f"js_fetch_failed: HTTP {cause.response.status_code}"
-                    logger.warning(f"{log_id}: {failure_reason} on {cause.request.url}")
-                elif isinstance(cause, ValueError):
-                    # Only ValueError raised by _fetch_js is the size cap.
-                    failure_reason = "js_too_large"
-                    logger.warning(f"{log_id}: {failure_reason}: {cause}")
-                else:
-                    failure_reason = f"js_fetch_failed: {type(cause).__name__}"
-                    logger.warning(f"{log_id}: {failure_reason}: {cause}")
-                generations[prompt] = GenerationResult(failure_reason=failure_reason)
-                await save_generations(
-                    git_batcher=self.git_batcher,
-                    round_num=round_num,
-                    hotkey=hotkey,
-                    source=GenerationSource.SUBMITTED,
-                    generations=generations,
-                )
+            js_data, fetch_failure = await _try_fetch_js(
+                cdn_url=submission.cdn_url,
+                prompt=prompt,
+                log_id=log_id,
+                max_js_size_bytes=self.settings.max_js_size_bytes,
+            )
+            if js_data is None:
+                await persist(failure_reason=fetch_failure)
                 return
+            size = len(js_data)
 
             # Phase 2: upload JS. If this fails, we still record the miner delivered
             # (we just couldn't store it) — but `js` stays None so the judge skips it.
@@ -232,142 +215,141 @@ class DownloadPipeline:
                     self.r2, key_for(f"{prompt}.js"), js_data, "application/javascript", log_id, self.settings.cdn_url
                 )
             except Exception as e:
-                failure_reason = "js_upload_failed"
-                logger.error(f"{log_id}: {failure_reason}: {type(e).__name__}: {e}")
+                logger.error(f"{log_id}: failed to upload JS: {type(e).__name__}: {e}")
+                await persist(size=size, failure_reason="js_upload_failed")
+                return
+
+            # Skip Phase 3+ if the prompt image is missing — embeddings need it, so
+            # rendering is wasted work. One failure flag for the whole round's prompt;
+            # not actionable per-miner, so no Discord alert.
+            if prompt_image is None:
+                logger.warning(f"{log_id}: prompt image unavailable; skipping renders and embeddings")
+                await persist(js=js_url, size=size, failure_reason="prompt_image_missing")
+                return
 
             # Phase 3: render views + grid in parallel. Any None here means a render
             # service / preview pipeline problem — distinct from miner failures.
-            if failure_reason is None:
-                white, gray, grid = await asyncio.gather(
-                    render_views(
-                        client=self.http_client,
-                        endpoint=self.settings.render_service_url,
-                        js_content=js_data,
-                        views=WHITE_VIEWS,
-                        bg_color=WHITE_BG,
-                        log_id=log_id,
-                        api_key=render_key,
-                    ),
-                    render_views(
-                        client=self.http_client,
-                        endpoint=self.settings.render_service_url,
-                        js_content=js_data,
-                        views=GRAY_VIEWS,
-                        bg_color=GRAY_BG,
-                        log_id=log_id,
-                        api_key=render_key,
-                    ),
-                    render_grid(
-                        client=self.http_client,
-                        endpoint=self.settings.render_service_url,
-                        js_content=js_data,
-                        log_id=log_id,
-                        api_key=render_key,
-                    ),
+            white, gray, grid = await asyncio.gather(
+                render_views(
+                    client=self.http_client,
+                    endpoint=self.settings.render_service_url,
+                    js_content=js_data,
+                    views=WHITE_VIEWS,
+                    bg_color=WHITE_BG,
+                    log_id=log_id,
+                    api_key=render_key,
+                ),
+                render_views(
+                    client=self.http_client,
+                    endpoint=self.settings.render_service_url,
+                    js_content=js_data,
+                    views=GRAY_VIEWS,
+                    bg_color=GRAY_BG,
+                    log_id=log_id,
+                    api_key=render_key,
+                ),
+                render_grid(
+                    client=self.http_client,
+                    endpoint=self.settings.render_service_url,
+                    js_content=js_data,
+                    log_id=log_id,
+                    api_key=render_key,
+                ),
+            )
+            if white is None or gray is None:
+                await self._discord.notify_render_failure(hotkey)
+                await persist(js=js_url, size=size, failure_reason="render_failed")
+                return
+            if grid is None:
+                await self._discord.notify_render_failure(hotkey)
+                await persist(js=js_url, size=size, failure_reason="grid_render_failed")
+                return
+
+            # Phase 4a: embeddings.
+            try:
+                hf_token = self.settings.hf_token.get_secret_value() if self.settings.hf_token else None
+                npz_bytes = await build_embeddings_npz(
+                    prompt_image, white, log_id, revision=self.settings.dinov3_revision, hf_token=hf_token
                 )
+            except Exception as e:
+                logger.error(f"{log_id}: embedding computation failed: {type(e).__name__}: {e}")
+                await self._discord.notify_render_failure(hotkey)
+                await persist(js=js_url, size=size, failure_reason="embeddings_failed")
+                return
 
-                if prompt_image is None:
-                    failure_reason = "prompt_image_missing"
-                    logger.warning(f"{log_id}: {failure_reason}; skipping embeddings/views bundle")
-                elif white is None or gray is None:
-                    failure_reason = "render_failed"
-                    await self._discord.notify_render_failure(hotkey)
-                elif grid is None:
-                    failure_reason = "grid_render_failed"
-                else:
-                    # Phase 4: embeddings + bundle upload. Atomic — either views_url is
-                    # set (every PNG and the npz uploaded) or failure_reason is set.
-                    try:
-                        hf_token = self.settings.hf_token.get_secret_value() if self.settings.hf_token else None
-                        npz_bytes = await _build_embeddings_npz(
-                            prompt_image,
-                            white,
-                            log_id,
-                            hf_token=hf_token,
-                        )
-                    except Exception as e:
-                        logger.error(f"{log_id}: embeddings_failed: {type(e).__name__}: {e}")
-                        failure_reason = "embeddings_failed"
-                        npz_bytes = None
+            # Phase 4b: bundle upload. Atomic — every PNG and the npz upload, or none.
+            bundle = (
+                [(key_for(f"{prompt}/white/{view.name}.png"), white[view.name], "image/png") for view in WHITE_VIEWS]
+                + [(key_for(f"{prompt}/gray/{view.name}.png"), gray[view.name], "image/png") for view in GRAY_VIEWS]
+                + [
+                    (key_for(f"{prompt}/grid.png"), grid, "image/png"),
+                    (key_for(f"{prompt}/embeddings.npz"), npz_bytes, "application/octet-stream"),
+                ]
+            )
+            try:
+                upload_start = asyncio.get_running_loop().time()
+                await asyncio.gather(
+                    *[
+                        _upload_to_r2(self.r2, key, data, ctype, log_id, self.settings.cdn_url)
+                        for key, data, ctype in bundle
+                    ]
+                )
+                upload_elapsed = asyncio.get_running_loop().time() - upload_start
+                bundle_kb = sum(len(data) for _, data, _ in bundle) / 1024
+                logger.debug(
+                    f"{log_id}: uploaded {len(bundle)} files in {upload_elapsed:.1f}s, {bundle_kb:.1f}KB total"
+                )
+            except Exception as e:
+                logger.error(f"{log_id}: failed to upload rendered views bundle: {type(e).__name__}: {e}")
+                await persist(js=js_url, size=size, failure_reason="views_upload_failed")
+                return
 
-                    if npz_bytes is not None:
-                        bundle = (
-                            [
-                                (key_for(f"{prompt}/white/{view.name}.png"), white[view.name], "image/png")
-                                for view in WHITE_VIEWS
-                            ]
-                            + [
-                                (key_for(f"{prompt}/gray/{view.name}.png"), gray[view.name], "image/png")
-                                for view in GRAY_VIEWS
-                            ]
-                            + [
-                                (key_for(f"{prompt}/grid.png"), grid, "image/png"),
-                                (key_for(f"{prompt}/embeddings.npz"), npz_bytes, "application/octet-stream"),
-                            ]
-                        )
-                        try:
-                            await asyncio.gather(
-                                *[
-                                    _upload_to_r2(self.r2, key, data, ctype, log_id, self.settings.cdn_url)
-                                    for key, data, ctype in bundle
-                                ]
-                            )
-                            views_url = f"{self.settings.cdn_url}/{key_for(prompt)}"
-                        except Exception as e:
-                            failure_reason = "views_upload_failed"
-                            logger.error(f"{log_id}: {failure_reason}: {type(e).__name__}: {e}")
-
-        generations[prompt] = GenerationResult(
-            js=js_url,
-            views=views_url,
-            failure_reason=failure_reason,
-            size=size,
-        )
-
-        await save_generations(
-            git_batcher=self.git_batcher,
-            round_num=round_num,
-            hotkey=hotkey,
-            source=GenerationSource.SUBMITTED,
-            generations=generations,
-        )
-
-
-async def _build_embeddings_npz(
-    prompt_bytes: bytes,
-    white_views: dict[str, bytes],
-    log_id: str,
-    *,
-    hf_token: str | None,
-) -> bytes:
-    """Compute DINOv3 embeddings for prompt + 8 white views; pack into a single .npz."""
-    view_names = [v.name for v in WHITE_VIEWS]
-    view_bytes = [white_views[name] for name in view_names]
-
-    logger.debug(f"{log_id}: computing embeddings for prompt + {len(view_names)} views")
-    start = asyncio.get_running_loop().time()
-    embeds = await calculate_embeddings([prompt_bytes, *view_bytes], hf_token=hf_token)
-    elapsed = asyncio.get_running_loop().time() - start
-    if embeds.shape[0] != 1 + len(view_names):
-        raise RuntimeError(f"expected {1 + len(view_names)} embeddings, got {embeds.shape[0]}")
-
-    arrays: dict[str, np.ndarray] = {"prompt": embeds[0]}
-    for i, name in enumerate(view_names, start=1):
-        arrays[f"view_{name}"] = embeds[i]
-
-    buf = io.BytesIO()
-    np.savez(buf, **arrays)  # type: ignore[arg-type]  # numpy stubs miss the **kwargs form
-    logger.debug(f"{log_id}: embeddings computed in {elapsed:.1f}s; " f"npz packed ({buf.tell() / 1024:.1f}KB)")
-    return buf.getvalue()
+            await persist(js=js_url, views=f"{self.settings.cdn_url}/{key_for(prompt)}", size=size)
 
 
 async def _upload_to_r2(r2: R2Client, key: str, data: bytes, content_type: str, log_id: str, cdn_url: str) -> str:
     """Upload data to R2 and return the CDN URL."""
-    start = asyncio.get_running_loop().time()
     await r2.upload(key=key, data=data, content_type=content_type)
-    elapsed = asyncio.get_running_loop().time() - start
-    logger.debug(f"{log_id}: uploaded {key} in {elapsed:.1f}s, {len(data) / 1024:.1f}KB")
     return f"{cdn_url}/{key}"
+
+
+async def _try_fetch_js(
+    cdn_url: str,
+    prompt: str,
+    log_id: str,
+    max_js_size_bytes: int,
+) -> tuple[bytes | None, str | None]:
+    """Fetch JS from miner CDN, categorizing failures.
+
+    Returns (js_data, None) on success or (None, failure_reason) on failure.
+    Categorized failure reasons: "js_too_large", "js_fetch_failed: HTTP <code>",
+    "js_fetch_failed: <ExceptionType>".
+    """
+    try:
+        js_data = await _fetch_js(cdn_url=cdn_url, prompt=prompt, log_id=log_id, max_js_size_bytes=max_js_size_bytes)
+        return js_data, None
+    except Exception as e:
+        # Unwrap tenacity RetryError so we see the underlying cause (status + URL).
+        cause: BaseException = e
+        if isinstance(e, RetryError) and e.last_attempt is not None:
+            inner = e.last_attempt.exception()
+            if inner is not None:
+                cause = inner
+        if isinstance(cause, httpx.HTTPStatusError):
+            # Miner CDN inaccessibility is common and not operator-actionable; the
+            # categorical failure_reason is persisted on the GenerationResult for
+            # post-hoc analysis.
+            status = cause.response.status_code
+            failure_reason = f"js_fetch_failed: HTTP {status}"
+            logger.debug(f"{log_id}: miner CDN returned HTTP {status} for {cause.request.url}")
+        elif isinstance(cause, ValueError):
+            # Only ValueError raised by _fetch_js is the size cap.
+            failure_reason = "js_too_large"
+            logger.warning(f"{log_id}: JS exceeds size limit: {cause}")
+        else:
+            failure_reason = f"js_fetch_failed: {type(cause).__name__}"
+            logger.debug(f"{log_id}: JS fetch failed ({type(cause).__name__}): {cause}")
+        return None, failure_reason
 
 
 @retry(

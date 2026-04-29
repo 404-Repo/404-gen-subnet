@@ -1,4 +1,6 @@
-from pydantic import BaseModel, TypeAdapter
+from collections.abc import Iterator
+
+from pydantic import BaseModel, Field, TypeAdapter
 
 from subnet_common.git_batcher import GitBatcher
 from subnet_common.github import GitHubClient
@@ -13,6 +15,7 @@ class AuditRequest(BaseModel):
     """
 
     hotkey: str
+    latest_defender: str = Field(description="Hotkey of the most recent leader this miner has beaten")
 
 
 AuditRequestListAdapter = TypeAdapter(list[AuditRequest])
@@ -25,8 +28,8 @@ class AuditRequests:
         self._requests: dict[str, AuditRequest] = {}
 
     def add(self, request: AuditRequest) -> bool:
-        """Add request if hotkey not present. Returns True if added."""
-        if request.hotkey in self._requests:
+        """Insert or update. Returns True if anything changed (new key or different value)."""
+        if self._requests.get(request.hotkey) == request:
             return False
         self._requests[request.hotkey] = request
         return True
@@ -39,6 +42,9 @@ class AuditRequests:
 
     def get(self, hotkey: str) -> AuditRequest | None:
         return self._requests.get(hotkey)
+
+    def __iter__(self) -> Iterator[AuditRequest]:
+        return iter(self._requests.values())
 
     @property
     def hotkeys(self) -> set[str]:

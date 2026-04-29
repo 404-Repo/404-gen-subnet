@@ -406,7 +406,7 @@ EXPLAIN_USER_PROMPT = (
     "Identify the most important rendering and prompt-match issues for each model. "
     "Focus on what is clearly wrong vs the reference: missing features, wrong colors, "
     "geometric distortions, surface artifacts. Skip minor differences.\n\n"
-    "Output JSON: {\"issues\": \"<one or two short sentences comparing the two models' issues>\"}"
+    'Output JSON: {"issues": "<one or two short sentences comparing the two models\' issues>"}'
 )
 
 
@@ -1253,18 +1253,25 @@ async def _s4_ask_per_angle(
     """
     messages: list[dict] = [
         {"role": "system", "content": S4_SYSTEM_PROMPT},
-        {"role": "user", "content": [
-            {"type": "text", "text": "Front view of the 3D model:"},
-            {"type": "image_url", "image_url": {"url": front_url}},
-            {"type": "text", "text": f"Same 3D model viewed from {angle_desc}:"},
-            {"type": "image_url", "image_url": {"url": angle_url}},
-            {"type": "text", "text": S4_PER_ANGLE_PROMPT.format(angle_desc=angle_desc)},
-        ]},
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "Front view of the 3D model:"},
+                {"type": "image_url", "image_url": {"url": front_url}},
+                {"type": "text", "text": f"Same 3D model viewed from {angle_desc}:"},
+                {"type": "image_url", "image_url": {"url": angle_url}},
+                {"type": "text", "text": S4_PER_ANGLE_PROMPT.format(angle_desc=angle_desc)},
+            ],
+        },
     ]
     parsed = await _safe_chat_json(
-        vlm, messages, SideGuardVerdict,
-        label="s4_per_angle", seed=seed,
-        max_retries=S4_VLM_MAX_RETRIES, max_tokens=S4_VLM_MAX_TOKENS,
+        vlm,
+        messages,
+        SideGuardVerdict,
+        label="s4_per_angle",
+        seed=seed,
+        max_retries=S4_VLM_MAX_RETRIES,
+        max_tokens=S4_VLM_MAX_TOKENS,
         on_failure=_neutral_side_guard(),
     )
     return cast(SideGuardVerdict, parsed).verdict
@@ -1358,19 +1365,27 @@ async def _explain_run(
     """
     messages: list[dict] = [
         {"role": "system", "content": EXPLAIN_SYSTEM_PROMPT},
-        {"role": "user", "content": [
-            {"type": "text", "text": "Reference image:"},
-            {"type": "image_url", "image_url": {"url": prompt_url}},
-            {"type": "text", "text": "Model A (4 views):"},
-            {"type": "image_url", "image_url": {"url": left_grid_url}},
-            {"type": "text", "text": "Model B (4 views):"},
-            {"type": "image_url", "image_url": {"url": right_grid_url}},
-            {"type": "text", "text": EXPLAIN_USER_PROMPT},
-        ]},
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "Reference image:"},
+                {"type": "image_url", "image_url": {"url": prompt_url}},
+                {"type": "text", "text": "Model A (4 views):"},
+                {"type": "image_url", "image_url": {"url": left_grid_url}},
+                {"type": "text", "text": "Model B (4 views):"},
+                {"type": "image_url", "image_url": {"url": right_grid_url}},
+                {"type": "text", "text": EXPLAIN_USER_PROMPT},
+            ],
+        },
     ]
     parsed = await _safe_chat_json(
-        vlm, messages, IssuesSummary,
-        label="explain", seed=seed, max_retries=3, max_tokens=300,
+        vlm,
+        messages,
+        IssuesSummary,
+        label="explain",
+        seed=seed,
+        max_retries=3,
+        max_tokens=300,
         on_failure=_neutral_issues(),
     )
     return cast(IssuesSummary, parsed).issues
@@ -1396,10 +1411,7 @@ def _slim_s1(s1: dict, choice: str) -> dict:
         "choice": choice,
         "n_total": s1["n_total"],
         "n_consistent": s1["n_consistent"],
-        "angles": [
-            {"label": a["label"], "pen_a": a["pen_a"], "pen_b": a["pen_b"]}
-            for a in s1["angles"]
-        ],
+        "angles": [{"label": a["label"], "pen_a": a["pen_a"], "pen_b": a["pen_b"]} for a in s1["angles"]],
     }
 
 
@@ -1428,17 +1440,18 @@ def _slim_checklist(cl: dict | None) -> dict | None:
         "main_object": inner["main_object"],
         "main_object_correct_a": verify_a.get("main_object_correct"),
         "main_object_correct_b": verify_b.get("main_object_correct"),
-        "features": [
-            {"feature": d, "side_a": checks_a.get(d), "side_b": checks_b.get(d)}
-            for d in feature_descs
-        ],
+        "features": [{"feature": d, "side_a": checks_a.get(d), "side_b": checks_b.get(d)} for d in feature_descs],
         "score_a": cl.get("score_a"),
         "score_b": cl.get("score_b"),
     }
 
 
 def _slim_s2(
-    bv: dict | None, ac: dict, cl: dict, choice: str, source: str,
+    bv: dict | None,
+    ac: dict,
+    cl: dict,
+    choice: str,
+    source: str,
 ) -> dict:
     """S2 detail — sub-judge penalties + checklist features with per-side matches."""
     return {
@@ -1460,10 +1473,7 @@ def _slim_s4(s4: dict) -> dict:
     return {
         "choice": s4["choice"],
         "side_verdicts": s4["side_verdicts"],
-        "per_angle": {
-            side: {a["label"]: a["verdict"] for a in s4["per_angle"][side]}
-            for side in ("a", "b")
-        },
+        "per_angle": {side: {a["label"]: a["verdict"] for a in s4["per_angle"][side]} for side in ("a", "b")},
     }
 
 

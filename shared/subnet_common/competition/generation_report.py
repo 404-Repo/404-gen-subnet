@@ -12,6 +12,13 @@ class GenerationReportOutcome(StrEnum):
     REJECTED = "rejected"
 
 
+class RepeatStats(BaseModel):
+    repeat_index: int
+    generated_prompts: int = 0
+    failed_prompts: int = 0
+    generation_time: float | None = None
+
+
 class GenerationReport(BaseModel):
     """Report of a miner's generation run, produced by the generation orchestrator.
 
@@ -21,9 +28,7 @@ class GenerationReport(BaseModel):
 
     hotkey: str
     outcome: GenerationReportOutcome = GenerationReportOutcome.PENDING
-    checked_prompts: int = Field(default=0, description="Prompts regenerated so far")
-    failed_prompts: int = Field(default=0, description="Prompts that failed to regenerate")
-    generation_time: float | None = Field(default=None, description="Trimmed median generation time in seconds")
+    repeats: list[RepeatStats] = Field(default_factory=list)
     reason: str = ""
 
 
@@ -48,11 +53,3 @@ async def save_generation_reports(
         content=GenerationReportsAdapter.dump_json(reports, indent=2).decode(),
         message=f"Update generation reports for round {round_num}",
     )
-
-
-def get_completed_hotkeys(reports: dict[str, GenerationReport]) -> set[str]:
-    return {hk for hk, r in reports.items() if r.outcome == GenerationReportOutcome.COMPLETED}
-
-
-def get_rejected_hotkeys(reports: dict[str, GenerationReport]) -> set[str]:
-    return {hk for hk, r in reports.items() if r.outcome == GenerationReportOutcome.REJECTED}

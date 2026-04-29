@@ -4,6 +4,10 @@ from subnet_common.competition.generations import GenerationsMap
 from subnet_common.discord import DiscordWebhook
 
 
+COLOR_GREEN = 0x2ECC71
+COLOR_RED = 0xE74C3C
+
+
 class DiscordNotifier:
     def __init__(
         self,
@@ -23,7 +27,8 @@ class DiscordNotifier:
     async def notify_submissions_collected(
         self,
         round_num: int,
-        submission_count: int,
+        committed_count: int,
+        accepted_count: int,
         generation_deadline: datetime,
         prompts_url: str,
         seed_url: str,
@@ -31,10 +36,11 @@ class DiscordNotifier:
         unix_ts = int(generation_deadline.timestamp())
         await self._webhook.send_embed(
             title=f"Round {round_num} Submissions Collected",
-            color=0x2ECC71,
+            color=COLOR_GREEN,
             fields=[
-                {"name": "Round", "value": str(round_num), "inline": True},
-                {"name": "Submissions", "value": str(submission_count), "inline": True},
+                {"name": "Committed", "value": str(committed_count), "inline": True},
+                {"name": "No lock", "value": str(committed_count - accepted_count), "inline": True},
+                {"name": "Accepted", "value": str(accepted_count), "inline": True},
                 {"name": "Generation Deadline", "value": f"<t:{unix_ts}:f>", "inline": True},
                 {"name": "Prompts", "value": f"[prompts.txt]({prompts_url})", "inline": True},
                 {"name": "Seed", "value": f"[seed.json]({seed_url})", "inline": True},
@@ -44,7 +50,7 @@ class DiscordNotifier:
     async def notify_no_submissions(self, round_num: int) -> None:
         await self._webhook.send_embed(
             title=f"Round {round_num} — No Submissions",
-            color=0xE74C3C,
+            color=COLOR_RED,
             description=f"Round {round_num} received no valid submissions. Transitioning to FINALIZING.",
         )
 
@@ -64,7 +70,7 @@ class DiscordNotifier:
         self._last_render_alert = now
         await self._webhook.send_embed(
             title="Render Failures Detected",
-            color=0xE74C3C,
+            color=COLOR_RED,
             description=f"{self._render_failures} render failures across {len(self._render_failure_hotkeys)} miners. "
             f"Render service may be down.",
         )
@@ -74,7 +80,7 @@ class DiscordNotifier:
         if total_miners == 0:
             await self._webhook.send_embed(
                 title=f"Round {round_num} Downloads Complete",
-                color=0x2ECC71,
+                color=COLOR_GREEN,
                 fields=[{"name": "Miners", "value": "0", "inline": True}],
             )
             return
@@ -89,20 +95,11 @@ class DiscordNotifier:
             if total_prompts > 0 and len(gens) >= total_prompts and all(g.js is not None for g in gens.values())
         )
 
-        # "No submission" miners genuinely sent nothing — every entry has neither js nor a
-        # collector-side failure_reason. "Fetch-failed" miners had something on the chain
-        # but our collector couldn't pull any of it (CDN dead, etc.).
-        no_submission = sum(
-            1
-            for gens in results.values()
-            if not any(g.js is not None or g.failure_reason is not None for g in gens.values())
-        )
-        fetch_failed = sum(
-            1
-            for gens in results.values()
-            if not any(g.js is not None for g in gens.values())
-            and any(g.failure_reason is not None for g in gens.values())
-        )
+        # Miners with no successfully uploaded JS for any prompt. Every entry persisted
+        # by the pipeline carries either a JS URL or a failure_reason, so this counts
+        # miners whose every prompt failed before the JS upload (dead CDN, oversized
+        # JS, R2 reject, etc.) — i.e., they delivered nothing usable this round.
+        no_submission = sum(1 for gens in results.values() if not any(g.js is not None for g in gens.values()))
 
         # Stems where the miner delivered JS but our render/embedding pipeline failed to
         # produce views. This is *our* problem to act on — every other number is
@@ -112,7 +109,7 @@ class DiscordNotifier:
         )
 
         # Red if anything on the system side is actionable; green otherwise.
-        color = 0xE74C3C if render_failures > 0 or fetch_failed > 0 else 0x2ECC71
+        color = COLOR_RED if render_failures > 0 else COLOR_GREEN
 
         await self._webhook.send_embed(
             title=f"Round {round_num} Downloads Complete",
@@ -129,15 +126,18 @@ class DiscordNotifier:
                     "value": f"{no_submission} ({100 * no_submission // total_miners}%)",
                     "inline": True,
                 },
-                {"name": "Fetch failed", "value": str(fetch_failed), "inline": True},
                 {"name": "Render failures", "value": str(render_failures), "inline": True},
             ],
         )
 
+        self._render_failures = 0
+        self._render_failure_hotkeys.clear()
+        self._last_render_alert = None
+
     async def notify_cycle_error(self, error: Exception) -> None:
         await self._webhook.send_embed(
             title="Submission Collector Error",
-            color=0xE74C3C,
+            color=COLOR_RED,
             description=f"```{type(error).__name__}: {error}```",
         )
 
@@ -147,7 +147,13 @@ class NullDiscordNotifier(DiscordNotifier):
         pass
 
     async def notify_submissions_collected(
-        self, round_num: int, submission_count: int, generation_deadline: datetime, prompts_url: str, seed_url: str
+        self,
+        round_num: int,
+        committed_count: int,
+        accepted_count: int,
+        generation_deadline: datetime,
+        prompts_url: str,
+        seed_url: str,
     ) -> None:
         pass
 

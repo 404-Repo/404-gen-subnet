@@ -27,8 +27,10 @@ async def select_prompts(
     else:
         carryover = []
 
+    carryover_set = set(carryover)
+    pool = [p for p in all_prompts if p not in carryover_set]
     new_count = config.prompts_per_round - len(carryover)
-    new = _sample_up_to(rng, all_prompts, new_count)
+    new = _sample_up_to(rng, pool, new_count)
 
     logger.info(f"Selected {len(carryover)} carryover + {len(new)} new prompts")
     return carryover + new
