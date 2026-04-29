@@ -2,12 +2,14 @@ import json
 from unittest.mock import AsyncMock, patch
 
 import httpx
+import pytest
 from subnet_common.competition.generations import GenerationResult, GenerationsAdapter
 from subnet_common.competition.state import CompetitionState, RoundStage
 from subnet_common.git_batcher import GitBatcher
 from subnet_common.render import GRAY_VIEWS, WHITE_VIEWS
 from subnet_common.testing import MockGitHubClient, MockR2Client
 
+from submission_collector.discord import DiscordNotifier
 from submission_collector.download import DownloadPipeline
 from submission_collector.settings import Settings
 
@@ -99,8 +101,8 @@ async def test_happy_path_fetches_renders_uploads(
 
     # Generation result saved to git
     gen_path = f"rounds/1/{HOTKEY}/submitted.json"
-    assert gen_path in git_batcher_committed(git)
-    generations = GenerationsAdapter.validate_json(git_batcher_committed(git)[gen_path])
+    assert gen_path in git.committed
+    generations = GenerationsAdapter.validate_json(git.committed[gen_path])
     assert "chair" in generations
     expected_prefix = f"{settings.cdn_url}/rounds/1/{HOTKEY}/submitted/chair"
     assert generations["chair"].js == f"{expected_prefix}.js"
@@ -176,7 +178,7 @@ async def test_fetch_failure_records_empty_generation(
 
     # Empty generation result saved
     gen_path = f"rounds/1/{HOTKEY}/submitted.json"
-    generations = GenerationsAdapter.validate_json(git_batcher_committed(git)[gen_path])
+    generations = GenerationsAdapter.validate_json(git.committed[gen_path])
     assert "chair" in generations
     assert generations["chair"].js is None
     assert generations["chair"].views is None
@@ -213,13 +215,155 @@ async def test_render_failure_saves_js_without_views(
 
     # Generation has JS but no views
     gen_path = f"rounds/1/{HOTKEY}/submitted.json"
-    generations = GenerationsAdapter.validate_json(git_batcher_committed(git)[gen_path])
+    generations = GenerationsAdapter.validate_json(git.committed[gen_path])
     expected_js = f"{settings.cdn_url}/rounds/1/{HOTKEY}/submitted/chair.js"
     assert generations["chair"].js == expected_js
     assert generations["chair"].views is None
     assert generations["chair"].size == len(JS_DATA)
 
 
-def git_batcher_committed(git: MockGitHubClient) -> dict[str, str]:
-    """Get all files written via git_batcher (which uses commit_files under the hood)."""
-    return git.committed
+async def test_fetch_prompt_images_drops_failed_urls(git: MockGitHubClient, settings: Settings) -> None:
+    """One URL fails, others succeed: failed stems drop out, successful ones come through."""
+    pipeline = _make_pipeline(git, MockR2Client(), settings)
+
+    async def fake_get(url: str, **_kwargs: object) -> httpx.Response:
+        request = httpx.Request("GET", url)
+        if "chair" in url:
+            return httpx.Response(200, content=b"chair-bytes", request=request)
+        return httpx.Response(404, request=request)
+
+    with patch.object(pipeline.http_client, "get", new=AsyncMock(side_effect=fake_get)):
+        result = await pipeline._fetch_prompt_images(["https://example.com/chair.png", "https://example.com/table.png"])
+
+    assert result == {"chair": b"chair-bytes"}
+
+
+async def test_fetch_prompt_images_all_failures_returns_empty(git: MockGitHubClient, settings: Settings) -> None:
+    """Every URL fails: empty dict (not exception, not None entries)."""
+    pipeline = _make_pipeline(git, MockR2Client(), settings)
+
+    async def fake_get(url: str, **_kwargs: object) -> httpx.Response:
+        return httpx.Response(500, request=httpx.Request("GET", url))
+
+    with patch.object(pipeline.http_client, "get", new=AsyncMock(side_effect=fake_get)):
+        result = await pipeline._fetch_prompt_images(["https://example.com/a.png", "https://example.com/b.png"])
+
+    assert result == {}
+
+
+# Failure-mode contract: each early-exit path in _fetch_render_upload persists a
+# specific failure_reason, preserves the JS URL only when the JS upload succeeded,
+# and triggers the Discord render-failure alert only for our-infrastructure-side
+# failures (renders, embeddings) — not for miner-side failures (CDN dead, oversized
+# JS) and not for storage failures (R2 down).
+@pytest.mark.parametrize(
+    "fail_phase,expected_reason_prefix,preserves_js,alerts_discord",
+    [
+        ("fetch", "js_fetch_failed", False, False),
+        ("js_upload", "js_upload_failed", False, False),
+        ("prompt_img", "prompt_image_missing", True, False),
+        ("white_render", "render_failed", True, True),
+        ("grid_render", "grid_render_failed", True, True),
+        ("embeddings", "embeddings_failed", True, True),
+        ("views_upload", "views_upload_failed", True, False),
+    ],
+)
+async def test_failure_mode_contract(
+    fail_phase: str,
+    expected_reason_prefix: str,
+    preserves_js: bool,
+    alerts_discord: bool,
+    git: MockGitHubClient,
+    settings: Settings,
+) -> None:
+    discord = AsyncMock(spec=DiscordNotifier)
+    r2 = MockR2Client()
+    _setup_round(git, round_num=1, hotkeys=[HOTKEY], prompts=["chair"])
+    state = CompetitionState(current_round=1, stage=RoundStage.DOWNLOADING)
+
+    fetch_side_effect: object = None
+    render_views_return: object = VIEW_PNGS
+    render_grid_return: object = GRID_PNG
+    embeddings_side_effect: object = None
+    prompt_images_return: dict[str, bytes] = {"chair": PROMPT_IMG}
+
+    async def upload_ok(_r2: object, key: str, *_args: object, **_kwargs: object) -> str:
+        return f"{settings.cdn_url}/{key}"
+
+    upload_side_effect = upload_ok
+
+    if fail_phase == "fetch":
+        fetch_side_effect = Exception("CDN down")
+    elif fail_phase == "js_upload":
+
+        async def fail_on_js(_r2: object, key: str, _data: bytes, ctype: str, *_args: object) -> str:
+            if ctype == "application/javascript":
+                raise Exception("R2 reject JS")
+            return f"{settings.cdn_url}/{key}"
+
+        upload_side_effect = fail_on_js
+    elif fail_phase == "prompt_img":
+        prompt_images_return = {}
+    elif fail_phase == "white_render":
+        render_views_return = None
+    elif fail_phase == "grid_render":
+        render_grid_return = None
+    elif fail_phase == "embeddings":
+        embeddings_side_effect = Exception("HF down")
+    elif fail_phase == "views_upload":
+
+        async def fail_on_bundle(_r2: object, key: str, _data: bytes, ctype: str, *_args: object) -> str:
+            if ctype != "application/javascript":
+                raise Exception("R2 reject bundle")
+            return f"{settings.cdn_url}/{key}"
+
+        upload_side_effect = fail_on_bundle
+
+    git_batcher = GitBatcher(git=git, base_sha=REF, branch=settings.github_branch)
+    pipeline = DownloadPipeline(
+        git_batcher=git_batcher,
+        r2=r2,
+        http_client=httpx.AsyncClient(),
+        settings=settings,
+        discord=discord,
+    )
+
+    with (
+        patch(
+            "submission_collector.download.DownloadPipeline._fetch_prompt_images",
+            new=AsyncMock(return_value=prompt_images_return),
+        ),
+        patch(
+            "submission_collector.download._fetch_js",
+            new=AsyncMock(return_value=JS_DATA, side_effect=fetch_side_effect),
+        ),
+        patch("submission_collector.download.render_views", new=AsyncMock(return_value=render_views_return)),
+        patch("submission_collector.download.render_grid", new=AsyncMock(return_value=render_grid_return)),
+        patch(
+            "submission_collector.download.build_embeddings_npz",
+            new=AsyncMock(return_value=NPZ_BYTES, side_effect=embeddings_side_effect),
+        ),
+        patch("submission_collector.download._upload_to_r2", new=AsyncMock(side_effect=upload_side_effect)),
+    ):
+        await pipeline.run(state=state, ref=REF)
+
+    gen_path = f"rounds/1/{HOTKEY}/submitted.json"
+    generations = GenerationsAdapter.validate_json(git.committed[gen_path])
+    chair = generations["chair"]
+
+    assert chair.failure_reason is not None
+    assert chair.failure_reason.startswith(
+        expected_reason_prefix
+    ), f"expected failure_reason starting with {expected_reason_prefix!r}, got {chair.failure_reason!r}"
+
+    if preserves_js:
+        assert chair.js is not None and chair.js != ""
+    else:
+        assert chair.js is None
+
+    assert chair.views is None  # all failure modes leave views unset
+
+    if alerts_discord:
+        discord.notify_render_failure.assert_called_once_with(HOTKEY)
+    else:
+        discord.notify_render_failure.assert_not_called()

@@ -63,7 +63,13 @@ class DownloadPipeline:
         random.shuffle(hotkeys)
         logger.info(f"Processing {len(hotkeys)} submissions × {len(prompts)} prompts")
 
-        raw_results = await asyncio.gather(
+        # No return_exceptions: any escape from `_download_submission` is an
+        # infrastructure error (typically a git read failing) or an unhandled bug —
+        # both should restart the iteration, not silently mark the miner as zero.
+        # Per-miner content failures (CDN dead, oversized JS, render rejection) are
+        # categorized via `failure_reason` inside `_fetch_render_upload` and travel
+        # through the success path, so they don't reach this gather.
+        results = await asyncio.gather(
             *[
                 self._download_submission(
                     hotkey=hotkey,
@@ -75,15 +81,8 @@ class DownloadPipeline:
                 )
                 for hotkey in hotkeys
             ],
-            return_exceptions=True,
         )
-        generations_by_hotkey: dict[str, GenerationsMap] = {}
-        for hotkey, result in zip(hotkeys, raw_results, strict=True):
-            if isinstance(result, BaseException):
-                logger.error(f"{hotkey[:10]}: download failed: {result}")
-            else:
-                generations_by_hotkey[hotkey] = result
-        return generations_by_hotkey
+        return dict(zip(hotkeys, results, strict=True))
 
     async def _fetch_prompt_images(self, prompt_urls: list[str]) -> dict[str, bytes]:
         """Download all prompt images for the round once. Stem -> bytes; missing on failure."""
@@ -129,6 +128,10 @@ class DownloadPipeline:
         else:
             logger.info(f"Processing {len(prompts_to_process)}/{len(prompts)} prompts for {hotkey[:10]}")
 
+            # No return_exceptions: `_fetch_render_upload` catches per-prompt failures
+            # internally and persists them as failure_reason. Anything escaping is a
+            # `persist()` git-write failure or an unhandled bug — both warrant an
+            # iteration restart rather than a silent missing-prompt entry.
             tasks = [
                 self._fetch_render_upload(
                     hotkey=hotkey,
@@ -140,10 +143,7 @@ class DownloadPipeline:
                 )
                 for prompt in prompts_to_process
             ]
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            for prompt, result in zip(prompts_to_process, results, strict=True):
-                if isinstance(result, BaseException):
-                    logger.error(f"{hotkey[:10]} / {prompt}: fetch failed: {result}")
+            await asyncio.gather(*tasks)
 
         return {p: generations[p] for p in prompts if p in generations}
 
@@ -287,11 +287,17 @@ class DownloadPipeline:
                 ]
             )
             try:
+                upload_start = asyncio.get_running_loop().time()
                 await asyncio.gather(
                     *[
                         _upload_to_r2(self.r2, key, data, ctype, log_id, self.settings.cdn_url)
                         for key, data, ctype in bundle
                     ]
+                )
+                upload_elapsed = asyncio.get_running_loop().time() - upload_start
+                bundle_kb = sum(len(data) for _, data, _ in bundle) / 1024
+                logger.debug(
+                    f"{log_id}: uploaded {len(bundle)} files in {upload_elapsed:.1f}s, {bundle_kb:.1f}KB total"
                 )
             except Exception as e:
                 logger.error(f"{log_id}: views_upload_failed: {type(e).__name__}: {e}")
@@ -303,10 +309,7 @@ class DownloadPipeline:
 
 async def _upload_to_r2(r2: R2Client, key: str, data: bytes, content_type: str, log_id: str, cdn_url: str) -> str:
     """Upload data to R2 and return the CDN URL."""
-    start = asyncio.get_running_loop().time()
     await r2.upload(key=key, data=data, content_type=content_type)
-    elapsed = asyncio.get_running_loop().time() - start
-    logger.debug(f"{log_id}: uploaded {key} in {elapsed:.1f}s, {len(data) / 1024:.1f}KB")
     return f"{cdn_url}/{key}"
 
 
@@ -333,15 +336,18 @@ async def _try_fetch_js(
             if inner is not None:
                 cause = inner
         if isinstance(cause, httpx.HTTPStatusError):
+            # Miner CDN inaccessibility is common and not operator-actionable; the
+            # categorical failure_reason is persisted on the GenerationResult for
+            # post-hoc analysis.
             failure_reason = f"js_fetch_failed: HTTP {cause.response.status_code}"
-            logger.warning(f"{log_id}: {failure_reason} on {cause.request.url}")
+            logger.debug(f"{log_id}: {failure_reason} on {cause.request.url}")
         elif isinstance(cause, ValueError):
             # Only ValueError raised by _fetch_js is the size cap.
             failure_reason = "js_too_large"
             logger.warning(f"{log_id}: {failure_reason}: {cause}")
         else:
             failure_reason = f"js_fetch_failed: {type(cause).__name__}"
-            logger.warning(f"{log_id}: {failure_reason}: {cause}")
+            logger.debug(f"{log_id}: {failure_reason}: {cause}")
         return None, failure_reason
 
 

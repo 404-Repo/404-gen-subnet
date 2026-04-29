@@ -169,5 +169,5 @@ async def build_embeddings_npz(
 
     buf = io.BytesIO()
     np.savez(buf, **arrays)  # type: ignore[arg-type]  # numpy stubs miss the **kwargs form
-    logger.debug(f"{log_id}: embeddings computed in {elapsed:.1f}s; " f"npz packed ({buf.tell() / 1024:.1f}KB)")
+    logger.debug(f"{log_id}: embeddings computed in {elapsed:.1f}s; npz packed ({buf.tell() / 1024:.1f}KB)")
     return buf.getvalue()
