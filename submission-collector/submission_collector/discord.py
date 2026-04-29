@@ -4,6 +4,10 @@ from subnet_common.competition.generations import GenerationsMap
 from subnet_common.discord import DiscordWebhook
 
 
+COLOR_GREEN = 0x2ECC71
+COLOR_RED = 0xE74C3C
+
+
 class DiscordNotifier:
     def __init__(
         self,
@@ -31,7 +35,7 @@ class DiscordNotifier:
         unix_ts = int(generation_deadline.timestamp())
         await self._webhook.send_embed(
             title=f"Round {round_num} Submissions Collected",
-            color=0x2ECC71,
+            color=COLOR_GREEN,
             fields=[
                 {"name": "Round", "value": str(round_num), "inline": True},
                 {"name": "Submissions", "value": str(submission_count), "inline": True},
@@ -44,7 +48,7 @@ class DiscordNotifier:
     async def notify_no_submissions(self, round_num: int) -> None:
         await self._webhook.send_embed(
             title=f"Round {round_num} — No Submissions",
-            color=0xE74C3C,
+            color=COLOR_RED,
             description=f"Round {round_num} received no valid submissions. Transitioning to FINALIZING.",
         )
 
@@ -64,7 +68,7 @@ class DiscordNotifier:
         self._last_render_alert = now
         await self._webhook.send_embed(
             title="Render Failures Detected",
-            color=0xE74C3C,
+            color=COLOR_RED,
             description=f"{self._render_failures} render failures across {len(self._render_failure_hotkeys)} miners. "
             f"Render service may be down.",
         )
@@ -74,7 +78,7 @@ class DiscordNotifier:
         if total_miners == 0:
             await self._webhook.send_embed(
                 title=f"Round {round_num} Downloads Complete",
-                color=0x2ECC71,
+                color=COLOR_GREEN,
                 fields=[{"name": "Miners", "value": "0", "inline": True}],
             )
             return
@@ -112,7 +116,7 @@ class DiscordNotifier:
         )
 
         # Red if anything on the system side is actionable; green otherwise.
-        color = 0xE74C3C if render_failures > 0 or fetch_failed > 0 else 0x2ECC71
+        color = COLOR_RED if render_failures > 0 or fetch_failed > 0 else COLOR_GREEN
 
         await self._webhook.send_embed(
             title=f"Round {round_num} Downloads Complete",
@@ -134,10 +138,14 @@ class DiscordNotifier:
             ],
         )
 
+        self._render_failures = 0
+        self._render_failure_hotkeys.clear()
+        self._last_render_alert = None
+
     async def notify_cycle_error(self, error: Exception) -> None:
         await self._webhook.send_embed(
             title="Submission Collector Error",
-            color=0xE74C3C,
+            color=COLOR_RED,
             description=f"```{type(error).__name__}: {error}```",
         )
 

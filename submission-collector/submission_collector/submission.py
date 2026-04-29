@@ -8,7 +8,7 @@ class Submission(BaseModel):
     hotkey: str = Field(..., min_length=10, description="Bittensor hotkey of winner")
     reveal_block: int = Field(..., ge=0, description="Block number at which commit SHA was revealed")
     repo: str = Field(..., pattern=r"^[\w-]+/[\w-]+$", description="GitHub repo of winning solution")
-    commit: str = Field(..., min_length=40, max_length=40, description="Git commit SHA")
+    commit: str = Field(..., pattern=r"^[a-f0-9]{40}$", description="Git commit SHA")
     cdn_url: HttpUrl = Field(..., description="CDN URL of the directory with generated GLB files")
 
 
@@ -26,7 +26,6 @@ def parse_commitment(
     valid_commits = [(block, data_str) for block, data_str in commitment if earliest_block <= block <= latest_block]
 
     if not valid_commits:
-        # logger.debug(f"No commits in window for {hotkey}")
         return None
 
     repo_commits = []

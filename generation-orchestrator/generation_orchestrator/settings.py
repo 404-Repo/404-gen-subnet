@@ -61,6 +61,13 @@ class Settings(BaseSettings):
     )
 
     hf_token: SecretStr | None = Field(..., alias="HF_TOKEN", description="HF personal access token")
+    dinov3_revision: str = Field(
+        ...,
+        alias="DINOV3_REVISION",
+        description="Hugging Face revision (branch/tag/commit) for the DINOv3 embedding model. "
+        "Pin to a commit hash in production — drift across revisions changes embedding "
+        "outputs and corrupts judge comparisons.",
+    )
 
     gpu_providers: str = Field(
         default="targon",

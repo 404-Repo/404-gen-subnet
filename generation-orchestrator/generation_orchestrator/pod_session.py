@@ -1,5 +1,4 @@
 import asyncio
-import io
 import json
 from dataclasses import dataclass
 from enum import StrEnum
@@ -8,10 +7,9 @@ from types import TracebackType
 from typing import Self
 
 import httpx
-import numpy as np
 from loguru import logger
 from subnet_common.competition.generations import GenerationResult
-from subnet_common.embeddings import calculate_embeddings
+from subnet_common.embeddings import build_embeddings_npz
 from subnet_common.r2_client import R2Client
 from subnet_common.render import GRAY_BG, GRAY_VIEWS, WHITE_BG, WHITE_VIEWS, render_grid, render_views
 from tenacity import RetryCallState, retry, stop_after_attempt, wait_exponential
@@ -313,31 +311,12 @@ class PodSession:
         return result
 
     async def _build_embeddings_npz(self, prompt_path: Path, white_views: dict[str, bytes], log_id: str) -> bytes:
-        """Compute DINOv3 embeddings for prompt + 8 white views; pack into a single .npz.
-
-        Embeddings of the same view are identical between white and gray bg in practice,
-        so we only embed the white set — saves 4 forward passes per stem.
-        """
+        """Read prompt bytes, then delegate to the shared embeddings/npz packer."""
         prompt_bytes = await asyncio.to_thread(prompt_path.read_bytes)
-        view_names = [v.name for v in WHITE_VIEWS]
-        view_bytes = [white_views[name] for name in view_names]
-
         hf_token = self._settings.hf_token.get_secret_value() if self._settings.hf_token else None
-        logger.debug(f"{log_id}: computing embeddings for prompt + {len(view_names)} views")
-        start = asyncio.get_running_loop().time()
-        all_embeds = await calculate_embeddings([prompt_bytes, *view_bytes], hf_token=hf_token)
-        elapsed = asyncio.get_running_loop().time() - start
-        if all_embeds.shape[0] != 1 + len(view_names):
-            raise RuntimeError(f"expected {1 + len(view_names)} embeddings, got {all_embeds.shape[0]}")
-
-        arrays: dict[str, np.ndarray] = {"prompt": all_embeds[0]}
-        for i, name in enumerate(view_names, start=1):
-            arrays[f"view_{name}"] = all_embeds[i]
-
-        buf = io.BytesIO()
-        np.savez(buf, **arrays)  # type: ignore[arg-type]  # numpy stubs miss the **kwargs form
-        logger.debug(f"{log_id}: embeddings computed in {elapsed:.1f}s; " f"npz packed ({buf.tell() / 1024:.1f}KB)")
-        return buf.getvalue()
+        return await build_embeddings_npz(
+            prompt_bytes, white_views, log_id, revision=self._settings.dinov3_revision, hf_token=hf_token
+        )
 
     def _views_prefix(self, round_num: int, stem: str) -> str:
         """CDN URL of the per-stem folder; views live under `{prefix}/white/...` and `{prefix}/gray/...`."""

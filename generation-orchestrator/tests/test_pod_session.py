@@ -81,7 +81,7 @@ async def test_run_success(settings: Settings) -> None:
         ),
         patch("generation_orchestrator.pod_session.render_views", _render_views_ok()),
         patch("generation_orchestrator.pod_session.render_grid", _render_grid_ok()),
-        patch("generation_orchestrator.pod_session.calculate_embeddings", _embeddings_ok()),
+        patch("subnet_common.embeddings.calculate_embeddings", _embeddings_ok()),
     ):
         MockHttpx.return_value.aclose = AsyncMock()
         async with make_session(settings) as session:
@@ -118,7 +118,7 @@ async def test_run_partial_batch_records_failures(settings: Settings) -> None:
         ),
         patch("generation_orchestrator.pod_session.render_views", _render_views_ok()),
         patch("generation_orchestrator.pod_session.render_grid", _render_grid_ok()),
-        patch("generation_orchestrator.pod_session.calculate_embeddings", _embeddings_ok()),
+        patch("subnet_common.embeddings.calculate_embeddings", _embeddings_ok()),
     ):
         MockHttpx.return_value.aclose = AsyncMock()
         async with make_session(settings) as session:

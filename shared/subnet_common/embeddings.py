@@ -35,7 +35,7 @@ _lock = threading.Lock()
 _processor: Any = None
 _model: Any = None
 _device: Any = None
-_cached_key: tuple[str, str | None] | None = None  # (model_id, revision)
+_cached_key: tuple[str, str] | None = None  # (model_id, revision)
 
 
 def _resolve_device(device_setting: str | None) -> Any:
@@ -48,7 +48,7 @@ def _resolve_device(device_setting: str | None) -> Any:
 
 def _load_model(
     model_id: str,
-    revision: str | None,
+    revision: str,
     hf_token: str | None,
     device: str | None,
 ) -> tuple[Any, Any, Any]:
@@ -65,9 +65,9 @@ def _load_model(
 
         logger.info(f"Loading DINOv3 embedding model: {model_id} (revision={revision})")
 
-        # B615 (HF unsafe download): production should pass an explicit revision (commit
-        # hash) for reproducibility. Pinning at the call site keeps the model an
-        # env-deployable artifact instead of a code-locked one.
+        # B615 (HF unsafe download): the revision kwarg is required at the call site (no
+        # default), so this is always a concrete branch/tag/commit chosen by the operator
+        # via service settings. Pin to a commit hash in production for reproducibility.
         _processor = AutoImageProcessor.from_pretrained(model_id, revision=revision, token=hf_token)  # nosec B615
         _model = AutoModel.from_pretrained(model_id, revision=revision, token=hf_token)  # nosec B615
         _device = _resolve_device(device)
@@ -81,7 +81,7 @@ def _load_model(
 def _embed_sync(
     images: list[bytes],
     model_id: str,
-    revision: str | None,
+    revision: str,
     hf_token: str | None,
     device: str | None,
 ) -> np.ndarray:
@@ -111,9 +111,9 @@ def _embed_sync(
 async def calculate_embeddings(
     images: list[bytes],
     *,
+    revision: str,
     hf_token: str | None = None,
     model_id: str = _DEFAULT_MODEL_ID,
-    revision: str | None = None,
     device: str | None = None,
 ) -> np.ndarray:
     """L2-normalized DINOv3 embeddings, shape (N, D). Async wrapper around blocking inference.
@@ -121,7 +121,53 @@ async def calculate_embeddings(
     First call loads + caches the model. Subsequent calls reuse the cache as long as
     `(model_id, revision)` is unchanged.
 
+    `revision` is required (a branch, tag, or commit hash on Hugging Face). Pin to a
+    commit hash in production for reproducibility — drift between model revisions
+    changes embedding outputs and corrupts judge comparisons across rounds.
     `hf_token` is required for gated models (e.g. DINOv3). `device` accepts "cuda",
     "cpu", or None/"auto" to pick automatically.
     """
     return await asyncio.to_thread(_embed_sync, images, model_id, revision, hf_token, device)
+
+
+async def build_embeddings_npz(
+    prompt_bytes: bytes,
+    white_views: dict[str, bytes],
+    log_id: str,
+    *,
+    revision: str,
+    hf_token: str | None,
+) -> bytes:
+    """Compute DINOv3 embeddings for prompt + 8 white views; pack into a single .npz.
+
+    Embeddings of the same view are identical between white and gray bg in practice,
+    so we only embed the white set — saves 4 forward passes per stem.
+
+    The npz layout is the consumer contract for the judge: an array named "prompt"
+    plus one "view_<name>" per WHITE_VIEWS entry, in WHITE_VIEWS order.
+
+    `revision` is the Hugging Face revision (branch/tag/commit) for the embedding model;
+    see `calculate_embeddings` for why it must be pinned in production.
+    """
+    from loguru import logger
+
+    from subnet_common.render import WHITE_VIEWS
+
+    view_names = [v.name for v in WHITE_VIEWS]
+    view_bytes = [white_views[name] for name in view_names]
+
+    logger.debug(f"{log_id}: computing embeddings for prompt + {len(view_names)} views")
+    start = asyncio.get_running_loop().time()
+    embeds = await calculate_embeddings([prompt_bytes, *view_bytes], revision=revision, hf_token=hf_token)
+    elapsed = asyncio.get_running_loop().time() - start
+    if embeds.shape[0] != 1 + len(view_names):
+        raise RuntimeError(f"expected {1 + len(view_names)} embeddings, got {embeds.shape[0]}")
+
+    arrays: dict[str, np.ndarray] = {"prompt": embeds[0]}
+    for i, name in enumerate(view_names, start=1):
+        arrays[f"view_{name}"] = embeds[i]
+
+    buf = io.BytesIO()
+    np.savez(buf, **arrays)  # type: ignore[arg-type]  # numpy stubs miss the **kwargs form
+    logger.debug(f"{log_id}: embeddings computed in {elapsed:.1f}s; " f"npz packed ({buf.tell() / 1024:.1f}KB)")
+    return buf.getvalue()

@@ -57,7 +57,7 @@ def _make_pipeline(git: MockGitHubClient, r2: MockR2Client, settings: Settings) 
     new_callable=AsyncMock,
     return_value={"chair": PROMPT_IMG, "table": PROMPT_IMG},
 )
-@patch("submission_collector.download._build_embeddings_npz", new_callable=AsyncMock, return_value=NPZ_BYTES)
+@patch("submission_collector.download.build_embeddings_npz", new_callable=AsyncMock, return_value=NPZ_BYTES)
 @patch("submission_collector.download.render_grid", new_callable=AsyncMock, return_value=GRID_PNG)
 @patch("submission_collector.download._fetch_js", new_callable=AsyncMock, return_value=JS_DATA)
 @patch("submission_collector.download.render_views", new_callable=AsyncMock, return_value=VIEW_PNGS)
@@ -113,7 +113,7 @@ async def test_happy_path_fetches_renders_uploads(
     new_callable=AsyncMock,
     return_value={"chair": PROMPT_IMG, "table": PROMPT_IMG},
 )
-@patch("submission_collector.download._build_embeddings_npz", new_callable=AsyncMock, return_value=NPZ_BYTES)
+@patch("submission_collector.download.build_embeddings_npz", new_callable=AsyncMock, return_value=NPZ_BYTES)
 @patch("submission_collector.download.render_grid", new_callable=AsyncMock, return_value=GRID_PNG)
 @patch("submission_collector.download._fetch_js", new_callable=AsyncMock, return_value=JS_DATA)
 @patch("submission_collector.download.render_views", new_callable=AsyncMock, return_value=VIEW_PNGS)
@@ -148,7 +148,7 @@ async def test_skips_already_completed_prompts(
     new_callable=AsyncMock,
     return_value={"chair": PROMPT_IMG},
 )
-@patch("submission_collector.download._build_embeddings_npz", new_callable=AsyncMock, return_value=NPZ_BYTES)
+@patch("submission_collector.download.build_embeddings_npz", new_callable=AsyncMock, return_value=NPZ_BYTES)
 @patch("submission_collector.download.render_grid", new_callable=AsyncMock, return_value=GRID_PNG)
 @patch("submission_collector.download._fetch_js", new_callable=AsyncMock, side_effect=Exception("CDN down"))
 @patch("submission_collector.download.render_views", new_callable=AsyncMock, return_value=VIEW_PNGS)
@@ -187,7 +187,7 @@ async def test_fetch_failure_records_empty_generation(
     new_callable=AsyncMock,
     return_value={"chair": PROMPT_IMG},
 )
-@patch("submission_collector.download._build_embeddings_npz", new_callable=AsyncMock, return_value=NPZ_BYTES)
+@patch("submission_collector.download.build_embeddings_npz", new_callable=AsyncMock, return_value=NPZ_BYTES)
 @patch("submission_collector.download.render_grid", new_callable=AsyncMock, return_value=GRID_PNG)
 @patch("submission_collector.download._fetch_js", new_callable=AsyncMock, return_value=JS_DATA)
 @patch("submission_collector.download.render_views", new_callable=AsyncMock, return_value=None)

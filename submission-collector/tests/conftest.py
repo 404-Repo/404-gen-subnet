@@ -21,6 +21,7 @@ def settings() -> Settings:
         R2_ENDPOINT=SecretStr("https://test-r2-endpoint"),
         DOWNLOAD_JITTER_SECONDS=0,
         STORAGE_KEY_TEMPLATE="rounds/{round}/{hotkey}/submitted/{filename}",
+        DINOV3_REVISION="test-revision",
     )
 
 

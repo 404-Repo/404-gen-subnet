@@ -26,22 +26,22 @@ class Settings(BaseSettings):
         alias="SUBTENSOR_NETWORK",
         description="Bittensor subtensor endpoint",
     )
-    netuid: int = Field(default=17, alias="NETUID", description="Network ID")
+    netuid: int = Field(default=17, alias="NETUID", description="Bittensor subnet ID")
     subtensor_timeout_seconds: int = Field(
         default=120,
         alias="SUBTENSOR_TIMEOUT",
-        description="Timeout in seconds for individual subtensor RPC calls (default 120s)",
+        description="Timeout in seconds for individual subtensor RPC calls",
     )
 
     min_check_state_interval_seconds: int = Field(
         default=120,
         alias="MIN_CHECK_STATE_INTERVAL",
-        description="Minimum interval between competition stage checks in seconds (default 2 min)",
+        description="Minimum interval between competition stage checks in seconds",
     )
     max_check_state_interval_seconds: int = Field(
         default=1800,
         alias="MAX_CHECK_STATE_INTERVAL",
-        description="Maximum interval between competition stage checks in seconds (default 30 min)",
+        description="Maximum interval between competition stage checks in seconds",
     )
 
     max_concurrent_downloads: int = Field(
@@ -52,7 +52,7 @@ class Settings(BaseSettings):
     download_jitter_seconds: int = Field(
         default=300,
         alias="DOWNLOAD_JITTER_SECONDS",
-        description="Max random delay before each download to spread load across CDNs (default 5 min)",
+        description="Max random delay before each download to spread load across CDNs",
     )
     max_js_size_bytes: int = Field(
         default=1 * 1024 * 1024,
@@ -79,6 +79,13 @@ class Settings(BaseSettings):
         default=None,
         alias="HF_TOKEN",
         description="Hugging Face token for gated models (DINOv3 embeddings).",
+    )
+    dinov3_revision: str = Field(
+        ...,
+        alias="DINOV3_REVISION",
+        description="Hugging Face revision (branch/tag/commit) for the DINOv3 embedding model. "
+        "Pin to a commit hash in production — drift across revisions changes embedding "
+        "outputs and corrupts judge comparisons.",
     )
 
     storage_key_template: str = Field(
