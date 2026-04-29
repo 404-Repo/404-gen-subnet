@@ -1,23 +1,28 @@
-from subnet_common.competition.generation_audit import GenerationAudit, GenerationAuditOutcome
+from subnet_common.competition.generation_report import GenerationReport, GenerationReportOutcome
 from subnet_common.discord import DiscordWebhook
+
+
+# TODO: For Max to review
 
 
 class DiscordNotifier:
     def __init__(self, webhook_url: str) -> None:
         self._webhook = DiscordWebhook(webhook_url)
 
-    async def notify_miner_audit(self, audit: GenerationAudit) -> None:
-        if audit.outcome == GenerationAuditOutcome.PENDING:
+    async def notify_generation_report(self, report: GenerationReport) -> None:
+        if report.outcome == GenerationReportOutcome.PENDING:
             return
-        if audit.outcome == GenerationAuditOutcome.PASSED:
-            gen_time = f"{audit.generation_time:.1f}s" if audit.generation_time is not None else "N/A"
-            description = f"Miner `{audit.hotkey[:10]}` passed — {audit.checked_prompts} prompts, median {gen_time}"
+        if report.outcome == GenerationReportOutcome.COMPLETED:
+            gen_time = f"{report.generation_time:.1f}s" if report.generation_time is not None else "N/A"
+            description = (
+                f"Miner `{report.hotkey[:10]}` completed — {report.checked_prompts} prompts, median {gen_time}"
+            )
             color = 0x2ECC71
         else:
-            description = f"Miner `{audit.hotkey[:10]}` rejected — {audit.reason}"
+            description = f"Miner `{report.hotkey[:10]}` rejected — {report.reason}"
             color = 0xE74C3C
         await self._webhook.send_embed(
-            title="Miner Audit Result",
+            title="Generation Report",
             color=color,
             description=description,
         )
@@ -30,20 +35,15 @@ class DiscordNotifier:
         generated: int,
         total: int,
         fails: int,
-        final_fails: int,
-        overtimes: int,
-        final_overtimes: int,
-        mismatches: int,
-        median_time: float | None,
+        total_generation_time: float,
+        replacements_used: int,
     ) -> None:
-        median = f"{median_time:.1f}s" if median_time is not None else "N/A"
         pct = generated * 100 // total if total else 0
         lines = [
-            f"Generated    {generated} / {total} ({pct}%)",
-            f"Fails        {fails:>3}  final: {final_fails}",
-            f"Overtimes    {overtimes:>3}  final: {final_overtimes}",
-            f"Mismatches   {mismatches:>3}",
-            f"Median time  {median}",
+            f"Generated     {generated} / {total} ({pct}%)",
+            f"Fails         {fails:>3}",
+            f"Total time    {total_generation_time:.1f}s",
+            f"Replacements  {replacements_used}",
         ]
         await self._webhook.send_embed(
             title=f"Round {round_num} Generation — `{hotkey[:10]}`",
@@ -84,7 +84,7 @@ class NullDiscordNotifier(DiscordNotifier):
     def __init__(self) -> None:
         pass
 
-    async def notify_miner_audit(self, audit: GenerationAudit) -> None:
+    async def notify_generation_report(self, report: GenerationReport) -> None:
         pass
 
     async def notify_generation_progress(self, **kwargs: object) -> None:  # type: ignore[override]

@@ -7,7 +7,12 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", case_sensitive=False)
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        case_sensitive=False,
+        extra="ignore",
+    )
 
     github_token: SecretStr = Field(..., alias="GITHUB_TOKEN", description="GitHub personal access token")
     github_repo: str = Field(
@@ -62,6 +67,16 @@ class Settings(BaseSettings):
         alias="GPU_PROVIDERS",
         description="Comma-separated list of GPU providers in priority order (e.g., 'targon,verda')",
     )
+    gpu_type: str = Field(
+        default="H200",
+        alias="GPU_TYPE",
+        description="GPU model miners run on (maps to provider-specific SKUs)",
+    )
+    gpu_count: int = Field(
+        default=4,
+        alias="GPU_COUNT",
+        description="GPUs per pod; api_specification.md promises miners 4×H200",
+    )
 
     targon_api_key: SecretStr | None = Field(default=None, alias="TARGON_API_KEY", description="Targon API key")
     verda_client_id: SecretStr | None = Field(
@@ -72,6 +87,14 @@ class Settings(BaseSettings):
     )
     verda_generation_token: SecretStr | None = Field(
         default=None, alias="VERDA_GENERATION_TOKEN", description="Verda Bearer token for generation requests"
+    )
+    runpod_api_key: SecretStr | None = Field(
+        default=None,
+        alias="RUNPOD_PROVIDER_API_KEY",
+        description=(
+            "Runpod API key for deploying pods. NOT 'RUNPOD_API_KEY' — Runpod injects "
+            "a scope-limited RUNPOD_API_KEY into every pod, which would shadow ours."
+        ),
     )
 
     generation_port: int = Field(
@@ -100,98 +123,84 @@ class Settings(BaseSettings):
         description="Timeout for pod to become visible after deployment in seconds",
     )
     pod_warmup_timeout_seconds: float = Field(
-        default=3600,
+        default=12600,
         alias="POD_WARMUP_TIMEOUT",
-        description="Timeout for pod to become healthy after visibility in seconds",
+        description=(
+            "Timeout for pod to progress from visible to /status=ready (covers /health + model load). "
+            "Default 12600s = 3.5h; combined with 30 min visibility, matches the api-spec 4h warmup budget."
+        ),
     )
 
-    pods_per_miner: int = Field(
-        default=4,
-        alias="PODS_PER_MINER",
-        description="N: target concurrent PODs per miner (N=1 for testing only, N>=2 for production)",
+    batch_size: int = Field(
+        default=32,
+        alias="BATCH_SIZE",
+        description="Number of prompts per batch sent to the pod",
     )
-    max_pod_attempts: int = Field(
-        default=6,
-        alias="MAX_POD_ATTEMPTS",
-        description="K: total POD start attempts budget (K >= N)",
+    max_replacements: int = Field(
+        default=3,
+        alias="MAX_REPLACEMENTS",
+        description="Maximum pod replacements allowed per miner (crash or miner-requested)",
     )
-    initial_pod_count: int = Field(
+    max_initial_deploy_attempts: int = Field(
         default=2,
-        alias="INITIAL_POD_COUNT",
-        description="M: how many PODs to start initially before expansion (M <= N)",
+        alias="MAX_INITIAL_DEPLOY_ATTEMPTS",
+        description=(
+            "Attempts to get the first healthy pod before giving up; "
+            "subsequent deploy failures use the replacement budget"
+        ),
     )
-    pod_start_delay_seconds: int = Field(
-        default=30,
-        alias="POD_START_DELAY",
-        description="Delay between POD starts",
+    status_check_interval_seconds: float = Field(
+        default=10.0,
+        alias="STATUS_CHECK_INTERVAL",
+        description="Seconds between pod status polls while waiting for batch completion",
     )
-    max_prompt_attempts: int = Field(
-        default=3,
-        alias="MAX_PROMPT_ATTEMPTS",
-        description="Max attempts per prompt across all PODs (must be <= pods_per_miner)",
+    max_consecutive_unhealthy: int = Field(
+        default=18,
+        alias="MAX_CONSECUTIVE_UNHEALTHY",
+        description="Consecutive unreachable status checks before treating pod as crashed (~3 min at 10s interval)",
     )
-    prompt_lock_timeout_seconds: float = Field(
-        default=600.0,
-        alias="PROMPT_LOCK_TIMEOUT",
-        description="Max seconds a prompt stays assigned to a pod before other pods can claim it",
+    batch_time_limit_seconds: float | None = Field(
+        default=3600.0,
+        alias="BATCH_TIME_LIMIT",
+        description=(
+            "Per-batch wall-clock cap (seconds). Watchdog only: above any plausible real "
+            "batch, exists to break out of pods stuck reporting status=generating forever. "
+            "Run-level policy lives in TOTAL_GENERATION_TIME_LIMIT (post-hoc rejection)."
+        ),
     )
-    pod_min_samples: int = Field(
-        default=8,
-        alias="POD_MIN_SAMPLES",
-        description="Minimum prompts processed before checking bad pod criteria",
-    )
-    pod_failure_threshold: int = Field(
-        default=8,
-        alias="POD_FAILURE_THRESHOLD",
-        description="Mark POD as bad after this many hard failures",
-    )
-    warmup_half_window: int = Field(
-        default=4,
-        alias="WARMUP_HALF_WINDOW",
-        description="Half-window size for warmup trend detection (compares median of last N vs previous N)",
-    )
-    generation_median_limit_seconds: float = Field(
-        default=90.0,
-        alias="GENERATION_MEDIAN_LIMIT",
-        description="Quality bar for trimmed median generation time",
-    )
-    rolling_median_limit_seconds: float = Field(
-        default=120.0,
-        alias="ROLLING_MEDIAN_LIMIT",
-        description="Infrastructure bar for rolling median (marks pod as bad if exceeded)",
-    )
-    retry_delta_min_samples: int = Field(
-        default=3,
-        alias="RETRY_DELTA_MIN_SAMPLES",
-        description="Minimum retry samples before checking if retries are helping",
-    )
-    generation_median_trim_count: int = Field(
-        default=6,
-        alias="GENERATION_MEDIAN_TRIM_COUNT",
-        description="Number of low/high samples trimmed before median calculation",
-    )
-    generation_timeout_seconds: int = Field(
-        default=180,
-        alias="GENERATION_TIMEOUT",
-        description="Hard limit for generation time in seconds (counts as failure if exceeded)",
-    )
-    acceptable_distance: float = Field(
-        default=0.1,
-        alias="ACCEPTABLE_DISTANCE",
-        description="Maximum acceptable distance between submitted and regenerated previews",
+    total_generation_time_limit_seconds: float = Field(
+        default=7200.0,
+        alias="TOTAL_GENERATION_TIME_LIMIT",
+        description="Maximum total generation time across all batches before audit rejection",
     )
     max_mismatched_prompts: int = Field(
         default=6,
         alias="MAX_MISMATCHED_PROMPTS",
         description="Maximum tolerated mismatched prompts before early stop",
     )
-    max_mismatched_critical_prompts: int = Field(
-        default=1,
-        alias="MAX_MISMATCHED_CRITICAL_PROMPTS",
-        description="Maximum tolerated mismatched critical prompts before audit failure",
-    )
     download_timeout_seconds: int = Field(
         default=180, alias="DOWNLOAD_TIMEOUT", description="Download timeout in seconds"
+    )
+
+    max_batch_zip_bytes: int = Field(
+        default=64 * 1024 * 1024,
+        alias="MAX_BATCH_ZIP_BYTES",
+        description="Hard cap on raw /results ZIP size (default 64 MB; api-spec theoretical max is ~32 MB)",
+    )
+    max_batch_files: int = Field(
+        default=100,
+        alias="MAX_BATCH_FILES",
+        description="Hard cap on archive entries (default 100; expected is 33 = 32 .js + _failed.json)",
+    )
+    max_js_bytes: int = Field(
+        default=1 * 1024 * 1024,
+        alias="MAX_JS_BYTES",
+        description="Hard cap on a single .js module size; matches output spec FILE_SIZE_EXCEEDED (default 1 MB)",
+    )
+    max_failed_manifest_bytes: int = Field(
+        default=16 * 1024,
+        alias="MAX_FAILED_MANIFEST_BYTES",
+        description="Hard cap on the _failed.json manifest size (default 16 KB)",
     )
 
     max_concurrent_miners: int = Field(
@@ -199,17 +208,24 @@ class Settings(BaseSettings):
         alias="MAX_CONCURRENT_MINERS",
         description="Maximum number of miners being processed concurrently",
     )
-    max_concurrent_prompts_per_pod: int = Field(
-        default=4,
-        alias="MAX_CONCURRENT_PROMPTS_PER_POD",
-        description="Maximum number of prompts processed concurrently per GPU pod",
-    )
 
     render_service_url: str = Field(
         default="http://localhost:8000", alias="RENDER_URL", description="Render service base URL"
     )
-    image_distance_service_url: str = Field(
-        default="http://localhost:8001", alias="IMAGE_DISTANCE_SERVICE_URL", description="Image distance service URL"
+    render_api_key: SecretStr | None = Field(
+        default=None,
+        alias="RENDER_API_KEY",
+        description="Bearer token sent to the render service (e.g. Runpod serverless key). None = no auth.",
+    )
+    render_timeout_seconds: float = Field(
+        default=60.0,
+        alias="RENDER_TIMEOUT",
+        description="Per-request read timeout for the render service (covers serverless cold starts)",
+    )
+    render_warmup_timeout_seconds: float = Field(
+        default=60.0,
+        alias="RENDER_WARMUP_TIMEOUT",
+        description="How long the fire-and-forget warmup waits for the cold-start render to return",
     )
 
     r2_access_key_id: SecretStr = Field(..., alias="R2_ACCESS_KEY_ID", description="R2 access key ID")
@@ -240,11 +256,7 @@ class Settings(BaseSettings):
 
     log_level: str = Field(default="DEBUG", alias="LOG_LEVEL", description="Logging level")
 
-    debug_keep_pods_alive: bool = Field(
-        default=False, alias="DEBUG_KEEP_PODS_ALIVE", description="Do not terminate pods when generation is completed"
-    )
-
-    @field_validator("render_service_url", "image_distance_service_url", "cdn_url")
+    @field_validator("render_service_url", "cdn_url")
     @classmethod
     def normalize_url(cls, v: str) -> str:
         return v.rstrip("/")
@@ -257,23 +269,6 @@ class Settings(BaseSettings):
         return v
 
     @model_validator(mode="after")
-    def validate_pod_config(self) -> Self:
-        """Validate multi-POD configuration constraints."""
-        if self.max_prompt_attempts > self.pods_per_miner:
-            raise ValueError(
-                f"max_prompt_attempts ({self.max_prompt_attempts}) must be <= pods_per_miner ({self.pods_per_miner})"
-            )
-        if self.max_pod_attempts < self.pods_per_miner:
-            raise ValueError(
-                f"max_pod_attempts ({self.max_pod_attempts}) must be >= pods_per_miner ({self.pods_per_miner})"
-            )
-        if self.initial_pod_count > self.pods_per_miner:
-            raise ValueError(
-                f"initial_pod_count ({self.initial_pod_count}) must be <= pods_per_miner ({self.pods_per_miner})"
-            )
-        return self
-
-    @model_validator(mode="after")
     def validate_gpu_providers(self) -> Self:
         """Ensure credentials are present for each enabled GPU provider."""
         providers = [p.strip().lower() for p in self.gpu_providers.split(",") if p.strip()]
@@ -281,8 +276,8 @@ class Settings(BaseSettings):
             raise ValueError("GPU_PROVIDERS must contain at least one provider")
 
         for provider in providers:
-            if provider not in ("targon", "verda"):
-                raise ValueError(f"Unknown GPU provider: {provider}. Valid options: targon, verda")
+            if provider not in ("targon", "verda", "runpod"):
+                raise ValueError(f"Unknown GPU provider: {provider}. Valid options: targon, verda, runpod")
 
         if "targon" in providers and not self.targon_api_key:
             raise ValueError("TARGON_API_KEY is required when targon is in GPU_PROVIDERS")
@@ -298,5 +293,8 @@ class Settings(BaseSettings):
                 "VERDA_CLIENT_ID, VERDA_CLIENT_SECRET, and VERDA_GENERATION_TOKEN "
                 "are required when verda is in GPU_PROVIDERS"
             )
+
+        if "runpod" in providers and not self.runpod_api_key:
+            raise ValueError("RUNPOD_PROVIDER_API_KEY is required when runpod is in GPU_PROVIDERS")
 
         return self

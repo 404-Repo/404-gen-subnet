@@ -147,6 +147,73 @@ class TestTrack:
         image = tracker._builds[HOTKEY].docker_image
         assert image == f"gcr.io/myproject/{HOTKEY[:10]}:abc1234-round1"
 
+    async def test_skips_github_when_builds_json_is_final(self) -> None:
+        """Prior builds.json with every submission in terminal state: no GitHub poll, no write."""
+        mock_git = BuildMockGitHub()
+        mock_git.files["rounds/1/builds.json"] = json.dumps(
+            {
+                HOTKEY: {
+                    "repo": "o/r",
+                    "commit": "abc1234",
+                    "revealed_at_block": 100,
+                    "tag": "abc1234-round1",
+                    "status": "success",
+                    "docker_image": "registry/5abc123def:abc1234-round1",
+                }
+            }
+        )
+
+        tracker = make_tracker(mock_git)
+
+        await tracker.track(round_num=1, submissions=make_submission())
+
+        assert tracker._builds[HOTKEY].status == BuildStatus.SUCCESS
+        assert tracker._builds[HOTKEY].docker_image == "registry/5abc123def:abc1234-round1"
+        assert "rounds/1/builds.json" not in mock_git.committed
+        assert mock_git.run_id is None  # untouched — default was None
+
+    async def test_preserves_prior_terminal_entries_across_restart(self) -> None:
+        """Partial prior state: keep terminal entries, still poll for missing ones."""
+        second = "5def456abc"
+        second_job = f"Bake and push images to Google Cloud ({second})"
+
+        mock_git = BuildMockGitHub()
+        mock_git.files["rounds/1/builds.json"] = json.dumps(
+            {
+                HOTKEY: {
+                    "repo": "o/r",
+                    "commit": "abc1234",
+                    "revealed_at_block": 100,
+                    "tag": "abc1234-round1",
+                    "status": "success",
+                    "docker_image": "registry/5abc123def:abc1234-round1",
+                }
+            }
+        )
+        mock_git.run_id = 42
+        mock_git.jobs = [
+            GitHubJob(id=1, name=JOB_NAME, status="completed", conclusion="success"),
+            GitHubJob(id=2, name=second_job, status="completed", conclusion="success"),
+        ]
+        tracker = make_tracker(mock_git)
+
+        submissions = make_submission()
+        submissions[second] = MinerSubmission(
+            repo="o/r2",
+            commit="def4567",
+            cdn_url="https://cdn.example.com",
+            revealed_at_block=101,
+            round="round1",
+        )
+
+        await tracker.track(round_num=1, submissions=submissions)
+
+        # Preserved terminal entry keeps its existing docker_image (prior value, not re-formatted).
+        assert tracker._builds[HOTKEY].status == BuildStatus.SUCCESS
+        assert tracker._builds[HOTKEY].docker_image == "registry/5abc123def:abc1234-round1"
+        # Newly-tracked entry resolved from GitHub.
+        assert tracker._builds[second].status == BuildStatus.SUCCESS
+
 
 class TestWaitForBuild:
     async def test_unblocks_when_build_resolves(self) -> None:

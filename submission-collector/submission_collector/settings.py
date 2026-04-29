@@ -3,7 +3,15 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", case_sensitive=False)
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        case_sensitive=False,
+        # Pod hosts (Runpod etc.) inject their own env vars (RUNPOD_API_KEY etc.) which
+        # would otherwise crash the service on startup. Service-owned typos in .env are
+        # a tradeoff: most service config has a defined field below.
+        extra="ignore",
+    )
 
     github_token: SecretStr = Field(..., alias="GITHUB_TOKEN", description="GitHub personal access token")
     github_repo: str = Field(
@@ -46,10 +54,13 @@ class Settings(BaseSettings):
         alias="DOWNLOAD_JITTER_SECONDS",
         description="Max random delay before each download to spread load across CDNs (default 5 min)",
     )
-    max_glb_size_bytes: int = Field(
-        default=200 * 1024 * 1024,
-        alias="MAX_GLB_SIZE_BYTES",
-        description="Maximum GLB file size in bytes (default 200 MB)",
+    max_js_size_bytes: int = Field(
+        default=1 * 1024 * 1024,
+        alias="MAX_JS_SIZE_BYTES",
+        description=(
+            "Maximum .js module size in bytes (default 1 MB; matches orchestrator "
+            "MAX_JS_BYTES and the miner output spec)"
+        ),
     )
 
     r2_access_key_id: SecretStr = Field(..., alias="R2_ACCESS_KEY_ID", description="R2 access key ID")
@@ -58,6 +69,16 @@ class Settings(BaseSettings):
 
     render_service_url: str = Field(
         default="http://localhost:8000", alias="RENDER_URL", description="Render service base URL"
+    )
+    render_api_key: SecretStr | None = Field(
+        default=None,
+        alias="RENDER_API_KEY",
+        description="Bearer token sent to the render service (e.g. Runpod serverless key). None = no auth.",
+    )
+    hf_token: SecretStr | None = Field(
+        default=None,
+        alias="HF_TOKEN",
+        description="Hugging Face token for gated models (DINOv3 embeddings).",
     )
 
     storage_key_template: str = Field(

@@ -1,12 +1,9 @@
-import random
 from collections import deque
-from math import ceil
-from pathlib import Path
 
 from loguru import logger
 from openai import AsyncOpenAI
 from pydantic import BaseModel, Field
-from subnet_common.competition import generation_audit, source_audit
+from subnet_common.competition import generation_report, source_audit, verification_audit
 from subnet_common.competition.audit_requests import (
     AuditRequest,
     AuditRequests,
@@ -18,7 +15,7 @@ from subnet_common.competition.config import require_competition_config
 from subnet_common.competition.generations import GenerationSource, get_generations
 from subnet_common.competition.leader import require_leader_state
 from subnet_common.competition.match_matrix import MatchMatrix, get_match_matrix, save_match_matrix
-from subnet_common.competition.match_report import DuelWinner, MatchReport, get_match_report, save_match_report
+from subnet_common.competition.match_report import DuelWinner, save_match_report
 from subnet_common.competition.prompts import require_prompts
 from subnet_common.competition.round_result import RoundResult, save_round_result
 from subnet_common.competition.seed import require_seed_from_git
@@ -32,6 +29,7 @@ from subnet_common.git_batcher import GitBatcher
 from subnet_common.github import GitHubClient
 from subnet_common.graceful_shutdown import GracefulShutdown
 
+from judge_service.audit_execution import run_verification_audit
 from judge_service.discord import DiscordNotifier
 from judge_service.match_execution import run_match
 from judge_service.models import MatchOutcome
@@ -104,6 +102,8 @@ class MatchRunner:
         self._audit_requests = audit_requests
         self._approved_hotkeys: set[str] = set()
         self._rejected_hotkeys: set[str] = set()
+        self._reports: dict[str, generation_report.GenerationReport] = {}
+        self._verification_audits: dict[str, verification_audit.VerificationAudit] = {}
 
         self._settings = settings
         self._discord = discord
@@ -198,7 +198,16 @@ class MatchRunner:
                 await self._finalize(winner=self._timeline.winner)
                 return
 
-            if not self._timeline.finished:
+            # Verification first: any hotkey with a COMPLETED orchestrator report and no
+            # verification audit yet gets duelled (submitted vs generated) before we run
+            # more miner-vs-miner matches. A pending verification could disqualify the
+            # current local leader and reset the timeline, so resolving it early avoids
+            # wasted match work.
+            pending_audit = await self._find_pending_verification()
+            if pending_audit:
+                await self._run_verification_audit(pending_audit, shutdown)
+                refresh_needed = True
+            elif not self._timeline.finished:
                 match = await self._run_timeline(qualified, shutdown)
                 refresh_needed = not match.from_cache
             else:
@@ -230,13 +239,13 @@ class MatchRunner:
             if hotkey in self._rejected_hotkeys:
                 continue
 
-            match = await self._ensure_match("leader", hotkey, shutdown, reload_decisive_prompts=True)
+            match = await self._ensure_match("leader", hotkey, shutdown)
 
             if match.margin >= self._win_margin:
                 qualified.append(hotkey)
 
                 if not first_qualified_audited:
-                    await self._request_audit(hotkey, match.decisive_prompts, match.margin)
+                    await self._request_audit(hotkey, match.margin)
                     first_qualified_audited = True
 
             if not match.from_cache:
@@ -258,11 +267,11 @@ class MatchRunner:
             return MatchOutcome(left=left, right=right, margin=-100.0)
 
         logger.info(f"Timeline match. Running: {left[:10]} vs {right[:10]}")
-        match = await self._ensure_match(left, right, shutdown, reload_decisive_prompts=True)
+        match = await self._ensure_match(left, right, shutdown)
 
         if match.margin >= self._win_margin:
             self._timeline.local_leaders.append(right)
-            await self._request_audit(right, match.decisive_prompts, match.margin)
+            await self._request_audit(right, match.margin)
             await self._discord.notify_new_local_leader(
                 round_num=self._round_num, hotkey=right, defeated=left, margin=match.margin
             )
@@ -280,22 +289,14 @@ class MatchRunner:
     async def _run_exploratory_duel(self, left: str, right: str, shutdown: GracefulShutdown) -> MatchOutcome:
         """Run a duel between two miners. Returns MatchOutcome."""
         logger.info(f"Exploratory duel. Running: {left[:10]} vs {right[:10]}")
-        match = await self._ensure_match(left, right, shutdown=shutdown, reload_decisive_prompts=False)
+        match = await self._ensure_match(left, right, shutdown=shutdown)
         return match
 
-    async def _ensure_match(
-        self, left: str, right: str, shutdown: GracefulShutdown, reload_decisive_prompts: bool
-    ) -> MatchOutcome:
+    async def _ensure_match(self, left: str, right: str, shutdown: GracefulShutdown) -> MatchOutcome:
         """Run match if not in matrix, save a result. Returns MatchOutcome with a cached flag."""
         margin = self._match_matrix.get(left=left, right=right)
         if margin is not None:
-            if reload_decisive_prompts:
-                decisive_prompts = await self._load_decisive_prompts(left, right)
-            else:
-                decisive_prompts = []
-            return MatchOutcome(
-                left=left, right=right, margin=margin, decisive_prompts=decisive_prompts, from_cache=True
-            )
+            return MatchOutcome(left=left, right=right, margin=margin, from_cache=True)
 
         match = await self._run_match_between(left=left, right=right, shutdown=shutdown)
 
@@ -305,15 +306,6 @@ class MatchRunner:
         self._match_matrix.add(left, right, match.margin)
         await save_match_matrix(self._git_batcher, self._round_num, self._match_matrix)
         return match
-
-    async def _load_decisive_prompts(self, left: str, right: str) -> list[str]:
-        """Load decisive prompts from a saved match report."""
-        report = await get_match_report(
-            git_batcher=self._git_batcher, round_num=self._round_num, left=left, right=right
-        )
-        if report is None:
-            return []
-        return self._extract_decisive_prompts(report)
 
     async def _run_match_between(
         self,
@@ -357,9 +349,7 @@ class MatchRunner:
             right_gens=right_gens,
             left=left,
             right=right,
-            max_concurrent_duels=self._settings.max_concurrent_duels,
-            overtime_tolerance_ratio=self._settings.overtime_tolerance_ratio,
-            max_generation_time_seconds=self._settings.max_generation_time_seconds,
+            max_concurrent_vlm_calls=self._settings.max_concurrent_vlm_calls,
             shutdown=shutdown,
         )
 
@@ -367,28 +357,26 @@ class MatchRunner:
             logger.info(f"Match {left[:10]} vs {right[:10]} interrupted by shutdown, discarding partial result")
             return MatchOutcome(left=left, right=right, margin=0.0)
 
-        failed_duels = sum(1 for d in report.duels if d.issues == "Internal error")
+        # Multi-stage judge sets winner+detail on success, or leaves SKIPPED with detail=None
+        # when evaluate_duel raised. SKIPPED with detail set is a clean preview-missing skip.
+        failed_duels = sum(
+            1 for d in report.duels if d.winner == DuelWinner.SKIPPED and d.detail is None
+        )
         if failed_duels:
             await self._discord.notify_judge_error(failed_duels=failed_duels, total_duels=len(report.duels))
 
         await save_match_report(self._git_batcher, self._round_num, report)
 
-        decisive = self._extract_decisive_prompts(report)
-        logger.info(f"Match {left[:10]} vs {right[:10]}: margin={report.margin:+.2%}, decisive={len(decisive)}")
+        logger.info(f"Match {left[:10]} vs {right[:10]}: margin={report.margin:+.2%}")
 
-        return MatchOutcome(
-            left=left,
-            right=right,
-            margin=report.margin,
-            decisive_prompts=decisive,
-        )
+        return MatchOutcome(left=left, right=right, margin=report.margin)
 
-    async def _request_audit(self, hotkey: str, decisive_prompts: list[str], margin: float) -> None:
+    async def _request_audit(self, hotkey: str, margin: float) -> None:
         """Request audit for a miner if not already requested."""
-        added = self._audit_requests.add(AuditRequest(hotkey=hotkey, critical_prompts=decisive_prompts))
+        added = self._audit_requests.add(AuditRequest(hotkey=hotkey))
         if added:
             await save_audit_requests(self._git_batcher, self._round_num, self._audit_requests)
-            logger.info(f"Audit requested for {hotkey[:10]}, critical_prompts={len(decisive_prompts)}")
+            logger.info(f"Audit requested for {hotkey[:10]}")
             await self._discord.notify_audit_requested(round_num=self._round_num, hotkey=hotkey, margin=margin)
 
     async def _refresh_verification_state(self) -> bool:
@@ -396,18 +384,29 @@ class MatchRunner:
 
         await self._git_batcher.refresh_base_sha()
 
-        gen_audits = await generation_audit.get_generation_audits(
+        # Generation orchestrator's own verdict (it self-rejects on timing / failures).
+        # Only COMPLETED reports become candidates for the verification duel below.
+        reports = await generation_report.get_generation_reports(
             git=self._git, round_num=self._round_num, ref=self._ref
         )
-        verified = generation_audit.get_passed_hotkeys(gen_audits)
-        failed = generation_audit.get_rejected_hotkeys(gen_audits)
+        completed = generation_report.get_completed_hotkeys(reports)
+        rejected_by_orchestrator = generation_report.get_rejected_hotkeys(reports)
+
+        # Our own verdict from the submitted-vs-generated verification duel.
+        ver_audits = await verification_audit.get_verification_audits(
+            git=self._git, round_num=self._round_num, ref=self._ref
+        )
+        ver_passed = verification_audit.get_passed_hotkeys(ver_audits)
+        ver_failed = verification_audit.get_failed_hotkeys(ver_audits)
 
         audits = await source_audit.get_source_audits(git=self._git, round_num=self._round_num, ref=self._ref)
-        passed = source_audit.get_passed_hotkeys(audits)
-        disqualified = source_audit.get_failed_hotkeys(audits)
+        source_passed = source_audit.get_passed_hotkeys(audits)
+        source_failed = source_audit.get_failed_hotkeys(audits)
 
-        approved = verified & passed
-        rejected = failed | disqualified
+        # Approved = orchestrator COMPLETED ∧ verification PASSED ∧ source PASSED.
+        # Rejected = any of the three said no.
+        approved = completed & ver_passed & source_passed
+        rejected = rejected_by_orchestrator | ver_failed | source_failed
 
         changed: bool = approved != self._approved_hotkeys or rejected != self._rejected_hotkeys
 
@@ -416,39 +415,72 @@ class MatchRunner:
             self._rejected_hotkeys = rejected
             logger.info(
                 f"Verification update: "
-                f"approved={len(approved)} (verified={len(verified)}, passed={len(passed)}), "
-                f"rejected={len(rejected)} (failed={len(failed)}, disqualified={len(disqualified)})"
+                f"approved={len(approved)} "
+                f"(completed={len(completed)}, ver_passed={len(ver_passed)}, source_passed={len(source_passed)}), "
+                f"rejected={len(rejected)} "
+                f"(orch={len(rejected_by_orchestrator)}, ver={len(ver_failed)}, source={len(source_failed)})"
             )
 
+        # Stash for the main loop to consult when picking the next unit of work.
+        self._reports = reports
+        self._verification_audits = ver_audits
+
         return changed
+
+    async def _find_pending_verification(self) -> str | None:
+        """Find the first hotkey with COMPLETED orchestrator report and no verification audit yet."""
+        for hotkey, rpt in self._reports.items():
+            if rpt.outcome != generation_report.GenerationReportOutcome.COMPLETED:
+                continue
+            if hotkey in self._verification_audits:
+                continue
+            if hotkey in self._rejected_hotkeys:
+                continue
+            return hotkey
+        return None
+
+    async def _run_verification_audit(self, hotkey: str, shutdown: GracefulShutdown) -> None:
+        """Run one verification duel: SUBMITTED vs GENERATED. Persists report + audit."""
+        logger.info(f"Verification duel for {hotkey[:10]}")
+        submitted_gens = await get_generations(
+            git=self._git,
+            round_num=self._round_num,
+            hotkey=hotkey,
+            source=GenerationSource.SUBMITTED,
+            ref=self._ref,
+        )
+        generated_gens = await get_generations(
+            git=self._git,
+            round_num=self._round_num,
+            hotkey=hotkey,
+            source=GenerationSource.GENERATED,
+            ref=self._ref,
+        )
+
+        audit = await run_verification_audit(
+            openai=self._openai,
+            git_batcher=self._git_batcher,
+            round_num=self._round_num,
+            hotkey=hotkey,
+            prompts=self._prompts,
+            seed=self._seed,
+            submitted_gens=submitted_gens,
+            generated_gens=generated_gens,
+            max_concurrent_vlm_calls=self._settings.max_concurrent_vlm_calls,
+            shutdown=shutdown,
+        )
+
+        if shutdown.should_stop:
+            logger.info(f"Verification for {hotkey[:10]} interrupted by shutdown")
+            return
+
+        # Merge into the existing audits dict and persist.
+        self._verification_audits[hotkey] = audit
+        await verification_audit.save_verification_audits(self._git_batcher, self._round_num, self._verification_audits)
 
     def _filter_rejected(self, hotkeys: list[str]) -> list[str]:
         """Filter out rejected hotkeys."""
         return [hk for hk in hotkeys if hk not in self._rejected_hotkeys]
-
-    def _extract_decisive_prompts(self, report: MatchReport) -> list[str]:
-        """Identify pivotal prompts that require strict audit verification.
-
-        All generations are re-checked during audit, but up to max_mismatched_margin
-        mismatches are tolerated when they are not pivotal. Pivotal prompts are held
-        to a stricter standard.
-
-        If the margin is large enough (>= max_mismatched_margin + win_margin), even
-        the tolerant standard check is enough — no pivotal prompts are flagged.
-        Otherwise we flag right-winning prompts as pivotal: all of them when there
-        are few, or a random subset proportional to win_margin when there are many.
-        """
-        full_tolerance_margin = self._settings.max_mismatched_margin + self._win_margin
-        if report.margin >= full_tolerance_margin:
-            return []
-
-        right_wins = [Path(d.prompt).stem for d in report.duels if d.winner == DuelWinner.RIGHT]
-        count = max(1, ceil(len(report.duels) * self._win_margin))
-
-        if count >= len(right_wins):
-            return right_wins
-
-        return random.Random(self._seed).sample(right_wins, count)  # nosec B311 # noqa: S311
 
     async def _transition_to_next_stage(self, reason: str) -> None:
         """Transition to the next stage."""

@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'none'; script-src 'self' blob: 'unsafe-inline'; connect-src 'none'; img-src 'none'; style-src 'unsafe-inline';">
+  <style>body { margin: 0; overflow: hidden; }</style>
+</head>
+<body>
+<script type="module">
+import * as THREE from '/three.module.js';
+
+// Expose THREE globally. Property overrides (Math.random, Date, performance)
+// are applied by the Puppeteer evaluate function just before miner code runs,
+// then restored afterwards. This avoids breaking Three.js internals that use
+// Math.random (e.g. MathUtils.generateUUID called by WebGLRenderer).
+window.THREE = THREE;
+window.__ready = true;
+</script>
+</body>
+</html>

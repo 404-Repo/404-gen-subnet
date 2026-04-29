@@ -39,5 +39,7 @@ class Settings(BaseSettings):
     github_winner_info_branch: str = Field(default="main")
     github_token: str | None = Field(default=None)
 
+    discord_webhook_url: str | None = Field(default=None, description="Discord webhook URL for error alerts (optional)")
+
 
 settings = Settings()  # type: ignore[call-arg]

@@ -1,0 +1,27 @@
+{
+  "name": "@404-subnet/validator",
+  "version": "0.1.0",
+  "description": "Static and post-execution validator for 404-GEN miner submissions. Mirrors the production runtime's static analysis and post-execution checks so miners can iterate locally before submitting.",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "scripts": {
+    "test": "node test/run-budget-probes.js && node test/run-negative-probes.js && node test/run-adversary-probes.mjs && node test/run-runtime-adversary.mjs && node test/run-exec-argv-test.js",
+    "test:budget": "node test/run-budget-probes.js",
+    "test:negative": "node test/run-negative-probes.js",
+    "test:adversary": "node test/run-adversary-probes.mjs",
+    "test:runtime-adversary": "node test/run-runtime-adversary.mjs",
+    "test:exec-argv": "node test/run-exec-argv-test.js",
+    "validate-car": "node ../tools/validate.js ../examples/car.js"
+  },
+  "dependencies": {
+    "@babel/parser": "^7.24.0",
+    "@babel/traverse": "^7.24.0",
+    "three": "0.183.2"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

@@ -20,12 +20,17 @@ class DuelReport(BaseModel):
 
     name: str
     prompt: str
-    left_glb: str | None = None
+    left_js: str | None = None
     left_png: str | None = None
-    right_glb: str | None = None
+    right_js: str | None = None
     right_png: str | None = None
     winner: DuelWinner = DuelWinner.SKIPPED
-    issues: str = ""
+    detail: dict | None = None
+    """Per-stage trace from the multi-stage judge: scores per VLM call + DINOv3 similarities.
+
+    Free-form by design — each stage adds its own keys (s1/s2_bv/s2_ac/s2_cl/s3/s4).
+    Only numeric/structural fields are kept; VLM `issues` text is dropped to bound size.
+    """
 
 
 class MatchReport(BaseModel):

@@ -1,24 +1,30 @@
 import asyncio
-import statistics
 from enum import Enum
 
 from loguru import logger
 from subnet_common.competition.audit_requests import AuditRequest
-from subnet_common.competition.generation_audit import GenerationAudit, GenerationAuditOutcome
-from subnet_common.competition.generations import GenerationResult, GenerationSource, get_generations
+from subnet_common.competition.generation_report import GenerationReport, GenerationReportOutcome
+from subnet_common.competition.generations import (
+    GenerationResult,
+    GenerationSource,
+    get_generations,
+    save_generations,
+)
 from subnet_common.competition.pod_stats import PodStats, save_pod_stats
 from subnet_common.git_batcher import GitBatcher
+from subnet_common.render import warmup as render_warmup
 
 from generation_orchestrator.discord import NULL_DISCORD_NOTIFIER, DiscordNotifier
-from generation_orchestrator.generation_pipeline import GenerationPipeline
 from generation_orchestrator.generation_stop import GenerationStop
+from generation_orchestrator.generation_summary import summarize_generation
 from generation_orchestrator.gpu_provider import DeployedContainer, GPUProviderManager
-from generation_orchestrator.miner_audit import audit_generations
-from generation_orchestrator.pod_tracker import PodTracker
-from generation_orchestrator.prompt_coordinator import PromptCoordinator, PromptEntry
+from generation_orchestrator.pod_session import PodReplaceRequested, PodSession
 from generation_orchestrator.prompts import Prompt
 from generation_orchestrator.settings import Settings
 from generation_orchestrator.staggered_semaphore import StaggeredSemaphore
+
+
+_TERMINATION_COMPLETED = "completed"
 
 
 class _Verdict(Enum):
@@ -31,11 +37,9 @@ class _Verdict(Enum):
 
 
 class MinerRunner:
-    """
-    Orchestrates pod lifecycle and prompt processing for a single miner.
-
-    Worker = Pod. Each worker task owns its pod's entire lifecycle:
-    deploy → health check → process prompts → cleanup.
+    """Full lifecycle for one hotkey (miner or leader) in a round: deploy a pod,
+    run batches on it, handle replacements, collect results, and produce a generation
+    report.
     """
 
     def __init__(
@@ -70,27 +74,17 @@ class MinerRunner:
         self._log_id = hotkey[:10]
         self._miner_prefix = f"miner-{self._current_round:02d}-{self._hotkey[:10].lower()}"
 
-        self._pods_started = 0
-        self._workers: dict[str, asyncio.Task[None]] = {}
-        self._first_healthy = asyncio.Event()
-
-        self._coordinator = PromptCoordinator(
-            max_attempts=settings.max_prompt_attempts,
-            lock_timeout=settings.prompt_lock_timeout_seconds,
-            acceptable_distance=settings.acceptable_distance,
-            median_limit=settings.generation_median_limit_seconds,
-            hard_limit=settings.generation_timeout_seconds,
-            median_trim_count=settings.generation_median_trim_count,
-        )
-        self._submitted: dict[str, GenerationResult] = {}
+        self._submitted_stems: set[str] = set()
+        self._generations: dict[str, GenerationResult] = {}
+        self._replacements_used: int = 0
+        self._total_generation_time: float = 0.0
         self._pod_stats: dict[str, PodStats] = {}
 
-    async def run(self) -> GenerationAudit | None:
-        """
-        Run generation for one miner.
+    async def run(self) -> GenerationReport | None:
+        """Run generation for one miner.
 
         Returns:
-            GenerationAudit - generation completed (passed or rejected)
+            GenerationReport - generation completed or rejected
             None - generation-only run, or interrupted (should retry later)
         """
         async with self._semaphore:
@@ -98,8 +92,8 @@ class MinerRunner:
                 return None
             return await self._run()
 
-    async def _run(self) -> GenerationAudit | None:
-        """Load state, build task queue, orchestrate pods, return audit result."""
+    async def _run(self) -> GenerationReport | None:
+        """Load state, deploy pods with replacement loop, return audit result."""
         if self._audit_request is not None:
             all_submitted = await get_generations(
                 git=self._git_batcher.git,
@@ -108,61 +102,200 @@ class MinerRunner:
                 source=GenerationSource.SUBMITTED,
                 ref=self._settings.github_branch,
             )
-            self._submitted = {k: v for k, v in all_submitted.items() if not v.is_failed()}
+            self._submitted_stems = {k for k, v in all_submitted.items() if v.js is not None}
 
-        generations = await get_generations(
+        prior = await get_generations(
             git=self._git_batcher.git,
             hotkey=self._hotkey,
             round_num=self._current_round,
             source=GenerationSource.GENERATED,
             ref=self._settings.github_branch,
         )
+        self._generations = dict(prior)
 
-        if self._audit_request is not None:
-            entries = self._audit_entries()
-        else:
-            entries = [PromptEntry(prompt=p) for p in self._prompts]
+        if self._all_done():
+            logger.info(f"{self._log_id}: all {len(self._target_prompts())} prompts already done")
+            return self._build_report(_Verdict.COMPLETED)
 
-        self._coordinator.seed(entries, generations)
-        if self._coordinator.all_done():
-            logger.info(f"{self._log_id}: all {len(self._coordinator)} prompts already done")
-            return self._build_audit(_Verdict.COMPLETED)
+        logger.info(f"{self._log_id}: {self._pending_count()} prompts to process")
 
-        logger.info(f"{self._log_id}: {len(self._coordinator)} prompts to process")
+        # Fire-and-forget: wake a possibly-cold serverless render service now, so it's up
+        # by the time the first batch finishes, and we need to render. Bounded by its own
+        # timeout; failures are harmless — render() has its own retry budget.
+        render_key = self._settings.render_api_key.get_secret_value() if self._settings.render_api_key else None
+        asyncio.create_task(
+            render_warmup(
+                endpoint=self._settings.render_service_url,
+                timeout=self._settings.render_warmup_timeout_seconds,
+                api_key=render_key,
+                log_id=self._log_id,
+            )
+        )
 
         try:
-            await self._expand_pods(target=self._settings.initial_pod_count)
-            await self._wait_for_first_healthy_or_all_failed()
-
-            if self._stop.should_stop:
-                logger.info(f"{self._log_id}: stopped during initial pod warmup")
-                return None
-
-            if not self._first_healthy.is_set():
-                logger.error(f"{self._log_id}: all {self._settings.initial_pod_count} initial pods failed warmup")
-                await self._discord.notify_pod_warmup_failed(self._hotkey, self._current_round)
-                return self._build_audit(_Verdict.DEPLOY_FAILURE)
-
-            await self._expand_pods(target=self._settings.pods_per_miner)
-            await self._run_until_complete()
-
-            verdict = self._determine_verdict()
+            verdict = await self._run_with_replacements()
+            await self._send_progress()
             logger.info(f"{self._log_id}: finished with verdict={verdict.value}")
-            return self._build_audit(verdict)
+            return self._build_report(verdict)
         finally:
             await self._cleanup_all()
 
-    def _audit_entries(self) -> list[PromptEntry]:
-        """Build entries for audit mode: only prompts with valid submissions."""
-        entries: list[PromptEntry] = []
-        for prompt in self._prompts:
-            sub = self._submitted.get(prompt.stem)
-            if sub is not None:
-                entries.append(PromptEntry(prompt=prompt, submitted_png=sub.png))
-        return entries
+    async def _run_with_replacements(self) -> _Verdict:
+        """Deploy pods and run batches, replacing on crash or miner request."""
+        warmup = await self._warmup_initial_pod()
+        if warmup is None:
+            return _Verdict.PARTIAL if self._stop.should_stop else _Verdict.DEPLOY_FAILURE
+        pod_index, deployed = warmup
 
-    def _build_audit(self, verdict: _Verdict) -> GenerationAudit | None:
-        """Build audit result based on the verdict."""
+        while not self._stop.should_stop:
+            swap = await self._run_pod(deployed, pod_index)
+
+            if swap is None:
+                return self._determine_verdict()
+
+            if not self._consume_replacement(swap.reason.value):
+                return self._determine_verdict()
+
+            pod_index, next_deployed = await self._deploy_next_pod(pod_index + 1)
+            if next_deployed is None:
+                return _Verdict.PARTIAL if self._stop.should_stop else self._determine_verdict()
+            deployed = next_deployed
+
+        return _Verdict.PARTIAL
+
+    async def _run_pod(self, deployed: DeployedContainer, pod_index: int) -> PodReplaceRequested | None:
+        """Run all pending batches on one pod. Returns a swap signal or None if nothing to swap for.
+
+        Persists per-batch generations and per-pod stats regardless of how the pod ended.
+        """
+        pod_id = f"{self._miner_prefix}-{pod_index}"
+        batch_times: list[float] = []
+        pod_total_time: float = 0.0
+        swap: PodReplaceRequested | None = None
+
+        try:
+            async with PodSession(
+                settings=self._settings,
+                pod_endpoint=deployed.info.url,
+                auth_token=deployed.generation_token,
+                hotkey=self._hotkey,
+                seed=self._seed,
+                stop=self._stop,
+                remaining_replacements=self._settings.max_replacements - self._replacements_used,
+            ) as session:
+                pending = [p for p in self._target_prompts() if p.stem not in self._generations]
+                for batch in self._chunk(pending):
+                    if self._stop.should_stop:
+                        break
+
+                    outcome = await session.run(self._current_round, batch)
+                    if isinstance(outcome, PodReplaceRequested):
+                        swap = outcome
+                        return swap
+
+                    self._generations.update(outcome.generations)
+                    await save_generations(
+                        git_batcher=self._git_batcher,
+                        hotkey=self._hotkey,
+                        round_num=self._current_round,
+                        generations=self._generations,
+                        source=GenerationSource.GENERATED,
+                    )
+                    batch_times.append(outcome.batch_time)
+                    pod_total_time += outcome.batch_time
+                    self._total_generation_time += outcome.batch_time
+        finally:
+            self._pod_stats[pod_id] = PodStats(
+                pod_id=pod_id,
+                provider=deployed.info.provider.value,
+                batch_times=batch_times,
+                total_generation_time=pod_total_time,
+                termination_reason=swap.reason.value if swap is not None else _TERMINATION_COMPLETED,
+                payload=swap.payload if swap is not None else None,
+            )
+            await save_pod_stats(
+                git_batcher=self._git_batcher,
+                round_num=self._current_round,
+                hotkey=self._hotkey,
+                stats=self._pod_stats,
+            )
+            await self._gpu_manager.delete_container(deployed.info)
+
+        return swap
+
+    async def _warmup_initial_pod(self) -> tuple[int, DeployedContainer] | None:
+        """Deploy the first healthy pod, retrying up to max_initial_deploy_attempts.
+
+        Returns (pod_index, deployed) on success; None if all attempts failed or stop fired.
+        """
+        max_attempts = self._settings.max_initial_deploy_attempts
+        for attempt in range(1, max_attempts + 1):
+            if self._stop.should_stop:
+                return None
+            pod_index = attempt - 1
+            deployed = await self._deploy_and_wait_healthy(f"{self._miner_prefix}-{pod_index}", attempt_index=pod_index)
+            if deployed is not None:
+                return pod_index, deployed
+            if self._stop.should_stop:
+                return None  # type: ignore[unreachable]  # property can flip across the await
+            if attempt < max_attempts:
+                logger.info(f"{self._log_id}: initial deploy failed, retry {attempt}/{max_attempts}")
+        logger.warning(f"{self._log_id}: initial deploy failed after {max_attempts}/{max_attempts} attempts")
+        return None
+
+    async def _deploy_next_pod(self, start_index: int) -> tuple[int, DeployedContainer | None]:
+        """Deploy a replacement pod, consuming one replacement per failed attempt.
+
+        Returns (final_pod_index, deployed); deployed is None when the budget is exhausted
+        or stop fires.
+        """
+        pod_index = start_index
+        while not self._stop.should_stop:
+            deployed = await self._deploy_and_wait_healthy(f"{self._miner_prefix}-{pod_index}", attempt_index=pod_index)
+            if deployed is not None:
+                return pod_index, deployed
+            if self._stop.should_stop:
+                return pod_index, None  # type: ignore[unreachable]  # property can flip across the await
+            if not self._consume_replacement("deploy_failed"):
+                return pod_index, None
+            pod_index += 1
+        return pod_index, None
+
+    def _consume_replacement(self, reason: str) -> bool:
+        """Try to consume one replacement from the budget. Returns False when exhausted."""
+        if self._replacements_used >= self._settings.max_replacements:
+            logger.warning(
+                f"{self._log_id}: {reason}, replacement limit reached "
+                f"({self._replacements_used}/{self._settings.max_replacements})"
+            )
+            return False
+        self._replacements_used += 1
+        logger.info(
+            f"{self._log_id}: {reason}, " f"replacement {self._replacements_used}/{self._settings.max_replacements}"
+        )
+        return True
+
+    def _chunk(self, prompts: list[Prompt]) -> list[list[Prompt]]:
+        size = self._settings.batch_size
+        return [prompts[i : i + size] for i in range(0, len(prompts), size)]
+
+    def _target_prompts(self) -> list[Prompt]:
+        """Prompts this miner needs to regenerate.
+
+        In audit mode that's only what they submitted; in generation-only mode it's all of them.
+        """
+        if self._audit_request is not None:
+            return [p for p in self._prompts if p.stem in self._submitted_stems]
+        return self._prompts
+
+    def _all_done(self) -> bool:
+        return all(p.stem in self._generations for p in self._target_prompts())
+
+    def _pending_count(self) -> int:
+        return sum(1 for p in self._target_prompts() if p.stem not in self._generations)
+
+    def _build_report(self, verdict: _Verdict) -> GenerationReport | None:
+        """Build generation report based on the verdict."""
         if self._audit_request is None:
             return None
 
@@ -170,275 +303,73 @@ class MinerRunner:
             return None
 
         if verdict == _Verdict.DEPLOY_FAILURE:
-            return GenerationAudit(
+            return GenerationReport(
                 hotkey=self._hotkey,
-                outcome=GenerationAuditOutcome.REJECTED,
+                outcome=GenerationReportOutcome.REJECTED,
                 reason="Failed to deploy a docker image",
             )
 
-        return audit_generations(
+        return summarize_generation(
             hotkey=self._hotkey,
-            audit_request=self._audit_request,
-            submitted=self._submitted,
-            generations=self._coordinator.generations,
+            submitted_stems=self._submitted_stems,
+            generations=self._generations,
             settings=self._settings,
+            total_generation_time=self._total_generation_time,
         )
-
-    def _should_start_pod(self) -> bool:
-        """Check if conditions allow starting a new pod."""
-        return (
-            not self._stop.should_stop
-            and self._pods_started < self._settings.max_pod_attempts
-            and not self._coordinator.all_done()
-        )
-
-    async def _expand_pods(self, target: int) -> None:
-        """Start additional workers to reach the target pod count."""
-        current = len(self._workers)
-        needed = target - current
-        if needed <= 0:
-            return
-
-        started = 0
-        while started < needed and self._should_start_pod():
-            if started > 0:
-                await asyncio.sleep(self._settings.pod_start_delay_seconds)
-            self._start_worker()
-            started += 1
-
-        if started > 0:
-            logger.info(f"{self._log_id}: expanded from {current} to {current + started} workers")
-
-    def _start_worker(self) -> None:
-        """Create and register a new worker task."""
-        idx = self._pods_started
-        self._pods_started += 1
-
-        pod_id = f"{self._miner_prefix}-{idx}"
-
-        task = asyncio.create_task(
-            self._worker_task(pod_id=pod_id, provider_start_index=idx),
-            name=pod_id,
-        )
-        self._workers[pod_id] = task
-
-    async def _wait_for_first_healthy_or_all_failed(self) -> None:
-        """Block until at least one pod is healthy or all workers have exited."""
-        if not self._workers:
-            return
-
-        async def all_done() -> None:
-            await asyncio.gather(*self._workers.values(), return_exceptions=True)
-
-        event_waiter = asyncio.create_task(self._first_healthy.wait())
-        all_workers = asyncio.create_task(all_done())
-
-        try:
-            await asyncio.wait({event_waiter, all_workers}, return_when=asyncio.FIRST_COMPLETED)
-        finally:
-            event_waiter.cancel()
-
-    async def _run_until_complete(self) -> None:
-        """Process workers until queue empty or stopped."""
-        progress_interval = self._settings.discord_progress_interval_seconds
-
-        while self._workers and not self._stop.should_stop:
-            done, _ = await asyncio.wait(
-                self._workers.values(),
-                return_when=asyncio.FIRST_COMPLETED,
-                timeout=progress_interval,
-            )
-
-            if not done:
-                await self._send_progress()
-                continue
-
-            self._reap_workers(done)
-
-            if self._coordinator.all_done() and self._workers:
-                self._stop.cancel("no_tasks")
-                break
-
-            await self._expand_pods(target=self._settings.pods_per_miner)
-
-        if self._workers:
-            logger.info(f"{self._log_id}: waiting for {len(self._workers)} workers to finish")
-            done, _ = await asyncio.wait(self._workers.values(), return_when=asyncio.ALL_COMPLETED)
-            self._reap_workers(done)
-
-        await self._send_progress()
-
-    def _reap_workers(self, done: set[asyncio.Task]) -> None:
-        """Remove completed workers and log any errors."""
-        for task in done:
-            pod_id = task.get_name()
-            self._workers.pop(pod_id, None)
-            try:
-                task.result()
-                logger.debug(f"{self._log_id}: worker {pod_id} finished")
-            except Exception as e:
-                logger.exception(f"{self._log_id}: worker {pod_id} crashed with {e}")
 
     async def _send_progress(self) -> None:
-        gens = self._coordinator.generations
-        fails = final_fails = overtimes = final_overtimes = mismatches = 0
-        times: list[float] = []
-
-        max_attempts = self._settings.max_prompt_attempts
-        hard_limit = self._settings.generation_timeout_seconds
-        acceptable_distance = self._settings.acceptable_distance
-
-        for r in gens.values():
-            if r.is_failed():
-                fails += 1
-                if r.attempts >= max_attempts:
-                    final_fails += 1
-            if r.generation_time > hard_limit:
-                overtimes += 1
-                if r.attempts >= max_attempts:
-                    final_overtimes += 1
-            if r.distance >= acceptable_distance:
-                mismatches += 1
-            if r.generation_time > 0:
-                times.append(r.generation_time)
+        prompts = self._target_prompts()
+        gens = self._generations
+        generated = sum(1 for p in prompts if p.stem in gens and not gens[p.stem].is_failed())
+        fails = sum(1 for p in prompts if p.stem in gens and gens[p.stem].is_failed())
 
         await self._discord.notify_generation_progress(
             hotkey=self._hotkey,
             round_num=self._current_round,
-            generated=len(gens),
-            total=len(self._coordinator),
+            generated=generated,
+            total=len(prompts),
             fails=fails,
-            final_fails=final_fails,
-            overtimes=overtimes,
-            final_overtimes=final_overtimes,
-            mismatches=mismatches,
-            median_time=statistics.median(times) if times else None,
+            total_generation_time=self._total_generation_time,
+            replacements_used=self._replacements_used,
         )
 
     def _determine_verdict(self) -> _Verdict:
-        """Determine a final verdict based on queue and stop state."""
-        if self._coordinator.all_done():
+        if self._all_done():
             return _Verdict.COMPLETED
         if self._stop.should_stop:
             return _Verdict.PARTIAL
         return _Verdict.EARLY_STOP
 
-    async def _worker_task(self, pod_id: str, provider_start_index: int) -> None:
-        """Worker lifecycle: deploy pod, process prompts, cleanup."""
-        deployed = await self._deploy_and_wait_healthy(pod_id, provider_start_index)
-        if deployed is None:
-            if not self._stop.should_stop:
-                await self._discord.notify_pod_deploy_failed(self._hotkey, pod_id)
-            return
+    async def _deploy_and_wait_healthy(self, pod_id: str, attempt_index: int) -> DeployedContainer | None:
+        """Deploy a pod and wait for it to reach `/status=ready`.
 
-        self._first_healthy.set()
-
-        try:
-            tracker = PodTracker(
-                min_samples=self._settings.pod_min_samples,
-                failure_threshold=self._settings.pod_failure_threshold,
-                warmup_half_window=self._settings.warmup_half_window,
-                rolling_median_limit=self._settings.rolling_median_limit_seconds,
-                hard_limit=self._settings.generation_timeout_seconds,
-                retry_delta_min_samples=self._settings.retry_delta_min_samples,
-            )
-
-            pipeline = GenerationPipeline(
-                settings=self._settings,
-                pod_endpoint=deployed.info.url,
-                generation_token=deployed.generation_token,
-                coordinator=self._coordinator,
-                git_batcher=self._git_batcher,
-                hotkey=self._hotkey,
-                current_round=self._current_round,
-                seed=self._seed,
-                stop=self._stop,
-            )
-
-            await pipeline.run(pod_id=pod_id, tracker=tracker)
-        finally:
-            if tracker.marked_bad:
-                await self._discord.notify_pod_bad(
-                    self._hotkey, pod_id, deployed.info.provider.value, tracker.termination_reason
-                )
-            self._pod_stats[pod_id] = tracker.to_stats(pod_id=pod_id)
-            await save_pod_stats(
-                git_batcher=self._git_batcher,
-                round_num=self._current_round,
-                hotkey=self._hotkey,
-                stats=self._pod_stats,
-            )
-            if not self._settings.debug_keep_pods_alive:
-                await self._gpu_manager.delete_container(deployed.info)
-
-    async def _deploy_and_wait_healthy(
-        self,
-        pod_id: str,
-        provider_start_index: int,
-    ) -> DeployedContainer | None:
-        """Deploy a pod and wait for it to become healthy."""
-        logger.debug(f"{pod_id}: deploying with provider_start_index={provider_start_index}")
+        `attempt_index` drives provider rotation — every successive deploy attempt for
+        this miner starts the round-robin at the next provider, so after a working pod
+        on provider A (attempt N), the replacement attempt (N+1) tries provider B first.
+        """
+        logger.debug(f"{pod_id}: deploying")
 
         deployed = await self._gpu_manager.get_healthy_pod(
             name=pod_id,
             image=self._docker_image,
-            gpu_type="H200",
+            gpu_type=self._settings.gpu_type,
+            gpu_count=self._settings.gpu_count,
             stop=self._stop,
-            start_index=provider_start_index,
+            replacements_remaining=self._settings.max_replacements - self._replacements_used,
+            start_index=attempt_index,
         )
 
         if deployed is None:
             if not self._stop.should_stop:
                 logger.warning(f"{pod_id}: failed to get healthy pod")
+                await self._discord.notify_pod_deploy_failed(self._hotkey, pod_id)
             return None
 
         logger.info(f"{pod_id}: pod healthy at {deployed.info.url}")
         return deployed
 
     async def _cleanup_all(self) -> None:
-        """Signal stop and wait for all workers to finish."""
+        """Signal stop and clean up any leftover containers."""
         if not self._stop.should_stop:
             self._stop.cancel("cleanup")
-
-        if self._workers:
-            logger.info(f"{self._log_id}: cleaning up {len(self._workers)} workers")
-            await self._gpu_manager.cleanup_by_prefix(self._miner_prefix)
-            await asyncio.gather(*self._workers.values(), return_exceptions=True)
-            self._workers.clear()
-
-
-async def run_miner(
-    *,
-    settings: Settings,
-    semaphore: StaggeredSemaphore,
-    gpu_manager: GPUProviderManager,
-    git_batcher: GitBatcher,
-    hotkey: str,
-    docker_image: str,
-    prompts: list[Prompt],
-    current_round: int,
-    seed: int,
-    stop: GenerationStop,
-    audit_request: AuditRequest | None = None,
-    discord: DiscordNotifier = NULL_DISCORD_NOTIFIER,
-) -> GenerationAudit | None:
-    """
-    Run generation for a single miner.
-
-    Returns GenerationAudit on completion, None for generation-only runs or interruptions.
-    """
-    runner = MinerRunner(
-        settings=settings,
-        semaphore=semaphore,
-        gpu_manager=gpu_manager,
-        git_batcher=git_batcher,
-        hotkey=hotkey,
-        docker_image=docker_image,
-        prompts=prompts,
-        current_round=current_round,
-        seed=seed,
-        stop=stop,
-        audit_request=audit_request,
-        discord=discord,
-    )
-    return await runner.run()
+        await self._gpu_manager.cleanup_by_prefix(self._miner_prefix)

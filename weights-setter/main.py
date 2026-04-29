@@ -3,6 +3,7 @@ import asyncio
 import bittensor as bt
 from loguru import logger
 
+from discord import DiscordNotifier, NullDiscordNotifier
 from settings import settings
 from weights_service import WeightsService
 
@@ -21,6 +22,9 @@ async def main() -> None:
             hotkey=settings.wallet_hotkey,
         )
     subtensor = bt.async_subtensor(settings.subtensor_endpoint)
+    discord: DiscordNotifier = (
+        DiscordNotifier(settings.discord_webhook_url) if settings.discord_webhook_url else NullDiscordNotifier()
+    )
     weights_service = WeightsService(
         subtensor=subtensor,
         repo=settings.github_winner_info_repo,
@@ -34,6 +38,7 @@ async def main() -> None:
         subnet_owner_uid=settings.subnet_owner_uid,
         netuid=settings.netuid,
         wallet=wallet,
+        discord=discord,
     )
     await weights_service.set_weights_loop()
 

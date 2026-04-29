@@ -6,19 +6,14 @@ from subnet_common.github import GitHubClient
 
 class PodStats(BaseModel):
     pod_id: str = Field(default="", description="Worker identifier (e.g. miner-01-abc1234def-0)")
-    processed: int = Field(default=0, description="Total prompts attempted")
-    successful: int = Field(default=0, description="Generations completed under the hard time limit")
-    hard_failed: int = Field(default=0, description="Generations that produced no output (crash, HTTP error)")
-    hard_overtime: int = Field(default=0, description="Generations that completed but exceeded the hard time limit")
-    time_min: float = Field(default=0.0, description="Minimum generation time in seconds")
-    time_max: float = Field(default=0.0, description="Maximum generation time in seconds")
-    time_avg: float = Field(default=0.0, description="Average generation time in seconds")
-    time_median: float = Field(default=0.0, description="Median generation time in seconds")
-    marked_bad: bool = Field(default=False, description="Whether the pod was marked bad and terminated early")
-    retry_cumulative_delta: float = Field(default=0.0, description="Sum of (retry_time - original_time) across retries")
-    retry_delta_count: int = Field(default=0, description="Number of retry deltas recorded")
+    provider: str = Field(default="", description="GPU provider this pod was deployed on (e.g. 'targon', 'runpod')")
+    batch_times: list[float] = Field(default_factory=list, description="Wall-clock time per batch in seconds")
+    total_generation_time: float = Field(default=0.0, description="Total wall-clock generation time in seconds")
     termination_reason: str = Field(
-        default="", description="Why the pod stopped processing (e.g. 'no work available', 'stopped', 'mismatch limit')"
+        default="", description="Why the pod stopped processing (e.g. 'completed', 'crashed', 'replace_requested')"
+    )
+    payload: dict | None = Field(
+        default=None, description="Diagnostic payload from the miner at termination time (e.g. health report)"
     )
 
 

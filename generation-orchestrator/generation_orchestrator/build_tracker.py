@@ -1,7 +1,7 @@
 import asyncio
 
 from loguru import logger
-from subnet_common.competition.build_info import BuildInfo, BuildStatus, save_builds
+from subnet_common.competition.build_info import BuildInfo, BuildStatus, get_builds, save_builds
 from subnet_common.competition.submissions import MinerSubmission
 from subnet_common.git_batcher import GitBatcher
 from subnet_common.github import GitHubJob
@@ -48,11 +48,30 @@ class BuildTracker:
     async def track(self, round_num: int, submissions: dict[str, MinerSubmission]) -> None:
         """Track Docker build jobs until all reach the terminal state or timeout.
 
+        If `builds.json` is already in a terminal state in git (every current submission
+        has a terminal entry), skip GitHub polling and trust the committed state. This
+        avoids redundant writes across service restarts and lets an operator hand-edit
+        `builds.json` for debugging without having it overwritten.
+
         Args:
             round_num: Current competition round.
             submissions: Map of hotkey -> tag for miners who submitted.
         """
-        self._builds = {hotkey: BuildInfo.from_submission(submission) for hotkey, submission in submissions.items()}
+        prior = await get_builds(
+            git=self._git_batcher.git,
+            round_num=round_num,
+            ref=self._git_batcher.base_sha,
+        )
+
+        if prior is not None and _is_final_for(prior, submissions):
+            logger.info(f"Round {round_num}: builds.json already terminal; skipping GitHub poll")
+            self._builds = {hotkey: prior[hotkey] for hotkey in submissions}
+            self._notify_all()
+            return
+
+        self._builds = {
+            hotkey: _preserve_terminal_or_new(prior, hotkey, submission) for hotkey, submission in submissions.items()
+        }
 
         run_id = await self._wait_for_build_run(round_num=round_num)
         if run_id is None:
@@ -201,3 +220,19 @@ def _derive_status(job: GitHubJob | None) -> BuildStatus:
 def _now() -> float:
     """Current event loop time."""
     return asyncio.get_running_loop().time()
+
+
+def _is_final_for(prior: dict[str, BuildInfo], submissions: dict[str, MinerSubmission]) -> bool:
+    """True when `prior` has a terminal entry for every current submission."""
+    return all(hotkey in prior and prior[hotkey].status in TERMINAL_STATUSES for hotkey in submissions)
+
+
+def _preserve_terminal_or_new(
+    prior: dict[str, BuildInfo] | None,
+    hotkey: str,
+    submission: MinerSubmission,
+) -> BuildInfo:
+    """Keep a prior terminal entry across restarts; otherwise initialize fresh from the submission."""
+    if prior is not None and hotkey in prior and prior[hotkey].status in TERMINAL_STATUSES:
+        return prior[hotkey]
+    return BuildInfo.from_submission(submission)

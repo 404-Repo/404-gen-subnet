@@ -8,6 +8,7 @@ from pydantic import BaseModel
 class GPUProvider(str, Enum):
     TARGON = "targon"
     VERDA = "verda"
+    RUNPOD = "runpod"
 
 
 class ContainerInfo(BaseModel):

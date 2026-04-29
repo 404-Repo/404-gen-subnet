@@ -23,8 +23,8 @@ class ContainerDeployConfig(BaseModel):
 
     image: str
     exposed_port: int = 10006
-    compute_name: str = "H200"
-    compute_size: int = 1
+    gpu_type: str = "H200"
+    gpu_count: int = 4  # 4×H200 per api_specification.md
     min_replicas: int = 1
     max_replicas: int = 1
     concurrent_requests_per_replica: int = 8
@@ -175,13 +175,13 @@ class VerdaClient:
             logger.error(f"Network error calling Verda API: {e}")
             raise VerdaClientError(f"Network error: {e}") from e
 
-    async def _list_containers_raw(
+    async def list_containers(
         self,
         *,
         name: str | None = None,
         prefix: str | None = None,
     ) -> list[VerdaContainerResponse]:
-        """List containers (raw API response), optionally filtered by exact name or prefix."""
+        """List containers, optionally filtered by exact name or prefix."""
         response = await self._request("GET", "/container-deployments")
         data = response.json()
 
@@ -199,7 +199,7 @@ class VerdaClient:
 
     async def get_container(self, name: str) -> ContainerInfo | None:
         """Get container by exact name. Returns None if not found."""
-        containers = await self._list_containers_raw(name=name)
+        containers = await self.list_containers(name=name)
         if not containers:
             return None
         c = containers[0]
@@ -218,7 +218,8 @@ class VerdaClient:
         *,
         config: ContainerDeployConfig | None = None,
         image: str | None = None,
-        resource_name: str | None = None,
+        gpu_type: str | None = None,
+        gpu_count: int | None = None,
         port: int | None = None,
         concurrency: int | None = None,
         env: dict[str, str] | None = None,
@@ -233,7 +234,8 @@ class VerdaClient:
         if not _image:
             raise ValueError("image is required")
 
-        _resource = resource_name or (config.compute_name if config else "H200")
+        _gpu_type = gpu_type or (config.gpu_type if config else "H200")
+        _gpu_count = gpu_count or (config.gpu_count if config else 4)
         _port = port or (config.exposed_port if config else 10006)
         _concurrency = concurrency or (config.concurrent_requests_per_replica if config else 8)
         _env = {**(config.env if config else {}), **(env or {})}
@@ -241,7 +243,6 @@ class VerdaClient:
         # Other settings from config or defaults
         _healthcheck_enabled = config.healthcheck_enabled if config else True
         _healthcheck_path = config.healthcheck_path if config else "/health"
-        _compute_size = config.compute_size if config else 1
         _min_replicas = config.min_replicas if config else 1
         _max_replicas = config.max_replicas if config else 1
         _scale_down_delay = config.scale_down_delay_seconds if config else 3600
@@ -268,8 +269,8 @@ class VerdaClient:
             "container_registry_settings": {"is_private": False},
             "containers": [container_config],
             "compute": {
-                "name": _resource,
-                "size": _compute_size,
+                "name": _gpu_type,
+                "size": _gpu_count,
             },
             "scaling": {
                 "min_replica_count": _min_replicas,
@@ -312,7 +313,7 @@ class VerdaClient:
 
     async def delete_containers_by_name(self, name: str) -> int:
         """Delete all containers with the exact name. Returns count deleted."""
-        containers = await self._list_containers_raw(name=name)
+        containers = await self.list_containers(name=name)
         if not containers:
             return 0
 
@@ -329,7 +330,7 @@ class VerdaClient:
         Example: delete_containers_by_prefix("miner-5") deletes
         miner-5-abc123, miner-5-def456, etc.
         """
-        containers = await self._list_containers_raw(prefix=prefix)
+        containers = await self.list_containers(prefix=prefix)
         if not containers:
             return 0
 

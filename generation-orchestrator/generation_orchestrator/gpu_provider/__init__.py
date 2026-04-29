@@ -5,9 +5,11 @@ from loguru import logger
 from pydantic import BaseModel
 
 from generation_orchestrator.generation_stop import GenerationStop
+from generation_orchestrator.pod_client import PodStatus, check_pod_status
 from generation_orchestrator.settings import Settings
 
 from .common import ContainerInfo, GPUClientError, GPUProvider
+from .runpod_client import RunpodClient
 from .targon_client import TargonClient
 from .verda_client import VerdaClient
 
@@ -18,7 +20,7 @@ __all__ = [
     "GPUProvider",
     "GPUProviderError",
     "GPUProviderManager",
-    "wait_for_healthy",
+    "wait_for_ready",
 ]
 
 
@@ -28,13 +30,6 @@ class GPUProviderError(Exception):
     def __init__(self, message: str, provider: GPUProvider) -> None:
         super().__init__(f"[{provider.value}] {message}")
         self.provider = provider
-
-
-# (gpu_type, provider) -> resource_name
-_RESOURCE_NAMES: dict[tuple[str, GPUProvider], str] = {
-    ("H200", GPUProvider.TARGON): "h200-small",
-    ("H200", GPUProvider.VERDA): "H200",
-}
 
 
 class DeployedContainer(BaseModel):
@@ -62,7 +57,11 @@ class GPUProviderManager:
 
     def _build_provider_list(self) -> list[GPUProvider]:
         """Build a list of enabled providers from settings, preserving order."""
-        provider_map = {"targon": GPUProvider.TARGON, "verda": GPUProvider.VERDA}
+        provider_map = {
+            "targon": GPUProvider.TARGON,
+            "verda": GPUProvider.VERDA,
+            "runpod": GPUProvider.RUNPOD,
+        }
         providers = []
         for name in self._settings.gpu_providers.split(","):
             name = name.strip().lower()
@@ -90,25 +89,31 @@ class GPUProviderManager:
         name: str,
         image: str,
         gpu_type: str,
+        gpu_count: int,
         stop: GenerationStop,
+        replacements_remaining: int,
         *,
         provider: GPUProvider | None = None,
         start_index: int = 0,
     ) -> DeployedContainer | None:
         """
-        Get a healthy container, with retry logic.
+        Get a container that has reached `/status=ready`, with retry logic.
 
         Args:
             name: Container name.
             image: Docker image to deploy.
-            gpu_type: GPU type required (e.g., "H200").
+            gpu_type: GPU model (e.g., "H200"). Provider clients map this to their SKUs.
+            gpu_count: Number of GPUs per pod (e.g., 4 for the 4×H200 spec default).
             stop: Graceful shutdown signal.
+            replacements_remaining: Forwarded to `/status` polling so the miner sees the
+                current replacement budget during warmup.
             provider: If set, use only this provider for all attempts.
                       If None, round-robin across enabled providers.
             start_index: Starting index for round-robin (ignored if provider is set).
 
         Returns:
-            DeployedContainer if successful, None if all attempts failed or warmup failed.
+            DeployedContainer if `/status=ready`; None on timeout, stop, `/status=replace`,
+            or provider failure.
         """
         # Note on retry policy:
         # - We retry only acquisition/visibility failures (provider downs, no GPU available).
@@ -119,7 +124,6 @@ class GPUProviderManager:
         deploy_timeout = self._settings.pod_visibility_timeout_seconds
         warmup_timeout = self._settings.pod_warmup_timeout_seconds
         check_interval = self._settings.check_pod_interval_seconds
-        cleanup_existing = not self._settings.debug_keep_pods_alive
 
         for attempt in range(max_attempts):
             if stop.should_stop:
@@ -136,10 +140,10 @@ class GPUProviderManager:
                 name=name,
                 image=image,
                 gpu_type=gpu_type,
+                gpu_count=gpu_count,
                 stop=stop,
                 timeout=deploy_timeout,
                 check_interval=check_interval,
-                cleanup_existing=cleanup_existing,
             )
 
             if not container:
@@ -147,17 +151,18 @@ class GPUProviderManager:
                 await stop.wait(timeout=retry_interval)
                 continue
 
-            logger.debug(f"Waiting for {name} to become healthy (timeout: {warmup_timeout}s)")
-            healthy = await wait_for_healthy(
+            logger.debug(f"Waiting for {name} to become ready (timeout: {warmup_timeout}s)")
+            ready = await wait_for_ready(
                 container.url,
                 stop,
                 auth_token=generation_token,
+                replacements_remaining=replacements_remaining,
                 timeout=warmup_timeout,
                 check_interval=check_interval,
             )
 
-            if healthy:
-                logger.info(f"Container {name} healthy on {current_provider.value}")
+            if ready:
+                logger.info(f"Container {name} ready on {current_provider.value}")
                 return DeployedContainer(
                     info=container,
                     generation_token=generation_token,
@@ -203,13 +208,17 @@ class GPUProviderManager:
                 logger.warning(f"Failed to cleanup on {prov.value}: {e}")
         return total_deleted
 
-    def _create_client(self, provider: GPUProvider) -> TargonClient | VerdaClient:
+    def _create_client(self, provider: GPUProvider) -> TargonClient | VerdaClient | RunpodClient:
         """Create a client for the given provider."""
         if provider == GPUProvider.TARGON:
             # Settings validation enforces credentials when provider is in GPU_PROVIDERS
             if not self._settings.targon_api_key:
                 raise GPUProviderError("Targon API key not configured", GPUProvider.TARGON)
             return TargonClient(api_key=self._settings.targon_api_key.get_secret_value())
+        elif provider == GPUProvider.RUNPOD:
+            if not self._settings.runpod_api_key:
+                raise GPUProviderError("Runpod API key not configured", GPUProvider.RUNPOD)
+            return RunpodClient(api_key=self._settings.runpod_api_key.get_secret_value())
         elif provider == GPUProvider.VERDA:
             # Settings validation enforces credentials when provider is in GPU_PROVIDERS
             if not self._settings.verda_client_id or not self._settings.verda_client_secret:
@@ -227,10 +236,10 @@ class GPUProviderManager:
         name: str,
         image: str,
         gpu_type: str,
+        gpu_count: int,
         stop: GenerationStop,
-        timeout: float,  # noqa: ASYNC109
+        timeout: float,
         check_interval: float,
-        cleanup_existing: bool,
     ) -> ContainerInfo | None:
         """
         Try to deploy a container and wait for it to become visible.
@@ -238,24 +247,21 @@ class GPUProviderManager:
         """
         try:
             async with self._create_client(provider) as client:
-                if cleanup_existing:
-                    deleted = await client.delete_containers_by_name(name)
-                    if deleted:
-                        logger.debug(f"Cleaned up {deleted} existing container(s) named {name}")
+                deleted = await client.delete_containers_by_name(name)
+                if deleted:
+                    logger.debug(f"Cleaned up {deleted} existing container(s) named {name}")
 
                 logger.info(f"Deploying {name} on {provider.value}")
-                resource_name = self._get_resource_name(gpu_type, provider)
                 env = {}
                 if self._settings.hf_token:
                     env["HF_TOKEN"] = self._settings.hf_token.get_secret_value()
                 await client.deploy_container(
                     name,
                     image=image,
-                    resource_name=resource_name,
+                    gpu_type=gpu_type,
+                    gpu_count=gpu_count,
                     port=self._settings.generation_port,
-                    # We cap in-flight prompts with a semaphore but allow a +1 cushion
-                    # so provider autoscalers don't reject brief spikes while scaling.
-                    concurrency=self._settings.max_concurrent_prompts_per_pod + 1,
+                    concurrency=2,
                     env=env or None,
                 )
 
@@ -282,26 +288,51 @@ class GPUProviderManager:
             logger.warning(f"Failed to deploy on {provider.value}: {e}")
             return None
 
-    def _get_resource_name(self, gpu_type: str, provider: GPUProvider) -> str:
-        """Get the provider-specific resource name for a GPU type."""
-        resource_name = _RESOURCE_NAMES.get((gpu_type, provider))
-        if not resource_name:
-            raise ValueError(f"Unknown GPU type {gpu_type} for provider {provider}")
-        return resource_name
 
-
-async def wait_for_healthy(
+async def wait_for_ready(
     url: str,
     stop: GenerationStop,
     *,
-    auth_token: str | None = None,
-    timeout: float = 300.0,  # noqa: ASYNC109
-    check_interval: float = 5.0,
+    auth_token: str | None,
+    replacements_remaining: int,
+    timeout: float,
+    check_interval: float,
 ) -> bool:
-    """Wait for the container health endpoint to return 200."""
-    health_url = f"{url}/health"
+    """Wait for a pod to reach `/status=ready` within a single deadline.
+
+    Two-phase walk against one budget:
+      1. Poll `/health` until 200 (HTTP server up).
+      2. Poll `/status` until `ready` (models loaded, batch-capable).
+
+    Returns True iff `/status=ready` was observed before the deadline. Returns False on
+    timeout, stop, or `/status=replace` (any non-ready terminal outcome).
+    """
     deadline = asyncio.get_running_loop().time() + timeout
 
+    if not await _wait_for_health(
+        url=url, deadline=deadline, auth_token=auth_token, stop=stop, check_interval=check_interval
+    ):
+        return False
+
+    return await _wait_for_status_ready(
+        url=url,
+        deadline=deadline,
+        auth_token=auth_token,
+        replacements_remaining=replacements_remaining,
+        stop=stop,
+        check_interval=check_interval,
+    )
+
+
+async def _wait_for_health(
+    url: str,
+    deadline: float,
+    auth_token: str | None,
+    stop: GenerationStop,
+    check_interval: float,
+) -> bool:
+    """Poll `/health` until 200 or the shared deadline expires."""
+    health_url = f"{url}/health"
     headers = {"Authorization": f"Bearer {auth_token}"} if auth_token else {}
 
     async with httpx.AsyncClient(timeout=30.0) as http:
@@ -313,12 +344,48 @@ async def wait_for_healthy(
             except (httpx.ConnectError, httpx.TimeoutException):
                 pass  # Expected during deployment
             except httpx.RequestError as e:
-                logger.debug(f"Unexpected health check error for {url}: {type(e).__name__}: {e}")
+                logger.debug(f"Unexpected /health error for {url}: {type(e).__name__}: {e}")
 
             if asyncio.get_running_loop().time() >= deadline:
-                logger.warning(f"Container at {url} not healthy within {timeout}s")
+                logger.warning(f"Container at {url} /health did not return 200 before deadline")
                 return False
 
             await stop.wait(timeout=check_interval)
+
+    return False
+
+
+async def _wait_for_status_ready(
+    url: str,
+    deadline: float,
+    auth_token: str | None,
+    replacements_remaining: int,
+    stop: GenerationStop,
+    check_interval: float,
+) -> bool:
+    """Poll `/status` until `ready` or the shared deadline expires.
+
+    `/status=replace` during warmup returns False — the pod is unusable and must be torn
+    down. The payload is logged for diagnostics but not propagated (consistent with other
+    warmup-phase failures).
+    """
+    while not stop.should_stop:
+        response = await check_pod_status(
+            endpoint=url,
+            auth_token=auth_token,
+            replacements_remaining=replacements_remaining,
+        )
+        if response is not None:
+            if response.status == PodStatus.READY:
+                return True
+            if response.status == PodStatus.REPLACE:
+                logger.warning(f"Container at {url} requested replacement during warmup: payload={response.payload}")
+                return False
+
+        if asyncio.get_running_loop().time() >= deadline:
+            logger.warning(f"Container at {url} /status did not reach 'ready' before deadline")
+            return False
+
+        await stop.wait(timeout=check_interval)
 
     return False
