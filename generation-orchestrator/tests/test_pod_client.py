@@ -148,6 +148,7 @@ async def test_check_pod_status_generating_with_progress() -> None:
             endpoint="http://pod:10006",
             auth_token=None,
             replacements_remaining=3,
+            log_id="test",
         )
 
     assert result is not None
@@ -169,6 +170,7 @@ async def test_check_pod_status_ready_with_payload() -> None:
             endpoint="http://pod:10006",
             auth_token="token",
             replacements_remaining=2,
+            log_id="test",
         )
 
     assert result is not None
@@ -189,6 +191,7 @@ async def test_check_pod_status_complete() -> None:
             endpoint="http://pod:10006",
             auth_token=None,
             replacements_remaining=1,
+            log_id="test",
         )
 
     assert result is not None
@@ -203,6 +206,7 @@ async def test_check_pod_status_connection_error() -> None:
             endpoint="http://pod:10006",
             auth_token=None,
             replacements_remaining=3,
+            log_id="test",
         )
 
     assert result is None
@@ -221,6 +225,7 @@ async def test_check_pod_status_invalid_response() -> None:
             endpoint="http://pod:10006",
             auth_token=None,
             replacements_remaining=3,
+            log_id="test",
         )
 
     assert result is None

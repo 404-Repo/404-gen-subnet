@@ -181,7 +181,7 @@ class Settings(BaseSettings):
         description="Maximum total generation time across all batches before audit rejection",
     )
     max_mismatched_prompts: int = Field(
-        default=6,
+        default=12,
         alias="MAX_MISMATCHED_PROMPTS",
         description="Maximum tolerated mismatched prompts before early stop",
     )

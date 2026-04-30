@@ -93,19 +93,12 @@ class DiscordNotifier:
             if total_prompts > 0 and len(gens) >= total_prompts and all(g.js is not None for g in gens.values())
         )
 
-        # "No submission" miners genuinely sent nothing — every entry has neither js nor a
-        # collector-side failure_reason. "Fetch-failed" miners had something on the chain
-        # but our collector couldn't pull any of it (CDN dead, etc.).
+        # Miners with no successfully uploaded JS for any prompt. Every entry persisted
+        # by the pipeline carries either a JS URL or a failure_reason, so this counts
+        # miners whose every prompt failed before the JS upload (dead CDN, oversized
+        # JS, R2 reject, etc.) — i.e., they delivered nothing usable this round.
         no_submission = sum(
-            1
-            for gens in results.values()
-            if not any(g.js is not None or g.failure_reason is not None for g in gens.values())
-        )
-        fetch_failed = sum(
-            1
-            for gens in results.values()
-            if not any(g.js is not None for g in gens.values())
-            and any(g.failure_reason is not None for g in gens.values())
+            1 for gens in results.values() if not any(g.js is not None for g in gens.values())
         )
 
         # Stems where the miner delivered JS but our render/embedding pipeline failed to
@@ -116,7 +109,7 @@ class DiscordNotifier:
         )
 
         # Red if anything on the system side is actionable; green otherwise.
-        color = COLOR_RED if render_failures > 0 or fetch_failed > 0 else COLOR_GREEN
+        color = COLOR_RED if render_failures > 0 else COLOR_GREEN
 
         await self._webhook.send_embed(
             title=f"Round {round_num} Downloads Complete",
@@ -133,7 +126,6 @@ class DiscordNotifier:
                     "value": f"{no_submission} ({100 * no_submission // total_miners}%)",
                     "inline": True,
                 },
-                {"name": "Fetch failed", "value": str(fetch_failed), "inline": True},
                 {"name": "Render failures", "value": str(render_failures), "inline": True},
             ],
         )

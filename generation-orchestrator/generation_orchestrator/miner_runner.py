@@ -18,7 +18,7 @@ from generation_orchestrator.discord import NULL_DISCORD_NOTIFIER, DiscordNotifi
 from generation_orchestrator.generation_stop import GenerationStop
 from generation_orchestrator.generation_summary import summarize_generation
 from generation_orchestrator.gpu_provider import DeployedContainer, GPUProviderManager
-from generation_orchestrator.pod_session import PodReplaceRequested, PodSession
+from generation_orchestrator.pod_session import PodReplaceRequested, PodSession, ReplaceReason
 from generation_orchestrator.prompts import Prompt
 from generation_orchestrator.settings import Settings
 from generation_orchestrator.staggered_semaphore import StaggeredSemaphore
@@ -153,6 +153,8 @@ class MinerRunner:
             if swap is None:
                 return self._determine_verdict()
 
+            await self._notify_swap(swap.reason, pod_index)
+
             if not self._consume_replacement(swap.reason.value):
                 return self._determine_verdict()
 
@@ -162,6 +164,18 @@ class MinerRunner:
             deployed = next_deployed
 
         return _Verdict.PARTIAL
+
+    async def _notify_swap(self, reason: ReplaceReason, pod_index: int) -> None:
+        """Surface infra-side pod failures to Discord. REQUESTED and BATCH_TIME_LIMIT
+        are intentionally silent — the first is a miner-side decision, the second is
+        already covered by the eventual generation report."""
+        pod_id = f"{self._miner_prefix}-{pod_index}"
+        if reason == ReplaceReason.SUBMISSION_FAILED:
+            await self._discord.notify_batch_submit_failed(self._hotkey, pod_id)
+        elif reason == ReplaceReason.DOWNLOAD_FAILED:
+            await self._discord.notify_batch_download_failed(self._hotkey, pod_id)
+        elif reason == ReplaceReason.UNREACHABLE:
+            await self._discord.notify_pod_unreachable(self._hotkey, pod_id)
 
     async def _run_pod(self, deployed: DeployedContainer, pod_index: int) -> PodReplaceRequested | None:
         """Run all pending batches on one pod. Returns a swap signal or None if nothing to swap for.

@@ -329,16 +329,25 @@ class MatchRunner:
             ref=self._ref,
         )
 
-        if not left_gens and not right_gens:
-            logger.warning(f"No generations for {left[:10]} and {right[:10]}")
+        # A miner counts as "delivered" only if at least one prompt has a usable JS URL.
+        # An entry with js=None (miner failure or collector fetch failure) is not a
+        # delivery; treating such miners as winners against miners with no file at all
+        # (e.g. a leader whose generations weren't produced this round) lets a miner
+        # who delivered nothing usable beat a missing leader. Both must be treated
+        # symmetrically as "empty" → draw, so the leader keeps the throne.
+        left_delivered = any(g.js is not None for g in left_gens.values())
+        right_delivered = any(g.js is not None for g in right_gens.values())
+
+        if not left_delivered and not right_delivered:
+            logger.warning(f"No usable generations for {left[:10]} and {right[:10]}")
             return MatchOutcome(left=left, right=right, margin=0.0)
 
-        if not left_gens:
-            logger.warning(f"No generations for left miner {left[:10]}")
+        if not left_delivered:
+            logger.warning(f"No usable generations for left miner {left[:10]}")
             return MatchOutcome(left=left, right=right, margin=100.0)
 
-        if not right_gens:
-            logger.warning(f"No generations for right miner {right[:10]}")
+        if not right_delivered:
+            logger.warning(f"No usable generations for right miner {right[:10]}")
             return MatchOutcome(left=left, right=right, margin=-100.0)
 
         report = await run_match(

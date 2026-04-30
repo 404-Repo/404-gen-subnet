@@ -72,6 +72,29 @@ class DiscordNotifier:
             description=f"`{hotkey[:10]}` / `{pod_id}` — failed to get healthy pod",
         )
 
+    async def notify_batch_submit_failed(self, hotkey: str, pod_id: str) -> None:
+        await self._webhook.send_embed(
+            title="Batch Submission Failed",
+            color=0xE74C3C,
+            description=f"`{hotkey[:10]}` / `{pod_id}` — pod rejected the batch (HTTP error / timeout); "
+            f"see logs for status code",
+        )
+
+    async def notify_batch_download_failed(self, hotkey: str, pod_id: str) -> None:
+        await self._webhook.send_embed(
+            title="Batch Download Failed",
+            color=0xE74C3C,
+            description=f"`{hotkey[:10]}` / `{pod_id}` — could not download results after batch completed",
+        )
+
+    async def notify_pod_unreachable(self, hotkey: str, pod_id: str) -> None:
+        await self._webhook.send_embed(
+            title="Pod Unreachable",
+            color=0xE74C3C,
+            description=f"`{hotkey[:10]}` / `{pod_id}` — `/status` unreachable beyond consecutive-failure threshold; "
+            f"replacing",
+        )
+
     async def notify_cycle_error(self, error: Exception) -> None:
         await self._webhook.send_embed(
             title="Generation Orchestrator Error",
@@ -97,6 +120,15 @@ class NullDiscordNotifier(DiscordNotifier):
         pass
 
     async def notify_pod_deploy_failed(self, hotkey: str, pod_id: str) -> None:
+        pass
+
+    async def notify_batch_submit_failed(self, hotkey: str, pod_id: str) -> None:
+        pass
+
+    async def notify_batch_download_failed(self, hotkey: str, pod_id: str) -> None:
+        pass
+
+    async def notify_pod_unreachable(self, hotkey: str, pod_id: str) -> None:
         pass
 
     async def notify_cycle_error(self, error: Exception) -> None:

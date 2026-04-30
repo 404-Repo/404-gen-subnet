@@ -181,6 +181,7 @@ class PodSession:
                 endpoint=self._pod_endpoint,
                 auth_token=self._auth_token,
                 replacements_remaining=self._remaining_replacements,
+                log_id=self._log_id,
             )
 
             if response is None:
