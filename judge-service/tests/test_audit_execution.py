@@ -47,23 +47,37 @@ async def _run(winner_seq: list[DuelWinner], prompts: list[str]) -> tuple:
     return audit, save_calls
 
 
-async def test_passed_when_submitted_dominates() -> None:
-    """All submitted wins → score = +N, PASSED."""
+async def test_failed_when_submitted_dominates() -> None:
+    """All submitted (LEFT) wins → score = -N, FAILED. Submitted dominating means
+    the miner can't reproduce their submission with their own solution — suspicious."""
     audit, saved = await _run(
         [DuelWinner.LEFT, DuelWinner.LEFT, DuelWinner.LEFT],
+        prompts=["a", "b", "c"],
+    )
+    assert audit.outcome == VerificationOutcome.FAILED
+    assert audit.score == -3
+    assert audit.checked_prompts == 3
+    assert len(saved) == 1
+    # Match report saved with left="submitted" so persistence path is `duels_submitted.json`.
+    # Matches per-duel left_js=submitted, mirroring miner-vs-miner file convention.
+    assert saved[0].left == "submitted"
+    assert saved[0].right == "hk1"
+
+
+async def test_passed_when_generated_dominates() -> None:
+    """All generated (RIGHT) wins → score = +N, PASSED. Generated holding up means
+    the solution can reproduce or exceed the submission — legitimate."""
+    audit, _ = await _run(
+        [DuelWinner.RIGHT, DuelWinner.RIGHT, DuelWinner.RIGHT],
         prompts=["a", "b", "c"],
     )
     assert audit.outcome == VerificationOutcome.PASSED
     assert audit.score == 3
     assert audit.checked_prompts == 3
-    assert len(saved) == 1
-    # Match report saved with left="generated" so persistence path is `duels_generated.json`.
-    assert saved[0].left == "generated"
-    assert saved[0].right == "hk1"
 
 
 async def test_passed_on_draw() -> None:
-    """All draws → score = 0, still PASSED (margin 0% accepts draws)."""
+    """All draws → score = 0, still PASSED (threshold accepts ties)."""
     audit, _ = await _run(
         [DuelWinner.DRAW, DuelWinner.DRAW, DuelWinner.DRAW],
         prompts=["a", "b", "c"],
@@ -74,9 +88,9 @@ async def test_passed_on_draw() -> None:
 
 
 async def test_passed_when_mixed_but_nonnegative() -> None:
-    """+1 -1 +1 = +1 → PASSED."""
+    """LEFT, RIGHT, RIGHT → -1 + 1 + 1 = +1 → PASSED."""
     audit, _ = await _run(
-        [DuelWinner.LEFT, DuelWinner.RIGHT, DuelWinner.LEFT],
+        [DuelWinner.LEFT, DuelWinner.RIGHT, DuelWinner.RIGHT],
         prompts=["a", "b", "c"],
     )
     assert audit.outcome == VerificationOutcome.PASSED
@@ -84,10 +98,10 @@ async def test_passed_when_mixed_but_nonnegative() -> None:
     assert audit.checked_prompts == 3
 
 
-async def test_failed_when_generated_wins_overall() -> None:
-    """+1 -1 -1 = -1 → FAILED."""
+async def test_failed_when_submitted_wins_overall() -> None:
+    """LEFT, RIGHT, LEFT → -1 + 1 - 1 = -1 → FAILED. Net submitted-wins is the cheating signal."""
     audit, _ = await _run(
-        [DuelWinner.LEFT, DuelWinner.RIGHT, DuelWinner.RIGHT],
+        [DuelWinner.LEFT, DuelWinner.RIGHT, DuelWinner.LEFT],
         prompts=["a", "b", "c"],
     )
     assert audit.outcome == VerificationOutcome.FAILED
@@ -98,9 +112,9 @@ async def test_failed_when_generated_wins_overall() -> None:
 async def test_skipped_prompts_count_as_zero() -> None:
     """Skipped duels (e.g. preview missing) count as 0 — neither side gets credit."""
     audit, _ = await _run(
-        [DuelWinner.SKIPPED, DuelWinner.LEFT, DuelWinner.SKIPPED],
+        [DuelWinner.SKIPPED, DuelWinner.RIGHT, DuelWinner.SKIPPED],
         prompts=["a", "b", "c"],
     )
     assert audit.outcome == VerificationOutcome.PASSED
-    assert audit.score == 1  # only the LEFT win contributed
+    assert audit.score == 1  # only the RIGHT win contributed
     assert audit.checked_prompts == 1

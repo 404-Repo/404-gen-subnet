@@ -2,13 +2,18 @@
 
 For each prompt, run the multi-stage judge with submitted as left, generated as right.
 Score per prompt:
-    +1  submitted won
-    -1  generated won
+    -1  submitted won  (miner's solution can't reproduce its own submission — suspicious)
+    +1  generated won  (solution reproduces or exceeds submission — legitimate)
      0  draw or skipped (e.g. preview missing on either side)
 
-Sum >= 0 → PASSED; otherwise FAILED. Same `evaluate_duel` engine as miner-vs-miner
-matches, same `MatchReport` artifact (saved as `duels_generated.json`), plus a
-slim `VerificationAudit` summary for fast resume / lookup.
+Sum >= 0 → PASSED; otherwise FAILED. The asymmetry catches cheating: a miner who
+submits offline-generated / cherry-picked assets but deploys a weaker reproducer
+will have submitted dominate generated, score goes negative, audit fails.
+
+Same `evaluate_duel` engine as miner-vs-miner matches, same `MatchReport` artifact
+(saved as `duels_submitted.json` — `left="submitted"` matches the per-duel left side,
+mirroring how miner-vs-miner files name the file after the actual left), plus a slim
+`VerificationAudit` summary for fast resume / lookup.
 """
 
 import asyncio
@@ -26,7 +31,7 @@ from subnet_common.graceful_shutdown import GracefulShutdown
 from judge_service.judges.multi_stage import evaluate_duel
 
 
-GENERATED_LEFT = "generated"
+SUBMITTED_LEFT = "submitted"
 
 
 def _preview_url(gen: GenerationResult) -> str | None:
@@ -37,8 +42,8 @@ def _preview_url(gen: GenerationResult) -> str | None:
 
 
 _SCORE_FOR: dict[DuelWinner, int] = {
-    DuelWinner.LEFT: 1,
-    DuelWinner.RIGHT: -1,
+    DuelWinner.LEFT: -1,  # submitted won — miner couldn't reproduce; suspicious
+    DuelWinner.RIGHT: 1,  # generated won — solution reproduces or exceeds; legitimate
     DuelWinner.DRAW: 0,
     DuelWinner.SKIPPED: 0,
 }
@@ -59,7 +64,8 @@ async def run_verification_audit(
     """Run submitted-vs-generated duels for one hotkey, persist report + audit, return verdict.
 
     Submitted is the LEFT side, generated is the RIGHT side. Per-prompt:
-    LEFT win = +1, RIGHT win = -1, DRAW or SKIPPED = 0. Sum >= 0 → PASSED.
+    LEFT win = -1 (submitted dominated, suspicious), RIGHT win = +1 (generated held up,
+    legitimate), DRAW or SKIPPED = 0. Sum >= 0 → PASSED.
     """
     sem = asyncio.Semaphore(max_concurrent_vlm_calls)
     audit_label = f"audit/{hotkey[:10]}"
@@ -89,9 +95,11 @@ async def run_verification_audit(
     checked = sum(1 for d in duels if d.winner in (DuelWinner.LEFT, DuelWinner.RIGHT))
 
     # Reuse MatchReport to keep the artifact shape identical to miner-vs-miner duels.
-    # `left=GENERATED_LEFT`/`right=hotkey` makes the saved path `rounds/{n}/{hotkey}/duels_generated.json`.
+    # `left=SUBMITTED_LEFT`/`right=hotkey` makes the saved path `rounds/{n}/{hotkey}/duels_submitted.json`.
+    # The label matches the per-duel `left_js=submitted.js` data, so a reader sees a
+    # consistent "left = submitted, right = the audited miner's regenerated output".
     report = MatchReport(
-        left=GENERATED_LEFT,
+        left=SUBMITTED_LEFT,
         right=hotkey,
         score=score,
         margin=score / len(duels) if duels else 0,
