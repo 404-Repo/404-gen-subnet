@@ -2,9 +2,10 @@
 
 After the generation orchestrator finishes a re-run for an audited hotkey, the judge
 runs a duel between the miner's submitted output and our re-generated output. The sum
-of per-prompt outcomes (+1 for submitted, -1 for generated, 0 for draws / skips)
-determines the verdict: sum >= 0 → PASSED; otherwise FAILED. A draw is acceptable —
-the miner only loses verification on a clear loss.
+of per-prompt outcomes (-1 if submitted dominates, +1 if generated holds up, 0 for
+draws / skips) determines the verdict: sum >= 0 → PASSED; otherwise FAILED. A draw is
+acceptable — the miner only loses verification when submitted disproportionately beats
+generated, which is the cheating signal.
 """
 
 from enum import StrEnum
@@ -22,12 +23,25 @@ class VerificationOutcome(StrEnum):
 
 
 class VerificationAudit(BaseModel):
-    """One verification verdict for a hotkey within a round."""
+    """One verification verdict for a hotkey within a round.
+
+    Per-duel outcome breakdown so readers don't have to load the full duels file
+    to understand the verdict shape:
+        total_prompts = checked_prompts + drawn
+    """
 
     hotkey: str
     outcome: VerificationOutcome = VerificationOutcome.PENDING
-    score: int = Field(default=0, description="Sum of per-prompt outcomes: +1 submitted, -1 generated, 0 otherwise")
-    checked_prompts: int = Field(default=0, description="Number of prompts that contributed a non-zero score")
+    score: int = Field(default=0, description="Sum of per-prompt outcomes: -1 submitted, +1 generated, 0 otherwise")
+    total_prompts: int = Field(default=0, description="Total duels in the audit")
+    checked_prompts: int = Field(
+        default=0,
+        description="Duels the judge ran to a verdict (decisive or draw); "
+        "equals total_prompts when the judge didn't crash",
+    )
+    drawn: int = Field(
+        default=0, description="Duels the multi-stage judge ruled a draw (sides equivalent or both missing previews)"
+    )
     reason: str = ""
 
 

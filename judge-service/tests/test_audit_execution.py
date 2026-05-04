@@ -77,14 +77,20 @@ async def test_passed_when_generated_dominates() -> None:
 
 
 async def test_passed_on_draw() -> None:
-    """All draws → score = 0, still PASSED (threshold accepts ties)."""
+    """All draws → score = 0, still PASSED (threshold accepts ties).
+
+    `checked_prompts` includes draws — a duel the judge ruled DRAW was still checked,
+    just inconclusive. Only judge-side crashes (SKIPPED) are excluded.
+    """
     audit, _ = await _run(
         [DuelWinner.DRAW, DuelWinner.DRAW, DuelWinner.DRAW],
         prompts=["a", "b", "c"],
     )
     assert audit.outcome == VerificationOutcome.PASSED
     assert audit.score == 0
-    assert audit.checked_prompts == 0  # draws don't count as decided
+    assert audit.checked_prompts == 3
+    assert audit.drawn == 3
+    assert audit.total_prompts == 3
 
 
 async def test_passed_when_mixed_but_nonnegative() -> None:

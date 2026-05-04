@@ -58,9 +58,7 @@ async def run_match(
     score = sum(WINNER_TO_SCORE[d.winner] for d in duels)
     margin = score / len(duels) if duels else 0
     elapsed = asyncio.get_running_loop().time() - match_start
-    logger.info(
-        f"match {match_label}: done in {elapsed:.1f}s, score={score:+d}, margin={margin:+.2%}"
-    )
+    logger.info(f"match {match_label}: done in {elapsed:.1f}s, score={score:+d}, margin={margin:+.2%}")
     return MatchReport(
         left=left,
         right=right,

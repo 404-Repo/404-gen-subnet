@@ -59,7 +59,5 @@ def _create_openai_client(settings: Settings) -> AsyncOpenAI:
         base_url=settings.openai_base_url,
         api_key=settings.openai_api_key.get_secret_value(),
         timeout=settings.openai_timeout_seconds,
-        http_client=httpx.AsyncClient(
-            limits=httpx.Limits(max_keepalive_connections=64, max_connections=128)
-        ),
+        http_client=httpx.AsyncClient(limits=httpx.Limits(max_keepalive_connections=64, max_connections=128)),
     )

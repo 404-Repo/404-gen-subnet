@@ -368,9 +368,7 @@ class MatchRunner:
 
         # Multi-stage judge sets winner+detail on success, or leaves SKIPPED with detail=None
         # when evaluate_duel raised. SKIPPED with detail set is a clean preview-missing skip.
-        failed_duels = sum(
-            1 for d in report.duels if d.winner == DuelWinner.SKIPPED and d.detail is None
-        )
+        failed_duels = sum(1 for d in report.duels if d.winner == DuelWinner.SKIPPED and d.detail is None)
         if failed_duels:
             await self._discord.notify_judge_error(failed_duels=failed_duels, total_duels=len(report.duels))
 

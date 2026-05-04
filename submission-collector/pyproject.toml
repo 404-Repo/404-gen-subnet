@@ -7,7 +7,7 @@ readme = "README.md"
 
 [tool.poetry.dependencies]
 python = ">=3.11,<=3.13"
-subnet-common = {path = "../shared", develop = true}
+subnet-common = {path = "../shared", develop = true, extras = ["embeddings"]}
 bittensor = "10.2.1"
 pydantic-settings = "2.14.0"
 httpx = "0.28.1"

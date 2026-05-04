@@ -97,9 +97,7 @@ class DiscordNotifier:
         # by the pipeline carries either a JS URL or a failure_reason, so this counts
         # miners whose every prompt failed before the JS upload (dead CDN, oversized
         # JS, R2 reject, etc.) — i.e., they delivered nothing usable this round.
-        no_submission = sum(
-            1 for gens in results.values() if not any(g.js is not None for g in gens.values())
-        )
+        no_submission = sum(1 for gens in results.values() if not any(g.js is not None for g in gens.values()))
 
         # Stems where the miner delivered JS but our render/embedding pipeline failed to
         # produce views. This is *our* problem to act on — every other number is
