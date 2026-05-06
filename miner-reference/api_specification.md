@@ -27,6 +27,24 @@ Your service must expose four HTTP endpoints on port **10006**:
 
 Each pod has **4× H200 SXM** GPUs (141 GB HBM3e each, ~564 GB total VRAM). How you distribute work across GPUs is entirely up to you.
 
+## Docker Image Requirements
+
+Your submission is built and run as a Docker image by the orchestrator. The build pipeline expects a fixed layout, and the runtime expects a specific port and listen address.
+
+1. **Dockerfile location**: the repository must include a **`docker/Dockerfile`**. The build context is the repository root (`docker build -f docker/Dockerfile .`).
+2. **Exposed port**: the Dockerfile must expose port **10006** (`EXPOSE 10006`).
+3. **Listen address**: the HTTP server inside the image must listen on **`0.0.0.0:10006`**. Binding to `127.0.0.1` makes the service unreachable from the orchestrator.
+4. **Startup + warmup budget**: the service must reach the `ready` state within **4 hours** of pod start. This covers everything between container start and the first time `GET /status` returns `ready` — image pull is not counted, but model downloads and warm-up are.
+5. **Pinned dependencies**: every external dependency must be pinned to a specific version or commit hash so builds are reproducible:
+   - **pip packages**: exact versions (e.g., `torch==2.5.1`, not `torch>=2.0`).
+   - **Hugging Face models / repos**: pin to a specific revision hash.
+   - **Git dependencies**: use commit SHAs, not branch names.
+   - **Docker base images**: use a digest or specific tag (e.g., `pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime`, not `pytorch/pytorch:latest`).
+
+   Submissions with unpinned or floating dependencies may be rejected as non-reproducible.
+
+A minimal compliant Dockerfile lives at [`docker/Dockerfile`](docker/Dockerfile) in this bundle and is the starting point for the reference service.
+
 ## Pod Lifecycle
 
 ### State Machine

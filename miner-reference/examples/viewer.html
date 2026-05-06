@@ -8,7 +8,7 @@
       margin: 0;
       padding: 0;
       height: 100%;
-      background: #1a1a1f;
+      background: #ffffff;
       color: #ddd;
       font-family: -apple-system, system-ui, sans-serif;
       overflow: hidden;
@@ -172,7 +172,7 @@
     renderer.toneMappingExposure = 1.0;
 
     const scene = new THREE.Scene();
-    scene.background = new THREE.Color(0x1a1a1f);
+    scene.background = new THREE.Color(0xffffff);
 
     // FOV matches the runtime spec (17.5°). Position kept at the same direction
     // and distance as the canonical render camera (3.5 from origin).
@@ -194,6 +194,12 @@
     const fill = new THREE.DirectionalLight(0xaaccff, 0.4);
     fill.position.set(-2, 2, -3);
     scene.add(fill);
+
+    const top = new THREE.DirectionalLight(0xffffff, 1.0);
+    top.position.set(0, 5, 0);
+    top.target.position.set(0, 0, 0);
+    scene.add(top);
+    scene.add(top.target);
 
     // Reference helpers — unit cube wireframe (the [-0.5, 0.5] valid region) and origin axes
     const unitBox = new THREE.Box3Helper(
