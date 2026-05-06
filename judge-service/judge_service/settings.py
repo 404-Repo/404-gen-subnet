@@ -43,10 +43,24 @@ class Settings(BaseSettings):
         default=32,
         alias="MAX_CONCURRENT_VLM_CALLS",
         description=(
-            "Cap on simultaneous VLM calls in flight across the whole match. A duel runs "
-            "~25 VLM calls; with N duels gathered you can have up to 25*N in flight. This "
-            "sem keeps the VLM endpoint loaded but not over-saturated. Watch vLLM's "
-            "Running/Waiting and KV-cache stats — bump until KV cache fills meaningfully."
+            "Hard cap on simultaneous VLM calls in flight, summed across all duels currently "
+            "running. Acts as a backstop on top of `max_concurrent_duels`: with K duels in "
+            "flight and stage-1/stage-4 gathers of 8 calls each, the worst-case is ~8*K calls "
+            "in parallel — set this slightly above that so the sem isn't the inner-duel "
+            "bottleneck. Watch vLLM's Running/Waiting and KV-cache stats — bump until the "
+            "KV cache fills meaningfully."
+        ),
+    )
+
+    max_concurrent_duels: int = Field(
+        default=4,
+        alias="MAX_CONCURRENT_DUELS",
+        description=(
+            "Cap on simultaneously-running duels in a match. Bounding duel concurrency keeps "
+            "each duel's reference image and view PNGs hot in vLLM's prefix cache for the "
+            "whole pipeline (~25 calls), instead of getting evicted by sibling duels' prefixes. "
+            "Lower = better prefix-cache reuse, less cross-duel parallelism. Tune alongside "
+            "`max_concurrent_vlm_calls`."
         ),
     )
 

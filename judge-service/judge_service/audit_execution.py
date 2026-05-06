@@ -69,6 +69,7 @@ async def run_verification_audit(
     submitted_gens: dict[str, GenerationResult],
     generated_gens: dict[str, GenerationResult],
     max_concurrent_vlm_calls: int,
+    max_concurrent_duels: int,
     shutdown: GracefulShutdown,
 ) -> VerificationAudit:
     """Run submitted-vs-generated duels for one hotkey, persist report + audit, return verdict.
@@ -76,11 +77,18 @@ async def run_verification_audit(
     Submitted is the LEFT side, generated is the RIGHT side. Per-prompt:
     LEFT win = -1 (submitted dominated, suspicious), RIGHT win = +1 (generated held up,
     legitimate), DRAW or SKIPPED = 0. Sum >= 0 → PASSED.
+
+    `max_concurrent_duels` bounds how many duels run at once so each duel's reference
+    image stays hot in vLLM's prefix cache; mirrors `match_execution.run_match`.
     """
     sem = asyncio.Semaphore(max_concurrent_vlm_calls)
+    duel_sem = asyncio.Semaphore(max_concurrent_duels)
     audit_label = f"audit/{hotkey[:10]}"
     audit_start = asyncio.get_running_loop().time()
-    logger.info(f"audit {hotkey[:10]}: starting {len(prompts)} verification duels")
+    logger.info(
+        f"audit {hotkey[:10]}: starting {len(prompts)} verification duels "
+        f"(duel_concurrency={max_concurrent_duels}, vlm_call_cap={max_concurrent_vlm_calls})"
+    )
 
     async with httpx.AsyncClient(timeout=httpx.Timeout(60, connect=10)) as http:
         duels = await asyncio.gather(
@@ -89,6 +97,7 @@ async def run_verification_audit(
                     openai=openai,
                     http=http,
                     sem=sem,
+                    duel_sem=duel_sem,
                     prompt=p,
                     submitted=submitted_gens.get(Path(p).stem, GenerationResult()),
                     generated=generated_gens.get(Path(p).stem, GenerationResult()),
@@ -168,6 +177,7 @@ async def _evaluate_audit_prompt(
     openai: AsyncOpenAI,
     http: httpx.AsyncClient,
     sem: asyncio.Semaphore,
+    duel_sem: asyncio.Semaphore,
     prompt: str,
     submitted: GenerationResult,
     generated: GenerationResult,
@@ -175,7 +185,11 @@ async def _evaluate_audit_prompt(
     shutdown: GracefulShutdown,
     log_id: str = "",
 ) -> DuelReport:
-    """One audit duel. Mirrors `match_execution._evaluate_prompt` shape so reports are uniform."""
+    """One audit duel. Mirrors `match_execution._evaluate_prompt` shape so reports are uniform.
+
+    Acquires `duel_sem` for the whole pipeline so the duel's prefix stays hot in vLLM's
+    cache; queued duels bail without VLM calls if shutdown fires before their turn.
+    """
     stem = Path(prompt).stem
     left_url = _preview_url(submitted)
     right_url = _preview_url(generated)
@@ -190,24 +204,25 @@ async def _evaluate_audit_prompt(
         winner=DuelWinner.SKIPPED,
     )
 
-    if shutdown.should_stop:
+    async with duel_sem:
+        # Re-check after acquiring the sem: shutdown may have fired while we were
+        # queued behind earlier duels. Coroutines that arrive at this check post-shutdown
+        # bail without making any VLM calls.
+        if shutdown.should_stop:
+            return duel
+        try:
+            winner, detail = await evaluate_duel(
+                vlm=openai,
+                http=http,
+                sem=sem,
+                prompt_url=prompt,
+                left_gen=submitted,
+                right_gen=generated,
+                seed=seed,
+                log_id=log_id or stem,
+            )
+            duel.winner = winner
+            duel.detail = detail
+        except Exception as e:
+            logger.exception(f"audit duel failed for {stem}: {e}")
         return duel
-
-    try:
-        winner, detail = await evaluate_duel(
-            vlm=openai,
-            http=http,
-            sem=sem,
-            prompt_url=prompt,
-            left_gen=submitted,
-            right_gen=generated,
-            seed=seed,
-            log_id=log_id or stem,
-        )
-    except Exception as e:
-        logger.exception(f"audit duel failed for {stem}: {e}")
-        return duel
-
-    duel.winner = winner
-    duel.detail = detail
-    return duel

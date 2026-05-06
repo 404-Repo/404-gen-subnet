@@ -31,6 +31,7 @@ async def _run(
         left="left_hk",
         right="right_hk",
         max_concurrent_vlm_calls=4,
+        max_concurrent_duels=4,
         shutdown=GracefulShutdown(),
     )
 
@@ -113,6 +114,7 @@ async def test_run_match_shutdown_skips_pending_duels(mock_judge: AsyncMock) -> 
         left="left_hk",
         right="right_hk",
         max_concurrent_vlm_calls=1,
+        max_concurrent_duels=2,
         shutdown=shutdown,
     )
 

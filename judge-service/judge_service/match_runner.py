@@ -359,6 +359,7 @@ class MatchRunner:
             left=left,
             right=right,
             max_concurrent_vlm_calls=self._settings.max_concurrent_vlm_calls,
+            max_concurrent_duels=self._settings.max_concurrent_duels,
             shutdown=shutdown,
         )
 
@@ -389,6 +390,7 @@ class MatchRunner:
     async def _refresh_verification_state(self) -> bool:
         """Refresh approved/rejected sets from git. Returns True if changed."""
 
+        await self._git_batcher.flush()
         await self._git_batcher.refresh_base_sha()
 
         # Generation orchestrator's own verdict (it self-rejects on timing / failures).
@@ -474,6 +476,7 @@ class MatchRunner:
             submitted_gens=submitted_gens,
             generated_gens=generated_gens,
             max_concurrent_vlm_calls=self._settings.max_concurrent_vlm_calls,
+            max_concurrent_duels=self._settings.max_concurrent_duels,
             shutdown=shutdown,
         )
 

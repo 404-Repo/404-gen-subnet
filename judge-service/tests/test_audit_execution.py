@@ -42,6 +42,7 @@ async def _run(winner_seq: list[DuelWinner], prompts: list[str]) -> tuple:
             submitted_gens=submitted,
             generated_gens=generated,
             max_concurrent_vlm_calls=2,
+            max_concurrent_duels=2,
             shutdown=GracefulShutdown(),
         )
     return audit, save_calls
