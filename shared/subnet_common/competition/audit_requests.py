@@ -1,4 +1,4 @@
-from pydantic import BaseModel, TypeAdapter
+from pydantic import BaseModel, Field, TypeAdapter
 
 from subnet_common.git_batcher import GitBatcher
 from subnet_common.github import GitHubClient
@@ -13,6 +13,17 @@ class AuditRequest(BaseModel):
     """
 
     hotkey: str
+    latest_defender: str | None = Field(
+        default=None,
+        description=(
+            "Hotkey of the most recent leader the audited miner has beaten ('leader' "
+            "for the round-leader, or another miner's hotkey for a timeline win). Updated "
+            "in place as the miner climbs the timeline — re-requesting an audit doesn't "
+            "re-trigger orchestrator regeneration but does refresh this field. Used by "
+            "judge-service for the informational generated-vs-defender duel after the "
+            "verification audit. None on entries written before this field was introduced."
+        ),
+    )
 
 
 AuditRequestListAdapter = TypeAdapter(list[AuditRequest])
@@ -25,10 +36,26 @@ class AuditRequests:
         self._requests: dict[str, AuditRequest] = {}
 
     def add(self, request: AuditRequest) -> bool:
-        """Add request if hotkey not present. Returns True if added."""
+        """Add request if hotkey not present. Returns True if added.
+
+        Does NOT update an existing entry — callers that want to refresh `latest_defender`
+        on a re-request use `update_latest_defender` after `add` returns False.
+        """
         if request.hotkey in self._requests:
             return False
         self._requests[request.hotkey] = request
+        return True
+
+    def update_latest_defender(self, hotkey: str, latest_defender: str) -> bool:
+        """Refresh `latest_defender` on an existing request. Returns True if it changed.
+
+        No-op (returns False) when the hotkey isn't in the dict or the value is unchanged
+        — callers can use the boolean to decide whether re-persistence is needed.
+        """
+        existing = self._requests.get(hotkey)
+        if existing is None or existing.latest_defender == latest_defender:
+            return False
+        existing.latest_defender = latest_defender
         return True
 
     def has(self, hotkey: str) -> bool:

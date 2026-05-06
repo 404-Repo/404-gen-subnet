@@ -12,7 +12,7 @@ from subnet_common.competition.audit_requests import (
 )
 from subnet_common.competition.build_info import require_builds
 from subnet_common.competition.config import require_competition_config
-from subnet_common.competition.generations import GenerationSource, get_generations
+from subnet_common.competition.generations import GenerationsMap, GenerationSource, get_generations
 from subnet_common.competition.leader import require_leader_state
 from subnet_common.competition.match_matrix import MatchMatrix, get_match_matrix, save_match_matrix
 from subnet_common.competition.match_report import DuelWinner, save_match_report
@@ -29,7 +29,7 @@ from subnet_common.git_batcher import GitBatcher
 from subnet_common.github import GitHubClient
 from subnet_common.graceful_shutdown import GracefulShutdown
 
-from judge_service.audit_execution import run_verification_audit
+from judge_service.audit_execution import run_informational_audit_duel, run_verification_audit
 from judge_service.discord import DiscordNotifier
 from judge_service.match_execution import run_match
 from judge_service.models import MatchOutcome
@@ -245,7 +245,7 @@ class MatchRunner:
                 qualified.append(hotkey)
 
                 if not first_qualified_audited:
-                    await self._request_audit(hotkey, match.margin)
+                    await self._request_audit(hotkey=hotkey, defender="leader", margin=match.margin)
                     first_qualified_audited = True
 
             if not match.from_cache:
@@ -271,7 +271,7 @@ class MatchRunner:
 
         if match.margin >= self._win_margin:
             self._timeline.local_leaders.append(right)
-            await self._request_audit(right, match.margin)
+            await self._request_audit(hotkey=right, defender=left, margin=match.margin)
             await self._discord.notify_new_local_leader(
                 round_num=self._round_num, hotkey=right, defeated=left, margin=match.margin
             )
@@ -379,13 +379,26 @@ class MatchRunner:
 
         return MatchOutcome(left=left, right=right, margin=report.margin)
 
-    async def _request_audit(self, hotkey: str, margin: float) -> None:
-        """Request audit for a miner if not already requested."""
-        added = self._audit_requests.add(AuditRequest(hotkey=hotkey))
+    async def _request_audit(self, hotkey: str, defender: str, margin: float) -> None:
+        """Request audit for a miner; refresh `latest_defender` on a re-request.
+
+        `defender` is the hotkey the miner just beat ('leader' or another hotkey). On a
+        new request we persist + notify discord. On a repeat request for an already-audited
+        miner we don't re-notify or re-trigger orchestrator regeneration, but we DO refresh
+        `latest_defender` so the informational duel runs against the strongest opponent
+        the miner has climbed past. The latter is silent at INFO level — only the file
+        gets re-saved.
+        """
+        added = self._audit_requests.add(AuditRequest(hotkey=hotkey, latest_defender=defender))
         if added:
             await save_audit_requests(self._git_batcher, self._round_num, self._audit_requests)
-            logger.info(f"Audit requested for {hotkey[:10]}")
+            logger.info(f"Audit requested for {hotkey[:10]} (defender: {defender[:10]})")
             await self._discord.notify_audit_requested(round_num=self._round_num, hotkey=hotkey, margin=margin)
+            return
+
+        if self._audit_requests.update_latest_defender(hotkey, defender):
+            await save_audit_requests(self._git_batcher, self._round_num, self._audit_requests)
+            logger.debug(f"Audit latest_defender updated for {hotkey[:10]} -> {defender[:10]}")
 
     async def _refresh_verification_state(self) -> bool:
         """Refresh approved/rejected sets from git. Returns True if changed."""
@@ -487,6 +500,78 @@ class MatchRunner:
         # Merge into the existing audits dict and persist.
         self._verification_audits[hotkey] = audit
         await verification_audit.save_verification_audits(self._git_batcher, self._round_num, self._verification_audits)
+
+        # Informational generated-vs-defender duel. Best-effort: skipped if no defender
+        # is recorded (legacy request), or if either side has no usable outputs at the
+        # current ref. Trade-off: if we crash between this point and the save, the
+        # informational report is lost — verification is already persisted so the next
+        # iteration won't re-enter `_run_verification_audit` for this hotkey.
+        request = self._audit_requests.get(hotkey)
+        defender = request.latest_defender if request else None
+        if defender:
+            await self._run_informational_audit_duel(
+                audited_hotkey=hotkey,
+                defender=defender,
+                audited_generated=generated_gens,
+                shutdown=shutdown,
+            )
+        else:
+            logger.debug(f"No defender recorded for {hotkey[:10]} audit; skipping informational duel")
+
+    async def _run_informational_audit_duel(
+        self,
+        audited_hotkey: str,
+        defender: str,
+        audited_generated: GenerationsMap,
+        shutdown: GracefulShutdown,
+    ) -> None:
+        """Run the informational generated-vs-defender duel for an already-audited miner.
+
+        Defender's source mirrors `_get_generation_source`: GENERATED for 'leader' (the
+        round leader's outputs), SUBMITTED for any miner hotkey (we don't reuse another
+        miner's GENERATED even if they were also audited — keeps the comparison
+        consistent with what the original timeline match used). No verdict is computed
+        and a missing-data skip is silent at INFO level.
+        """
+        if shutdown.should_stop:
+            return
+
+        defender_source = self._get_generation_source(defender)
+        defender_gens = await get_generations(
+            git=self._git,
+            round_num=self._round_num,
+            hotkey=defender,
+            source=defender_source,
+            ref=self._ref,
+        )
+
+        if not any(g.js for g in defender_gens.values()):
+            logger.info(
+                f"informational audit skipped for {audited_hotkey[:10]} vs {defender[:10]}: "
+                f"defender has no usable {defender_source.value} outputs"
+            )
+            return
+        if not any(g.js for g in audited_generated.values()):
+            logger.info(
+                f"informational audit skipped for {audited_hotkey[:10]} vs {defender[:10]}: "
+                "no usable generated outputs"
+            )
+            return
+
+        await run_informational_audit_duel(
+            openai=self._openai,
+            git_batcher=self._git_batcher,
+            round_num=self._round_num,
+            audited_hotkey=audited_hotkey,
+            defender_hotkey=defender,
+            prompts=self._prompts,
+            seed=self._seed,
+            defender_gens=defender_gens,
+            audited_generated=audited_generated,
+            max_concurrent_vlm_calls=self._settings.max_concurrent_vlm_calls,
+            max_concurrent_duels=self._settings.max_concurrent_duels,
+            shutdown=shutdown,
+        )
 
     def _filter_rejected(self, hotkeys: list[str]) -> list[str]:
         """Filter out rejected hotkeys."""

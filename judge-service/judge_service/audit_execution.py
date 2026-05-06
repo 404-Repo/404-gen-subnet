@@ -39,6 +39,7 @@ from subnet_common.git_batcher import GitBatcher
 from subnet_common.graceful_shutdown import GracefulShutdown
 
 from judge_service.judges.multi_stage import evaluate_duel
+from judge_service.match_execution import run_match
 
 
 SUBMITTED_LEFT = "submitted"
@@ -226,3 +227,67 @@ async def _evaluate_audit_prompt(
         except Exception as e:
             logger.exception(f"audit duel failed for {stem}: {e}")
         return duel
+
+
+def _informational_audit_path(round_num: int, audited_hotkey: str, defender_hotkey: str) -> str:
+    """Path for the informational audit report. Distinct from `duels_*.json` to avoid
+    collision with the original miner-vs-miner duel between the same pair of hotkeys."""
+    return f"rounds/{round_num}/{audited_hotkey}/audit_{defender_hotkey[:10]}.json"
+
+
+async def run_informational_audit_duel(
+    openai: AsyncOpenAI,
+    git_batcher: GitBatcher,
+    round_num: int,
+    audited_hotkey: str,
+    defender_hotkey: str,
+    prompts: list[str],
+    seed: int,
+    defender_gens: dict[str, GenerationResult],
+    audited_generated: dict[str, GenerationResult],
+    max_concurrent_vlm_calls: int,
+    max_concurrent_duels: int,
+    shutdown: GracefulShutdown,
+) -> MatchReport:
+    """Run audited.generated vs defender's outputs. Informational only — no verdict.
+
+    `defender_hotkey` is the leader (either 'leader' or another miner) the audited miner
+    beat at audit-request time. We compare the miner's regenerated outputs against the
+    defender as a sanity check: if `submitted` beat the defender originally but
+    `generated` now loses to the defender, that's a cherry-picking signal worth a human
+    look. RIGHT (audited.generated) winning = legitimate, mirroring `run_verification_audit`.
+
+    Saved as a `MatchReport` at `rounds/{n}/{audited}/audit_vs_{defender[:10]}.json`.
+    No `VerificationOutcome` is computed — read the margin and judge for yourself.
+    """
+    report = await run_match(
+        openai=openai,
+        prompts=prompts,
+        seed=seed,
+        left_gens=defender_gens,
+        right_gens=audited_generated,
+        left=defender_hotkey,
+        right=audited_hotkey,
+        max_concurrent_vlm_calls=max_concurrent_vlm_calls,
+        max_concurrent_duels=max_concurrent_duels,
+        shutdown=shutdown,
+    )
+
+    if shutdown.should_stop:
+        logger.info(
+            f"informational audit interrupted before save: "
+            f"{audited_hotkey[:10]} generated vs {defender_hotkey[:10]}"
+        )
+        return report
+
+    path = _informational_audit_path(round_num, audited_hotkey, defender_hotkey)
+    await git_batcher.write(
+        path=path,
+        content=report.model_dump_json(indent=2),
+        message=f"Informational audit: {audited_hotkey[:10]} generated vs {defender_hotkey[:10]}",
+    )
+    logger.info(
+        f"informational audit saved: {audited_hotkey[:10]} generated vs "
+        f"{defender_hotkey[:10]}: margin={report.margin:+.2%}"
+    )
+    return report
