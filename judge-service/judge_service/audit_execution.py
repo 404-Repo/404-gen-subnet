@@ -1,241 +1,82 @@
-"""Verification duel: submitted vs generated for one audited hotkey.
+"""Audit duels and verdict computation for judge-service.
 
-For each prompt, run the multi-stage judge with submitted as left, generated as right.
-Score per prompt:
-    -1  submitted won  (miner's solution can't reproduce its own submission — suspicious)
-    +1  generated won  (solution reproduces or exceeds submission — legitimate)
-     0  draw or skipped
+Two duel artifacts per audited miner — both saved as MatchReports with kind='audit':
 
-DRAW means the judge ran end-to-end and ruled the two sides equivalent (or both sides
-had no previews). DRAW contributes 0 to score and is reported under `drawn` in the
-audit summary — it does not count as a "decided" duel.
+  D1 — `audit_submitted.json`        — submitted vs generated.
+       Bounds drift between what was submitted and what the solution actually produces.
+       LEFT='submitted' (sentinel), RIGHT=audited hotkey, RIGHT win = legit.
 
-SKIPPED is the per-duel default in `DuelReport` and only persists when the judge
-raised an unhandled exception that we caught (logged at audit_execution.py with
-`audit duel failed for <stem>`). It shouldn't happen in normal operation; if it does,
-a WARNING is emitted so an operator notices. SKIPPED is intentionally not surfaced as
-a separate field on `VerificationAudit` — chasing it via logs is the right entry point.
+  D2 — `audit_{defender[:10]}.json`  — generated vs the leader the miner beat.
+       Verifies the solution genuinely beats the leader (quality).
+       LEFT=defender hotkey, RIGHT=audited hotkey, RIGHT win = legit.
+       Re-produced when latest_defender changes; old D2 files for previous defenders
+       sit on disk as forensic data and are not consulted by `compute_verification`.
 
-Sum >= 0 → PASSED; otherwise FAILED. The asymmetry catches cheating: a miner who
-submits offline-generated / cherry-picked assets but deploys a weaker reproducer
-will have submitted dominate generated, score goes negative, audit fails.
+Verdict is derived, never persisted. `compute_verification` reads D1 + the D2 against
+the miner's CURRENT latest_defender and returns:
+    PENDING  — D1 or D2-vs-current-defender is missing.
+    PASSED   — D1.margin ≥ −W AND D2.margin ≥ +W.
+    FAILED   — otherwise.
 
-Same `evaluate_duel` engine as miner-vs-miner matches, same `MatchReport` artifact
-(saved as `duels_submitted.json` — `left="submitted"` matches the per-duel left side,
-mirroring how miner-vs-miner files name the file after the actual left), plus a slim
-`VerificationAudit` summary for fast resume / lookup.
+The producer functions (`produce_d1_duel`, `produce_d2_duel`) are pure data — they run
+the multi-stage judge over each prompt and persist a MatchReport. No verdict logic
+lives in the producers. Callers in `round_runner` decide what to produce when, based
+on what's already on disk.
 """
 
-import asyncio
-from pathlib import Path
-
-import httpx
 from loguru import logger
 from openai import AsyncOpenAI
-from subnet_common.competition.generations import GenerationResult
-from subnet_common.competition.match_report import DuelReport, DuelWinner, MatchReport, save_match_report
-from subnet_common.competition.verification_audit import VerificationAudit, VerificationOutcome
+from subnet_common.competition.generations import GenerationsMap
+from subnet_common.competition.match_report import (
+    MatchReport,
+    get_match_report,
+    save_match_report,
+)
+from subnet_common.competition.verification_audit import VerificationOutcome
 from subnet_common.git_batcher import GitBatcher
 from subnet_common.graceful_shutdown import GracefulShutdown
 
-from judge_service.judges.multi_stage import evaluate_duel
 from judge_service.match_execution import run_match
 
 
 SUBMITTED_LEFT = "submitted"
 
 
-def _preview_url(gen: GenerationResult) -> str | None:
-    """Grid PNG for the duel report — 4 views at a glance is more useful than just front."""
-    if not gen.views:
-        return None
-    return f"{gen.views}/grid.png"
-
-
-_SCORE_FOR: dict[DuelWinner, int] = {
-    DuelWinner.LEFT: -1,  # submitted won — miner couldn't reproduce; suspicious
-    DuelWinner.RIGHT: 1,  # generated won — solution reproduces or exceeds; legitimate
-    DuelWinner.DRAW: 0,
-    DuelWinner.SKIPPED: 0,
-}
-
-
-async def run_verification_audit(
+async def produce_d1_duel(
     openai: AsyncOpenAI,
     git_batcher: GitBatcher,
     round_num: int,
     hotkey: str,
     prompts: list[str],
     seed: int,
-    submitted_gens: dict[str, GenerationResult],
-    generated_gens: dict[str, GenerationResult],
+    submitted_gens: GenerationsMap,
+    generated_gens: GenerationsMap,
     max_concurrent_vlm_calls: int,
     max_concurrent_duels: int,
     shutdown: GracefulShutdown,
-) -> VerificationAudit:
-    """Run submitted-vs-generated duels for one hotkey, persist report + audit, return verdict.
-
-    Submitted is the LEFT side, generated is the RIGHT side. Per-prompt:
-    LEFT win = -1 (submitted dominated, suspicious), RIGHT win = +1 (generated held up,
-    legitimate), DRAW or SKIPPED = 0. Sum >= 0 → PASSED.
-
-    `max_concurrent_duels` bounds how many duels run at once so each duel's reference
-    image stays hot in vLLM's prefix cache; mirrors `match_execution.run_match`.
-    """
-    sem = asyncio.Semaphore(max_concurrent_vlm_calls)
-    duel_sem = asyncio.Semaphore(max_concurrent_duels)
-    audit_label = f"audit/{hotkey[:10]}"
-    audit_start = asyncio.get_running_loop().time()
-    logger.info(
-        f"audit {hotkey[:10]}: starting {len(prompts)} verification duels "
-        f"(duel_concurrency={max_concurrent_duels}, vlm_call_cap={max_concurrent_vlm_calls})"
-    )
-
-    async with httpx.AsyncClient(timeout=httpx.Timeout(60, connect=10)) as http:
-        duels = await asyncio.gather(
-            *[
-                _evaluate_audit_prompt(
-                    openai=openai,
-                    http=http,
-                    sem=sem,
-                    duel_sem=duel_sem,
-                    prompt=p,
-                    submitted=submitted_gens.get(Path(p).stem, GenerationResult()),
-                    generated=generated_gens.get(Path(p).stem, GenerationResult()),
-                    seed=seed,
-                    shutdown=shutdown,
-                    log_id=f"{Path(p).stem} / {audit_label}",
-                )
-                for p in prompts
-            ]
-        )
-    duels = sorted(duels, key=lambda d: d.name)
-
-    score = sum(_SCORE_FOR[d.winner] for d in duels)
-    decided = sum(1 for d in duels if d.winner in (DuelWinner.LEFT, DuelWinner.RIGHT))
-    drawn = sum(1 for d in duels if d.winner == DuelWinner.DRAW)
-    skipped = sum(1 for d in duels if d.winner == DuelWinner.SKIPPED)
-    total = len(duels)
-    # `checked` = duels the judge ran to a verdict (decisive or draw). SKIPPED is a
-    # judge-side crash, so it's excluded from "checked". In normal operation skipped=0
-    # and checked == total.
-    checked = decided + drawn
-    if skipped:
-        # Shouldn't happen in normal operation — evaluate_duel handles missing previews
-        # internally and only SKIPPED leaks through on shutdown or unhandled exception.
-        # Log loudly so an operator notices instead of letting it hide in the duels file.
-        logger.warning(f"audit {hotkey[:10]}: {skipped} duel(s) returned SKIPPED — judge crashed for those stems")
-
-    # Reuse MatchReport to keep the artifact shape identical to miner-vs-miner duels.
-    # `left=SUBMITTED_LEFT`/`right=hotkey` makes the saved path `rounds/{n}/{hotkey}/duels_submitted.json`.
-    # The label matches the per-duel `left_js=submitted.js` data, so a reader sees a
-    # consistent "left = submitted, right = the audited miner's regenerated output".
-    report = MatchReport(
+) -> MatchReport:
+    """Produce D1: submitted vs generated. Saved at rounds/{n}/{hotkey}/audit_submitted.json."""
+    report = await run_match(
+        openai=openai,
+        prompts=prompts,
+        seed=seed,
+        left_gens=submitted_gens,
+        right_gens=generated_gens,
         left=SUBMITTED_LEFT,
         right=hotkey,
-        score=score,
-        margin=score / len(duels) if duels else 0,
-        duels=duels,
+        max_concurrent_vlm_calls=max_concurrent_vlm_calls,
+        max_concurrent_duels=max_concurrent_duels,
+        shutdown=shutdown,
     )
-    await save_match_report(git_batcher, round_num, report)
-
-    breakdown = f"{checked} checked ({decided} decided, {drawn} drawn)"
-
     if shutdown.should_stop:
-        # Don't finalize a verdict on shutdown — it'll resume next iteration with the
-        # saved partial report (next pass will see no audit yet and re-run).
-        return VerificationAudit(
-            hotkey=hotkey,
-            outcome=VerificationOutcome.PENDING,
-            score=score,
-            total_prompts=total,
-            checked_prompts=checked,
-            drawn=drawn,
-            reason="interrupted by shutdown",
-        )
-
-    if score >= 0:
-        outcome = VerificationOutcome.PASSED
-        reason = f"score={score} ≥ 0 over {breakdown}"
-    else:
-        outcome = VerificationOutcome.FAILED
-        reason = f"score={score} < 0 over {breakdown}"
-
-    elapsed = asyncio.get_running_loop().time() - audit_start
-    logger.info(f"audit {hotkey[:10]}: {outcome.value} in {elapsed:.1f}s " f"(score={score}, {breakdown})")
-    return VerificationAudit(
-        hotkey=hotkey,
-        outcome=outcome,
-        score=score,
-        total_prompts=total,
-        checked_prompts=checked,
-        drawn=drawn,
-        reason=reason,
-    )
+        logger.info(f"D1 interrupted before save: {hotkey[:10]}")
+        return report
+    await save_match_report(git_batcher, round_num, report, kind="audit")
+    logger.info(f"D1 saved: {hotkey[:10]} submitted vs generated: margin={report.margin:+.2%}")
+    return report
 
 
-async def _evaluate_audit_prompt(
-    openai: AsyncOpenAI,
-    http: httpx.AsyncClient,
-    sem: asyncio.Semaphore,
-    duel_sem: asyncio.Semaphore,
-    prompt: str,
-    submitted: GenerationResult,
-    generated: GenerationResult,
-    seed: int,
-    shutdown: GracefulShutdown,
-    log_id: str = "",
-) -> DuelReport:
-    """One audit duel. Mirrors `match_execution._evaluate_prompt` shape so reports are uniform.
-
-    Acquires `duel_sem` for the whole pipeline so the duel's prefix stays hot in vLLM's
-    cache; queued duels bail without VLM calls if shutdown fires before their turn.
-    """
-    stem = Path(prompt).stem
-    left_url = _preview_url(submitted)
-    right_url = _preview_url(generated)
-
-    duel = DuelReport(
-        name=stem,
-        prompt=prompt,
-        left_js=submitted.js,
-        left_png=left_url,
-        right_js=generated.js,
-        right_png=right_url,
-        winner=DuelWinner.SKIPPED,
-    )
-
-    async with duel_sem:
-        # Re-check after acquiring the sem: shutdown may have fired while we were
-        # queued behind earlier duels. Coroutines that arrive at this check post-shutdown
-        # bail without making any VLM calls.
-        if shutdown.should_stop:
-            return duel
-        try:
-            winner, detail = await evaluate_duel(
-                vlm=openai,
-                http=http,
-                sem=sem,
-                prompt_url=prompt,
-                left_gen=submitted,
-                right_gen=generated,
-                seed=seed,
-                log_id=log_id or stem,
-            )
-            duel.winner = winner
-            duel.detail = detail
-        except Exception as e:
-            logger.exception(f"audit duel failed for {stem}: {e}")
-        return duel
-
-
-def _informational_audit_path(round_num: int, audited_hotkey: str, defender_hotkey: str) -> str:
-    """Path for the informational audit report. Distinct from `duels_*.json` to avoid
-    collision with the original miner-vs-miner duel between the same pair of hotkeys."""
-    return f"rounds/{round_num}/{audited_hotkey}/audit_{defender_hotkey[:10]}.json"
-
-
-async def run_informational_audit_duel(
+async def produce_d2_duel(
     openai: AsyncOpenAI,
     git_batcher: GitBatcher,
     round_num: int,
@@ -243,22 +84,17 @@ async def run_informational_audit_duel(
     defender_hotkey: str,
     prompts: list[str],
     seed: int,
-    defender_gens: dict[str, GenerationResult],
-    audited_generated: dict[str, GenerationResult],
+    defender_gens: GenerationsMap,
+    audited_generated: GenerationsMap,
     max_concurrent_vlm_calls: int,
     max_concurrent_duels: int,
     shutdown: GracefulShutdown,
 ) -> MatchReport:
-    """Run audited.generated vs defender's outputs. Informational only — no verdict.
+    """Produce D2: generated vs defender. Saved at rounds/{n}/{audited}/audit_{defender[:10]}.json.
 
-    `defender_hotkey` is the leader (either 'leader' or another miner) the audited miner
-    beat at audit-request time. We compare the miner's regenerated outputs against the
-    defender as a sanity check: if `submitted` beat the defender originally but
-    `generated` now loses to the defender, that's a cherry-picking signal worth a human
-    look. RIGHT (audited.generated) winning = legitimate, mirroring `run_verification_audit`.
-
-    Saved as a `MatchReport` at `rounds/{n}/{audited}/audit_vs_{defender[:10]}.json`.
-    No `VerificationOutcome` is computed — read the margin and judge for yourself.
+    Re-runs are not idempotent at this layer — callers gate on `get_match_report` first
+    and only invoke this when the file is actually missing (e.g., first audit, or a new
+    `latest_defender` for which no D2 has been produced yet).
     """
     report = await run_match(
         openai=openai,
@@ -272,22 +108,39 @@ async def run_informational_audit_duel(
         max_concurrent_duels=max_concurrent_duels,
         shutdown=shutdown,
     )
-
     if shutdown.should_stop:
-        logger.info(
-            f"informational audit interrupted before save: "
-            f"{audited_hotkey[:10]} generated vs {defender_hotkey[:10]}"
-        )
+        logger.info(f"D2 interrupted before save: {audited_hotkey[:10]} vs {defender_hotkey[:10]}")
         return report
-
-    path = _informational_audit_path(round_num, audited_hotkey, defender_hotkey)
-    await git_batcher.write(
-        path=path,
-        content=report.model_dump_json(indent=2),
-        message=f"Informational audit: {audited_hotkey[:10]} generated vs {defender_hotkey[:10]}",
-    )
-    logger.info(
-        f"informational audit saved: {audited_hotkey[:10]} generated vs "
-        f"{defender_hotkey[:10]}: margin={report.margin:+.2%}"
-    )
+    await save_match_report(git_batcher, round_num, report, kind="audit")
+    logger.info(f"D2 saved: {audited_hotkey[:10]} generated vs {defender_hotkey[:10]}: " f"margin={report.margin:+.2%}")
     return report
+
+
+async def compute_verification(
+    git_batcher: GitBatcher,
+    round_num: int,
+    hotkey: str,
+    latest_defender: str,
+    win_margin: float,
+) -> VerificationOutcome:
+    """Derive the verdict from D1 + D2-vs-current-defender artifacts.
+
+    Reads only the D2 against the CURRENT `latest_defender`. Old D2 files for previous
+    defenders are not consulted — a defender change naturally re-derives the verdict
+    against the new D2 (PENDING until produced, then PASSED/FAILED). Stale D2s remain
+    on disk as forensic data.
+
+    Returns:
+        PENDING — D1 or D2-vs-current-defender is missing.
+        PASSED  — D1.margin ≥ −W AND D2.margin ≥ +W.
+        FAILED  — otherwise.
+    """
+    d1 = await get_match_report(git_batcher, round_num, SUBMITTED_LEFT, hotkey, kind="audit")
+    if d1 is None:
+        return VerificationOutcome.PENDING
+    d2 = await get_match_report(git_batcher, round_num, latest_defender, hotkey, kind="audit")
+    if d2 is None:
+        return VerificationOutcome.PENDING
+    if d1.margin >= -win_margin and d2.margin >= win_margin:
+        return VerificationOutcome.PASSED
+    return VerificationOutcome.FAILED

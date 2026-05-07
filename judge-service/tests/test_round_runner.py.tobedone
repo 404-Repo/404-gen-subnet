@@ -21,7 +21,7 @@ from subnet_common.testing import MockGitHubClient
 
 from judge_service.discord import NULL_DISCORD_NOTIFIER
 from judge_service.match_execution import WINNER_TO_SCORE
-from judge_service.match_runner import MatchRunner, Timeline
+from judge_service.round_runner import RoundRunner, Timeline
 from judge_service.settings import Settings
 
 
@@ -30,10 +30,10 @@ def _make_runner(
     hotkeys: list[str] | None = None,
     seed: int = 42,
     win_margin: float = 0.05,
-) -> tuple[MatchRunner, MockGitHubClient]:
+) -> tuple[RoundRunner, MockGitHubClient]:
     mock_github = MockGitHubClient()
     git_batcher = GitBatcher(git=mock_github, branch="main", base_sha="abc123")
-    runner = MatchRunner(
+    runner = RoundRunner(
         git_batcher=git_batcher,
         state=CompetitionState(current_round=1, stage=RoundStage.DUELS),
         openai=AsyncMock(),
@@ -151,7 +151,7 @@ _SUBMISSIONS_ADAPTER = TypeAdapter(dict[str, MinerSubmission])
 def _populate_round(
     git: MockGitHubClient, round_num: int, num_prompts: int, hotkeys: list[str], win_margin: float
 ) -> None:
-    """Populate all git files needed for MatchRunner.create() and run()."""
+    """Populate all git files needed for RoundRunner.create() and run()."""
     prompts = [f"p{i}.png" for i in range(num_prompts)]
 
     git.files["config.json"] = json.dumps(
@@ -228,14 +228,14 @@ def _inject_audits(
 
 
 class _Scenario:
-    """Shared setup for full MatchRunner integration tests."""
+    """Shared setup for full RoundRunner integration tests."""
 
     NUM_PROMPTS = 10
     NUM_HOTKEYS = 10
 
     def __init__(
         self,
-        runner: MatchRunner,
+        runner: RoundRunner,
         git: MockGitHubClient,
         shutdown: GracefulShutdown,
         hotkeys: list[str],
@@ -260,7 +260,7 @@ class _Scenario:
         _populate_round(git, round_num=1, num_prompts=cls.NUM_PROMPTS, hotkeys=hotkeys, win_margin=1.0)
 
         state = CompetitionState(current_round=1, stage=RoundStage.DUELS)
-        runner = await MatchRunner.create(
+        runner = await RoundRunner.create(
             git_batcher=git_batcher,
             state=state,
             openai=AsyncMock(),
@@ -284,7 +284,7 @@ class _Scenario:
             return _make_report([duel_outcomes[(left, right)]] * self.NUM_PROMPTS, left, right)
 
         with (
-            patch("judge_service.match_runner.run_match", side_effect=mock_run_match),
+            patch("judge_service.round_runner.run_match", side_effect=mock_run_match),
             patch.object(self.shutdown, "wait", side_effect=mock_wait),
         ):
             await self.runner.run(self.shutdown)
@@ -309,7 +309,7 @@ async def test_no_submissions_finalizes_as_leader(settings: Settings) -> None:
 
 
 async def test_full_success_scenario(settings: Settings) -> None:
-    """Full MatchRunner success path via run(): qual → timeline → exploratory → verify → finalize."""
+    """Full RoundRunner success path via run(): qual → timeline → exploratory → verify → finalize."""
     s = await _Scenario.create(settings)
 
     R, L = DuelWinner.RIGHT, DuelWinner.LEFT
@@ -560,7 +560,7 @@ async def test_shutdown_mid_match_stops_and_discards_interrupted_work(settings: 
     _populate_round(git, round_num=1, num_prompts=num_prompts, hotkeys=hotkeys, win_margin=0.5)
 
     state = CompetitionState(current_round=1, stage=RoundStage.DUELS)
-    runner = await MatchRunner.create(
+    runner = await RoundRunner.create(
         git_batcher=git_batcher,
         state=state,
         openai=AsyncMock(),
@@ -578,7 +578,7 @@ async def test_shutdown_mid_match_stops_and_discards_interrupted_work(settings: 
             shutdown.request_shutdown()
         return _make_report([DuelWinner.RIGHT] * num_prompts, left, right)
 
-    with patch("judge_service.match_runner.run_match", side_effect=mock_run_match):
+    with patch("judge_service.round_runner.run_match", side_effect=mock_run_match):
         await runner.run(shutdown)
 
     # Runner stopped after exactly 3 run_match calls

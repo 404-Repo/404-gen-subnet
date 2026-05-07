@@ -3,7 +3,7 @@ from collections import deque
 from loguru import logger
 from openai import AsyncOpenAI
 from pydantic import BaseModel, Field
-from subnet_common.competition import generation_report, source_audit, verification_audit
+from subnet_common.competition import generation_report, source_audit
 from subnet_common.competition.audit_requests import (
     AuditRequest,
     AuditRequests,
@@ -12,10 +12,10 @@ from subnet_common.competition.audit_requests import (
 )
 from subnet_common.competition.build_info import require_builds
 from subnet_common.competition.config import require_competition_config
-from subnet_common.competition.generations import GenerationsMap, GenerationSource, get_generations
+from subnet_common.competition.generations import GenerationSource, get_generations
 from subnet_common.competition.leader import require_leader_state
 from subnet_common.competition.match_matrix import MatchMatrix, get_match_matrix, save_match_matrix
-from subnet_common.competition.match_report import DuelWinner, save_match_report
+from subnet_common.competition.match_report import DuelWinner, get_match_report, save_match_report
 from subnet_common.competition.prompts import require_prompts
 from subnet_common.competition.round_result import RoundResult, save_round_result
 from subnet_common.competition.seed import require_seed_from_git
@@ -25,11 +25,17 @@ from subnet_common.competition.state import (
     update_competition_state,
 )
 from subnet_common.competition.submissions import require_submissions
+from subnet_common.competition.verification_audit import VerificationOutcome
 from subnet_common.git_batcher import GitBatcher
 from subnet_common.github import GitHubClient
 from subnet_common.graceful_shutdown import GracefulShutdown
 
-from judge_service.audit_execution import run_informational_audit_duel, run_verification_audit
+from judge_service.audit_execution import (
+    SUBMITTED_LEFT,
+    compute_verification,
+    produce_d1_duel,
+    produce_d2_duel,
+)
 from judge_service.discord import DiscordNotifier
 from judge_service.match_execution import run_match
 from judge_service.models import MatchOutcome
@@ -73,8 +79,9 @@ class Timeline(BaseModel):
         return False
 
 
-class MatchRunner:
-    """Runs matches for a round, tracks timelines, requests audits."""
+class RoundRunner:
+    """Drives a single round end-to-end: qualification, timeline, exploratory duels,
+    audit production (D1/D2), verification verdict derivation, and finalization."""
 
     def __init__(
         self,
@@ -103,7 +110,10 @@ class MatchRunner:
         self._approved_hotkeys: set[str] = set()
         self._rejected_hotkeys: set[str] = set()
         self._reports: dict[str, generation_report.GenerationReport] = {}
-        self._verification_audits: dict[str, verification_audit.VerificationAudit] = {}
+        # Hotkeys with COMPLETED orchestrator report whose verdict is PENDING — i.e., D1 or
+        # D2-vs-current-latest_defender hasn't been produced yet. Populated by
+        # `_refresh_verification_state` so the main loop knows what to work on next.
+        self._pending_verification: set[str] = set()
 
         self._settings = settings
         self._discord = discord
@@ -134,7 +144,7 @@ class MatchRunner:
         openai: AsyncOpenAI,
         settings: Settings,
         discord: DiscordNotifier,
-    ) -> "MatchRunner":
+    ) -> "RoundRunner":
         """Load round data and create a runner."""
 
         round_num = state.current_round
@@ -218,7 +228,7 @@ class MatchRunner:
                 else:
                     logger.info("All duels complete, waiting for verification")
                     await self._git_batcher.flush()
-                    await shutdown.wait(timeout=self._settings.check_state_interval_seconds)
+                    await shutdown.wait(timeout=self._settings.max_check_state_interval_seconds)
                     refresh_needed = True
 
             if refresh_needed:
@@ -401,7 +411,13 @@ class MatchRunner:
             logger.debug(f"Audit latest_defender updated for {hotkey[:10]} -> {defender[:10]}")
 
     async def _refresh_verification_state(self) -> bool:
-        """Refresh approved/rejected sets from git. Returns True if changed."""
+        """Refresh approved/rejected sets from git. Returns True if changed.
+
+        Verification verdicts are derived on-demand from D1 + D2 artifacts on disk via
+        `compute_verification`, not loaded from a persisted file. Hotkeys whose D1 or
+        D2-vs-current-defender hasn't been produced yet land in `_pending_verification`
+        for the main loop to process.
+        """
 
         await self._git_batcher.flush()
         await self._git_batcher.refresh_base_sha()
@@ -414,12 +430,35 @@ class MatchRunner:
         completed = generation_report.get_completed_hotkeys(reports)
         rejected_by_orchestrator = generation_report.get_rejected_hotkeys(reports)
 
-        # Our own verdict from the submitted-vs-generated verification duel.
-        ver_audits = await verification_audit.get_verification_audits(
-            git=self._git, round_num=self._round_num, ref=self._ref
-        )
-        ver_passed = verification_audit.get_passed_hotkeys(ver_audits)
-        ver_failed = verification_audit.get_failed_hotkeys(ver_audits)
+        # Derive verification verdicts from the duel artifacts on disk. PENDING hotkeys
+        # are tracked separately so `_find_pending_verification` knows what to work on.
+        ver_passed: set[str] = set()
+        ver_failed: set[str] = set()
+        pending: set[str] = set()
+        for hotkey in completed:
+            if hotkey in rejected_by_orchestrator:
+                continue
+            request = self._audit_requests.get(hotkey)
+            if request is None or request.latest_defender is None:
+                # Miner hasn't been audit-requested (or legacy entry without defender).
+                # No D2 to compute against → not auditable; treat as PENDING so the
+                # round can't finalize through them. New requests will populate the
+                # defender and unblock progress.
+                pending.add(hotkey)
+                continue
+            outcome = await compute_verification(
+                git_batcher=self._git_batcher,
+                round_num=self._round_num,
+                hotkey=hotkey,
+                latest_defender=request.latest_defender,
+                win_margin=self._win_margin,
+            )
+            if outcome == VerificationOutcome.PASSED:
+                ver_passed.add(hotkey)
+            elif outcome == VerificationOutcome.FAILED:
+                ver_failed.add(hotkey)
+            else:
+                pending.add(hotkey)
 
         audits = await source_audit.get_source_audits(git=self._git, round_num=self._round_num, ref=self._ref)
         source_passed = source_audit.get_passed_hotkeys(audits)
@@ -445,32 +484,33 @@ class MatchRunner:
 
         # Stash for the main loop to consult when picking the next unit of work.
         self._reports = reports
-        self._verification_audits = ver_audits
+        self._pending_verification = pending - rejected
 
         return changed
 
     async def _find_pending_verification(self) -> str | None:
-        """Find the first hotkey with COMPLETED orchestrator report and no verification audit yet."""
-        for hotkey, rpt in self._reports.items():
-            if rpt.outcome != generation_report.GenerationReportOutcome.COMPLETED:
-                continue
-            if hotkey in self._verification_audits:
-                continue
-            if hotkey in self._rejected_hotkeys:
-                continue
+        """Return any hotkey with COMPLETED report whose D1 or D2-vs-current-defender
+        is missing — i.e., needs more audit duel production before its verdict resolves."""
+        for hotkey in self._pending_verification:
             return hotkey
         return None
 
     async def _run_verification_audit(self, hotkey: str, shutdown: GracefulShutdown) -> None:
-        """Run one verification duel: SUBMITTED vs GENERATED. Persists report + audit."""
-        logger.info(f"Verification duel for {hotkey[:10]}")
-        submitted_gens = await get_generations(
-            git=self._git,
-            round_num=self._round_num,
-            hotkey=hotkey,
-            source=GenerationSource.SUBMITTED,
-            ref=self._ref,
-        )
+        """Produce whichever audit duel artifacts are missing for `hotkey`.
+
+        Idempotent: D1 (audit_submitted.json) is produced once. D2 is produced per
+        unique `latest_defender` value the miner has had — re-runs only if the file for
+        the CURRENT defender is missing. Old D2 files for previous defenders sit on
+        disk as forensic data and are not re-read by `compute_verification`.
+        """
+        request = self._audit_requests.get(hotkey)
+        if request is None or request.latest_defender is None:
+            logger.debug(f"No audit request / defender for {hotkey[:10]}; nothing to produce")
+            return
+
+        defender = request.latest_defender
+
+        # Generated outputs are needed by both D1 (as RIGHT) and D2 (as RIGHT). Load once.
         generated_gens = await get_generations(
             git=self._git,
             round_num=self._round_num,
@@ -479,99 +519,70 @@ class MatchRunner:
             ref=self._ref,
         )
 
-        audit = await run_verification_audit(
-            openai=self._openai,
-            git_batcher=self._git_batcher,
-            round_num=self._round_num,
-            hotkey=hotkey,
-            prompts=self._prompts,
-            seed=self._seed,
-            submitted_gens=submitted_gens,
-            generated_gens=generated_gens,
-            max_concurrent_vlm_calls=self._settings.max_concurrent_vlm_calls,
-            max_concurrent_duels=self._settings.max_concurrent_duels,
-            shutdown=shutdown,
-        )
-
-        if shutdown.should_stop:
-            logger.info(f"Verification for {hotkey[:10]} interrupted by shutdown")
-            return
-
-        # Merge into the existing audits dict and persist.
-        self._verification_audits[hotkey] = audit
-        await verification_audit.save_verification_audits(self._git_batcher, self._round_num, self._verification_audits)
-
-        # Informational generated-vs-defender duel. Best-effort: skipped if no defender
-        # is recorded (legacy request), or if either side has no usable outputs at the
-        # current ref. Trade-off: if we crash between this point and the save, the
-        # informational report is lost — verification is already persisted so the next
-        # iteration won't re-enter `_run_verification_audit` for this hotkey.
-        request = self._audit_requests.get(hotkey)
-        defender = request.latest_defender if request else None
-        if defender:
-            await self._run_informational_audit_duel(
-                audited_hotkey=hotkey,
-                defender=defender,
-                audited_generated=generated_gens,
-                shutdown=shutdown,
+        # D1: produce if missing.
+        d1_existing = await get_match_report(self._git_batcher, self._round_num, SUBMITTED_LEFT, hotkey, kind="audit")
+        if d1_existing is None and not shutdown.should_stop:
+            submitted_gens = await get_generations(
+                git=self._git,
+                round_num=self._round_num,
+                hotkey=hotkey,
+                source=GenerationSource.SUBMITTED,
+                ref=self._ref,
             )
-        else:
-            logger.debug(f"No defender recorded for {hotkey[:10]} audit; skipping informational duel")
+            if not any(g.js for g in submitted_gens.values()):
+                logger.warning(f"D1 skipped for {hotkey[:10]}: submitted has no usable outputs")
+            elif not any(g.js for g in generated_gens.values()):
+                logger.warning(f"D1 skipped for {hotkey[:10]}: generated has no usable outputs")
+            else:
+                logger.info(f"Producing D1 for {hotkey[:10]} (submitted vs generated)")
+                await produce_d1_duel(
+                    openai=self._openai,
+                    git_batcher=self._git_batcher,
+                    round_num=self._round_num,
+                    hotkey=hotkey,
+                    prompts=self._prompts,
+                    seed=self._seed,
+                    submitted_gens=submitted_gens,
+                    generated_gens=generated_gens,
+                    max_concurrent_vlm_calls=self._settings.max_concurrent_vlm_calls,
+                    max_concurrent_duels=self._settings.max_concurrent_duels,
+                    shutdown=shutdown,
+                )
 
-    async def _run_informational_audit_duel(
-        self,
-        audited_hotkey: str,
-        defender: str,
-        audited_generated: GenerationsMap,
-        shutdown: GracefulShutdown,
-    ) -> None:
-        """Run the informational generated-vs-defender duel for an already-audited miner.
-
-        Defender's source mirrors `_get_generation_source`: GENERATED for 'leader' (the
-        round leader's outputs), SUBMITTED for any miner hotkey (we don't reuse another
-        miner's GENERATED even if they were also audited — keeps the comparison
-        consistent with what the original timeline match used). No verdict is computed
-        and a missing-data skip is silent at INFO level.
-        """
-        if shutdown.should_stop:
-            return
-
-        defender_source = self._get_generation_source(defender)
-        defender_gens = await get_generations(
-            git=self._git,
-            round_num=self._round_num,
-            hotkey=defender,
-            source=defender_source,
-            ref=self._ref,
-        )
-
-        if not any(g.js for g in defender_gens.values()):
-            logger.info(
-                f"informational audit skipped for {audited_hotkey[:10]} vs {defender[:10]}: "
-                f"defender has no usable {defender_source.value} outputs"
+        # D2 against current latest_defender: produce if missing.
+        d2_existing = await get_match_report(self._git_batcher, self._round_num, defender, hotkey, kind="audit")
+        if d2_existing is None and not shutdown.should_stop:
+            defender_source = self._get_generation_source(defender)
+            defender_gens = await get_generations(
+                git=self._git,
+                round_num=self._round_num,
+                hotkey=defender,
+                source=defender_source,
+                ref=self._ref,
             )
-            return
-        if not any(g.js for g in audited_generated.values()):
-            logger.info(
-                f"informational audit skipped for {audited_hotkey[:10]} vs {defender[:10]}: "
-                "no usable generated outputs"
-            )
-            return
-
-        await run_informational_audit_duel(
-            openai=self._openai,
-            git_batcher=self._git_batcher,
-            round_num=self._round_num,
-            audited_hotkey=audited_hotkey,
-            defender_hotkey=defender,
-            prompts=self._prompts,
-            seed=self._seed,
-            defender_gens=defender_gens,
-            audited_generated=audited_generated,
-            max_concurrent_vlm_calls=self._settings.max_concurrent_vlm_calls,
-            max_concurrent_duels=self._settings.max_concurrent_duels,
-            shutdown=shutdown,
-        )
+            if not any(g.js for g in defender_gens.values()):
+                logger.warning(
+                    f"D2 skipped for {hotkey[:10]} vs {defender[:10]}: "
+                    f"defender has no usable {defender_source.value} outputs"
+                )
+            elif not any(g.js for g in generated_gens.values()):
+                logger.warning(f"D2 skipped for {hotkey[:10]} vs {defender[:10]}: generated has no usable outputs")
+            else:
+                logger.info(f"Producing D2 for {hotkey[:10]} vs {defender[:10]}")
+                await produce_d2_duel(
+                    openai=self._openai,
+                    git_batcher=self._git_batcher,
+                    round_num=self._round_num,
+                    audited_hotkey=hotkey,
+                    defender_hotkey=defender,
+                    prompts=self._prompts,
+                    seed=self._seed,
+                    defender_gens=defender_gens,
+                    audited_generated=generated_gens,
+                    max_concurrent_vlm_calls=self._settings.max_concurrent_vlm_calls,
+                    max_concurrent_duels=self._settings.max_concurrent_duels,
+                    shutdown=shutdown,
+                )
 
     def _filter_rejected(self, hotkeys: list[str]) -> list[str]:
         """Filter out rejected hotkeys."""

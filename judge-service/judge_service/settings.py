@@ -18,10 +18,15 @@ class Settings(BaseSettings):
     )
     github_branch: str = Field(default="main", alias="GITHUB_BRANCH", description="Git branch to commit to")
 
-    check_state_interval_seconds: int = Field(
+    min_check_state_interval_seconds: int = Field(
+        default=120,
+        alias="MIN_CHECK_STATE_INTERVAL",
+        description="Minimum interval between competition stage checks in seconds",
+    )
+    max_check_state_interval_seconds: int = Field(
         default=1800,
-        alias="CHECK_STATE_INTERVAL",
-        description="Interval between competition stage checks in seconds",
+        alias="MAX_CHECK_STATE_INTERVAL",
+        description="Maximum interval between competition stage checks in seconds",
     )
 
     openai_base_url: str = Field(

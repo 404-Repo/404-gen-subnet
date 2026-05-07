@@ -1,9 +1,10 @@
 import asyncio
 import sys
+from datetime import datetime
 
 from loguru import logger
 from subnet_common.graceful_shutdown import GracefulShutdown
-from subnet_common.utils import format_duration
+from subnet_common.utils import calculate_wait_time, format_duration
 
 from judge_service.discord import DiscordNotifier, NullDiscordNotifier
 from judge_service.judge_iteration import run_judge_iteration
@@ -39,17 +40,22 @@ async def main() -> None:
     logger.info("Judge service started")
 
     while not shutdown.should_stop:
+        next_stage_eta: datetime | None = None
         try:
-            await run_judge_iteration(settings=settings, shutdown=shutdown, discord=discord)
+            next_stage_eta = await run_judge_iteration(settings=settings, shutdown=shutdown, discord=discord)
         except asyncio.CancelledError:
             break
         except Exception as e:
             logger.exception(f"Judge cycle failed with {e}")
             await discord.notify_cycle_error(e)
 
-        # TODO: smart delay
-        logger.debug(f"Next cycle in {format_duration(settings.check_state_interval_seconds)}")
-        await shutdown.wait(timeout=settings.check_state_interval_seconds)
+        wait_seconds = calculate_wait_time(
+            eta=next_stage_eta,
+            min_wait_seconds=settings.min_check_state_interval_seconds,
+            max_wait_seconds=settings.max_check_state_interval_seconds,
+        )
+        logger.debug(f"Next cycle in {format_duration(wait_seconds)}")
+        await shutdown.wait(timeout=wait_seconds)
 
     logger.info("Judge stopped gracefully")
 
