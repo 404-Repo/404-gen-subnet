@@ -118,7 +118,7 @@ async def test_all_prompts_done_audit_mode(settings: Settings) -> None:
 
     mock_git = MockGitHubClient(files=_make_git_files(generated=prior, submitted=submitted))
 
-    audit_request = AuditRequest(hotkey=HOTKEY)
+    audit_request = AuditRequest(hotkey=HOTKEY, latest_defender="leader")
     gpu_manager = AsyncMock()
     runner = make_runner(settings, mock_git, prompts=prompts, audit_request=audit_request, gpu_manager=gpu_manager)
     result = await runner.run()
@@ -138,7 +138,7 @@ async def test_deploy_failure_audit_mode(settings: Settings) -> None:
     gpu_manager.get_healthy_pod = AsyncMock(return_value=None)
     gpu_manager.cleanup_by_prefix = AsyncMock(return_value=0)
 
-    audit_request = AuditRequest(hotkey=HOTKEY)
+    audit_request = AuditRequest(hotkey=HOTKEY, latest_defender="leader")
     runner = make_runner(settings, mock_git, prompts=prompts, audit_request=audit_request, gpu_manager=gpu_manager)
     result = await runner.run()
 
@@ -162,7 +162,7 @@ async def test_initial_deploy_retry_succeeds(settings: Settings) -> None:
     gpu_manager.delete_container = AsyncMock()
     gpu_manager.cleanup_by_prefix = AsyncMock(return_value=0)
 
-    audit_request = AuditRequest(hotkey=HOTKEY)
+    audit_request = AuditRequest(hotkey=HOTKEY, latest_defender="leader")
     runner = make_runner(settings, mock_git, prompts=prompts, audit_request=audit_request, gpu_manager=gpu_manager)
 
     with patch("generation_orchestrator.miner_runner.PodSession") as MockSession:
@@ -211,7 +211,7 @@ async def test_successful_generation(settings: Settings) -> None:
     gpu_manager.delete_container = AsyncMock()
     gpu_manager.cleanup_by_prefix = AsyncMock(return_value=0)
 
-    audit_request = AuditRequest(hotkey=HOTKEY)
+    audit_request = AuditRequest(hotkey=HOTKEY, latest_defender="leader")
     runner = make_runner(settings, mock_git, prompts=prompts, audit_request=audit_request, gpu_manager=gpu_manager)
 
     with patch("generation_orchestrator.miner_runner.PodSession") as MockSession:
@@ -241,7 +241,7 @@ async def test_replacement_on_crash(settings: Settings) -> None:
     gpu_manager.delete_container = AsyncMock()
     gpu_manager.cleanup_by_prefix = AsyncMock(return_value=0)
 
-    audit_request = AuditRequest(hotkey=HOTKEY)
+    audit_request = AuditRequest(hotkey=HOTKEY, latest_defender="leader")
     runner = make_runner(settings, mock_git, prompts=prompts, audit_request=audit_request, gpu_manager=gpu_manager)
 
     with patch("generation_orchestrator.miner_runner.PodSession") as MockSession:
@@ -271,7 +271,7 @@ async def test_replacement_on_pod_request(settings: Settings) -> None:
     gpu_manager.delete_container = AsyncMock()
     gpu_manager.cleanup_by_prefix = AsyncMock(return_value=0)
 
-    audit_request = AuditRequest(hotkey=HOTKEY)
+    audit_request = AuditRequest(hotkey=HOTKEY, latest_defender="leader")
     runner = make_runner(settings, mock_git, prompts=prompts, audit_request=audit_request, gpu_manager=gpu_manager)
 
     payload = {"why": "degraded gpu"}
@@ -346,7 +346,7 @@ async def test_batch_time_limit_preserves_earlier_batches(settings: Settings) ->
     gpu_manager.delete_container = AsyncMock()
     gpu_manager.cleanup_by_prefix = AsyncMock(return_value=0)
 
-    audit_request = AuditRequest(hotkey=HOTKEY)
+    audit_request = AuditRequest(hotkey=HOTKEY, latest_defender="leader")
     runner = make_runner(settings, mock_git, prompts=prompts, audit_request=audit_request, gpu_manager=gpu_manager)
 
     p2_failed = GenerationResult(failure_reason="miner skipped")
@@ -392,7 +392,7 @@ async def test_total_generation_time_accumulated(settings: Settings) -> None:
     gpu_manager.delete_container = AsyncMock()
     gpu_manager.cleanup_by_prefix = AsyncMock(return_value=0)
 
-    audit_request = AuditRequest(hotkey=HOTKEY)
+    audit_request = AuditRequest(hotkey=HOTKEY, latest_defender="leader")
     runner = make_runner(settings, mock_git, prompts=prompts, audit_request=audit_request, gpu_manager=gpu_manager)
 
     with patch("generation_orchestrator.miner_runner.PodSession") as MockSession:

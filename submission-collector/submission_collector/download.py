@@ -215,7 +215,7 @@ class DownloadPipeline:
                     self.r2, key_for(f"{prompt}.js"), js_data, "application/javascript", log_id, self.settings.cdn_url
                 )
             except Exception as e:
-                logger.error(f"{log_id}: js_upload_failed: {type(e).__name__}: {e}")
+                logger.error(f"{log_id}: failed to upload JS: {type(e).__name__}: {e}")
                 await persist(size=size, failure_reason="js_upload_failed")
                 return
 
@@ -223,7 +223,7 @@ class DownloadPipeline:
             # rendering is wasted work. One failure flag for the whole round's prompt;
             # not actionable per-miner, so no Discord alert.
             if prompt_image is None:
-                logger.warning(f"{log_id}: prompt_image_missing; skipping renders + embeddings")
+                logger.warning(f"{log_id}: prompt image unavailable; skipping renders and embeddings")
                 await persist(js=js_url, size=size, failure_reason="prompt_image_missing")
                 return
 
@@ -272,7 +272,7 @@ class DownloadPipeline:
                     prompt_image, white, log_id, revision=self.settings.dinov3_revision, hf_token=hf_token
                 )
             except Exception as e:
-                logger.error(f"{log_id}: embeddings_failed: {type(e).__name__}: {e}")
+                logger.error(f"{log_id}: embedding computation failed: {type(e).__name__}: {e}")
                 await self._discord.notify_render_failure(hotkey)
                 await persist(js=js_url, size=size, failure_reason="embeddings_failed")
                 return
@@ -300,7 +300,7 @@ class DownloadPipeline:
                     f"{log_id}: uploaded {len(bundle)} files in {upload_elapsed:.1f}s, {bundle_kb:.1f}KB total"
                 )
             except Exception as e:
-                logger.error(f"{log_id}: views_upload_failed: {type(e).__name__}: {e}")
+                logger.error(f"{log_id}: failed to upload rendered views bundle: {type(e).__name__}: {e}")
                 await persist(js=js_url, size=size, failure_reason="views_upload_failed")
                 return
 
@@ -339,15 +339,16 @@ async def _try_fetch_js(
             # Miner CDN inaccessibility is common and not operator-actionable; the
             # categorical failure_reason is persisted on the GenerationResult for
             # post-hoc analysis.
-            failure_reason = f"js_fetch_failed: HTTP {cause.response.status_code}"
-            logger.debug(f"{log_id}: {failure_reason} on {cause.request.url}")
+            status = cause.response.status_code
+            failure_reason = f"js_fetch_failed: HTTP {status}"
+            logger.debug(f"{log_id}: miner CDN returned HTTP {status} for {cause.request.url}")
         elif isinstance(cause, ValueError):
             # Only ValueError raised by _fetch_js is the size cap.
             failure_reason = "js_too_large"
-            logger.warning(f"{log_id}: {failure_reason}: {cause}")
+            logger.warning(f"{log_id}: JS exceeds size limit: {cause}")
         else:
             failure_reason = f"js_fetch_failed: {type(cause).__name__}"
-            logger.debug(f"{log_id}: {failure_reason}: {cause}")
+            logger.debug(f"{log_id}: JS fetch failed ({type(cause).__name__}): {cause}")
         return None, failure_reason
 
 

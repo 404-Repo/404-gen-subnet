@@ -31,7 +31,7 @@ def _generation_reports_json(reports: dict[str, GenerationReport]) -> str:
 
 async def test_audit_loop_spawns_and_saves_result(settings: Settings) -> None:
     """Core loop: audit request arrives, a task spawned, results collected and saved to git."""
-    audit_request = AuditRequest(hotkey=HOTKEY)
+    audit_request = AuditRequest(hotkey=HOTKEY, latest_defender="leader")
     mock_git = MockGitHubClient(
         files={
             "rounds/1/require_audit.json": _audit_requests_json(audit_request),
@@ -86,7 +86,7 @@ async def test_audit_loop_skips_already_completed(settings: Settings) -> None:
     }
     mock_git = MockGitHubClient(
         files={
-            "rounds/1/require_audit.json": _audit_requests_json(AuditRequest(hotkey=HOTKEY)),
+            "rounds/1/require_audit.json": _audit_requests_json(AuditRequest(hotkey=HOTKEY, latest_defender="leader")),
             "rounds/1/generation_reports.json": _generation_reports_json(existing_reports),
         }
     )

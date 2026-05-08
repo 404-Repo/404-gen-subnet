@@ -13,11 +13,11 @@ class DiscordNotifier:
             description=f"**{qualified}** / {total} miners qualified",
         )
 
-    async def notify_audit_requested(self, *, round_num: int, hotkey: str, margin: float) -> None:
+    async def notify_audit_requested(self, *, round_num: int, hotkey: str, defeated: str, margin: float) -> None:
         await self._webhook.send_embed(
             title=f"Round {round_num} Audit Requested",
             color=0x9B59B6,
-            description=f"Miner `{hotkey[:10]}` — win margin {margin:+.2%}",
+            description=f"Miner `{hotkey[:10]}` defeated `{defeated[:10]}` with margin {margin:+.2%}",
         )
 
     async def notify_round_finalized(self, *, round_num: int, winner: str, reason: str | None = None) -> None:

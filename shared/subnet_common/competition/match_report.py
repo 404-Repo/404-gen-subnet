@@ -1,7 +1,6 @@
 from enum import Enum
 from typing import Literal
 
-from loguru import logger
 from pydantic import BaseModel
 
 from subnet_common.git_batcher import GitBatcher
@@ -60,26 +59,6 @@ def _path(round_num: int, left: str, right: str, kind: MatchReportKind) -> str:
     Two prefixes keeps audit artifacts visually separate from regular duels in the same dir.
     """
     return f"rounds/{round_num}/{right}/{kind}_{left[:10]}.json"
-
-
-async def get_match_report(
-    git_batcher: GitBatcher,
-    round_num: int,
-    left: str,
-    right: str,
-    *,
-    kind: MatchReportKind = "duels",
-) -> MatchReport | None:
-    """Load match report from git (checks pending writes first). Returns None if not found or invalid."""
-    path = _path(round_num, left, right, kind)
-    try:
-        content = await git_batcher.read(path)
-        if not content:
-            return None
-        return MatchReport.model_validate_json(content)
-    except Exception as e:
-        logger.warning(f"Failed to load match report {path}: {e}")
-        return None
 
 
 async def save_match_report(
