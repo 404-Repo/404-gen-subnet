@@ -25,9 +25,6 @@ from subnet_common.graceful_shutdown import GracefulShutdown
 from judge_service.match_execution import run_match
 
 
-SUBMITTED_LEFT = "submitted"
-
-
 async def produce_generated_vs_submitted_audit(
     openai: AsyncOpenAI,
     git_batcher: GitBatcher,
@@ -48,7 +45,7 @@ async def produce_generated_vs_submitted_audit(
         seed=seed,
         left_gens=submitted_gens,
         right_gens=generated_gens,
-        left=SUBMITTED_LEFT,
+        left="submitted",
         right=hotkey,
         max_concurrent_vlm_calls=max_concurrent_vlm_calls,
         max_concurrent_duels=max_concurrent_duels,

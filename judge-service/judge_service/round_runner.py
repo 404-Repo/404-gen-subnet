@@ -31,7 +31,6 @@ from subnet_common.github import GitHubClient
 from subnet_common.graceful_shutdown import GracefulShutdown
 
 from judge_service.audit_execution import (
-    SUBMITTED_LEFT,
     produce_generated_vs_defender_audit,
     produce_generated_vs_submitted_audit,
 )
@@ -417,7 +416,7 @@ class RoundRunner:
         fully_approved: set[str] = {"leader"}
         defender = "leader"
         for hotkey in self._timeline.local_leaders:
-            submitted_margin = self._audit_matrix.get(SUBMITTED_LEFT, hotkey)
+            submitted_margin = self._audit_matrix.get("submitted", hotkey)
             defender_margin = self._audit_matrix.get(defender, hotkey)
             if (
                 hotkey not in self._source_audit_passed
@@ -437,7 +436,7 @@ class RoundRunner:
         for hotkey in qualified:
             if hotkey in self._generation_rejected or hotkey in self._source_audit_failed:
                 continue
-            submitted_margin = self._audit_matrix.get(SUBMITTED_LEFT, hotkey)
+            submitted_margin = self._audit_matrix.get("submitted", hotkey)
             if submitted_margin is not None and submitted_margin < -self._win_margin:
                 continue
             request = self._audit_requests.get(hotkey)
@@ -451,19 +450,14 @@ class RoundRunner:
         return new_qualified, fully_approved
 
     def _find_pending_verification(self, qualified: list[str]) -> str | None:
-        """Find a COMPLETED hotkey in `qualified` whose submitted or defender audit
-        margin hasn't landed in the matrix yet."""
-        qualified_set = set(qualified)
-        for hotkey in self._generation_completed:
-            if hotkey not in qualified_set:
-                continue
+        """Return the next hotkey in `qualified` whose audit work isn't finished — the
+        generated-vs-submitted or generated-vs-defender margin is still missing from the
+        audit matrix. None when every qualified miner's audits have been produced."""
+        for hotkey in self._generation_completed & set(qualified):
             request = self._audit_requests.get(hotkey)
             if request is None:
-                # COMPLETED implies the orchestrator regenerated, which means the miner
-                # was audit-requested. Missing request here is anomalous — log and skip.
-                logger.debug(f"COMPLETED hotkey {hotkey[:10]} has no audit_request; skipping")
                 continue
-            if self._audit_matrix.get(SUBMITTED_LEFT, hotkey) is None:
+            if self._audit_matrix.get("submitted", hotkey) is None:
                 return hotkey
             if self._audit_matrix.get(request.latest_defender, hotkey) is None:
                 return hotkey
@@ -494,7 +488,7 @@ class RoundRunner:
         )
 
         # Submitted audit: produce if no margin recorded yet.
-        if self._audit_matrix.get(SUBMITTED_LEFT, hotkey) is None and not shutdown.should_stop:
+        if self._audit_matrix.get("submitted", hotkey) is None and not shutdown.should_stop:
             submitted_gens = await get_generations(
                 git=self._git,
                 round_num=self._round_num,
@@ -522,7 +516,7 @@ class RoundRunner:
                     shutdown=shutdown,
                 )
                 if not shutdown.should_stop:
-                    self._audit_matrix.add(SUBMITTED_LEFT, hotkey, report.margin)
+                    self._audit_matrix.add("submitted", hotkey, report.margin)
                     await save_audit_matrix(self._git_batcher, self._round_num, self._audit_matrix)
 
         # Defender audit against current latest_defender: produce if no margin recorded yet.

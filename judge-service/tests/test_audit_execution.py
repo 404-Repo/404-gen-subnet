@@ -5,7 +5,6 @@ from subnet_common.competition.match_report import MatchReport
 from subnet_common.graceful_shutdown import GracefulShutdown
 
 from judge_service.audit_execution import (
-    SUBMITTED_LEFT,
     produce_generated_vs_defender_audit,
     produce_generated_vs_submitted_audit,
 )
@@ -58,7 +57,7 @@ async def test_produce_generated_vs_submitted_audit_saves_audit_submitted_with_c
             shutdown=GracefulShutdown(),
         )
 
-    assert captured["left"] == SUBMITTED_LEFT
+    assert captured["left"] == "submitted"
     assert captured["right"] == "audited_full_xxxxxxxx"
     assert len(write_calls) == 1
     assert write_calls[0]["path"] == "rounds/3/audited_full_xxxxxxxx/audit_submitted.json"
