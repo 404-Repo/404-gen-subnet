@@ -20,8 +20,8 @@ def _gen(views: str | None = "https://cdn/preview") -> GenerationResult:
 
 
 async def test_produce_generated_vs_submitted_audit_saves_audit_submitted_with_correct_sides() -> None:
-    """The submitted audit saves at `rounds/{n}/{hotkey}/audit_submitted.json` with
-    submitted=LEFT, generated=RIGHT. Positive margin (RIGHT win) is the legit signal."""
+    """The submitted audit for repeat 2 saves at `rounds/{n}/{hotkey}/audit_submitted_2.json`
+    with submitted=LEFT, generated=RIGHT. Positive margin (RIGHT win) is the legit signal."""
     write_calls: list[dict] = []
 
     async def _write(*, path: str, content: str, message: str) -> None:
@@ -52,6 +52,7 @@ async def test_produce_generated_vs_submitted_audit_saves_audit_submitted_with_c
             seed=42,
             submitted_gens={"a": _gen()},
             generated_gens={"a": _gen()},
+            repeat_index=2,
             max_concurrent_vlm_calls=2,
             max_concurrent_duels=2,
             shutdown=GracefulShutdown(),
@@ -60,7 +61,7 @@ async def test_produce_generated_vs_submitted_audit_saves_audit_submitted_with_c
     assert captured["left"] == "submitted"
     assert captured["right"] == "audited_full_xxxxxxxx"
     assert len(write_calls) == 1
-    assert write_calls[0]["path"] == "rounds/3/audited_full_xxxxxxxx/audit_submitted.json"
+    assert write_calls[0]["path"] == "rounds/3/audited_full_xxxxxxxx/audit_submitted_2.json"
     assert "Audit report" in write_calls[0]["message"]
 
 
@@ -99,6 +100,7 @@ async def test_produce_generated_vs_defender_audit_saves_audit_defender_with_cor
             seed=42,
             defender_gens={"a": _gen()},
             audited_generated={"a": _gen()},
+            repeat_index=1,
             max_concurrent_vlm_calls=2,
             max_concurrent_duels=2,
             shutdown=GracefulShutdown(),
@@ -107,7 +109,7 @@ async def test_produce_generated_vs_defender_audit_saves_audit_defender_with_cor
     assert captured["left"] == "defender_full_hotkey_yyy"
     assert captured["right"] == "audited_full_hotkey_xxxxx"
     assert len(write_calls) == 1
-    assert write_calls[0]["path"] == "rounds/7/audited_full_hotkey_xxxxx/audit_defender_f.json"
+    assert write_calls[0]["path"] == "rounds/7/audited_full_hotkey_xxxxx/audit_defender_f_1.json"
     assert "Audit report" in write_calls[0]["message"]
 
 
@@ -132,6 +134,7 @@ async def test_produce_generated_vs_defender_audit_skips_save_on_shutdown() -> N
             seed=42,
             defender_gens={"a": _gen()},
             audited_generated={"a": _gen()},
+            repeat_index=1,
             max_concurrent_vlm_calls=2,
             max_concurrent_duels=2,
             shutdown=shutdown,

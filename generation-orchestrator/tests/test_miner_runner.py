@@ -23,8 +23,9 @@ FIXTURES_DIR = Path(__file__).parent / "fixtures"
 HOTKEY = "5abc123def"
 
 
-def _generations_path(source: GenerationSource) -> str:
-    return f"rounds/1/{HOTKEY}/{source}.json"
+def _generations_path(source: GenerationSource, repeat_index: int = 1) -> str:
+    suffix = f"_{repeat_index}" if source == GenerationSource.GENERATED else ""
+    return f"rounds/1/{HOTKEY}/{source}{suffix}.json"
 
 
 def make_runner(
@@ -225,7 +226,8 @@ async def test_successful_generation(settings: Settings) -> None:
 
     assert result is not None
     assert result.outcome == GenerationReportOutcome.COMPLETED
-    assert result.checked_prompts == 2
+    assert len(result.repeats) == 1
+    assert result.repeats[0].generated_prompts == 2
     gpu_manager.get_healthy_pod.assert_called_once()
     gpu_manager.delete_container.assert_called_once_with(deployed.info)
 
@@ -367,11 +369,12 @@ async def test_batch_time_limit_preserves_earlier_batches(settings: Settings) ->
 
     assert result is not None
     assert result.outcome == GenerationReportOutcome.COMPLETED
-    assert result.checked_prompts == 3
+    stats = result.repeats[0]
+    assert stats.generated_prompts == 2
     # p2 is a permanent miner failure, so it counts as failed in the summary.
-    assert result.failed_prompts == 1
+    assert stats.failed_prompts == 1
     # Earlier batch's successes AND failures both survived the swap — time accumulated too.
-    assert result.generation_time == 25.0
+    assert stats.generation_time == 25.0
     # Pod 2 should have been invoked with only p3 pending (p1/p2 already resolved).
     third_call = MockSession.return_value.run.await_args_list[2]
     _round, batch = third_call.args
@@ -410,4 +413,4 @@ async def test_total_generation_time_accumulated(settings: Settings) -> None:
 
     assert result is not None
     assert result.outcome == GenerationReportOutcome.COMPLETED
-    assert result.generation_time == 250.0
+    assert result.repeats[0].generation_time == 250.0

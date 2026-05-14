@@ -13,7 +13,7 @@ from subnet_common.competition.audit_requests import (
 )
 from subnet_common.competition.build_info import require_builds
 from subnet_common.competition.config import require_competition_config
-from subnet_common.competition.generations import GenerationSource, get_generations
+from subnet_common.competition.generations import GenerationsMap, GenerationSource, get_generations
 from subnet_common.competition.leader import require_leader_state
 from subnet_common.competition.match_matrix import MatchMatrix, get_match_matrix, save_match_matrix
 from subnet_common.competition.match_report import DuelWinner, save_match_report
@@ -59,8 +59,8 @@ class Timeline(BaseModel):
 
 class RoundRunner:
     """Drives a single round end-to-end: qualification, timeline, exploratory duels,
-    audit duel production (submitted + defender), verification verdict derivation, and
-    finalization."""
+    per-repeat audit duel production (submitted + defender per repeat), verification
+    verdict derivation, and finalization."""
 
     def __init__(
         self,
@@ -71,6 +71,7 @@ class RoundRunner:
         seed: int,
         prompts: list[str],
         win_margin: float,
+        audit_repeats: int,
         match_matrix: MatchMatrix,
         audit_matrix: MatchMatrix,
         audit_requests: AuditRequests,
@@ -84,6 +85,7 @@ class RoundRunner:
         self._seed = seed
         self._prompts = prompts
         self._win_margin = win_margin
+        self._audit_repeats = audit_repeats
 
         self._match_matrix = match_matrix
         self._audit_matrix = audit_matrix
@@ -116,6 +118,14 @@ class RoundRunner:
     def _get_generation_source(self, hotkey: str) -> GenerationSource:
         """Leader uses generated outputs, challengers use submitted outputs."""
         return GenerationSource.GENERATED if hotkey == "leader" else GenerationSource.SUBMITTED
+
+    @staticmethod
+    def _submitted_audit_key(repeat_index: int) -> str:
+        return f"submitted_{repeat_index}"
+
+    @staticmethod
+    def _defender_audit_key(defender: str, repeat_index: int) -> str:
+        return f"{defender}_{repeat_index}"
 
     @classmethod
     async def create(
@@ -157,6 +167,7 @@ class RoundRunner:
             seed=seed,
             prompts=prompts,
             win_margin=competition_config.win_margin,
+            audit_repeats=competition_config.audit_repeats,
             match_matrix=match_matrix,
             audit_matrix=audit_matrix,
             audit_requests=audit_requests,
@@ -412,19 +423,26 @@ class RoundRunner:
 
         # Walk the timeline chain. "leader" is the anchor (always fully approved); we
         # carry it in the working set during the rejection pass below, then discard
-        # before returning so callers see only local-leader hotkeys.
+        # before returning so callers see only local-leader hotkeys. Every repeat must
+        # have a margin recorded and clear the threshold; any single failure rejects.
         fully_approved: set[str] = {"leader"}
         defender = "leader"
         for hotkey in self._timeline.local_leaders:
-            submitted_margin = self._audit_matrix.get("submitted", hotkey)
-            defender_margin = self._audit_matrix.get(defender, hotkey)
-            if (
-                hotkey not in self._source_audit_passed
-                or submitted_margin is None
-                or submitted_margin < -self._win_margin
-                or defender_margin is None
-                or defender_margin < self._win_margin
-            ):
+            if hotkey not in self._source_audit_passed:
+                break
+            ok = True
+            for r in range(1, self._audit_repeats + 1):
+                submitted_margin = self._audit_matrix.get(self._submitted_audit_key(r), hotkey)
+                defender_margin = self._audit_matrix.get(self._defender_audit_key(defender, r), hotkey)
+                if (
+                    submitted_margin is None
+                    or submitted_margin < -self._win_margin
+                    or defender_margin is None
+                    or defender_margin < self._win_margin
+                ):
+                    ok = False
+                    break
+            if not ok:
                 break
             fully_approved.add(hotkey)
             defender = hotkey
@@ -436,13 +454,20 @@ class RoundRunner:
         for hotkey in qualified:
             if hotkey in self._generation_rejected or hotkey in self._source_audit_failed:
                 continue
-            submitted_margin = self._audit_matrix.get("submitted", hotkey)
-            if submitted_margin is not None and submitted_margin < -self._win_margin:
+            if any(
+                (m := self._audit_matrix.get(self._submitted_audit_key(r), hotkey)) is not None
+                and m < -self._win_margin
+                for r in range(1, self._audit_repeats + 1)
+            ):
                 continue
             request = self._audit_requests.get(hotkey)
             if request and request.latest_defender in fully_approved:
-                defender_margin = self._audit_matrix.get(request.latest_defender, hotkey)
-                if defender_margin is not None and defender_margin < self._win_margin:
+                if any(
+                    (m := self._audit_matrix.get(self._defender_audit_key(request.latest_defender, r), hotkey))
+                    is not None
+                    and m < self._win_margin
+                    for r in range(1, self._audit_repeats + 1)
+                ):
                     continue
             new_qualified.append(hotkey)
 
@@ -450,26 +475,27 @@ class RoundRunner:
         return new_qualified, fully_approved
 
     def _find_pending_verification(self, qualified: list[str]) -> str | None:
-        """Return the next hotkey in `qualified` whose audit work isn't finished — the
-        generated-vs-submitted or generated-vs-defender margin is still missing from the
-        audit matrix. None when every qualified miner's audits have been produced."""
+        """Return the next hotkey in `qualified` whose audit work isn't finished — any of
+        the 2 * audit_repeats margins (submitted_{r}, {defender}_{r}) is still missing
+        from the audit matrix. None when every qualified miner's audits are complete."""
         for hotkey in self._generation_completed & set(qualified):
             request = self._audit_requests.get(hotkey)
             if request is None:
                 continue
-            if self._audit_matrix.get("submitted", hotkey) is None:
-                return hotkey
-            if self._audit_matrix.get(request.latest_defender, hotkey) is None:
-                return hotkey
+            for r in range(1, self._audit_repeats + 1):
+                if self._audit_matrix.get(self._submitted_audit_key(r), hotkey) is None:
+                    return hotkey
+                if self._audit_matrix.get(self._defender_audit_key(request.latest_defender, r), hotkey) is None:
+                    return hotkey
         return None
 
     async def _run_verification_audit(self, hotkey: str, shutdown: GracefulShutdown) -> None:
-        """Produce whichever audit duel artifacts are missing for `hotkey`.
+        """Produce whichever per-repeat audit duel artifacts are missing for `hotkey`.
 
-        Idempotent: the submitted duel (audit_submitted.json) is produced once. The
-        defender duel is produced per unique `latest_defender` value the miner has had
-        — re-runs only if the file for the CURRENT defender is missing. Older defender
-        duel files sit on disk as forensic data and are not consulted by the verdict.
+        For each repeat in 1..audit_repeats, produce the submitted and defender audit
+        duel if the corresponding margin is missing from `audit_matrix`. Idempotent at
+        the per-(repeat, kind) level — older defender duels (against prior defenders)
+        sit on disk as forensic data and are not consulted by the verdict.
         """
         request = self._audit_requests.get(hotkey)
         if request is None:
@@ -477,86 +503,105 @@ class RoundRunner:
             return
 
         defender = request.latest_defender
+        defender_source = self._get_generation_source(defender)
 
-        # Generated outputs are needed by both duels (as RIGHT). Load once.
-        generated_gens = await get_generations(
-            git=self._git,
-            round_num=self._round_num,
-            hotkey=hotkey,
-            source=GenerationSource.GENERATED,
-            ref=self._ref,
-        )
+        # Defender outputs are shared across all repeats (defender is run once with
+        # repeat_index=1 in generation-only mode, or its SUBMITTED file for regular miners).
+        submitted_gens: GenerationsMap | None = None
+        defender_gens: GenerationsMap | None = None
 
-        # Submitted audit: produce if no margin recorded yet.
-        if self._audit_matrix.get("submitted", hotkey) is None and not shutdown.should_stop:
-            submitted_gens = await get_generations(
+        for r in range(1, self._audit_repeats + 1):
+            if shutdown.should_stop:
+                return
+
+            need_submitted = self._audit_matrix.get(self._submitted_audit_key(r), hotkey) is None
+            need_defender = self._audit_matrix.get(self._defender_audit_key(defender, r), hotkey) is None
+            if not need_submitted and not need_defender:
+                continue
+
+            generated_gens = await get_generations(
                 git=self._git,
                 round_num=self._round_num,
                 hotkey=hotkey,
-                source=GenerationSource.SUBMITTED,
+                source=GenerationSource.GENERATED,
                 ref=self._ref,
+                repeat_index=r,
             )
-            if not any(g.js for g in submitted_gens.values()):
-                logger.warning(f"submitted audit skipped for {hotkey[:10]}: submitted has no usable outputs")
-            elif not any(g.js for g in generated_gens.values()):
-                logger.warning(f"submitted audit skipped for {hotkey[:10]}: generated has no usable outputs")
-            else:
-                logger.info(f"Producing submitted audit for {hotkey[:10]} (submitted vs generated)")
-                report = await produce_generated_vs_submitted_audit(
-                    openai=self._openai,
-                    git_batcher=self._git_batcher,
-                    round_num=self._round_num,
-                    hotkey=hotkey,
-                    prompts=self._prompts,
-                    seed=self._seed,
-                    submitted_gens=submitted_gens,
-                    generated_gens=generated_gens,
-                    max_concurrent_vlm_calls=self._settings.max_concurrent_vlm_calls,
-                    max_concurrent_duels=self._settings.max_concurrent_duels,
-                    shutdown=shutdown,
-                )
-                if not shutdown.should_stop:
-                    self._audit_matrix.add("submitted", hotkey, report.margin)
-                    await save_audit_matrix(self._git_batcher, self._round_num, self._audit_matrix)
 
-        # Defender audit against current latest_defender: produce if no margin recorded yet.
-        if self._audit_matrix.get(defender, hotkey) is None and not shutdown.should_stop:
-            defender_source = self._get_generation_source(defender)
-            defender_gens = await get_generations(
-                git=self._git,
-                round_num=self._round_num,
-                hotkey=defender,
-                source=defender_source,
-                ref=self._ref,
-            )
-            if not any(g.js for g in defender_gens.values()):
-                logger.warning(
-                    f"defender audit skipped for {hotkey[:10]} vs {defender[:10]}: "
-                    f"defender has no usable {defender_source.value} outputs"
-                )
-            elif not any(g.js for g in generated_gens.values()):
-                logger.warning(
-                    f"defender audit skipped for {hotkey[:10]} vs {defender[:10]}: generated has no usable outputs"
-                )
-            else:
-                logger.info(f"Producing defender audit for {hotkey[:10]} vs {defender[:10]}")
-                report = await produce_generated_vs_defender_audit(
-                    openai=self._openai,
-                    git_batcher=self._git_batcher,
-                    round_num=self._round_num,
-                    audited_hotkey=hotkey,
-                    defender_hotkey=defender,
-                    prompts=self._prompts,
-                    seed=self._seed,
-                    defender_gens=defender_gens,
-                    audited_generated=generated_gens,
-                    max_concurrent_vlm_calls=self._settings.max_concurrent_vlm_calls,
-                    max_concurrent_duels=self._settings.max_concurrent_duels,
-                    shutdown=shutdown,
-                )
-                if not shutdown.should_stop:
-                    self._audit_matrix.add(defender, hotkey, report.margin)
-                    await save_audit_matrix(self._git_batcher, self._round_num, self._audit_matrix)
+            if need_submitted and not shutdown.should_stop:
+                if submitted_gens is None:
+                    submitted_gens = await get_generations(
+                        git=self._git,
+                        round_num=self._round_num,
+                        hotkey=hotkey,
+                        source=GenerationSource.SUBMITTED,
+                        ref=self._ref,
+                    )
+                if not any(g.js for g in submitted_gens.values()):
+                    logger.warning(f"submitted audit r{r} skipped for {hotkey[:10]}: submitted has no usable outputs")
+                elif not any(g.js for g in generated_gens.values()):
+                    logger.warning(
+                        f"submitted audit r{r} skipped for {hotkey[:10]}: generated_{r} has no usable outputs"
+                    )
+                else:
+                    logger.info(f"Producing submitted audit r{r} for {hotkey[:10]}")
+                    report = await produce_generated_vs_submitted_audit(
+                        openai=self._openai,
+                        git_batcher=self._git_batcher,
+                        round_num=self._round_num,
+                        hotkey=hotkey,
+                        prompts=self._prompts,
+                        seed=self._seed,
+                        submitted_gens=submitted_gens,
+                        generated_gens=generated_gens,
+                        repeat_index=r,
+                        max_concurrent_vlm_calls=self._settings.max_concurrent_vlm_calls,
+                        max_concurrent_duels=self._settings.max_concurrent_duels,
+                        shutdown=shutdown,
+                    )
+                    if not shutdown.should_stop:
+                        self._audit_matrix.add(self._submitted_audit_key(r), hotkey, report.margin)
+                        await save_audit_matrix(self._git_batcher, self._round_num, self._audit_matrix)
+
+            if need_defender and not shutdown.should_stop:
+                if defender_gens is None:
+                    defender_gens = await get_generations(
+                        git=self._git,
+                        round_num=self._round_num,
+                        hotkey=defender,
+                        source=defender_source,
+                        ref=self._ref,
+                    )
+                if not any(g.js for g in defender_gens.values()):
+                    logger.warning(
+                        f"defender audit r{r} skipped for {hotkey[:10]} vs {defender[:10]}: "
+                        f"defender has no usable {defender_source.value} outputs"
+                    )
+                elif not any(g.js for g in generated_gens.values()):
+                    logger.warning(
+                        f"defender audit r{r} skipped for {hotkey[:10]} vs {defender[:10]}: "
+                        f"generated_{r} has no usable outputs"
+                    )
+                else:
+                    logger.info(f"Producing defender audit r{r} for {hotkey[:10]} vs {defender[:10]}")
+                    report = await produce_generated_vs_defender_audit(
+                        openai=self._openai,
+                        git_batcher=self._git_batcher,
+                        round_num=self._round_num,
+                        audited_hotkey=hotkey,
+                        defender_hotkey=defender,
+                        prompts=self._prompts,
+                        seed=self._seed,
+                        defender_gens=defender_gens,
+                        audited_generated=generated_gens,
+                        repeat_index=r,
+                        max_concurrent_vlm_calls=self._settings.max_concurrent_vlm_calls,
+                        max_concurrent_duels=self._settings.max_concurrent_duels,
+                        shutdown=shutdown,
+                    )
+                    if not shutdown.should_stop:
+                        self._audit_matrix.add(self._defender_audit_key(defender, r), hotkey, report.margin)
+                        await save_audit_matrix(self._git_batcher, self._round_num, self._audit_matrix)
 
     async def _transition_to_next_stage(self, reason: str) -> None:
         """Transition to the next stage."""

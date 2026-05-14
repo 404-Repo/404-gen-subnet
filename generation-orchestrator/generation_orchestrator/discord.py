@@ -13,10 +13,13 @@ class DiscordNotifier:
         if report.outcome == GenerationReportOutcome.PENDING:
             return
         if report.outcome == GenerationReportOutcome.COMPLETED:
-            gen_time = f"{report.generation_time:.1f}s" if report.generation_time is not None else "N/A"
-            description = (
-                f"Miner `{report.hotkey[:10]}` completed — {report.checked_prompts} prompts, median {gen_time}"
-            )
+            parts = []
+            for stats in report.repeats:
+                t = f"{stats.generation_time:.1f}s" if stats.generation_time is not None else "N/A"
+                parts.append(
+                    f"r{stats.repeat_index}: {stats.generated_prompts} ok / {stats.failed_prompts} fail in {t}"
+                )
+            description = f"Miner `{report.hotkey[:10]}` completed — " + " | ".join(parts)
             color = 0x2ECC71
         else:
             description = f"Miner `{report.hotkey[:10]}` rejected — {report.reason}"

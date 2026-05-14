@@ -239,10 +239,10 @@ class Settings(BaseSettings):
     r2_secret_access_key: SecretStr = Field(..., alias="R2_SECRET_ACCESS_KEY", description="R2 secret access key")
     r2_endpoint: SecretStr = Field(..., alias="R2_ENDPOINT", description="R2 endpoint")
 
-    storage_key_template: str = Field(
-        default="rounds/{round}/{hotkey}/generated/{filename}",
-        alias="STORAGE_PATH_TEMPLATE",
-        description="Storage key template",
+    storage_root_folder: str = Field(
+        default="rounds",
+        alias="STORAGE_ROOT_FOLDER",
+        description="R2 root folder for generated artifacts",
     )
     cdn_url: str = Field(default="https://subnet404.xyz", alias="CDN_URL", description="R2 public domain url")
 

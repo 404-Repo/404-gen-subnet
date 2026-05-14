@@ -3,6 +3,7 @@ from datetime import datetime
 
 from loguru import logger
 from subnet_common.competition.audit_requests import AuditRequest, AuditRequests, get_audit_requests
+from subnet_common.competition.config import require_competition_config
 from subnet_common.competition.generation_report import (
     GenerationReport,
     GenerationReportOutcome,
@@ -96,6 +97,8 @@ async def _run_generation(
         round_num=state.current_round,
         ref=ref,
     )
+    competition_config = await require_competition_config(git=git, ref=ref)
+    audit_repeats = competition_config.audit_repeats
 
     git_batcher = await GitBatcher.create(git=git, branch=settings.github_branch, base_sha=ref)
 
@@ -143,6 +146,7 @@ async def _run_generation(
                 prompts=prompts,
                 seed=seed,
                 round_num=state.current_round,
+                audit_repeats=audit_repeats,
                 shutdown=shutdown,
                 stop_manager=stop_manager,
                 discord=discord,
@@ -212,6 +216,7 @@ async def _process_audit_requests(
     prompts: list[Prompt],
     seed: int,
     round_num: int,
+    audit_repeats: int,
     shutdown: GracefulShutdown,
     stop_manager: GenerationStopManager,
     discord: DiscordNotifier = NULL_DISCORD_NOTIFIER,
@@ -261,6 +266,7 @@ async def _process_audit_requests(
                 prompts=prompts,
                 seed=seed,
                 round_num=round_num,
+                audit_repeats=audit_repeats,
                 discord=discord,
             )
 
@@ -308,6 +314,7 @@ def _spawn_new(
     prompts: list[Prompt],
     seed: int,
     round_num: int,
+    audit_repeats: int,
     discord: DiscordNotifier,
 ) -> None:
     """Spawn generation tasks for any audit requests not yet seen."""
@@ -328,6 +335,7 @@ def _spawn_new(
                 prompts=prompts,
                 seed=seed,
                 round_num=round_num,
+                audit_repeats=audit_repeats,
                 stop=stop_manager.new_stop(),
                 discord=discord,
             )
@@ -345,6 +353,7 @@ async def _generate_report(
     prompts: list[Prompt],
     seed: int,
     round_num: int,
+    audit_repeats: int,
     stop: GenerationStop,
     discord: DiscordNotifier = NULL_DISCORD_NOTIFIER,
 ) -> GenerationReport | None:
@@ -378,6 +387,7 @@ async def _generate_report(
             prompts=prompts,
             seed=seed,
             stop=stop,
+            audit_repeats=audit_repeats,
             audit_request=audit_request,
         ).run()
     except Exception as e:

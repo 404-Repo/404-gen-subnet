@@ -49,16 +49,18 @@ class MatchReport(BaseModel):
     duels: list[DuelReport]
 
 
-def _path(round_num: int, left: str, right: str, kind: MatchReportKind) -> str:
+def _path(round_num: int, left: str, right: str, kind: MatchReportKind, repeat_index: int | None) -> str:
     """Path to a match report file.
 
     Stored under the challenger's (right) directory with reference to the defender (left).
     `kind` selects the filename prefix:
       - 'duels' — round-internal matches (qualification, timeline, exploratory).
       - 'audit' — post-hoc audit duels (submitted-vs-generated, generated-vs-defender).
-    Two prefixes keeps audit artifacts visually separate from regular duels in the same dir.
+    `repeat_index` (audit reports only) appends `_<r>` so each repeat's audit duel is a
+    distinct file.
     """
-    return f"rounds/{round_num}/{right}/{kind}_{left[:10]}.json"
+    suffix = f"_{repeat_index}" if repeat_index is not None else ""
+    return f"rounds/{round_num}/{right}/{kind}_{left[:10]}{suffix}.json"
 
 
 async def save_match_report(
@@ -67,9 +69,10 @@ async def save_match_report(
     report: MatchReport,
     *,
     kind: MatchReportKind = "duels",
+    repeat_index: int | None = None,
 ) -> None:
     """Save a match report to git. Pass `kind='audit'` for audit-duel artifacts."""
-    path = _path(round_num, report.left, report.right, kind)
+    path = _path(round_num, report.left, report.right, kind, repeat_index)
     label = "Match report" if kind == "duels" else "Audit report"
     await git_batcher.write(
         path=path,

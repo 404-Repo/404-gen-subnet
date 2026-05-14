@@ -12,6 +12,13 @@ class GenerationReportOutcome(StrEnum):
     REJECTED = "rejected"
 
 
+class RepeatStats(BaseModel):
+    repeat_index: int
+    generated_prompts: int = 0
+    failed_prompts: int = 0
+    generation_time: float | None = None
+
+
 class GenerationReport(BaseModel):
     """Report of a miner's generation run, produced by the generation orchestrator.
 
@@ -21,9 +28,7 @@ class GenerationReport(BaseModel):
 
     hotkey: str
     outcome: GenerationReportOutcome = GenerationReportOutcome.PENDING
-    checked_prompts: int = Field(default=0, description="Prompts regenerated so far")
-    failed_prompts: int = Field(default=0, description="Prompts that failed to regenerate")
-    generation_time: float | None = Field(default=None, description="Trimmed median generation time in seconds")
+    repeats: list[RepeatStats] = Field(default_factory=list)
     reason: str = ""
 
 
