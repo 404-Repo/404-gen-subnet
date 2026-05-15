@@ -138,6 +138,39 @@ async def test_load_pod_config_unreadable_repo_returns_none() -> None:
 
 
 @pytest.mark.asyncio
+async def test_load_pod_config_github_5xx_returns_none() -> None:
+    """Transient GitHub errors must not propagate (generation uses defaults)."""
+    import httpx
+
+    from subnet_common.competition.pod_config import load_pod_config
+    from subnet_common.github import GitHubClient
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(503, request=request)
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport, base_url="https://api.github.com") as client:
+        gh = GitHubClient.with_client(client, repo="competition/repo", token="tok")
+        assert await load_pod_config(gh, "owner/miner", "a" * 40) is None
+
+
+@pytest.mark.asyncio
+async def test_load_pod_config_github_connect_error_returns_none() -> None:
+    import httpx
+
+    from subnet_common.competition.pod_config import load_pod_config
+    from subnet_common.github import GitHubClient
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("simulated network failure", request=request)
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport, base_url="https://api.github.com") as client:
+        gh = GitHubClient.with_client(client, repo="competition/repo", token="tok")
+        assert await load_pod_config(gh, "owner/miner", "a" * 40) is None
+
+
+@pytest.mark.asyncio
 async def test_load_pod_config_missing() -> None:
     from subnet_common.competition.pod_config import load_pod_config
     from subnet_common.testing.mock_github import MockGitHubClient

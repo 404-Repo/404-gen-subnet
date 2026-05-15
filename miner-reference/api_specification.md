@@ -51,7 +51,7 @@ The generation-orchestrator reads an optional **`pod_config.yaml`** from your re
 
 - **Path**: repository root, `pod_config.yaml`.
 - **If missing**: the orchestrator uses its environment defaults (`GPU_PROVIDERS`, no Runpod host CUDA filter).
-- **If unreadable** (e.g. private miner repo and the orchestrator token cannot read that repo): same as missing — defaults apply; generation is not blocked solely for lack of `pod_config.yaml`.
+- **If unreadable** (e.g. private miner repo and the orchestrator token cannot read that repo) **or the GitHub API fails transiently** (timeouts, connection errors, HTTP 5xx): same as missing — defaults apply; generation is not blocked solely for lack of `pod_config.yaml`.
 - **Schema** (YAML):
 
 ```yaml

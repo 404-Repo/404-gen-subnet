@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 from typing import Annotated, Any, Self
 
+import httpx
 import yaml
 from loguru import logger
 from pydantic import BaseModel, BeforeValidator, Field, field_validator, model_validator
@@ -182,10 +183,21 @@ def resolve_providers(miner: PodConfig, orchestrator_providers: list[str]) -> li
 async def load_pod_config(git: GitHubClient, repo: str, commit: str) -> PodConfig | None:
     """Load ``pod_config.yaml`` from ``repo`` at ``commit``.
 
-    Returns ``None`` if the file is missing, invalid, or **unreadable** (private repo without
-    token access — ``get_file_from_repo`` yields no content for 401/403/404).
+    Returns ``None`` if the file is missing, invalid, **unreadable** (private repo without
+    token access — ``get_file_from_repo`` yields no content for 401/403/404), or if the
+    GitHub fetch fails with a transient error (HTTP 5xx, timeouts, connection errors).
+    Generation must not abort solely because this optional file could not be loaded.
     """
-    raw = await git.get_file_from_repo(repo, "pod_config.yaml", commit)
+    try:
+        raw = await git.get_file_from_repo(repo, "pod_config.yaml", commit)
+    except httpx.HTTPError as e:
+        logger.warning(
+            "pod_config.yaml fetch failed for {}@{} (using orchestrator defaults): {}",
+            repo,
+            commit[:7],
+            e,
+        )
+        return None
     if raw is None:
         return None
     try:
