@@ -60,6 +60,45 @@ def test_pod_config_cuda_yaml_float_minor() -> None:
     assert "12.4" in (runpod_allowed_cuda_versions(c.filters.cuda) or [])
 
 
+def test_pod_config_cuda_yaml_float_12_8() -> None:
+    """Unquoted ``cuda: 12.8`` (YAML float) is supported."""
+    c = PodConfig.model_validate({"filters": {"cuda": 12.8}})
+    assert c.filters.cuda == "12.8"
+    assert "12.8" in (runpod_allowed_cuda_versions(c.filters.cuda) or [])
+
+
+def test_pod_config_invalid_cuda_string_becomes_none() -> None:
+    for bad in ("abc", "not-a-version", "12.4.x", "12..4", ".12"):
+        c = PodConfig.model_validate({"filters": {"cuda": bad}})
+        assert c.filters.cuda is None
+
+
+@pytest.mark.asyncio
+async def test_load_pod_config_invalid_cuda_ignores_filter_keeps_rest() -> None:
+    from subnet_common.competition.pod_config import load_pod_config
+    from subnet_common.testing.mock_github import MockGitHubClient
+
+    raw = "platforms:\n  - runpod\nfilters:\n  cuda: not-a-version\n"
+    git = MockGitHubClient(files={"owner/repo:pod_config.yaml": raw})
+    cfg = await load_pod_config(git, "owner/repo", "a" * 40)
+    assert cfg is not None
+    assert cfg.platforms == ["runpod"]
+    assert cfg.filters.cuda is None
+
+
+@pytest.mark.asyncio
+async def test_load_pod_config_yaml_cuda_12_8_float() -> None:
+    """YAML ``cuda: 12.8`` (float); a space after ``:`` is required — ``cuda:12.8`` is invalid YAML."""
+    from subnet_common.competition.pod_config import load_pod_config
+    from subnet_common.testing.mock_github import MockGitHubClient
+
+    raw = "filters:\n  cuda: 12.8\n"
+    git = MockGitHubClient(files={"owner/repo:pod_config.yaml": raw})
+    cfg = await load_pod_config(git, "owner/repo", "a" * 40)
+    assert cfg is not None
+    assert cfg.filters.cuda == "12.8"
+
+
 def test_pod_config_invalid_platforms_type() -> None:
     with pytest.raises(TypeError):
         PodConfig.model_validate({"platforms": "runpod"})

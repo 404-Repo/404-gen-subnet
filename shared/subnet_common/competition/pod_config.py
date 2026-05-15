@@ -50,9 +50,46 @@ def _coerce_cuda_yaml_number(v: Any) -> int | str | None:
     raise TypeError(f"filters.cuda must be int, float, str, or null, got {type(v).__name__}")
 
 
+def _cuda_tuple(version: str) -> tuple[int, int]:
+    parts = version.strip().split(".", 1)
+    major = int(parts[0])
+    minor = int(parts[1]) if len(parts) > 1 else 0
+    return (major, minor)
+
+
+def _parse_cuda_minimum(cuda: int | str) -> tuple[int, int]:
+    if isinstance(cuda, int):
+        return (cuda, 0)
+    s = str(cuda).strip()
+    if not s:
+        raise ValueError("empty cuda filter")
+    return _cuda_tuple(s)
+
+
+def _null_if_cuda_unparseable(v: Any) -> int | str | None:
+    """Coerce YAML scalars; unparseable or invalid ``filters.cuda`` becomes ``None`` (no deploy-time crash)."""
+    try:
+        coerced = _coerce_cuda_yaml_number(v)
+    except (TypeError, ValueError) as e:
+        logger.warning("pod_config filters.cuda invalid ({!r}): {} — ignoring CUDA filter", v, e)
+        return None
+    if coerced is None:
+        return None
+    try:
+        _parse_cuda_minimum(coerced)
+    except ValueError as e:
+        logger.warning(
+            "pod_config filters.cuda unparseable ({!r}): {} — ignoring CUDA filter",
+            coerced,
+            e,
+        )
+        return None
+    return coerced
+
+
 CudaFilterField = Annotated[
     int | str | None,
-    BeforeValidator(_coerce_cuda_yaml_number),
+    BeforeValidator(_null_if_cuda_unparseable),
 ]
 
 
@@ -63,7 +100,7 @@ class PodFilters(BaseModel):
         default=None,
         description=(
             "Minimum host CUDA capability (major or dotted), e.g. 13, 13.0 (YAML number), "
-            "'12.4', or quoted '13.0'"
+            "12.8 (YAML float), '12.4', or quoted '13.0'. Invalid values are ignored (no filter)."
         ),
     )
 
@@ -119,22 +156,6 @@ class PodConfig(BaseModel):
                 dropped,
             )
         return self
-
-
-def _cuda_tuple(version: str) -> tuple[int, int]:
-    parts = version.strip().split(".", 1)
-    major = int(parts[0])
-    minor = int(parts[1]) if len(parts) > 1 else 0
-    return (major, minor)
-
-
-def _parse_cuda_minimum(cuda: int | str) -> tuple[int, int]:
-    if isinstance(cuda, int):
-        return (cuda, 0)
-    s = str(cuda).strip()
-    if not s:
-        raise ValueError("empty cuda filter")
-    return _cuda_tuple(s)
 
 
 def _version_ge(catalog_entry: str, minimum: tuple[int, int]) -> bool:
