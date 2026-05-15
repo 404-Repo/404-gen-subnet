@@ -269,32 +269,21 @@ class GPUProviderManager:
                 env = {}
                 if self._settings.hf_token:
                     env["HF_TOKEN"] = self._settings.hf_token.get_secret_value()
-                if isinstance(client, RunpodClient):
-                    await client.deploy_container(
-                        name,
-                        image=image,
-                        gpu_type=gpu_type,
-                        gpu_count=gpu_count,
-                        port=self._settings.generation_port,
-                        concurrency=2,
-                        env=env or None,
-                        allowed_cuda_versions=allowed_cuda_versions,
+                if allowed_cuda_versions and provider != GPUProvider.RUNPOD:
+                    logger.debug(
+                        "allowed_cuda_versions is set but only applies to Runpod; "
+                        f"deploying on {provider.value} without host CUDA filter"
                     )
-                else:
-                    if allowed_cuda_versions:
-                        logger.debug(
-                            "allowed_cuda_versions is set but only applies to Runpod; "
-                            f"deploying on {provider.value} without host CUDA filter"
-                        )
-                    await client.deploy_container(
-                        name,
-                        image=image,
-                        gpu_type=gpu_type,
-                        gpu_count=gpu_count,
-                        port=self._settings.generation_port,
-                        concurrency=2,
-                        env=env or None,
-                    )
+                await client.deploy_container(
+                    name,
+                    image=image,
+                    gpu_type=gpu_type,
+                    gpu_count=gpu_count,
+                    port=self._settings.generation_port,
+                    concurrency=2,
+                    env=env or None,
+                    allowed_cuda_versions=allowed_cuda_versions,
+                )
 
                 # Wait for the container to become visible with URL
                 deadline = asyncio.get_running_loop().time() + timeout

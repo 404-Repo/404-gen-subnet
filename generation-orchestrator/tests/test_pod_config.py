@@ -22,7 +22,28 @@ def test_pod_config_full_yaml_dict() -> None:
             "filters": {"cuda": 13},
         }
     )
-    assert c.platforms == ["runpod", "targon"]
+    assert c.platforms == ["runpod"]
+    assert c.filters.cuda == 13
+
+
+def test_pod_config_platforms_only_targon_verda_becomes_empty() -> None:
+    c = PodConfig.model_validate({"platforms": ["verda", "targon"]})
+    assert c.platforms == []
+
+
+def test_pod_config_only_targon_verda_resets_filters_to_defaults() -> None:
+    """After stripping targon/verda, nothing Runpod-relevant remains — ignore filters too."""
+    c = PodConfig.model_validate(
+        {"platforms": ["verda", "targon"], "filters": {"cuda": 13}},
+    )
+    assert c.platforms == []
+    assert c.filters.cuda is None
+
+
+def test_pod_config_explicit_empty_platforms_still_honors_filters() -> None:
+    """Empty platforms without a strip pass does not clear filters (e.g. cuda-only hint)."""
+    c = PodConfig.model_validate({"platforms": [], "filters": {"cuda": 13}})
+    assert c.platforms == []
     assert c.filters.cuda == 13
 
 
@@ -47,7 +68,7 @@ def test_pod_config_invalid_platforms_type() -> None:
 def test_resolve_providers_miner_order() -> None:
     miner = PodConfig(platforms=["runpod", "targon"])
     orch = ["targon", "verda", "runpod"]
-    assert resolve_providers(miner, orch) == ["runpod", "targon"]
+    assert resolve_providers(miner, orch) == ["runpod"]
 
 
 def test_resolve_providers_empty_miner_uses_orch() -> None:

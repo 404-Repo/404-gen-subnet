@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import math
-from typing import Annotated, Any
+from typing import Annotated, Any, Self
 
 import yaml
 from loguru import logger
-from pydantic import BaseModel, BeforeValidator, Field, field_validator
+from pydantic import BaseModel, BeforeValidator, Field, field_validator, model_validator
 
 from subnet_common.github import GitHubClient
 
@@ -67,12 +67,16 @@ class PodFilters(BaseModel):
     )
 
 
+# Targon/Verda do not consume pod_config placement hints today (Runpod-only, e.g. allowedCudaVersions).
+_PLATFORMS_IGNORED_FOR_HINTS: frozenset[str] = frozenset({"targon", "verda"})
+
+
 class PodConfig(BaseModel):
     """Contents of miner repo root ``pod_config.yaml``."""
 
     platforms: list[str] = Field(
         default_factory=list,
-        description="Preferred GPU providers in order (subset of targon, verda, runpod)",
+        description="Preferred providers in YAML order; only Runpod uses hints today (Targon/Verda stripped).",
     )
     filters: PodFilters = Field(default_factory=PodFilters)
 
@@ -91,6 +95,29 @@ class PodConfig(BaseModel):
             if s:
                 out.append(s)
         return out
+
+    @model_validator(mode="after")
+    def _strip_platforms_without_pod_hints(self) -> Self:
+        """Drop Targon/Verda from ``platforms``; only Runpod honors this file's deploy hints today."""
+        dropped = [p for p in self.platforms if p in _PLATFORMS_IGNORED_FOR_HINTS]
+        if not dropped:
+            return self
+        kept = [p for p in self.platforms if p not in _PLATFORMS_IGNORED_FOR_HINTS]
+        logger.info(
+            "pod_config.yaml platforms {} ignored (only Runpod honors placement hints today)",
+            dropped,
+        )
+        self.platforms = kept
+        if not kept:
+            # No Runpod-relevant entries left; treat like missing pod_config for deploy hints
+            # (default provider order via resolve_providers, no allowedCudaVersions).
+            self.filters = PodFilters()
+            logger.info(
+                "pod_config.yaml: no platform hints remain after removing {} — "
+                "filters reset to defaults (no Runpod CUDA filter)",
+                dropped,
+            )
+        return self
 
 
 def _cuda_tuple(version: str) -> tuple[int, int]:

@@ -62,7 +62,7 @@ filters:
   cuda: 13   # optional; or YAML number 13.0 — same as 13 for Runpod allowedCudaVersions
 ```
 
-- **`platforms`**: subset of `runpod`, `targon`, `verda`. The orchestrator intersects this list with its own `GPU_PROVIDERS` setting and tries providers in your order. Unknown names are ignored.
+- **`platforms`**: optional ordered list. **Only `runpod` is honored** for placement hints today (`allowedCudaVersions`, etc.); **`targon` and `verda` entries are removed** when the file is loaded (orchestrator `GPU_PROVIDERS` still controls whether those providers are used at all). Unknown names are ignored later during provider resolution. If **every** listed platform was `targon` or `verda` (so the list is empty after removal), **`filters` are cleared** as well: the orchestrator applies the same defaults as when `pod_config.yaml` is missing for Runpod hints (no `filters.cuda` for Runpod). This does **not** apply when `platforms` is omitted or explicitly empty without those names — in that case `filters.cuda` is still honored.
 - **`filters.cuda`**: optional. Integer major (`13`) or YAML float (`13.0`, unquoted) are equivalent; dotted strings such as `12.4` are also accepted. When deploying on **Runpod**, this is mapped to the REST `allowedCudaVersions` allowlist so the pod is scheduled only on hosts whose driver reports a compatible CUDA version. **Targon and Verda** do not support this filter in the current orchestrator; deploy proceeds without a host-level CUDA allowlist there.
 
 Keep `filters.cuda` consistent with your Docker base image (e.g. CUDA 13 images require hosts that support CUDA 13).
