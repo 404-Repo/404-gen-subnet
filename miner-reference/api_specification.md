@@ -45,6 +45,28 @@ Your submission is built and run as a Docker image by the orchestrator. The buil
 
 A minimal compliant Dockerfile lives at [`docker/Dockerfile`](docker/Dockerfile) in this bundle and is the starting point for the reference service.
 
+## pod_config.yaml (orchestrator placement)
+
+The generation-orchestrator reads an optional **`pod_config.yaml`** from your repository at the **pinned submission commit** (same commit as the Docker build). Your HTTP service does not need to read this file; it is metadata for the orchestrator.
+
+- **Path**: repository root, `pod_config.yaml`.
+- **If missing**: the orchestrator uses its environment defaults (`GPU_PROVIDERS`, no Runpod host CUDA filter).
+- **If unreadable** (e.g. private miner repo and the orchestrator token cannot read that repo): same as missing — defaults apply; generation is not blocked solely for lack of `pod_config.yaml`.
+- **Schema** (YAML):
+
+```yaml
+platforms:
+  - runpod   # ordered preference: runpod, targon, verda
+  - targon
+filters:
+  cuda: 13   # optional; or YAML number 13.0 — same as 13 for Runpod allowedCudaVersions
+```
+
+- **`platforms`**: subset of `runpod`, `targon`, `verda`. The orchestrator intersects this list with its own `GPU_PROVIDERS` setting and tries providers in your order. Unknown names are ignored.
+- **`filters.cuda`**: optional. Integer major (`13`) or YAML float (`13.0`, unquoted) are equivalent; dotted strings such as `12.4` are also accepted. When deploying on **Runpod**, this is mapped to the REST `allowedCudaVersions` allowlist so the pod is scheduled only on hosts whose driver reports a compatible CUDA version. **Targon and Verda** do not support this filter in the current orchestrator; deploy proceeds without a host-level CUDA allowlist there.
+
+Keep `filters.cuda` consistent with your Docker base image (e.g. CUDA 13 images require hosts that support CUDA 13).
+
 ## Pod Lifecycle
 
 ### State Machine

@@ -15,6 +15,8 @@ Flags:
     --timeout-seconds                   override warmup budget (default: Settings.pod_warmup_timeout_seconds)
     --keep                              don't delete the pod after success (for manual inspection)
     --cleanup-only                      just delete any pods with the given --name prefix and exit
+    --pod-config <path>                 load pod_config.yaml for Runpod allowedCudaVersions (and future hints)
+    --miner-repo owner/repo --commit SHA   fetch pod_config.yaml from GitHub at that ref (needs GITHUB_TOKEN)
 """
 
 import argparse
@@ -23,6 +25,8 @@ import signal
 import sys
 import time
 from pathlib import Path
+
+import yaml
 
 
 # Bootstrap: make the orchestrator package importable when run as `python scripts/...`.
@@ -34,6 +38,8 @@ from generation_orchestrator.generation_stop import GenerationStop  # noqa: E402
 from generation_orchestrator.gpu_provider import GPUProviderManager  # noqa: E402
 from generation_orchestrator.gpu_provider.common import GPUProvider  # noqa: E402
 from generation_orchestrator.settings import Settings  # noqa: E402
+from subnet_common.competition.pod_config import PodConfig, load_pod_config, runpod_allowed_cuda_versions  # noqa: E402
+from subnet_common.github import GitHubClient  # noqa: E402
 
 
 PROVIDER_MAP = {
@@ -73,7 +79,25 @@ def _parse_args() -> argparse.Namespace:
         action="store_true",
         help="List containers (all, or matching --name prefix), print them, and exit. No deploys, no deletes.",
     )
-    return p.parse_args()
+    p.add_argument(
+        "--pod-config",
+        default=None,
+        help="Path to local pod_config.yaml (used for Runpod allowedCudaVersions when --provider runpod)",
+    )
+    p.add_argument(
+        "--miner-repo",
+        default=None,
+        help="GitHub owner/repo to fetch pod_config.yaml from (requires --commit and GITHUB_TOKEN in .env)",
+    )
+    p.add_argument(
+        "--commit",
+        default=None,
+        help="Git ref (commit SHA) for --miner-repo",
+    )
+    args = p.parse_args()
+    if bool(args.miner_repo) ^ bool(args.commit):
+        p.error("--miner-repo and --commit must be used together")
+    return args
 
 
 def _install_stop_handler(stop: GenerationStop) -> None:
@@ -109,6 +133,20 @@ async def _list_only(
     return 0
 
 
+async def _resolve_pod_config(args: argparse.Namespace, settings: Settings) -> PodConfig | None:
+    if args.pod_config:
+        path = Path(args.pod_config)
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+        return PodConfig.model_validate(data)
+    if args.miner_repo and args.commit:
+        async with GitHubClient(
+            repo=args.miner_repo,
+            token=settings.github_token.get_secret_value(),
+        ) as git:
+            return await load_pod_config(git, args.miner_repo, args.commit)
+    return None
+
+
 async def _deploy(
     manager: GPUProviderManager,
     provider: GPUProvider,
@@ -119,6 +157,7 @@ async def _deploy(
     timeout_override: float | None,
     keep: bool,
     stop: GenerationStop,
+    pod_config: PodConfig | None,
 ) -> int:
     """Deploy one pod and wait for /status=ready. Returns exit code."""
     if timeout_override is not None:
@@ -130,6 +169,12 @@ async def _deploy(
     start = time.monotonic()
     logger.info(f"Deploying '{name}' on {provider.value} with image={image} gpu={gpu_count}x{gpu_type}")
 
+    allowed_cuda = (
+        runpod_allowed_cuda_versions(pod_config.filters.cuda)
+        if pod_config is not None and provider == GPUProvider.RUNPOD
+        else None
+    )
+
     deployed = await manager.get_healthy_pod(
         name=name,
         image=image,
@@ -138,6 +183,7 @@ async def _deploy(
         stop=stop,
         replacements_remaining=manager._settings.max_replacements,  # type: ignore[misc]
         provider=provider,
+        allowed_cuda_versions=allowed_cuda,
     )
     elapsed = time.monotonic() - start
 
@@ -189,6 +235,8 @@ async def _main() -> int:
     gpu_type = args.gpu_type or settings.gpu_type
     gpu_count = args.gpu_count if args.gpu_count is not None else settings.gpu_count
 
+    pod_cfg = await _resolve_pod_config(args, settings)
+
     try:
         return await _deploy(
             manager=manager,
@@ -200,6 +248,7 @@ async def _main() -> int:
             timeout_override=args.timeout_seconds,
             keep=args.keep,
             stop=stop,
+            pod_config=pod_cfg,
         )
     except Exception as e:
         logger.exception(f"Unhandled error: {e}")

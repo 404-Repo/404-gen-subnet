@@ -45,6 +45,7 @@ class ContainerDeployConfig(BaseModel):
     cloud_type: str = "SECURE"  # "SECURE" or "COMMUNITY"
     support_public_ip: bool = True
     env: dict[str, str] = {}
+    allowed_cuda_versions: list[str] | None = None
 
 
 class RunpodPodResponse(BaseModel):
@@ -187,6 +188,7 @@ class RunpodClient:
         port: int | None = None,
         concurrency: int | None = None,  # noqa: ARG002 — Runpod has no concurrency knob, kept for API parity
         env: dict[str, str] | None = None,
+        allowed_cuda_versions: list[str] | None = None,
     ) -> None:
         """Create a Runpod pod. Does not wait for it to be visible."""
         _image = image or (config.image if config else None)
@@ -203,6 +205,11 @@ class RunpodClient:
         _volume_mount_path = config.volume_mount_path if config else "/runpod-volume"
         _cloud_type = config.cloud_type if config else "SECURE"
         _support_public_ip = config.support_public_ip if config else True
+        _allowed_cuda = (
+            allowed_cuda_versions
+            if allowed_cuda_versions is not None
+            else (config.allowed_cuda_versions if config else None)
+        )
 
         gpu_type_id = _resolve_gpu_type_id(_gpu_type)
 
@@ -221,6 +228,8 @@ class RunpodClient:
             payload["volumeMountPath"] = _volume_mount_path
         if _env:
             payload["env"] = _env
+        if _allowed_cuda:
+            payload["allowedCudaVersions"] = _allowed_cuda
 
         logger.debug(f"Deploying pod {name}")
         response = await self._request("POST", "/pods", json=payload)

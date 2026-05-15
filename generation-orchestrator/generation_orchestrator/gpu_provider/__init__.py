@@ -95,6 +95,8 @@ class GPUProviderManager:
         *,
         provider: GPUProvider | None = None,
         start_index: int = 0,
+        provider_sequence: list[GPUProvider] | None = None,
+        allowed_cuda_versions: list[str] | None = None,
     ) -> DeployedContainer | None:
         """
         Get a container that has reached `/status=ready`, with retry logic.
@@ -110,6 +112,9 @@ class GPUProviderManager:
             provider: If set, use only this provider for all attempts.
                       If None, round-robin across enabled providers.
             start_index: Starting index for round-robin (ignored if provider is set).
+            provider_sequence: If set (and ``provider`` is None), round-robin this ordered
+                subset instead of ``GPU_PROVIDERS`` (e.g. from miner ``pod_config.yaml``).
+            allowed_cuda_versions: Runpod-only; passed as REST ``allowedCudaVersions``.
 
         Returns:
             DeployedContainer if `/status=ready`; None on timeout, stop, `/status=replace`,
@@ -129,8 +134,14 @@ class GPUProviderManager:
             if stop.should_stop:
                 return None
 
-            # Provider selection: fixed or round-robin
-            current_provider = provider if provider else self.get_provider(start_index + attempt)
+            # Provider selection: fixed, custom sequence, or default round-robin
+            if provider is not None:
+                current_provider = provider
+            elif provider_sequence:
+                seq = provider_sequence
+                current_provider = seq[(start_index + attempt) % len(seq)]
+            else:
+                current_provider = self.get_provider(start_index + attempt)
             generation_token = self.get_generation_token(current_provider)
 
             logger.debug(f"POD attempt {attempt + 1}/{max_attempts} on {current_provider.value}")
@@ -144,6 +155,7 @@ class GPUProviderManager:
                 stop=stop,
                 timeout=deploy_timeout,
                 check_interval=check_interval,
+                allowed_cuda_versions=allowed_cuda_versions,
             )
 
             if not container:
@@ -241,6 +253,7 @@ class GPUProviderManager:
         stop: GenerationStop,
         timeout: float,
         check_interval: float,
+        allowed_cuda_versions: list[str] | None = None,
     ) -> ContainerInfo | None:
         """
         Try to deploy a container and wait for it to become visible.
@@ -256,15 +269,32 @@ class GPUProviderManager:
                 env = {}
                 if self._settings.hf_token:
                     env["HF_TOKEN"] = self._settings.hf_token.get_secret_value()
-                await client.deploy_container(
-                    name,
-                    image=image,
-                    gpu_type=gpu_type,
-                    gpu_count=gpu_count,
-                    port=self._settings.generation_port,
-                    concurrency=2,
-                    env=env or None,
-                )
+                if isinstance(client, RunpodClient):
+                    await client.deploy_container(
+                        name,
+                        image=image,
+                        gpu_type=gpu_type,
+                        gpu_count=gpu_count,
+                        port=self._settings.generation_port,
+                        concurrency=2,
+                        env=env or None,
+                        allowed_cuda_versions=allowed_cuda_versions,
+                    )
+                else:
+                    if allowed_cuda_versions:
+                        logger.debug(
+                            "allowed_cuda_versions is set but only applies to Runpod; "
+                            f"deploying on {provider.value} without host CUDA filter"
+                        )
+                    await client.deploy_container(
+                        name,
+                        image=image,
+                        gpu_type=gpu_type,
+                        gpu_count=gpu_count,
+                        port=self._settings.generation_port,
+                        concurrency=2,
+                        env=env or None,
+                    )
 
                 # Wait for the container to become visible with URL
                 deadline = asyncio.get_running_loop().time() + timeout
