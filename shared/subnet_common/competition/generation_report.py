@@ -53,11 +53,3 @@ async def save_generation_reports(
         content=GenerationReportsAdapter.dump_json(reports, indent=2).decode(),
         message=f"Update generation reports for round {round_num}",
     )
-
-
-def get_completed_hotkeys(reports: dict[str, GenerationReport]) -> set[str]:
-    return {hk for hk, r in reports.items() if r.outcome == GenerationReportOutcome.COMPLETED}
-
-
-def get_rejected_hotkeys(reports: dict[str, GenerationReport]) -> set[str]:
-    return {hk for hk, r in reports.items() if r.outcome == GenerationReportOutcome.REJECTED}

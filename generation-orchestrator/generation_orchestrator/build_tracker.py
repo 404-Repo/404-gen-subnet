@@ -14,7 +14,6 @@ TERMINAL_STATUSES = frozenset(
     {
         BuildStatus.SUCCESS,
         BuildStatus.FAILURE,
-        BuildStatus.NOT_FOUND,
         BuildStatus.TIMED_OUT,
     }
 )

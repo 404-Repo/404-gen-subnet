@@ -257,7 +257,9 @@ class PodSession:
         log_id = f"{self._log_id} / {stem}"
         result = GenerationResult(size=len(js_bytes))
 
-        result.js = await self._upload(round_num, repeat_index, f"{stem}.js", js_bytes, log_id, kind="JS")
+        result.js = await self._upload(
+            round_num, repeat_index, f"{stem}.js", js_bytes, log_id, kind="JS", content_type="text/javascript"
+        )
 
         render_key = self._settings.render_api_key.get_secret_value() if self._settings.render_api_key else None
         white, gray, grid = await asyncio.gather(
@@ -297,18 +299,18 @@ class PodSession:
             return result
 
         # Upload everything in parallel; abort the whole bundle on any failure.
-        uploads: list[tuple[str, bytes, str]] = (
-            [(f"{stem}/white/{view.name}.png", white[view.name], "VIEW") for view in WHITE_VIEWS]
-            + [(f"{stem}/gray/{view.name}.png", gray[view.name], "VIEW") for view in GRAY_VIEWS]
+        uploads: list[tuple[str, bytes, str, str]] = (
+            [(f"{stem}/white/{view.name}.png", white[view.name], "VIEW", "image/png") for view in WHITE_VIEWS]
+            + [(f"{stem}/gray/{view.name}.png", gray[view.name], "VIEW", "image/png") for view in GRAY_VIEWS]
             + [
-                (f"{stem}/grid.png", grid, "GRID"),
-                (f"{stem}/embeddings.npz", embeddings_npz, "EMB"),
+                (f"{stem}/grid.png", grid, "GRID", "image/png"),
+                (f"{stem}/embeddings.npz", embeddings_npz, "EMB", "application/octet-stream"),
             ]
         )
         urls = await asyncio.gather(
             *[
-                self._upload(round_num, repeat_index, filename, data, log_id, kind=kind)
-                for filename, data, kind in uploads
+                self._upload(round_num, repeat_index, filename, data, log_id, kind=kind, content_type=content_type)
+                for filename, data, kind, content_type in uploads
             ]
         )
         if any(u is None for u in urls):
@@ -334,7 +336,15 @@ class PodSession:
         return f"{self._settings.cdn_url}/{self._r2_key(round_num, repeat_index, stem)}"
 
     async def _upload(
-        self, round_num: int, repeat_index: int, filename: str, data: bytes, log_id: str, *, kind: str
+        self,
+        round_num: int,
+        repeat_index: int,
+        filename: str,
+        data: bytes,
+        log_id: str,
+        *,
+        kind: str,
+        content_type: str,
     ) -> str | None:
         """Upload data to R2 and return CDN URL. Retries up to 3 times on transient errors."""
         r2 = self._r2
@@ -351,7 +361,7 @@ class PodSession:
             reraise=True,
         )
         async def _do_upload() -> None:
-            await r2.upload(key=key, data=data)
+            await r2.upload(key=key, data=data, content_type=content_type)
 
         try:
             await _do_upload()
