@@ -223,12 +223,14 @@ class VerdaClient:
         port: int | None = None,
         concurrency: int | None = None,
         env: dict[str, str] | None = None,
+        allowed_cuda_versions: list[str] | None = None,  # Runpod-only; ignored on Verda
     ) -> None:
         """
         Deploy a new container.
 
         Either provide a full config, or use individual parameters (which override config).
         """
+        _ = allowed_cuda_versions
         # Resolve: explicit param > config > default
         _image = image or (config.image if config else None)
         if not _image:

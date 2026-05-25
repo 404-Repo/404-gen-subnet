@@ -91,6 +91,24 @@ class GitHubClient:
         response.raise_for_status()
         return response.text
 
+    async def get_file_from_repo(self, repo: str, path: str, ref: str) -> str | None:
+        """Read file content from any ``owner/repo`` at a specific ref (commit/branch/tag).
+
+        Returns ``None`` when the object is missing **or** when GitHub denies access
+        (e.g. private miner repo and the token lacks ``contents:read``). In those cases
+        GitHub responds with 404 and/or 403; callers such as ``load_pod_config`` treat
+        that as "no pod config".
+        """
+        response = await self.client.get(
+            f"/repos/{repo}/contents/{path}",
+            params={"ref": ref},
+            headers={"Accept": "application/vnd.github.raw+json"},
+        )
+        if response.status_code in (401, 403, 404):
+            return None
+        response.raise_for_status()
+        return response.text
+
     async def commit_files(
         self,
         files: dict[str, str],

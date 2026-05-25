@@ -27,6 +27,12 @@ class MockGitHubClient(GitHubClient):
     async def get_file(self, path: str, ref: str) -> str | None:
         return self.files.get(path)
 
+    async def get_file_from_repo(self, repo: str, path: str, ref: str) -> str | None:
+        key = f"{repo}:{path}"
+        if key in self.files:
+            return self.files[key]
+        return self.files.get(path)
+
     async def commit_files(
         self,
         files: dict[str, str],

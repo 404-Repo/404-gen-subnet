@@ -10,6 +10,7 @@ from subnet_common.competition.generations import (
     get_generations,
     save_generations,
 )
+from subnet_common.competition.pod_config import PodConfig, resolve_providers, runpod_allowed_cuda_versions
 from subnet_common.competition.pod_stats import PodStats, save_pod_stats
 from subnet_common.git_batcher import GitBatcher
 from subnet_common.render import warmup as render_warmup
@@ -18,6 +19,7 @@ from generation_orchestrator.discord import NULL_DISCORD_NOTIFIER, DiscordNotifi
 from generation_orchestrator.generation_stop import GenerationStop
 from generation_orchestrator.generation_summary import summarize_generation
 from generation_orchestrator.gpu_provider import DeployedContainer, GPUProviderManager
+from generation_orchestrator.gpu_provider.common import GPUProvider
 from generation_orchestrator.pod_session import PodReplaceRequested, PodSession, ReplaceReason
 from generation_orchestrator.prompts import Prompt
 from generation_orchestrator.settings import Settings
@@ -25,6 +27,12 @@ from generation_orchestrator.staggered_semaphore import StaggeredSemaphore
 
 
 _TERMINATION_COMPLETED = "completed"
+
+_PROVIDER_BY_NAME: dict[str, GPUProvider] = {
+    "targon": GPUProvider.TARGON,
+    "verda": GPUProvider.VERDA,
+    "runpod": GPUProvider.RUNPOD,
+}
 
 
 class _Verdict(Enum):
@@ -58,6 +66,7 @@ class MinerRunner:
         audit_repeats: int = 1,
         audit_request: AuditRequest | None = None,
         discord: DiscordNotifier = NULL_DISCORD_NOTIFIER,
+        pod_config: PodConfig | None = None,
     ):
         self._settings = settings
         self._semaphore = semaphore
@@ -72,6 +81,7 @@ class MinerRunner:
         self._audit_repeats = audit_repeats if audit_request is not None else 1
         self._audit_request = audit_request
         self._discord = discord
+        self._pod_config = pod_config
 
         self._log_id = hotkey[:10]
         self._miner_prefix = f"miner-{self._current_round:02d}-{self._hotkey[:10].lower()}"
@@ -402,6 +412,12 @@ class MinerRunner:
         """
         logger.debug(f"{pod_id}: deploying")
 
+        cfg = self._pod_config or PodConfig()
+        orch = [p.strip() for p in self._settings.gpu_providers.split(",") if p.strip()]
+        names = resolve_providers(cfg, orch)
+        provider_sequence = [_PROVIDER_BY_NAME[n] for n in names]
+        allowed_cuda = runpod_allowed_cuda_versions(cfg.filters.cuda)
+
         deployed = await self._gpu_manager.get_healthy_pod(
             name=pod_id,
             image=self._docker_image,
@@ -410,6 +426,8 @@ class MinerRunner:
             stop=self._stop,
             replacements_remaining=self._settings.max_replacements - self._replacements_used,
             start_index=attempt_index,
+            provider_sequence=provider_sequence,
+            allowed_cuda_versions=allowed_cuda,
         )
 
         if deployed is None:

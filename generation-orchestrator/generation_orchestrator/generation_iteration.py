@@ -11,6 +11,7 @@ from subnet_common.competition.generation_report import (
     save_generation_reports,
 )
 from subnet_common.competition.leader import require_leader_state
+from subnet_common.competition.pod_config import load_pod_config
 from subnet_common.competition.seed import require_seed_from_git
 from subnet_common.competition.state import CompetitionState, RoundStage, require_state
 from subnet_common.competition.submissions import MinerSubmission, require_submissions
@@ -375,6 +376,10 @@ async def _generate_report(
                 reason="Failed to build a docker image",
             )
 
+        pod_cfg = None
+        if build is not None:
+            pod_cfg = await load_pod_config(git_batcher.git, build.repo, build.commit)
+
         return await MinerRunner(
             settings=settings,
             semaphore=semaphore,
@@ -389,6 +394,7 @@ async def _generate_report(
             stop=stop,
             audit_repeats=audit_repeats,
             audit_request=audit_request,
+            pod_config=pod_cfg,
         ).run()
     except Exception as e:
         logger.exception(f"{hotkey[:10]}: generation failed with {e}")

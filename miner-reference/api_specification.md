@@ -45,6 +45,28 @@ Your submission is built and run as a Docker image by the orchestrator. The buil
 
 A minimal compliant Dockerfile lives at [`docker/Dockerfile`](docker/Dockerfile) in this bundle and is the starting point for the reference service.
 
+## pod_config.yaml (orchestrator placement)
+
+The generation-orchestrator reads an optional **`pod_config.yaml`** from your repository at the **pinned submission commit** (same commit as the Docker build). Your HTTP service does not need to read this file; it is metadata for the orchestrator.
+
+- **Path**: repository root, `pod_config.yaml`.
+- **If missing**: the orchestrator uses its environment defaults (`GPU_PROVIDERS`, no Runpod host CUDA filter).
+- **If unreadable** (e.g. private miner repo and the orchestrator token cannot read that repo) **or the GitHub API fails transiently** (timeouts, connection errors, HTTP 5xx): same as missing — defaults apply; generation is not blocked solely for lack of `pod_config.yaml`.
+- **Schema** (YAML):
+
+```yaml
+platforms:
+  - runpod   # ordered preference: runpod, targon, verda
+  - targon
+filters:
+  cuda: 13   # optional; or YAML number 13.0 — same as 13 for Runpod allowedCudaVersions
+```
+
+- **`platforms`**: optional ordered list. **Only `runpod` is honored** for placement hints today (`allowedCudaVersions`, etc.); **`targon` and `verda` entries are removed** when the file is loaded (orchestrator `GPU_PROVIDERS` still controls whether those providers are used at all). Unknown names are ignored later during provider resolution. If **every** listed platform was `targon` or `verda` (so the list is empty after removal), **`filters` are cleared** as well: the orchestrator applies the same defaults as when `pod_config.yaml` is missing for Runpod hints (no `filters.cuda` for Runpod). This does **not** apply when `platforms` is omitted or explicitly empty without those names — in that case `filters.cuda` is still honored.
+- **`filters.cuda`**: optional. Integer major (`13`) or YAML float (`13.0`, `12.8`, unquoted) are equivalent to the matching dotted form when parsed; quoted strings such as `'12.4'` are also accepted. Use a **space after the colon** in YAML (`cuda: 12.8`); `cuda:12.8` without a space is invalid YAML and is not read as a number. Values that cannot be parsed as a version are **ignored** (no Runpod CUDA filter), and the rest of `pod_config.yaml` still applies. When deploying on **Runpod**, a valid value is mapped to the REST `allowedCudaVersions` allowlist so the pod is scheduled only on hosts whose driver reports a compatible CUDA version. **Targon and Verda** do not support this filter in the current orchestrator; deploy proceeds without a host-level CUDA allowlist there.
+
+Keep `filters.cuda` consistent with your Docker base image (e.g. CUDA 13 images require hosts that support CUDA 13).
+
 ## Pod Lifecycle
 
 ### State Machine
