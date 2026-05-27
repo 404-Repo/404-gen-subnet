@@ -730,49 +730,47 @@ async def test_run_all_generation_rejected_finalizes_as_leader(settings: Setting
     assert winner_data["winner_hotkey"] == "leader"
 
 
-# async def test_run_successful_single_qualifier_dethrones_leader(settings: Settings) -> None:
-#     runner, git, _ = _make_runner(
-#         settings,
-#         hotkeys=[HK_A],
-#         prompts=["p0.png", "p1.png"],
-#         win_margin=0.5,
-#         audit_repeats=1,
-#     )
-#     _inject_builds(git, 1, [HK_A])
-#     _add_generations(git, 1, LEADER, GenerationSource.GENERATED, ["p0.png", "p1.png"])
-#     _add_generations(git, 1, HK_A, GenerationSource.SUBMITTED, ["p0.png", "p1.png"])
-#     _add_generations(git, 1, HK_A, GenerationSource.GENERATED, ["p0.png", "p1.png"], repeat_index=1)
-#
-#     audited_external_state_calls: list[int] = []
-#     original_reload = runner._reload_external_state
-#
-#     async def reload_then_inject() -> None:
-#         await original_reload()
-#         # After qualification's reload, inject COMPLETED + PASSED + audit margins so
-#         # the next derive_state sees a verified single-qualifier (finalizing).
-#         audited_external_state_calls.append(1)
-#         if len(audited_external_state_calls) >= 2:
-#             _inject_external_state(
-#                 git,
-#                 1,
-#                 reports={HK_A: GenerationReport(hotkey=HK_A, outcome=GenerationReportOutcome.COMPLETED)},
-#                 source_audits=[AuditResult(hotkey=HK_A, verdict=AuditVerdict.PASSED)],
-#             )
-#             runner._audit_matrix.add(submitted_audit_key(1), HK_A, 0.5)
-#             runner._audit_matrix.add(defender_audit_key(LEADER, 1), HK_A, 0.5)
-#
-#     async def fake_run_match(**kwargs: object) -> MatchReport:
-#         left, right = str(kwargs["left"]), str(kwargs["right"])
-#         return _make_match_report([DuelWinner.RIGHT, DuelWinner.RIGHT], left, right)
-#
-#     with (
-#         patch("judge_service.round_runner.run_match", side_effect=fake_run_match),
-#         patch.object(runner, "_reload_external_state", side_effect=reload_then_inject),
-#     ):
-#         await runner.run(GracefulShutdown())
-#
-#     winner_data = json.loads(git.committed["rounds/1/winner.json"])
-#     assert winner_data["winner_hotkey"] == HK_A
+async def test_run_successful_single_qualifier_dethrones_leader(settings: Settings) -> None:
+    runner, git, _ = _make_runner(
+        settings,
+        hotkeys=[HK_A],
+        prompts=["p0.png", "p1.png"],
+        win_margin=0.5,
+        audit_repeats=1,
+    )
+    _inject_builds(git, 1, [HK_A])
+    _add_generations(git, 1, LEADER, GenerationSource.GENERATED, ["p0.png", "p1.png"])
+    _add_generations(git, 1, HK_A, GenerationSource.SUBMITTED, ["p0.png", "p1.png"])
+    _add_generations(git, 1, HK_A, GenerationSource.GENERATED, ["p0.png", "p1.png"], repeat_index=1)
+
+    shutdown = GracefulShutdown()
+
+    async def fake_wait(timeout: float | None = None) -> bool:
+        # The runner reaches the idle branch after deriving "won unverified".
+        # Inject COMPLETED + PASSED + passing audit margins so the next reload
+        # produces "won verified" and run() finalizes.
+        _inject_external_state(
+            git,
+            1,
+            reports={HK_A: GenerationReport(hotkey=HK_A, outcome=GenerationReportOutcome.COMPLETED)},
+            source_audits=[AuditResult(hotkey=HK_A, verdict=AuditVerdict.PASSED)],
+        )
+        runner._audit_matrix.add(submitted_audit_key(1), HK_A, 0.5)
+        runner._audit_matrix.add(defender_audit_key(LEADER, 1), HK_A, 0.5)
+        return False  # timeout expired, not shutdown
+
+    async def fake_run_match(**kwargs: object) -> MatchReport:
+        left, right = str(kwargs["left"]), str(kwargs["right"])
+        return _make_match_report([DuelWinner.RIGHT, DuelWinner.RIGHT], left, right)
+
+    with (
+        patch("judge_service.round_runner.run_match", side_effect=fake_run_match),
+        patch.object(shutdown, "wait", side_effect=fake_wait),
+    ):
+        await runner.run(shutdown)
+
+    winner_data = json.loads(git.committed["rounds/1/winner.json"])
+    assert winner_data["winner_hotkey"] == HK_A
 
 
 async def test_run_shutdown_mid_qualification_does_not_finalize(settings: Settings) -> None:

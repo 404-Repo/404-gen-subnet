@@ -196,13 +196,13 @@ def _all_duel_audits_pass(
 def _rejection_from_generation_report(report: GenerationReport | None) -> str | None:
     if report is None or report.outcome != GenerationReportOutcome.REJECTED:
         return None
-    return "generation report" + (f": {report.reason}" if report.reason else "")
+    return "generation report" + (f": {report.reason[:64]}" if report.reason else "")
 
 
 def _rejection_from_source_audit(audit: AuditResult | None) -> str | None:
     if audit is None or audit.verdict != AuditVerdict.FAILED:
         return None
-    return "source audit" + (f": {audit.reason}" if audit.reason else "")
+    return "source audit" + (f": {audit.reason[:64]}" if audit.reason else "")
 
 
 def _rejection_from_submitted_audit(
