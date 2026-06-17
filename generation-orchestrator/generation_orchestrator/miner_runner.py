@@ -3,7 +3,11 @@ from enum import Enum
 
 from loguru import logger
 from subnet_common.competition.audit_requests import AuditRequest
-from subnet_common.competition.generation_report import GenerationReport, GenerationReportOutcome
+from subnet_common.competition.generation_report import (
+    GenerationReport,
+    GenerationReportOutcome,
+    save_generation_reports,
+)
 from subnet_common.competition.generations import (
     GenerationResult,
     GenerationSource,
@@ -18,7 +22,7 @@ from generation_orchestrator.discord import NULL_DISCORD_NOTIFIER, DiscordNotifi
 from generation_orchestrator.generation_stop import GenerationStop
 from generation_orchestrator.generation_summary import summarize_generation
 from generation_orchestrator.gpu_provider import DeployedContainer, GPUProviderManager
-from generation_orchestrator.pod_session import PodReplaceRequested, PodSession
+from generation_orchestrator.pod_session import PodReplaceRequested, PodSession, ReplaceReason
 from generation_orchestrator.prompts import Prompt
 from generation_orchestrator.settings import Settings
 from generation_orchestrator.staggered_semaphore import StaggeredSemaphore
@@ -55,7 +59,9 @@ class MinerRunner:
         current_round: int,
         seed: int,
         stop: GenerationStop,
+        audit_repeats: int = 1,
         audit_request: AuditRequest | None = None,
+        reports: dict[str, GenerationReport] | None = None,
         discord: DiscordNotifier = NULL_DISCORD_NOTIFIER,
     ):
         self._settings = settings
@@ -68,16 +74,20 @@ class MinerRunner:
         self._current_round = current_round
         self._seed = seed
         self._stop = stop
+        self._audit_repeats = audit_repeats if audit_request is not None else 1
         self._audit_request = audit_request
+        self._reports = reports
         self._discord = discord
 
         self._log_id = hotkey[:10]
         self._miner_prefix = f"miner-{self._current_round:02d}-{self._hotkey[:10].lower()}"
 
         self._submitted_stems: set[str] = set()
-        self._generations: dict[str, GenerationResult] = {}
+        self._generations_by_repeat: dict[int, dict[str, GenerationResult]] = {
+            r: {} for r in range(1, self._audit_repeats + 1)
+        }
         self._replacements_used: int = 0
-        self._total_generation_time: float = 0.0
+        self._generation_time_by_repeat: dict[int, float] = {r: 0.0 for r in range(1, self._audit_repeats + 1)}
         self._pod_stats: dict[str, PodStats] = {}
 
     async def run(self) -> GenerationReport | None:
@@ -104,17 +114,22 @@ class MinerRunner:
             )
             self._submitted_stems = {k for k, v in all_submitted.items() if v.js is not None}
 
-        prior = await get_generations(
-            git=self._git_batcher.git,
-            hotkey=self._hotkey,
-            round_num=self._current_round,
-            source=GenerationSource.GENERATED,
-            ref=self._settings.github_branch,
-        )
-        self._generations = dict(prior)
+        for repeat in range(1, self._audit_repeats + 1):
+            prior = await get_generations(
+                git=self._git_batcher.git,
+                hotkey=self._hotkey,
+                round_num=self._current_round,
+                source=GenerationSource.GENERATED,
+                ref=self._settings.github_branch,
+                repeat_index=repeat,
+            )
+            self._generations_by_repeat[repeat] = dict(prior)
 
         if self._all_done():
-            logger.info(f"{self._log_id}: all {len(self._target_prompts())} prompts already done")
+            logger.info(
+                f"{self._log_id}: all {len(self._target_prompts())} prompts already done "
+                f"across {self._audit_repeats} repeat(s)"
+            )
             return self._build_report(_Verdict.COMPLETED)
 
         logger.info(f"{self._log_id}: {self._pending_count()} prompts to process")
@@ -153,6 +168,8 @@ class MinerRunner:
             if swap is None:
                 return self._determine_verdict()
 
+            await self._notify_swap(swap.reason, pod_index)
+
             if not self._consume_replacement(swap.reason.value):
                 return self._determine_verdict()
 
@@ -163,15 +180,30 @@ class MinerRunner:
 
         return _Verdict.PARTIAL
 
-    async def _run_pod(self, deployed: DeployedContainer, pod_index: int) -> PodReplaceRequested | None:
-        """Run all pending batches on one pod. Returns a swap signal or None if nothing to swap for.
+    async def _notify_swap(self, reason: ReplaceReason, pod_index: int) -> None:
+        """Surface infra-side pod failures to Discord. REQUESTED and BATCH_TIME_LIMIT
+        are intentionally silent — the first is a miner-side decision, the second is
+        already covered by the eventual generation report."""
+        pod_id = f"{self._miner_prefix}-{pod_index}"
+        if reason == ReplaceReason.SUBMISSION_FAILED:
+            await self._discord.notify_batch_submit_failed(self._hotkey, pod_id)
+        elif reason == ReplaceReason.DOWNLOAD_FAILED:
+            await self._discord.notify_batch_download_failed(self._hotkey, pod_id)
+        elif reason == ReplaceReason.UNREACHABLE:
+            await self._discord.notify_pod_unreachable(self._hotkey, pod_id)
 
-        Persists per-batch generations and per-pod stats regardless of how the pod ended.
+    async def _run_pod(self, deployed: DeployedContainer, pod_index: int) -> PodReplaceRequested | None:
+        """Run all pending repeats on one pod. Returns a swap signal or None if nothing to swap for.
+
+        For an audit miner each of `audit_repeats` runs the full target prompt set on this
+        same pod. Per-(pod, repeat) batch times and termination reasons are recorded as
+        separate PodStats rows keyed `f"{pod_id}-r{repeat}"`.
         """
         pod_id = f"{self._miner_prefix}-{pod_index}"
-        batch_times: list[float] = []
-        pod_total_time: float = 0.0
+        per_repeat_batch_times: dict[int, list[float]] = {}
+        per_repeat_pod_total: dict[int, float] = {}
         swap: PodReplaceRequested | None = None
+        last_repeat: int = 1
 
         try:
             async with PodSession(
@@ -183,42 +215,62 @@ class MinerRunner:
                 stop=self._stop,
                 remaining_replacements=self._settings.max_replacements - self._replacements_used,
             ) as session:
-                pending = [p for p in self._target_prompts() if p.stem not in self._generations]
-                for batch in self._chunk(pending):
-                    if self._stop.should_stop:
-                        break
+                for repeat in range(1, self._audit_repeats + 1):
+                    last_repeat = repeat
+                    pending = [p for p in self._target_prompts() if p.stem not in self._generations_by_repeat[repeat]]
+                    if not pending:
+                        continue
 
-                    outcome = await session.run(self._current_round, batch)
-                    if isinstance(outcome, PodReplaceRequested):
-                        swap = outcome
-                        return swap
+                    per_repeat_batch_times[repeat] = []
+                    per_repeat_pod_total[repeat] = 0.0
 
-                    self._generations.update(outcome.generations)
-                    await save_generations(
-                        git_batcher=self._git_batcher,
-                        hotkey=self._hotkey,
-                        round_num=self._current_round,
-                        generations=self._generations,
-                        source=GenerationSource.GENERATED,
-                    )
-                    batch_times.append(outcome.batch_time)
-                    pod_total_time += outcome.batch_time
-                    self._total_generation_time += outcome.batch_time
+                    for batch in self._chunk(pending):
+                        if self._stop.should_stop:
+                            return swap
+
+                        outcome = await session.run(self._current_round, batch, repeat_index=repeat)
+                        if isinstance(outcome, PodReplaceRequested):
+                            swap = outcome
+                            return swap
+
+                        self._generations_by_repeat[repeat].update(outcome.generations)
+                        await save_generations(
+                            git_batcher=self._git_batcher,
+                            hotkey=self._hotkey,
+                            round_num=self._current_round,
+                            generations=self._generations_by_repeat[repeat],
+                            source=GenerationSource.GENERATED,
+                            repeat_index=repeat,
+                        )
+                        per_repeat_batch_times[repeat].append(outcome.batch_time)
+                        per_repeat_pod_total[repeat] += outcome.batch_time
+                        self._generation_time_by_repeat[repeat] += outcome.batch_time
+
+                    await self._write_progress_report()
         finally:
-            self._pod_stats[pod_id] = PodStats(
-                pod_id=pod_id,
-                provider=deployed.info.provider.value,
-                batch_times=batch_times,
-                total_generation_time=pod_total_time,
-                termination_reason=swap.reason.value if swap is not None else _TERMINATION_COMPLETED,
-                payload=swap.payload if swap is not None else None,
-            )
-            await save_pod_stats(
-                git_batcher=self._git_batcher,
-                round_num=self._current_round,
-                hotkey=self._hotkey,
-                stats=self._pod_stats,
-            )
+            for repeat, times in per_repeat_batch_times.items():
+                if repeat == last_repeat and swap is not None:
+                    reason = swap.reason.value
+                    payload = swap.payload
+                else:
+                    reason = _TERMINATION_COMPLETED
+                    payload = None
+                self._pod_stats[f"{pod_id}-r{repeat}"] = PodStats(
+                    pod_id=pod_id,
+                    repeat_index=repeat,
+                    provider=deployed.info.provider.value,
+                    batch_times=times,
+                    total_generation_time=per_repeat_pod_total[repeat],
+                    termination_reason=reason,
+                    payload=payload,
+                )
+            if per_repeat_batch_times:
+                await save_pod_stats(
+                    git_batcher=self._git_batcher,
+                    round_num=self._current_round,
+                    hotkey=self._hotkey,
+                    stats=self._pod_stats,
+                )
             await self._gpu_manager.delete_container(deployed.info)
 
         return swap
@@ -289,10 +341,18 @@ class MinerRunner:
         return self._prompts
 
     def _all_done(self) -> bool:
-        return all(p.stem in self._generations for p in self._target_prompts())
+        targets = self._target_prompts()
+        return all(
+            all(p.stem in self._generations_by_repeat[r] for p in targets) for r in range(1, self._audit_repeats + 1)
+        )
 
     def _pending_count(self) -> int:
-        return sum(1 for p in self._target_prompts() if p.stem not in self._generations)
+        return sum(
+            1
+            for r in range(1, self._audit_repeats + 1)
+            for p in self._target_prompts()
+            if p.stem not in self._generations_by_repeat[r]
+        )
 
     def _build_report(self, verdict: _Verdict) -> GenerationReport | None:
         """Build generation report based on the verdict."""
@@ -309,27 +369,60 @@ class MinerRunner:
                 reason="Failed to deploy a docker image",
             )
 
+        return self._summarize(list(range(1, self._audit_repeats + 1)))
+
+    def _summarize(self, repeats: list[int]) -> GenerationReport:
+        """Summarize the generation report over a subset of repeats."""
         return summarize_generation(
             hotkey=self._hotkey,
             submitted_stems=self._submitted_stems,
-            generations=self._generations,
+            generations_by_repeat={r: self._generations_by_repeat[r] for r in repeats},
+            generation_time_by_repeat={r: self._generation_time_by_repeat[r] for r in repeats},
             settings=self._settings,
-            total_generation_time=self._total_generation_time,
         )
+
+    def _repeat_complete(self, repeat: int) -> bool:
+        return all(p.stem in self._generations_by_repeat[repeat] for p in self._target_prompts())
+
+    async def _write_progress_report(self) -> None:
+        """Persist a per-repeat-incremental report so the judge can start a repeat's audit
+        duels before the remaining repeats finish.
+
+        Writes through the shared round `reports` dict — a single full-dict snapshot per
+        write — so concurrent miners don't clobber each other (re-reading the file would,
+        since reads bypass the GitBatcher's pending state). The overall outcome stays
+        PENDING while repeats remain; a completed repeat that already busts the failure
+        tolerance or time limit surfaces as REJECTED immediately. Flush so the freshly
+        committed generations and report are visible to the judge.
+        """
+        if self._audit_request is None or self._reports is None:
+            return
+        completed = [r for r in range(1, self._audit_repeats + 1) if self._repeat_complete(r)]
+        if not completed:
+            return
+        report = self._summarize(completed)
+        if report.outcome == GenerationReportOutcome.COMPLETED and len(completed) < self._audit_repeats:
+            report = report.model_copy(update={"outcome": GenerationReportOutcome.PENDING})
+        self._reports[self._hotkey] = report
+        await save_generation_reports(
+            git_batcher=self._git_batcher, round_num=self._current_round, reports=self._reports
+        )
+        await self._git_batcher.flush()
 
     async def _send_progress(self) -> None:
         prompts = self._target_prompts()
-        gens = self._generations
-        generated = sum(1 for p in prompts if p.stem in gens and not gens[p.stem].is_failed())
-        fails = sum(1 for p in prompts if p.stem in gens and gens[p.stem].is_failed())
+        per_repeat = [self._generations_by_repeat[r] for r in range(1, self._audit_repeats + 1)]
+        generated = sum(1 for gens in per_repeat for p in prompts if p.stem in gens and not gens[p.stem].is_failed())
+        fails = sum(1 for gens in per_repeat for p in prompts if p.stem in gens and gens[p.stem].is_failed())
+        total_time = sum(self._generation_time_by_repeat.values())
 
         await self._discord.notify_generation_progress(
             hotkey=self._hotkey,
             round_num=self._current_round,
             generated=generated,
-            total=len(prompts),
+            total=len(prompts) * self._audit_repeats,
             fails=fails,
-            total_generation_time=self._total_generation_time,
+            total_generation_time=total_time,
             replacements_used=self._replacements_used,
         )
 

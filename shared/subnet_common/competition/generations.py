@@ -54,15 +54,21 @@ GenerationsMap = dict[str, GenerationResult]
 GenerationsAdapter = TypeAdapter(GenerationsMap)
 
 
-def _path(round_num: int, hotkey: str, source: GenerationSource) -> str:
-    return f"rounds/{round_num}/{hotkey}/{source}.json"
+def _path(round_num: int, hotkey: str, source: GenerationSource, repeat_index: int = 1) -> str:
+    suffix = f"_{repeat_index}" if source == GenerationSource.GENERATED else ""
+    return f"rounds/{round_num}/{hotkey}/{source}{suffix}.json"
 
 
 async def get_generations(
-    git: GitHubClient, round_num: int, hotkey: str, source: GenerationSource, ref: str
+    git: GitHubClient,
+    round_num: int,
+    hotkey: str,
+    source: GenerationSource,
+    ref: str,
+    repeat_index: int = 1,
 ) -> GenerationsMap:
     content = await git.get_file(
-        path=_path(round_num=round_num, hotkey=hotkey, source=source),
+        path=_path(round_num=round_num, hotkey=hotkey, source=source, repeat_index=repeat_index),
         ref=ref,
     )
     if not content:
@@ -76,9 +82,11 @@ async def save_generations(
     hotkey: str,
     source: GenerationSource,
     generations: GenerationsMap,
+    repeat_index: int = 1,
 ) -> None:
+    path = _path(round_num=round_num, hotkey=hotkey, source=source, repeat_index=repeat_index)
     await git_batcher.write(
-        path=_path(round_num=round_num, hotkey=hotkey, source=source),
+        path=path,
         content=GenerationsAdapter.dump_json(generations, indent=2).decode(),
-        message=f"Update {source} for round {round_num}, miner {hotkey[:10]}",
+        message=f"Update {path.rsplit('/', 1)[-1]} for round {round_num}, miner {hotkey[:10]}",
     )

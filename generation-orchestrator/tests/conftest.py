@@ -14,4 +14,5 @@ def settings() -> Settings:
         R2_ACCESS_KEY_ID=SecretStr("test-r2-key"),
         R2_SECRET_ACCESS_KEY=SecretStr("test-r2-secret"),
         R2_ENDPOINT=SecretStr("https://test.r2.example.com"),
+        DINOV3_REVISION="test-revision",
     )

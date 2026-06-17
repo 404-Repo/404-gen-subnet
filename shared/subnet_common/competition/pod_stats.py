@@ -6,6 +6,7 @@ from subnet_common.github import GitHubClient
 
 class PodStats(BaseModel):
     pod_id: str = Field(default="", description="Worker identifier (e.g. miner-01-abc1234def-0)")
+    repeat_index: int = 1
     provider: str = Field(default="", description="GPU provider this pod was deployed on (e.g. 'targon', 'runpod')")
     batch_times: list[float] = Field(default_factory=list, description="Wall-clock time per batch in seconds")
     total_generation_time: float = Field(default=0.0, description="Total wall-clock generation time in seconds")

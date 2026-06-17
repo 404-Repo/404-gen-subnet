@@ -18,10 +18,15 @@ class Settings(BaseSettings):
     )
     github_branch: str = Field(default="main", alias="GITHUB_BRANCH", description="Git branch to commit to")
 
-    check_state_interval_seconds: int = Field(
+    min_check_state_interval_seconds: int = Field(
+        default=120,
+        alias="MIN_CHECK_STATE_INTERVAL",
+        description="Minimum interval between competition stage checks in seconds",
+    )
+    max_check_state_interval_seconds: int = Field(
         default=1800,
-        alias="CHECK_STATE_INTERVAL",
-        description="Interval between competition stage checks in seconds",
+        alias="MAX_CHECK_STATE_INTERVAL",
+        description="Maximum interval between competition stage checks in seconds",
     )
 
     openai_base_url: str = Field(
@@ -43,10 +48,9 @@ class Settings(BaseSettings):
         default=32,
         alias="MAX_CONCURRENT_VLM_CALLS",
         description=(
-            "Cap on simultaneous VLM calls in flight across the whole match. A duel runs "
-            "~25 VLM calls; with N duels gathered you can have up to 25*N in flight. This "
-            "sem keeps the VLM endpoint loaded but not over-saturated. Watch vLLM's "
-            "Running/Waiting and KV-cache stats — bump until KV cache fills meaningfully."
+            "Backstop cap on a duel's in-flight VLM calls. Duels run strictly one at a "
+            "time (each duel's images stay hot in vLLM's prefix cache); within a duel the "
+            "stages fan out up to ~8 calls at once, so this should sit above that."
         ),
     )
 

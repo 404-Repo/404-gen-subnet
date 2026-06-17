@@ -154,11 +154,14 @@ async def check_pod_status(
     auth_token: str | None,
     replacements_remaining: int,
     *,
+    log_id: str,
     timeout: float = 30.0,
 ) -> PodStatusResponse | None:
     """Check pod status. Returns None on connection error (transient).
 
     No retry here — the caller polls on a fixed interval, which is its own retry loop.
+    `log_id` is prefixed on every log line so operators can tie repeated polling noise
+    back to the specific miner/pod (typically `hotkey[:10]` or the pod name).
     """
     headers = {}
     if auth_token:
@@ -180,7 +183,7 @@ async def check_pod_status(
                 payload=data.get("payload"),
             )
             logger.debug(
-                f"Status from {endpoint}: status={parsed.status} "
+                f"{log_id}: status from {endpoint}: status={parsed.status} "
                 f"progress={parsed.progress}/{parsed.total} payload={_format_payload(parsed.payload)}"
             )
             return parsed
@@ -188,16 +191,16 @@ async def check_pod_status(
         # Previously silent. Surface the cause so an operator looking at
         # "status check failed (N/M)" upstream knows whether it's a timeout vs
         # connect refusal vs cold-start race.
-        logger.warning(f"Status check {type(e).__name__} on {endpoint}: {e}")
+        logger.warning(f"{log_id}: status check {type(e).__name__} on {endpoint}: {e}")
         return None
     except httpx.HTTPStatusError as exc:
-        logger.warning(f"Status check HTTP {exc.response.status_code} on {endpoint}")
+        logger.warning(f"{log_id}: status check HTTP {exc.response.status_code} on {endpoint}")
         return None
     except httpx.RequestError as e:
-        logger.warning(f"Status check {type(e).__name__} on {endpoint}: {e}")
+        logger.warning(f"{log_id}: status check {type(e).__name__} on {endpoint}: {e}")
         return None
     except (KeyError, ValueError) as e:
-        logger.warning(f"Status check invalid response on {endpoint}: {type(e).__name__}: {e}")
+        logger.warning(f"{log_id}: status check invalid response on {endpoint}: {type(e).__name__}: {e}")
         return None
 
 

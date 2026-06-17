@@ -1,9 +1,12 @@
 from enum import Enum
+from typing import Literal
 
-from loguru import logger
 from pydantic import BaseModel
 
 from subnet_common.git_batcher import GitBatcher
+
+
+MatchReportKind = Literal["duels", "audit"]
 
 
 class DuelWinner(str, Enum):
@@ -46,40 +49,33 @@ class MatchReport(BaseModel):
     duels: list[DuelReport]
 
 
-def _path(round_num: int, left: str, right: str) -> str:
-    """Path to match a report file.
-    Convention: stored under the challenger's (right) directory with reference to the defender (left).
+def _path(round_num: int, left: str, right: str, kind: MatchReportKind, repeat_index: int | None) -> str:
+    """Path to a match report file.
+
+    Stored under the challenger's (right) directory with reference to the defender (left).
+    `kind` selects the filename prefix:
+      - 'duels' — round-internal matches (qualification, timeline, exploratory).
+      - 'audit' — post-hoc audit duels (submitted-vs-generated, generated-vs-defender).
+    `repeat_index` (audit reports only) appends `_<r>` so each repeat's audit duel is a
+    distinct file.
     """
-    return f"rounds/{round_num}/{right}/duels_{left[:10]}.json"
-
-
-async def get_match_report(
-    git_batcher: GitBatcher,
-    round_num: int,
-    left: str,
-    right: str,
-) -> MatchReport | None:
-    """Load match report from git (checks pending writes first). Returns None if not found or invalid."""
-    path = _path(round_num, left, right)
-    try:
-        content = await git_batcher.read(path)
-        if not content:
-            return None
-        return MatchReport.model_validate_json(content)
-    except Exception as e:
-        logger.warning(f"Failed to load match report {path}: {e}")
-        return None
+    suffix = f"_{repeat_index}" if repeat_index is not None else ""
+    return f"rounds/{round_num}/{right}/{kind}_{left[:10]}{suffix}.json"
 
 
 async def save_match_report(
     git_batcher: GitBatcher,
     round_num: int,
     report: MatchReport,
+    *,
+    kind: MatchReportKind = "duels",
+    repeat_index: int | None = None,
 ) -> None:
-    """Save a match report to git."""
-    path = _path(round_num, report.left, report.right)
+    """Save a match report to git. Pass `kind='audit'` for audit-duel artifacts."""
+    path = _path(round_num, report.left, report.right, kind, repeat_index)
+    label = "Match report" if kind == "duels" else "Audit report"
     await git_batcher.write(
         path=path,
         content=report.model_dump_json(indent=2),
-        message=f"Match report: {report.left[:10]} vs {report.right[:10]}",
+        message=f"{label}: {report.left[:10]} vs {report.right[:10]}",
     )

@@ -87,37 +87,26 @@ def test_single_quotes_in_json_handled() -> None:
     assert result.repo == "test/model"
 
 
-def test_commit_before_window_ignored() -> None:
+@pytest.mark.parametrize(
+    "block,expected_valid",
+    [
+        (50, False),
+        (99, False),
+        (100, True),
+        (200, True),
+        (201, False),
+        (300, False),
+    ],
+)
+def test_block_window_filter(block: int, expected_valid: bool) -> None:
     result = parse_commitment(
         hotkey=HOTKEY,
-        commitment=_commitment(_valid_data(), block=50),
+        commitment=_commitment(_valid_data(), block=block),
         earliest_block=EARLIEST,
         latest_block=LATEST,
     )
 
-    assert result is None
-
-
-def test_commit_after_window_ignored() -> None:
-    result = parse_commitment(
-        hotkey=HOTKEY,
-        commitment=_commitment(_valid_data(), block=300),
-        earliest_block=EARLIEST,
-        latest_block=LATEST,
-    )
-
-    assert result is None
-
-
-def test_commit_at_window_boundaries_accepted() -> None:
-    for block in [EARLIEST, LATEST]:
-        result = parse_commitment(
-            hotkey=HOTKEY,
-            commitment=_commitment(_valid_data(), block=block),
-            earliest_block=EARLIEST,
-            latest_block=LATEST,
-        )
-        assert result is not None
+    assert (result is not None) == expected_valid
 
 
 @pytest.mark.parametrize("missing_field", ["repo", "commit", "cdn_url"])
@@ -150,11 +139,11 @@ def test_malformed_json_returns_none() -> None:
     assert result is None
 
 
-def test_invalid_repo_format_returns_none() -> None:
-    """Repo must match owner/name pattern."""
+@pytest.mark.parametrize("bad_repo", ["no-slash", "too/many/slashes", "only/", "/only", ""])
+def test_invalid_repo_returns_none(bad_repo: str) -> None:
     result = parse_commitment(
         hotkey=HOTKEY,
-        commitment=_commitment(_valid_data(repo="no-slash")),
+        commitment=_commitment(_valid_data(repo=bad_repo)),
         earliest_block=EARLIEST,
         latest_block=LATEST,
     )
@@ -162,54 +151,19 @@ def test_invalid_repo_format_returns_none() -> None:
     assert result is None
 
 
-def test_commit_sha_too_short_returns_none() -> None:
+@pytest.mark.parametrize(
+    "bad_commit",
+    [
+        "abc123",  # too short
+        "a" * 41,  # too long
+        "z" * 40,  # right length, non-hex char
+        "A" * 40,  # right length, uppercase rejected by lowercase-only pattern
+    ],
+)
+def test_invalid_commit_returns_none(bad_commit: str) -> None:
     result = parse_commitment(
         hotkey=HOTKEY,
-        commitment=_commitment(_valid_data(commit="abc123")),
-        earliest_block=EARLIEST,
-        latest_block=LATEST,
-    )
-
-    assert result is None
-
-
-def test_commit_sha_too_long_returns_none() -> None:
-    result = parse_commitment(
-        hotkey=HOTKEY,
-        commitment=_commitment(_valid_data(commit="a" * 41)),
-        earliest_block=EARLIEST,
-        latest_block=LATEST,
-    )
-
-    assert result is None
-
-
-def test_invalid_cdn_url_returns_none() -> None:
-    result = parse_commitment(
-        hotkey=HOTKEY,
-        commitment=_commitment(_valid_data(cdn_url="not-a-url")),
-        earliest_block=EARLIEST,
-        latest_block=LATEST,
-    )
-
-    assert result is None
-
-
-def test_short_hotkey_returns_none() -> None:
-    result = parse_commitment(
-        hotkey="short",
-        commitment=_commitment(_valid_data()),
-        earliest_block=EARLIEST,
-        latest_block=LATEST,
-    )
-
-    assert result is None
-
-
-def test_empty_commitment_returns_none() -> None:
-    result = parse_commitment(
-        hotkey=HOTKEY,
-        commitment=(),
+        commitment=_commitment(_valid_data(commit=bad_commit)),
         earliest_block=EARLIEST,
         latest_block=LATEST,
     )

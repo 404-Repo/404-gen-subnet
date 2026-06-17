@@ -18,6 +18,7 @@ from subnet_common.r2_client import R2Client
 from submission_collector.discord import NULL_DISCORD_NOTIFIER, DiscordNotifier
 from submission_collector.download import DownloadPipeline
 from submission_collector.prompts import select_prompts
+from submission_collector.revealed_commitments import get_all_revealed_commitments
 from submission_collector.settings import Settings
 from submission_collector.submission import Submission, parse_commitment
 
@@ -46,10 +47,23 @@ async def run_collection_iteration(
 
         async def get_commitments() -> dict:
             commitments: dict = await asyncio.wait_for(
-                subtensor.get_all_revealed_commitments(netuid=settings.netuid),
+                get_all_revealed_commitments(subtensor, settings.netuid),
                 timeout=settings.subtensor_timeout_seconds,
             )
             return commitments
+
+        async def get_hotkey_owners() -> dict[str, str]:
+            neurons = await asyncio.wait_for(
+                subtensor.neurons_lite(netuid=settings.netuid), timeout=settings.subtensor_timeout_seconds
+            )
+            return {neuron.hotkey: neuron.coldkey for neuron in neurons}
+
+        async def get_locked_alpha(coldkey: str) -> float:
+            lock = await asyncio.wait_for(
+                subtensor.get_coldkey_lock(coldkey_ss58=coldkey, netuid=settings.netuid),
+                timeout=settings.subtensor_timeout_seconds,
+            )
+            return float(lock["locked_mass"].tao) if lock is not None else 0.0
 
         async def download_fn(
             git_batcher: GitBatcher, state: CompetitionState, ref: str, settings: Settings
@@ -75,6 +89,8 @@ async def run_collection_iteration(
                 git=git,
                 get_block=get_block,
                 get_commitments=get_commitments,
+                get_hotkey_owners=get_hotkey_owners,
+                get_locked_alpha=get_locked_alpha,
                 download_fn=download_fn,
                 settings=settings,
                 discord=discord,
@@ -85,6 +101,8 @@ async def collection_iteration(
     git: GitHubClient,
     get_block: Callable[[], Awaitable[int]],
     get_commitments: Callable[[], Awaitable[dict]],
+    get_hotkey_owners: Callable[[], Awaitable[dict[str, str]]],
+    get_locked_alpha: Callable[[str], Awaitable[float]],
     download_fn: DownloadFn,
     settings: Settings,
     discord: DiscordNotifier = NULL_DISCORD_NOTIFIER,
@@ -112,6 +130,8 @@ async def collection_iteration(
             ref=ref,
             get_block=get_block,
             get_commitments=get_commitments,
+            get_hotkey_owners=get_hotkey_owners,
+            get_locked_alpha=get_locked_alpha,
             settings=settings,
             discord=discord,
         )
@@ -159,12 +179,15 @@ async def _collect_submissions(
     ref: str,
     get_block: Callable[[], Awaitable[int]],
     get_commitments: Callable[[], Awaitable[dict]],
+    get_hotkey_owners: Callable[[], Awaitable[dict[str, str]]],
+    get_locked_alpha: Callable[[str], Awaitable[float]],
     settings: Settings,
     discord: DiscordNotifier = NULL_DISCORD_NOTIFIER,
 ) -> datetime | None:
     """Collect miner submissions from a chain after a reveal window closes.
 
-    Waits until the latest_reveal_block is reached, then reads all valid submissions.
+    Waits until the latest_reveal_block is reached, then reads all valid submissions
+    and drops the ones whose coldkey lacks the required conviction lock.
     If submissions exist, generates seed and prompts, saves everything to git,
     and transitions to MINER_GENERATION stage.
     If no submissions, transitions directly to FINALIZING.
@@ -179,6 +202,13 @@ async def _collect_submissions(
         return _get_block_eta(current_block=block, target_block=schedule.latest_reveal_block)
 
     submissions = await _read_submissions_from_chain(get_commitments=get_commitments, schedule=schedule)
+    committed_count = len(submissions)
+    submissions = await _filter_by_conviction_lock(
+        submissions=submissions,
+        get_hotkey_owners=get_hotkey_owners,
+        get_locked_alpha=get_locked_alpha,
+        required_lock_alpha=settings.required_lock_alpha,
+    )
     block = await get_block()
 
     logger.info(f"Collected {len(submissions)} submissions")
@@ -212,7 +242,8 @@ async def _collect_submissions(
     base_url = f"https://github.com/{settings.github_repo}/blob/{settings.github_branch}"
     await discord.notify_submissions_collected(
         round_num=state.current_round,
-        submission_count=len(submissions),
+        committed_count=committed_count,
+        accepted_count=len(submissions),
         generation_deadline=state.next_stage_eta,
         prompts_url=f"{base_url}/{round_dir}/prompts.txt",
         seed_url=f"{base_url}/{round_dir}/seed.json",
@@ -291,6 +322,46 @@ async def _read_submissions_from_chain(
     logger.success(f"Found {len(submissions)} valid submissions")
 
     return submissions
+
+
+async def _filter_by_conviction_lock(
+    submissions: list[Submission],
+    get_hotkey_owners: Callable[[], Awaitable[dict[str, str]]],
+    get_locked_alpha: Callable[[str], Awaitable[float]],
+    required_lock_alpha: float,
+) -> list[Submission]:
+    """Drop submissions whose coldkey lacks the required conviction lock.
+
+    The requirement scales with the number of the coldkey's hotkeys submitting this
+    round: required = required_lock_alpha * num_submitting_hotkeys. A hotkey missing
+    from the metagraph (deregistered since committing) is dropped as well.
+    Lock queries run sequentially to avoid rate limiting on public endpoints.
+    """
+    owners = await get_hotkey_owners()
+
+    submissions_by_coldkey: dict[str, list[Submission]] = {}
+    for submission in submissions:
+        coldkey = owners.get(submission.hotkey)
+        if coldkey is None:
+            logger.warning(f"Dropping {submission.hotkey}: hotkey is not registered in the metagraph")
+            continue
+        submissions_by_coldkey.setdefault(coldkey, []).append(submission)
+
+    kept: list[Submission] = []
+    for coldkey, coldkey_submissions in submissions_by_coldkey.items():
+        locked = await get_locked_alpha(coldkey)
+        required = required_lock_alpha * len(coldkey_submissions)
+        if locked < required:
+            hotkeys = ", ".join(s.hotkey for s in coldkey_submissions)
+            logger.warning(
+                f"Dropping {hotkeys}: coldkey {coldkey} has {locked:.4f} ρ locked, {required:.0f} required "
+                f"({required_lock_alpha:.0f} ρ x {len(coldkey_submissions)} submitting hotkeys)"
+            )
+            continue
+        kept.extend(coldkey_submissions)
+
+    kept.sort(key=lambda s: s.reveal_block)
+    return kept
 
 
 def _serialize_submissions(submissions: list[Submission], config: CompetitionConfig, round_num: int) -> str:

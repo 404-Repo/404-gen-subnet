@@ -66,6 +66,7 @@ The tradeoff is responsibility: you're building health checks and failure recove
 | [`tools/validate.js`](tools/validate.js) | CLI wrapper around the validator package |
 | [`validator/test/budget-probes/`](validator/test/budget-probes/) | Complexity-tier fixtures showing how realistic outputs sit relative to the caps |
 | [`miner_reference/`](miner_reference/) | Reference pod-side HTTP service (Python/FastAPI) implementing the batch API |
+| [`docker/Dockerfile`](docker/Dockerfile) | Reference Dockerfile in the required `docker/` location — see [Docker Image Requirements](api_specification.md#docker-image-requirements) |
 
 ## Specifications
 
@@ -73,7 +74,7 @@ All three documents are required reading if you're building a miner.
 
 | Document | Covers |
 |---|---|
-| [API Specification](api_specification.md) | HTTP endpoints (`/health`, `/status`, `/generate`, `/results`), pod lifecycle, batch flow, pod replacement budget, time budget, scoring basics |
+| [API Specification](api_specification.md) | HTTP endpoints (`/health`, `/status`, `/generate`, `/results`), pod lifecycle, batch flow, pod replacement budget, time budget, scoring basics, [Docker image requirements](api_specification.md#docker-image-requirements) |
 | [Output Specification](output_specifications.md) | Function signature, execution constraints, literal budget, allowed and prohibited Three.js APIs, failure semantics with rule codes |
 | [Runtime Specification](runtime_specifications.md) | Three.js bundle pinning, static analysis, `isolated-vm` sandbox, double-execute render strategy, camera and lighting setup |
 
@@ -202,7 +203,7 @@ Code that passes the local validator will pass production. Use the `--json` flag
 
 ## Reference verification service
 
-Your Docker image must expose an HTTP service for the verification flow (see "How a round works § Verification"). You can write yours in any language. If you want a working starting point, there's a Python/FastAPI implementation in [`miner_reference/`](miner_reference). It implements the four endpoints from the [API Specification](api_specification.md) and demonstrates:
+Your Docker image must expose an HTTP service for the verification flow (see "How a round works § Verification") and conform to the [Docker Image Requirements](api_specification.md#docker-image-requirements) — most importantly, the build pipeline expects a **`docker/Dockerfile`** at the repository root. You can write the service in any language. If you want a working starting point, there's a Python/FastAPI implementation in [`miner_reference/`](miner_reference) plus a reference [`docker/Dockerfile`](docker/Dockerfile) that builds it. It implements the four endpoints from the [API Specification](api_specification.md) and demonstrates:
 
 - Pod state machine (`warming_up` → `ready` → `generating` → `complete`)
 - GPU health benchmark at startup and per-batch: stress-tests each GPU's compute throughput (TFLOPS) and checks per-GPU VRAM via `torch.cuda`, requests `replace` when any GPU is degraded (if budget allows)
@@ -218,6 +219,13 @@ The service starts on port **10006** (the port the orchestrator polls). Run test
 
 ```bash
 poetry run pytest -v
+```
+
+To build the Docker image the same way the orchestrator's pipeline does (build context = repo root, Dockerfile at `docker/Dockerfile`):
+
+```bash
+docker build -f docker/Dockerfile -t miner-reference .
+docker run -p 10006:10006 miner-reference
 ```
 
 `miner_reference/threejs_placeholder.py` returns the canonical [`examples/car.js`](examples/car.js) module for every prompt — the same fixture the validator treats as known-good. Replace `threejs_placeholder.py` with your inference pipeline when you're ready to generate real per-prompt output.

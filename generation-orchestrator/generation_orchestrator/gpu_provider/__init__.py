@@ -159,6 +159,7 @@ class GPUProviderManager:
                 replacements_remaining=replacements_remaining,
                 timeout=warmup_timeout,
                 check_interval=check_interval,
+                log_id=name,
             )
 
             if ready:
@@ -297,6 +298,7 @@ async def wait_for_ready(
     replacements_remaining: int,
     timeout: float,
     check_interval: float,
+    log_id: str,
 ) -> bool:
     """Wait for a pod to reach `/status=ready` within a single deadline.
 
@@ -310,7 +312,7 @@ async def wait_for_ready(
     deadline = asyncio.get_running_loop().time() + timeout
 
     if not await _wait_for_health(
-        url=url, deadline=deadline, auth_token=auth_token, stop=stop, check_interval=check_interval
+        url=url, deadline=deadline, auth_token=auth_token, stop=stop, check_interval=check_interval, log_id=log_id
     ):
         return False
 
@@ -321,6 +323,7 @@ async def wait_for_ready(
         replacements_remaining=replacements_remaining,
         stop=stop,
         check_interval=check_interval,
+        log_id=log_id,
     )
 
 
@@ -330,6 +333,7 @@ async def _wait_for_health(
     auth_token: str | None,
     stop: GenerationStop,
     check_interval: float,
+    log_id: str,
 ) -> bool:
     """Poll `/health` until 200 or the shared deadline expires."""
     health_url = f"{url}/health"
@@ -344,10 +348,10 @@ async def _wait_for_health(
             except (httpx.ConnectError, httpx.TimeoutException):
                 pass  # Expected during deployment
             except httpx.RequestError as e:
-                logger.debug(f"Unexpected /health error for {url}: {type(e).__name__}: {e}")
+                logger.debug(f"{log_id}: unexpected /health error for {url}: {type(e).__name__}: {e}")
 
             if asyncio.get_running_loop().time() >= deadline:
-                logger.warning(f"Container at {url} /health did not return 200 before deadline")
+                logger.warning(f"{log_id}: container at {url} /health did not return 200 before deadline")
                 return False
 
             await stop.wait(timeout=check_interval)
@@ -362,6 +366,7 @@ async def _wait_for_status_ready(
     replacements_remaining: int,
     stop: GenerationStop,
     check_interval: float,
+    log_id: str,
 ) -> bool:
     """Poll `/status` until `ready` or the shared deadline expires.
 
@@ -374,16 +379,19 @@ async def _wait_for_status_ready(
             endpoint=url,
             auth_token=auth_token,
             replacements_remaining=replacements_remaining,
+            log_id=log_id,
         )
         if response is not None:
             if response.status == PodStatus.READY:
                 return True
             if response.status == PodStatus.REPLACE:
-                logger.warning(f"Container at {url} requested replacement during warmup: payload={response.payload}")
+                logger.warning(
+                    f"{log_id}: container at {url} requested replacement during warmup: payload={response.payload}"
+                )
                 return False
 
         if asyncio.get_running_loop().time() >= deadline:
-            logger.warning(f"Container at {url} /status did not reach 'ready' before deadline")
+            logger.warning(f"{log_id}: container at {url} /status did not reach 'ready' before deadline")
             return False
 
         await stop.wait(timeout=check_interval)
