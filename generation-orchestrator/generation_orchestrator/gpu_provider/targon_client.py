@@ -3,7 +3,6 @@ from types import TracebackType
 from typing import Self
 
 from loguru import logger
-from pydantic import BaseModel
 from targon.client.client import Client
 from targon.client.serverless import (
     AutoScalingConfig,
@@ -36,25 +35,6 @@ def _resolve_sku(gpu_type: str, gpu_count: int) -> str:
         known = ", ".join(sorted(f"{count}x{gtype}" for (gtype, count) in _TARGON_SKUS))
         raise TargonClientError(f"Targon has no SKU for {gpu_count}x{gpu_type}. Known: {known}")
     return sku
-
-
-class ContainerDeployConfig(BaseModel):
-    """Configuration for Targon container deployment."""
-
-    image: str
-    container_concurrency: int
-    gpu_type: str = "H200"
-    gpu_count: int = 4
-    port: int = 10006
-    min_replicas: int = 1
-    max_replicas: int = 1
-    target_concurrency: int | None = None  # Defaults to container_concurrency
-    visibility: str = "external"
-    env: dict[str, str] = {}
-
-    def get_target_concurrency(self) -> int:
-        """Return target_concurrency, defaulting to container_concurrency."""
-        return self.target_concurrency if self.target_concurrency is not None else self.container_concurrency
 
 
 class TargonClient:
@@ -125,48 +105,29 @@ class TargonClient:
         self,
         name: str,
         *,
-        config: ContainerDeployConfig | None = None,
-        image: str | None = None,
-        gpu_type: str | None = None,
-        gpu_count: int | None = None,
-        port: int | None = None,
-        concurrency: int | None = None,
+        image: str,
+        gpu_type: str = "H200",
+        gpu_count: int = 4,
+        port: int = 10006,
+        concurrency: int = 8,
         env: dict[str, str] | None = None,
     ) -> None:
-        """
-        Deploy a new container. Does not wait for it to be visible.
-
-        Either provide a full config or use individual parameters (which override config).
-        """
-        # Resolve: explicit param > config > default
-        _image = image or (config.image if config else None)
-        if not _image:
-            raise ValueError("image is required")
-
-        _gpu_type = gpu_type or (config.gpu_type if config else "H200")
-        _gpu_count = gpu_count or (config.gpu_count if config else 4)
-        _resource = _resolve_sku(_gpu_type, _gpu_count)
-        _port = port or (config.port if config else 10006)
-        _concurrency = concurrency or (config.container_concurrency if config else 8)
-        _visibility = config.visibility if config else "external"
-        _min_replicas = config.min_replicas if config else 1
-        _max_replicas = config.max_replicas if config else 1
-        _target_concurrency = config.get_target_concurrency() if config else _concurrency
-        _env = {**(config.env if config else {}), **(env or {})}
+        """Deploy a new container. Does not wait for it to be visible."""
+        resource = _resolve_sku(gpu_type, gpu_count)
 
         request = CreateServerlessResourceRequest(
             name=name,
-            container=TargonContainerConfig(image=_image, env=_env or None),
-            resource_name=_resource,
+            container=TargonContainerConfig(image=image, env=env or None),
+            resource_name=resource,
             network=NetworkConfig(
-                port=PortConfig(port=_port),
-                visibility=_visibility,
+                port=PortConfig(port=port),
+                visibility="external",
             ),
             scaling=AutoScalingConfig(
-                min_replicas=_min_replicas,
-                max_replicas=_max_replicas,
-                container_concurrency=_concurrency,
-                target_concurrency=_target_concurrency,
+                min_replicas=1,
+                max_replicas=1,
+                container_concurrency=concurrency,
+                target_concurrency=concurrency,
             ),
         )
         try:
@@ -178,7 +139,7 @@ class TargonClient:
             logger.error(f"Failed to deploy container {name}: {e}")
             raise TargonClientError(f"Failed to deploy container {name}: {error_msg}") from e
 
-    async def delete_container(self, uid: str, raise_on_failure: bool = False) -> bool:
+    async def delete_container(self, uid: str) -> bool:
         """Delete container by UID. Returns True if deleted or already gone."""
         try:
             logger.debug(f"Deleting container {uid}")
@@ -190,9 +151,6 @@ class TargonClient:
             if status_code is None and hasattr(e, "response"):
                 status_code = getattr(e.response, "status_code", None)
             logger.error(f"Failed to delete container {uid}: status={status_code or 'unknown'}")
-            if raise_on_failure:
-                error_msg = str(e)[: self.ERROR_BODY_MAX_LENGTH]
-                raise TargonClientError(f"Failed to delete container {uid}: {error_msg}") from e
             return False
 
     async def delete_containers_by_name(self, name: str) -> int:

@@ -54,6 +54,11 @@ from subnet_common.competition.audit_requests import (
 )
 from subnet_common.competition.build_info import require_builds
 from subnet_common.competition.config import require_competition_config
+from subnet_common.competition.generation_audit import (
+    GenerationAuditResult,
+    get_generation_audits,
+    save_generation_audits,
+)
 from subnet_common.competition.generation_report import (
     GenerationReport,
     GenerationReportOutcome,
@@ -108,6 +113,7 @@ class RoundRunner:
         match_matrix: MatchMatrix,
         audit_matrix: MatchMatrix,
         audit_requests: AuditRequests,
+        generation_audits: dict[str, GenerationAuditResult],
         settings: Settings,
         discord: DiscordNotifier,
     ) -> None:
@@ -123,6 +129,7 @@ class RoundRunner:
         self._match_matrix = match_matrix
         self._audit_matrix = audit_matrix
         self._audit_requests = audit_requests
+        self._generation_audits = generation_audits
 
         # Snapshot of external verdicts, refreshed each `_reload_external_state`.
         self._reports: dict[str, GenerationReport] = {}
@@ -181,6 +188,9 @@ class RoundRunner:
         audit_requests = await get_audit_requests(git=git, round_num=round_num, ref=base_sha)
         logger.info(f"Existing audit requests: {len(audit_requests)}")
 
+        generation_audits = await get_generation_audits(git=git, round_num=round_num, ref=base_sha)
+        logger.info(f"Existing generation audits: {len(generation_audits)}")
+
         return cls(
             git_batcher=git_batcher,
             state=state,
@@ -193,6 +203,7 @@ class RoundRunner:
             match_matrix=match_matrix,
             audit_matrix=audit_matrix,
             audit_requests=audit_requests,
+            generation_audits=generation_audits,
             settings=settings,
             discord=discord,
         )
@@ -216,6 +227,7 @@ class RoundRunner:
             await self._announce_if_changed(state)
 
             await self._request_audits(state)
+            await self._publish_audits(state)
 
             if state.is_finalized:
                 await self._finalize(winner=state.winner)
@@ -316,6 +328,33 @@ class RoundRunner:
             await self._discord.notify_audit_requested(
                 round_num=self._round_num, hotkey=entry.hotkey, defeated=entry.defender, margin=entry.margin
             )
+
+    async def _publish_audits(self, state: Timeline) -> None:
+        """Publish a verification verdict for each requested audit the timeline has
+        settled: `rejected` -> FAILED with the timeline's reason, `won` and verified ->
+        PASSED. Persists per change."""
+        entries = {e.hotkey: e for e in state.entries}
+        changed = False
+        for request in self._audit_requests:
+            entry = entries.get(request.hotkey)
+            if entry is None:
+                continue
+            if entry.status == "rejected":
+                verdict = GenerationAuditResult(
+                    hotkey=request.hotkey, verdict=AuditVerdict.FAILED, reason=entry.reason or ""
+                )
+            elif entry.status == "won" and entry.verified:
+                verdict = GenerationAuditResult(hotkey=request.hotkey, verdict=AuditVerdict.PASSED)
+            else:
+                continue
+            if self._generation_audits.get(request.hotkey) == verdict:
+                continue
+            self._generation_audits[request.hotkey] = verdict
+            changed = True
+            reason = f" — {verdict.reason}" if verdict.reason else ""
+            logger.info(f"Audit verdict for {request.hotkey[:10]}: {verdict.verdict.value}{reason}")
+        if changed:
+            await save_generation_audits(self._git_batcher, self._round_num, self._generation_audits)
 
     def _next_audit_duel(self) -> AuditDuel | None:
         """The next audit duel whose margin is missing from the audit matrix, in

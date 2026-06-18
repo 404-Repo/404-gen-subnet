@@ -4,6 +4,7 @@ from datetime import datetime
 from loguru import logger
 from subnet_common.competition.audit_requests import AuditRequest, AuditRequests, get_audit_requests
 from subnet_common.competition.config import require_competition_config
+from subnet_common.competition.generation_audit import GenerationAuditResult, get_generation_audits
 from subnet_common.competition.generation_report import (
     GenerationReport,
     GenerationReportOutcome,
@@ -12,6 +13,7 @@ from subnet_common.competition.generation_report import (
 )
 from subnet_common.competition.leader import require_leader_state
 from subnet_common.competition.seed import require_seed_from_git
+from subnet_common.competition.source_audit import AuditResult, AuditVerdict, get_source_audits
 from subnet_common.competition.state import CompetitionState, RoundStage, require_state
 from subnet_common.competition.submissions import MinerSubmission, require_submissions
 from subnet_common.git_batcher import GitBatcher
@@ -226,6 +228,7 @@ async def _process_audit_requests(
     reports = await get_generation_reports(git=git_batcher.git, round_num=round_num, ref=git_batcher.base_sha)
     processed: set[str] = {hk for hk, r in reports.items() if r.outcome != GenerationReportOutcome.PENDING}
     hotkey_tasks: dict[str, asyncio.Task[GenerationReport | None]] = {}
+    hotkey_stops: dict[str, GenerationStop] = {}
 
     async with asyncio.TaskGroup() as tg:
         while not shutdown.should_stop:
@@ -235,7 +238,12 @@ async def _process_audit_requests(
                 audit_requests = await get_audit_requests(
                     git=git_batcher.git, round_num=round_num, ref=git_batcher.base_sha
                 )
-                # TODO: read source audits and cancel generation if needed
+                source_audits = await get_source_audits(
+                    git=git_batcher.git, round_num=round_num, ref=git_batcher.base_sha
+                )
+                generation_audits = await get_generation_audits(
+                    git=git_batcher.git, round_num=round_num, ref=git_batcher.base_sha
+                )
             except Exception as e:
                 logger.warning(f"Failed to refresh state: {e}")
                 await shutdown.wait(timeout=settings.check_audit_interval_seconds)
@@ -247,6 +255,7 @@ async def _process_audit_requests(
 
             await _collect_finished(
                 hotkey_tasks=hotkey_tasks,
+                hotkey_stops=hotkey_stops,
                 reports=reports,
                 git_batcher=git_batcher,
                 round_num=round_num,
@@ -257,6 +266,7 @@ async def _process_audit_requests(
                 audit_requests=audit_requests,
                 processed=processed,
                 hotkey_tasks=hotkey_tasks,
+                hotkey_stops=hotkey_stops,
                 reports=reports,
                 stop_manager=stop_manager,
                 settings=settings,
@@ -270,12 +280,18 @@ async def _process_audit_requests(
                 audit_repeats=audit_repeats,
                 discord=discord,
             )
+            _stop_disqualified(
+                hotkey_stops=hotkey_stops,
+                source_audits=source_audits,
+                generation_audits=generation_audits,
+            )
 
             await shutdown.wait(timeout=settings.check_audit_interval_seconds)
 
 
 async def _collect_finished(
     hotkey_tasks: dict[str, asyncio.Task[GenerationReport | None]],
+    hotkey_stops: dict[str, GenerationStop],
     reports: dict[str, GenerationReport],
     git_batcher: GitBatcher,
     round_num: int,
@@ -287,6 +303,7 @@ async def _collect_finished(
         if not task.done():
             continue
         del hotkey_tasks[hotkey]
+        hotkey_stops.pop(hotkey, None)
         if task.cancelled():
             continue
         report = task.result()
@@ -306,6 +323,7 @@ def _spawn_new(
     audit_requests: AuditRequests,
     processed: set[str],
     hotkey_tasks: dict[str, asyncio.Task[GenerationReport | None]],
+    hotkey_stops: dict[str, GenerationStop],
     reports: dict[str, GenerationReport],
     stop_manager: GenerationStopManager,
     settings: Settings,
@@ -325,6 +343,8 @@ def _spawn_new(
         if audit_request is None:
             continue
         processed.add(hotkey)
+        stop = stop_manager.new_stop()
+        hotkey_stops[hotkey] = stop
         hotkey_tasks[hotkey] = tg.create_task(
             _generate_report(
                 settings=settings,
@@ -339,10 +359,33 @@ def _spawn_new(
                 round_num=round_num,
                 audit_repeats=audit_repeats,
                 reports=reports,
-                stop=stop_manager.new_stop(),
+                stop=stop,
                 discord=discord,
             )
         )
+
+
+def _stop_disqualified(
+    hotkey_stops: dict[str, GenerationStop],
+    source_audits: list[AuditResult],
+    generation_audits: dict[str, GenerationAuditResult],
+) -> None:
+    """Cancel generation for in-flight miners the judge has already failed — a failed
+    source audit or a failed verification audit. Their regenerated outputs can no longer
+    change the verdict, so finishing the remaining repeats only burns GPU."""
+    failed_source = {a.hotkey for a in source_audits if a.verdict == AuditVerdict.FAILED}
+    failed_verification = {hk for hk, audit in generation_audits.items() if audit.verdict == AuditVerdict.FAILED}
+    for hotkey, stop in hotkey_stops.items():
+        if stop.should_stop:
+            continue
+        if hotkey in failed_source:
+            reason = "source audit failed"
+        elif hotkey in failed_verification:
+            reason = "verification audit failed"
+        else:
+            continue
+        logger.info(f"{hotkey[:10]}: {reason}; stopping generation")
+        stop.cancel(reason)
 
 
 async def _generate_report(

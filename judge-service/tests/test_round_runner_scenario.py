@@ -15,6 +15,7 @@ from pydantic import TypeAdapter
 from subnet_common.competition.audit_matrix import get_audit_matrix
 from subnet_common.competition.build_info import BuildInfo, BuildsInfoAdapter, BuildStatus
 from subnet_common.competition.config import CompetitionConfig
+from subnet_common.competition.generation_audit import get_generation_audits
 from subnet_common.competition.generation_report import (
     GenerationReport,
     GenerationReportOutcome,
@@ -87,7 +88,7 @@ class _RecordingDiscord(NullDiscordNotifier):
         self.round_finalized.append({"round_num": round_num, "winner": winner, "reason": reason})
 
 
-def _config_json() -> str:
+def _config_json(audit_repeats: int = 1) -> str:
     return CompetitionConfig(
         name="test-comp",
         description="scenario",
@@ -99,11 +100,11 @@ def _config_json() -> str:
         weight_floor=0.1,
         prompts_per_round=len(PROMPTS),
         carryover_prompts=0,
-        audit_repeats=1,
+        audit_repeats=audit_repeats,
     ).model_dump_json(indent=2)
 
 
-def _world(miners: list[str]) -> MockGitHubClient:
+def _world(miners: list[str], audit_repeats: int = 1) -> MockGitHubClient:
     """Round 1 at the start of judging: config, the leader's reference renders, and each
     miner's submitted outputs. Regenerations, reports and source audits arrive later via
     deliveries. Miners are revealed in list order."""
@@ -129,7 +130,7 @@ def _world(miners: list[str]) -> MockGitHubClient:
         for i, hk in enumerate(miners)
     }
     files = {
-        "config.json": _config_json(),
+        "config.json": _config_json(audit_repeats),
         "rounds/1/seed.json": json.dumps({"seed": SEED}),
         "rounds/1/prompts.txt": "\n".join(PROMPTS),
         "rounds/1/submissions.json": _SUBMISSIONS_ADAPTER.dump_json(submissions, indent=2).decode(),
@@ -166,6 +167,27 @@ def _deliver_regeneration(git: MockGitHubClient, *hotkeys: str) -> None:
             outcome=GenerationReportOutcome.COMPLETED,
             repeats=[RepeatStats(repeat_index=1, generated_prompts=len(PROMPTS))],
         )
+    git.files["rounds/1/generation_reports.json"] = GenerationReportsAdapter.dump_json(reports, indent=2).decode()
+
+
+def _deliver_repeats(
+    git: MockGitHubClient,
+    hotkey: str,
+    repeats: list[int],
+    outcome: GenerationReportOutcome = GenerationReportOutcome.COMPLETED,
+) -> None:
+    """Audit pod: deliver `hotkey`'s regenerated outputs for `repeats` and a report listing
+    them. A PENDING outcome with a subset of repeats models a partial report — the judge
+    audits each delivered repeat without waiting for the rest."""
+    content = git.files.get("rounds/1/generation_reports.json")
+    reports = dict(GenerationReportsAdapter.validate_json(content)) if content else {}
+    for repeat in repeats:
+        git.files[f"rounds/1/{hotkey}/generated_{repeat}.json"] = _GENERATIONS_JSON
+    reports[hotkey] = GenerationReport(
+        hotkey=hotkey,
+        outcome=outcome,
+        repeats=[RepeatStats(repeat_index=repeat, generated_prompts=len(PROMPTS)) for repeat in repeats],
+    )
     git.files["rounds/1/generation_reports.json"] = GenerationReportsAdapter.dump_json(reports, indent=2).decode()
 
 
@@ -277,6 +299,9 @@ async def test_single_challenger_dethrones_leader_and_is_verified(settings: Sett
     assert _verdicts(discord) == [(HK_A, LEADER, True)]
     assert discord.round_finalized[0]["winner"] == HK_A
     assert len(discord.timeline_changes) == 2  # initial publish, then the flip to verified
+
+    audits = await get_generation_audits(git=git, round_num=1, ref=git.ref_sha)
+    assert audits[HK_A].verdict == AuditVerdict.PASSED
 
 
 async def test_no_submissions_finalizes_with_leader_defending(settings: Settings) -> None:
@@ -411,6 +436,58 @@ async def test_second_beats_first_then_first_rejected_second_reaudited_against_l
     audit_matrix = await get_audit_matrix(git=git, round_num=1, ref=git.ref_sha)
     assert audit_matrix.get(defender_audit_key(HK_A, 1), HK_B) == 0.01  # stale, forensic only
     assert audit_matrix.get(defender_audit_key(LEADER, 1), HK_B) == 1.0
+
+    audits = await get_generation_audits(git=git, round_num=1, ref=git.ref_sha)
+    assert audits[HK_A].verdict == AuditVerdict.FAILED  # A's submission beat its regeneration
+    assert audits[HK_B].verdict == AuditVerdict.PASSED
+
+    winner = json.loads(git.committed["rounds/1/winner.json"])
+    assert winner["winner_hotkey"] == HK_B
+
+
+async def test_verification_verdict_defers_against_unverified_defender_then_resolves(settings: Settings) -> None:
+    """A dethrones the leader, B dethrones both. With audit_repeats=3:
+
+    1. B is audited first (all repeats). Its submitted-vs-generated duels pass, but its
+       defender duels against A all fall below win_margin. Because A is still unverified,
+       that failure is deferred — B is neither rejected nor verified, so NO verification
+       verdict is published for B.
+    2. A then delivers a partial (1-repeat, PENDING) report and its submitted-vs-generated
+       duel busts below -win_margin. A is rejected on that single repeat, and its FAILED
+       verdict is published immediately — without A's other repeats existing.
+    3. With A gone, B's defender reverts to the verified leader; B's three defender-vs-leader
+       duels pass, B verifies, and its PASSED verdict is published.
+    """
+    git = _world([HK_A, HK_B], audit_repeats=3)
+    margins = {
+        (LEADER, HK_A): [1.0, 0.0],  # A beats leader; A's wasted defender duel after it is rejected
+        (LEADER, HK_B): [1.0, 1.0, 1.0, 1.0],  # B beats leader; B's 3 defender-vs-leader audits pass
+        (HK_A, HK_B): [1.0, 0.0, 0.0, 0.0],  # B beats A (timeline); B's 3 defender-vs-A audits all fail
+        ("submitted", HK_B): [-0.4, -0.4, -0.4],  # B's submission ~matches regeneration, all pass (> -win_margin)
+        ("submitted", HK_A): [-1.0],  # A's submission beats its regeneration -> A rejected on repeat 1
+    }
+
+    captured: dict[str, str | None] = {}
+
+    def deliver_b_full(g: MockGitHubClient) -> None:
+        _deliver_repeats(g, HK_B, [1, 2, 3])
+        _deliver_source_audits(g, {HK_B: AuditVerdict.PASSED})
+
+    def capture_mid_round(g: MockGitHubClient) -> None:
+        captured["audits"] = g.committed.get("rounds/1/generation_audits.json")
+
+    def deliver_a_partial(g: MockGitHubClient) -> None:
+        _deliver_repeats(g, HK_A, [1], outcome=GenerationReportOutcome.PENDING)
+
+    deliveries = [deliver_b_full, capture_mid_round, deliver_a_partial]
+    await _run_round(git, margins, deliveries, settings)
+
+    # B's defender-audit failure against the unverified A published no verdict.
+    assert captured["audits"] is None
+
+    audits = await get_generation_audits(git=git, round_num=1, ref=git.ref_sha)
+    assert audits[HK_A].verdict == AuditVerdict.FAILED
+    assert audits[HK_B].verdict == AuditVerdict.PASSED
 
     winner = json.loads(git.committed["rounds/1/winner.json"])
     assert winner["winner_hotkey"] == HK_B
