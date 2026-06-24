@@ -44,6 +44,8 @@ Reads and writes to the competition Git repository:
 | `rounds/{n}/prompts.txt` | R | Prompt URLs for the round |
 | `rounds/{n}/submissions.json` | R | Miner submissions |
 | `rounds/{n}/require_audit.json` | R | Miners the judge has asked to be regenerated |
+| `rounds/{n}/source_audit.json` | R | Source-code audit verdicts; a `failed` verdict stops regeneration for that miner mid-flight |
+| `rounds/{n}/generation_audits.json` | R | Verification-audit verdicts the judge writes once a miner's duels settle; a `failed` verdict stops regeneration for that miner mid-flight |
 | `rounds/{n}/builds.json` | W | Docker build status per miner |
 | `rounds/{n}/generation_reports.json` | W | Per-miner regeneration status (`completed` / `rejected` / generation-time stats). The actual audit verdict is written by the judge to `generation_audits.json`. |
 | `rounds/{n}/{hotkey}/generated.json` | W | Regenerated GLB / PNG locations consumed by the judge's verification duel |

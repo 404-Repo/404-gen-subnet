@@ -2,9 +2,6 @@ from subnet_common.competition.generation_report import GenerationReport, Genera
 from subnet_common.discord import DiscordWebhook
 
 
-# TODO: For Max to review
-
-
 class DiscordNotifier:
     def __init__(self, webhook_url: str) -> None:
         self._webhook = DiscordWebhook(webhook_url)
@@ -54,20 +51,6 @@ class DiscordNotifier:
             description="```\n" + "\n".join(lines) + "\n```",
         )
 
-    async def notify_pod_warmup_failed(self, hotkey: str, round_num: int) -> None:
-        await self._webhook.send_embed(
-            title=f"Round {round_num} Pod Warmup Failed",
-            color=0xE74C3C,
-            description=f"All initial pods failed warmup for `{hotkey[:10]}`",
-        )
-
-    async def notify_pod_bad(self, hotkey: str, pod_id: str, provider: str, reason: str) -> None:
-        await self._webhook.send_embed(
-            title="Pod Marked Bad",
-            color=0xE67E22,
-            description=f"`{pod_id}` on {provider}: {reason}",
-        )
-
     async def notify_pod_deploy_failed(self, hotkey: str, pod_id: str) -> None:
         await self._webhook.send_embed(
             title="Pod Deploy Failed",
@@ -114,12 +97,6 @@ class NullDiscordNotifier(DiscordNotifier):
         pass
 
     async def notify_generation_progress(self, **kwargs: object) -> None:  # type: ignore[override]
-        pass
-
-    async def notify_pod_warmup_failed(self, hotkey: str, round_num: int) -> None:
-        pass
-
-    async def notify_pod_bad(self, hotkey: str, pod_id: str, provider: str, reason: str) -> None:
         pass
 
     async def notify_pod_deploy_failed(self, hotkey: str, pod_id: str) -> None:

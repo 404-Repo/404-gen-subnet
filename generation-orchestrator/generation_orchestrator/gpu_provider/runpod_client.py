@@ -30,23 +30,6 @@ def _resolve_gpu_type_id(gpu_type: str) -> str:
     return resolved
 
 
-class ContainerDeployConfig(BaseModel):
-    """Configuration for Runpod pod deployment."""
-
-    image: str
-    exposed_port: int = 10006
-    gpu_type: str = "H200"
-    gpu_count: int = 4  # 4×H200 per api_specification.md
-    container_disk_in_gb: int = 500
-    volume_in_gb: int = 0
-    volume_mount_path: str = (
-        "/runpod-volume"  # Only used when volume_in_gb > 0; /workspace collides with common image WORKDIR
-    )
-    cloud_type: str = "SECURE"  # "SECURE" or "COMMUNITY"
-    support_public_ip: bool = True
-    env: dict[str, str] = {}
-
-
 class RunpodPodResponse(BaseModel):
     """Subset of Runpod's pod response that we care about."""
 
@@ -161,14 +144,6 @@ class RunpodClient:
             pods = [p for p in pods if p.name.startswith(prefix)]
         return pods
 
-    async def list_containers(
-        self,
-        *,
-        name: str | None = None,
-        prefix: str | None = None,
-    ) -> list[RunpodPodResponse]:
-        return await self._list_pods_raw(name=name, prefix=prefix)
-
     async def get_container(self, name: str, port: int = 10006) -> ContainerInfo | None:
         """Get a pod by name. Returns None if not found or not yet addressable."""
         pods = await self._list_pods_raw(name=name)
@@ -180,54 +155,36 @@ class RunpodClient:
         self,
         name: str,
         *,
-        config: ContainerDeployConfig | None = None,
-        image: str | None = None,
-        gpu_type: str | None = None,
-        gpu_count: int | None = None,
-        port: int | None = None,
-        concurrency: int | None = None,  # noqa: ARG002 — Runpod has no concurrency knob, kept for API parity
+        image: str,
+        gpu_type: str = "H200",
+        gpu_count: int = 4,
+        port: int = 10006,
+        concurrency: int = 8,  # noqa: ARG002 — Runpod has no concurrency knob, kept for API parity
         env: dict[str, str] | None = None,
     ) -> None:
         """Create a Runpod pod. Does not wait for it to be visible."""
-        _image = image or (config.image if config else None)
-        if not _image:
-            raise ValueError("image is required")
-
-        _gpu_type = gpu_type or (config.gpu_type if config else "H200")
-        _gpu_count = gpu_count or (config.gpu_count if config else 4)
-        _port = port or (config.exposed_port if config else 10006)
-        _env = {**(config.env if config else {}), **(env or {})}
-
-        _container_disk = config.container_disk_in_gb if config else 500
-        _volume = config.volume_in_gb if config else 0
-        _volume_mount_path = config.volume_mount_path if config else "/runpod-volume"
-        _cloud_type = config.cloud_type if config else "SECURE"
-        _support_public_ip = config.support_public_ip if config else True
-
-        gpu_type_id = _resolve_gpu_type_id(_gpu_type)
+        gpu_type_id = _resolve_gpu_type_id(gpu_type)
 
         payload: dict[str, Any] = {
             "name": name,
-            "imageName": _image,
+            "imageName": image,
             "gpuTypeIds": [gpu_type_id],
-            "gpuCount": _gpu_count,
-            "containerDiskInGb": _container_disk,
-            "volumeInGb": _volume,
-            "ports": [f"{_port}/http"],
-            "cloudType": _cloud_type,
-            "supportPublicIp": _support_public_ip,
+            "gpuCount": gpu_count,
+            "containerDiskInGb": 500,
+            "volumeInGb": 0,
+            "ports": [f"{port}/http"],
+            "cloudType": "SECURE",
+            "supportPublicIp": True,
         }
-        if _volume > 0:
-            payload["volumeMountPath"] = _volume_mount_path
-        if _env:
-            payload["env"] = _env
+        if env:
+            payload["env"] = env
 
         logger.debug(f"Deploying pod {name}")
         response = await self._request("POST", "/pods", json=payload)
         data = response.json()
         logger.info(f"Deployed pod {name}: id={data.get('id', 'N/A')}")
 
-    async def delete_container(self, pod_id: str, raise_on_failure: bool = False) -> bool:
+    async def delete_container(self, pod_id: str) -> bool:
         """Delete a pod by id. Returns True if deleted or already gone."""
         try:
             logger.debug(f"Deleting pod {pod_id}")
@@ -238,8 +195,6 @@ class RunpodClient:
             if "404" in str(e):  # idempotent delete — already gone is success
                 return True
             logger.error(f"Failed to delete pod {pod_id}: {e}")
-            if raise_on_failure:
-                raise
             return False
 
     async def delete_containers_by_name(self, name: str) -> int:

@@ -15,9 +15,15 @@ TERMINAL_STATUSES = frozenset(
         BuildStatus.SUCCESS,
         BuildStatus.FAILURE,
         BuildStatus.TIMED_OUT,
+        BuildStatus.NOT_FOUND,
     }
 )
-"""Build statuses that indicate no further progress is expected."""
+"""Build statuses that indicate no further progress is expected.
+
+NOT_FOUND is terminal: once the build run exists, its per-hotkey matrix jobs are
+present, so a hotkey with no matching job genuinely has no build to wait for. Without
+this, `track()` would never satisfy `_all_resolved()` and would spin forever (the
+timeout sweep only converts PENDING/IN_PROGRESS)."""
 
 
 class BuildTracker:
@@ -184,7 +190,7 @@ class BuildTracker:
         changed = set()
         for hotkey, build in self._builds.items():
             if build.status in (BuildStatus.PENDING, BuildStatus.IN_PROGRESS):
-                logger.warning("Build %s timed out", hotkey)
+                logger.warning(f"Build {hotkey} timed out")
                 build.status = BuildStatus.TIMED_OUT
                 changed.add(hotkey)
         return changed

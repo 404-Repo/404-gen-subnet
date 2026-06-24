@@ -18,24 +18,6 @@ class VerdaAuthError(VerdaClientError):
     """Verda authentication error."""
 
 
-class ContainerDeployConfig(BaseModel):
-    """Configuration for Verda container deployment."""
-
-    image: str
-    exposed_port: int = 10006
-    gpu_type: str = "H200"
-    gpu_count: int = 4  # 4×H200 per api_specification.md
-    min_replicas: int = 1
-    max_replicas: int = 1
-    concurrent_requests_per_replica: int = 8
-    is_spot: bool = True
-    healthcheck_enabled: bool = True
-    healthcheck_path: str = "/health"
-    scale_down_delay_seconds: int = 3600
-    scale_up_delay_seconds: int = 600
-    env: dict[str, str] = {}
-
-
 class VerdaContainerResponse(BaseModel):
     """Container deployment info returned by Verda API."""
 
@@ -216,52 +198,26 @@ class VerdaClient:
         self,
         name: str,
         *,
-        config: ContainerDeployConfig | None = None,
-        image: str | None = None,
-        gpu_type: str | None = None,
-        gpu_count: int | None = None,
-        port: int | None = None,
-        concurrency: int | None = None,
+        image: str,
+        gpu_type: str = "H200",
+        gpu_count: int = 4,
+        port: int = 10006,
+        concurrency: int = 8,
         env: dict[str, str] | None = None,
     ) -> None:
-        """
-        Deploy a new container.
-
-        Either provide a full config, or use individual parameters (which override config).
-        """
-        # Resolve: explicit param > config > default
-        _image = image or (config.image if config else None)
-        if not _image:
-            raise ValueError("image is required")
-
-        _gpu_type = gpu_type or (config.gpu_type if config else "H200")
-        _gpu_count = gpu_count or (config.gpu_count if config else 4)
-        _port = port or (config.exposed_port if config else 10006)
-        _concurrency = concurrency or (config.concurrent_requests_per_replica if config else 8)
-        _env = {**(config.env if config else {}), **(env or {})}
-
-        # Other settings from config or defaults
-        _healthcheck_enabled = config.healthcheck_enabled if config else True
-        _healthcheck_path = config.healthcheck_path if config else "/health"
-        _min_replicas = config.min_replicas if config else 1
-        _max_replicas = config.max_replicas if config else 1
-        _scale_down_delay = config.scale_down_delay_seconds if config else 3600
-        _scale_up_delay = config.scale_up_delay_seconds if config else 600
-        _is_spot = config.is_spot if config else True
-
-        # Build container config
+        """Deploy a new container. Does not wait for it to be visible."""
         container_config: dict[str, Any] = {
-            "image": _image,
-            "exposed_port": _port,
+            "image": image,
+            "exposed_port": port,
             "healthcheck": {
-                "enabled": _healthcheck_enabled,
-                "port": _port,
-                "path": _healthcheck_path,
+                "enabled": True,
+                "port": port,
+                "path": "/health",
             },
         }
-        if _env:
+        if env:
             container_config["env"] = [
-                {"name": k, "value_or_reference_to_secret": v, "type": "plain"} for k, v in _env.items()
+                {"name": k, "value_or_reference_to_secret": v, "type": "plain"} for k, v in env.items()
             ]
 
         payload = {
@@ -269,23 +225,23 @@ class VerdaClient:
             "container_registry_settings": {"is_private": False},
             "containers": [container_config],
             "compute": {
-                "name": _gpu_type,
-                "size": _gpu_count,
+                "name": gpu_type,
+                "size": gpu_count,
             },
             "scaling": {
-                "min_replica_count": _min_replicas,
-                "max_replica_count": _max_replicas,
-                "scale_down_policy": {"delay_seconds": _scale_down_delay},
-                "scale_up_policy": {"delay_seconds": _scale_up_delay},
+                "min_replica_count": 1,
+                "max_replica_count": 1,
+                "scale_down_policy": {"delay_seconds": 3600},
+                "scale_up_policy": {"delay_seconds": 600},
                 "queue_message_ttl_seconds": 600,
-                "concurrent_requests_per_replica": _concurrency,
+                "concurrent_requests_per_replica": concurrency,
                 "scaling_triggers": {
-                    "queue_load": {"threshold": _concurrency},
+                    "queue_load": {"threshold": concurrency},
                     "cpu_utilization": {"enabled": False, "threshold": 80},
                     "gpu_utilization": {"enabled": False, "threshold": 80},
                 },
             },
-            "is_spot": _is_spot,
+            "is_spot": True,
         }
 
         logger.debug(f"Deploying container {name}")
@@ -294,7 +250,7 @@ class VerdaClient:
 
         logger.info(f"Deployed container {name}: {data.get('endpoint_base_url', 'N/A')}")
 
-    async def delete_container(self, name: str, raise_on_failure: bool = False) -> bool:
+    async def delete_container(self, name: str) -> bool:
         """Delete the container by name. Returns True if deleted or already gone."""
         try:
             logger.debug(f"Deleting container {name}")
@@ -307,8 +263,6 @@ class VerdaClient:
                 logger.debug(f"Container {name} already deleted or not found")
                 return True
             logger.error(f"Failed to delete container {name}: {e}")
-            if raise_on_failure:
-                raise
             return False
 
     async def delete_containers_by_name(self, name: str) -> int:
