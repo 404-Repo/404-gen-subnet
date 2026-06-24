@@ -3,6 +3,13 @@ from pydantic import BaseModel, Field, TypeAdapter
 from subnet_common.github import GitHubClient
 
 
+DEFAULT_HARDWARE = "4xH200"
+"""Verification GPU configuration assumed when a miner declares none."""
+
+SUPPORTED_HARDWARE = ("4xH200", "4xRTX6000Pro")
+"""GPU configurations the orchestrator can deploy a verification pod on."""
+
+
 class MinerSubmission(BaseModel):
     """Miner's submission info for a round."""
 
@@ -11,6 +18,10 @@ class MinerSubmission(BaseModel):
     cdn_url: str = Field(..., description="CDN URL for downloading generated GLB files")
     revealed_at_block: int = Field(..., description="Block number when miner's submission was revealed")
     round: str = Field(..., description="Full round name: competition name and round number")
+    hardware: list[str] = Field(
+        default_factory=lambda: [DEFAULT_HARDWARE],
+        description="Verification GPU configurations the miner's pipeline targets",
+    )
 
 
 async def require_submissions(git: GitHubClient, round_num: int, ref: str) -> dict[str, MinerSubmission]:
