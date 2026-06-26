@@ -41,6 +41,8 @@ def make_runner(
     gpu_manager: AsyncMock | None = None,
     audit_repeats: int = 1,
     reports: dict | None = None,
+    gpu_type: str = "H200",
+    gpu_count: int = 4,
 ) -> MinerRunner:
     git_batcher = GitBatcher(git=mock_git, branch="main", base_sha="abc123")
     return MinerRunner(
@@ -50,6 +52,8 @@ def make_runner(
         git_batcher=git_batcher,
         hotkey=HOTKEY,
         docker_image="registry/test:latest",
+        gpu_type=gpu_type,
+        gpu_count=gpu_count,
         prompts=prompts or [],
         current_round=1,
         seed=42,
@@ -238,6 +242,41 @@ async def test_successful_generation(settings: Settings) -> None:
     assert result.repeats[0].generated_prompts == 2
     gpu_manager.get_healthy_pod.assert_called_once()
     gpu_manager.delete_container.assert_called_once_with(deployed.info)
+
+
+async def test_deploys_on_configured_hardware(settings: Settings) -> None:
+    """The runner's gpu_type/gpu_count reach get_healthy_pod, so an RTX miner is verified
+    on RTX rather than the global default."""
+    prompts = [make_prompt("p1")]
+    submitted = {"p1": done_result()}
+    mock_git = MockGitHubClient(files=_make_git_files(submitted=submitted))
+
+    gpu_manager = AsyncMock()
+    gpu_manager.get_healthy_pod = AsyncMock(return_value=make_deployed())
+    gpu_manager.delete_container = AsyncMock()
+    gpu_manager.cleanup_by_prefix = AsyncMock(return_value=0)
+
+    audit_request = AuditRequest(hotkey=HOTKEY, latest_defender="leader")
+    runner = make_runner(
+        settings,
+        mock_git,
+        prompts=prompts,
+        audit_request=audit_request,
+        gpu_manager=gpu_manager,
+        gpu_type="RTX6000Pro",
+        gpu_count=4,
+    )
+
+    with patch("generation_orchestrator.miner_runner.PodSession") as MockSession:
+        _mock_pod_session(
+            MockSession,
+            run_side_effect=[BatchComplete(generations={"p1": done_result()}, batch_time=10.0)],
+        )
+        await runner.run()
+
+    deploy_kwargs = gpu_manager.get_healthy_pod.call_args.kwargs
+    assert deploy_kwargs["gpu_type"] == "RTX6000Pro"
+    assert deploy_kwargs["gpu_count"] == 4
 
 
 async def test_replacement_on_crash(settings: Settings) -> None:

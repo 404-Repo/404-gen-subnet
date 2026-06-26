@@ -10,7 +10,7 @@ Regenerates miner submissions on serverless GPUs so the judge service can verify
 
 3. **Audit processing**: When judge-service writes a miner's hotkey into `require_audit.json`:
    - Wait for the Docker build to complete.
-   - Deploy the miner's image to a serverless GPU (Targon / Verda), on the hardware the miner declared in `hardware.json` (recorded in `submissions.json`, `4xH200` by default; if the miner listed several, pick one available configuration).
+   - Deploy the miner's image to a serverless GPU (Targon / Verda), on the hardware the miner declared in `hardware.json` (recorded in `submissions.json`, `4xH200` by default). When a miner supports several configurations, the orchestrator prefers `4xRTX6000Pro` (the cheaper card) and falls back to `4xH200`.
    - Regenerate all submitted prompts using the same seed and prompt set.
    - Render PNG previews into the same view bundle layout the judge consumes.
    - Hand off to the judge: the orchestrator writes `generated.json` and marks the report `completed`. The judge then runs a `submitted` vs `generated` duel and writes the final verdict to `generation_audits.json`. See `judge-service/README.md` for the duel logic and the 0% pass margin.

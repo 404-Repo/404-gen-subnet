@@ -55,6 +55,8 @@ class MinerRunner:
         git_batcher: GitBatcher,
         hotkey: str,
         docker_image: str,
+        gpu_type: str,
+        gpu_count: int,
         prompts: list[Prompt],
         current_round: int,
         seed: int,
@@ -70,6 +72,8 @@ class MinerRunner:
         self._git_batcher = git_batcher
         self._hotkey = hotkey
         self._docker_image = docker_image
+        self._gpu_type = gpu_type
+        self._gpu_count = gpu_count
         self._prompts = prompts
         self._current_round = current_round
         self._seed = seed
@@ -445,8 +449,8 @@ class MinerRunner:
         deployed = await self._gpu_manager.get_healthy_pod(
             name=pod_id,
             image=self._docker_image,
-            gpu_type=self._settings.gpu_type,
-            gpu_count=self._settings.gpu_count,
+            gpu_type=self._gpu_type,
+            gpu_count=self._gpu_count,
             stop=self._stop,
             replacements_remaining=self._settings.max_replacements - self._replacements_used,
             start_index=attempt_index,

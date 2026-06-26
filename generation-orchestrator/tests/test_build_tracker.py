@@ -26,6 +26,7 @@ class BuildMockGitHub(MockGitHubClient):
         self.run_id: int | None = None
         self.jobs: list[GitHubJob] = []
         self._shutdown: GracefulShutdown | None = None
+        self.get_jobs_failures: int = 0
 
     async def find_run_by_commit_message(self, message: str) -> int | None:
         await asyncio.sleep(0)  # yield so concurrent wait_for_build can start
@@ -35,6 +36,9 @@ class BuildMockGitHub(MockGitHubClient):
 
     async def get_jobs(self, run_id: int) -> list[GitHubJob]:
         await asyncio.sleep(0)
+        if self.get_jobs_failures > 0:
+            self.get_jobs_failures -= 1
+            raise RuntimeError("transient GitHub error")
         return self.jobs
 
 
@@ -102,15 +106,32 @@ class TestTrack:
 
         assert tracker._builds[HOTKEY].status == BuildStatus.PENDING
 
-    async def test_no_matching_job(self) -> None:
+    async def test_missing_job_times_out_instead_of_failing_fast(self) -> None:
+        """A hotkey with no matching job is not instantly terminal — it stays PENDING and is
+        resolved by the deadline as TIMED_OUT, so a late-materializing job is never mistaken
+        for a permanent absence."""
         mock_git = BuildMockGitHub()
         mock_git.run_id = 42
         mock_git.jobs = [GitHubJob(id=1, name="Unrelated job", status="completed", conclusion="success")]
+        tracker = make_tracker(mock_git, timeout_seconds=0)
+
+        await tracker.track(round_num=1, submissions=make_submission())
+
+        assert tracker._builds[HOTKEY].status == BuildStatus.TIMED_OUT
+
+    async def test_transient_job_fetch_failure_does_not_falsely_resolve(self) -> None:
+        """A transient get_jobs error must not flip an in-flight build to a terminal state;
+        the next successful poll resolves it normally. Guards against a flaky GitHub call
+        falsely rejecting every miner whose build was still in progress."""
+        mock_git = BuildMockGitHub()
+        mock_git.run_id = 42
+        mock_git.get_jobs_failures = 1
+        mock_git.jobs = [GitHubJob(id=1, name=JOB_NAME, status="completed", conclusion="success")]
         tracker = make_tracker(mock_git)
 
         await tracker.track(round_num=1, submissions=make_submission())
 
-        assert tracker._builds[HOTKEY].status == BuildStatus.NOT_FOUND
+        assert tracker._builds[HOTKEY].status == BuildStatus.SUCCESS
 
     async def test_timeout(self) -> None:
         mock_git = BuildMockGitHub()

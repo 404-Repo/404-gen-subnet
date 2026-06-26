@@ -94,7 +94,9 @@ async def test_new_leader_takes_over(git: MockGitHubClient, settings: Settings) 
     add_config(git)
     schedule = add_schedule(git, round_num=1)
     add_leader(git, weight=1.0)
-    add_round_result(git, round_num=1, winner_hotkey="miner_hotkey", repo="miner/repo")
+    add_round_result(
+        git, round_num=1, winner_hotkey="miner_hotkey", repo="miner/repo", hardware=["4xRTX6000Pro"]
+    )
 
     await finalize_round(git=git, get_block=make_get_block(block=7200), settings=settings)
 
@@ -121,6 +123,7 @@ async def test_new_leader_takes_over(git: MockGitHubClient, settings: Settings) 
     leaders = LeaderListAdapter.validate_json(committed["leader.json"])
     assert leaders[-1].hotkey == "miner_hotkey"
     assert leaders[-1].weight == 1.0
+    assert leaders[-1].hardware == ["4xRTX6000Pro"]
 
 
 async def test_early_exit_when_not_finalizing(git: MockGitHubClient, settings: Settings) -> None:

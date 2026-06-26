@@ -19,6 +19,7 @@ _RUNPOD_GPU_TYPE_IDS: dict[str, str] = {
     "H200": "NVIDIA H200",  # SXM (api_specification.md requires SXM); NVL is "NVIDIA H200 NVL"
     "H100": "NVIDIA H100 80GB HBM3",  # SXM variant; PCIe/NVL are separate SKUs
     "B200": "NVIDIA B200",
+    "RTX6000Pro": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
 }
 
 
