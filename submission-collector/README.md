@@ -4,7 +4,7 @@ Collects miner submissions from a chain, downloads generated 3D files, and prepa
 
 ## Algorithm
 
-1. **OPEN stage**: Wait for `latest_reveal_block`, then collect all valid submissions from a chain. Generate seed and select prompts for the round. Save to git and transition to MINER_GENERATION.
+1. **OPEN stage**: Wait for `latest_reveal_block`, then collect all valid submissions from a chain. For each submission, read `hardware.json` from the root of the miner's repo (at the submitted commit) to record the verification hardware the miner targets, defaulting to `["4xH200"]` when the file is absent. Generate seed and select prompts for the round. Save to git and transition to MINER_GENERATION.
 
 2. **MINER_GENERATION stage**: Wait for `generation_deadline_block`. Miners use the published seed and prompts to generate 3D files and upload to their CDNs.
 
@@ -22,8 +22,10 @@ Reads and writes to the competition Git repository:
 | `rounds/{n}/schedule.json` | R | Round timing (reveal blocks, deadline) |
 | `rounds/{n}/seed.json` | W | Random seed for prompt selection       |
 | `rounds/{n}/prompts.txt` | W | Selected prompts for the round         |
-| `rounds/{n}/submissions.json` | W | Miner submissions from chain           |
+| `rounds/{n}/submissions.json` | W | Miner submissions from chain, plus each miner's target verification hardware |
 | `rounds/{n}/{hotkey}/submitted.json` | W | Downloaded GLB/PNG locations           |
+
+The target hardware is sourced from a `hardware.json` file at the root of each miner's own repository (not the competition repo), read at the submitted commit and defaulting to `["4xH200"]` when absent. See [`miner-reference/api_specification.md`](../miner-reference/api_specification.md#hardware) for the format.
 
 ## Development
 ```bash

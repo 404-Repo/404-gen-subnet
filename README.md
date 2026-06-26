@@ -92,7 +92,7 @@ All state is stored in the competition git repository.
 When a miner becomes a candidate winner, they are sent for verification:
 
 1. **Build tracking**: Monitor GitHub Actions for the miner's Docker image build
-2. **Pod deployment**: Deploy the image on a 4×H200 GPU pod via the batch generation API
+2. **Pod deployment**: Deploy the image on a GPU pod via the batch generation API, using the hardware the miner declared in `hardware.json` (4×H200 by default)
 3. **Regeneration**: Send prompts in sequential batches (128 prompts, 4 batches of 32) with the same seed used in the round
 4. **Validation & rendering**: Each returned JavaScript module is statically analyzed, executed in a sandbox, and rendered via headless Chromium
 5. **Comparison**: Rendered outputs compared to submissions via VLM-based judging

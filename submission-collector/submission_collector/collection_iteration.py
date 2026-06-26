@@ -20,7 +20,7 @@ from submission_collector.download import DownloadPipeline
 from submission_collector.prompts import select_prompts
 from submission_collector.revealed_commitments import get_all_revealed_commitments
 from submission_collector.settings import Settings
-from submission_collector.submission import Submission, parse_commitment
+from submission_collector.submission import Submission, parse_commitment, parse_hardware
 
 
 DownloadFn = Callable[[GitBatcher, CompetitionState, str, Settings], Awaitable[dict[str, GenerationsMap]]]
@@ -29,8 +29,22 @@ Creates R2/HTTP clients and runs the download pipeline.
 """
 
 
+HardwareFn = Callable[[str, str], Awaitable[list[str]]]
+"""Signature: (repo, commit) -> list of verification configurations the miner targets.
+Reads hardware.json from the root of the miner's repo at the submitted commit.
+"""
+
+
 SECONDS_PER_BLOCK = 12
 """Average block time on Bittensor network."""
+
+
+HARDWARE_FETCH_CONCURRENCY = 10
+"""Cap on concurrent hardware.json fetches. GitHub's authenticated primary limit
+(5,000 req/hr) easily covers a round's submissions, but its secondary/abuse limit
+penalizes large concurrent bursts — at the worst-case ~250 submissions an unbounded
+fan-out is exactly that. This keeps the burst small while staying fast enough for a
+once-per-round read."""
 
 
 async def run_collection_iteration(
@@ -81,6 +95,11 @@ async def run_collection_iteration(
                 )
                 return await pipeline.run(state=state, ref=ref)
 
+        async def get_hardware(repo: str, commit: str) -> list[str]:
+            async with GitHubClient(repo=repo, token=settings.github_token.get_secret_value()) as miner_git:
+                content = await miner_git.get_file(path="hardware.json", ref=commit)
+            return parse_hardware(content, log_id=repo)
+
         async with GitHubClient(
             repo=settings.github_repo,
             token=settings.github_token.get_secret_value(),
@@ -91,6 +110,7 @@ async def run_collection_iteration(
                 get_commitments=get_commitments,
                 get_hotkey_owners=get_hotkey_owners,
                 get_locked_alpha=get_locked_alpha,
+                get_hardware=get_hardware,
                 download_fn=download_fn,
                 settings=settings,
                 discord=discord,
@@ -103,6 +123,7 @@ async def collection_iteration(
     get_commitments: Callable[[], Awaitable[dict]],
     get_hotkey_owners: Callable[[], Awaitable[dict[str, str]]],
     get_locked_alpha: Callable[[str], Awaitable[float]],
+    get_hardware: HardwareFn,
     download_fn: DownloadFn,
     settings: Settings,
     discord: DiscordNotifier = NULL_DISCORD_NOTIFIER,
@@ -132,6 +153,7 @@ async def collection_iteration(
             get_commitments=get_commitments,
             get_hotkey_owners=get_hotkey_owners,
             get_locked_alpha=get_locked_alpha,
+            get_hardware=get_hardware,
             settings=settings,
             discord=discord,
         )
@@ -181,13 +203,15 @@ async def _collect_submissions(
     get_commitments: Callable[[], Awaitable[dict]],
     get_hotkey_owners: Callable[[], Awaitable[dict[str, str]]],
     get_locked_alpha: Callable[[str], Awaitable[float]],
+    get_hardware: HardwareFn,
     settings: Settings,
     discord: DiscordNotifier = NULL_DISCORD_NOTIFIER,
 ) -> datetime | None:
     """Collect miner submissions from a chain after a reveal window closes.
 
     Waits until the latest_reveal_block is reached, then reads all valid submissions
-    and drops the ones whose coldkey lacks the required conviction lock.
+    and drops the ones whose coldkey lacks the required conviction lock. For each kept
+    submission, reads the miner's declared verification hardware from their repo.
     If submissions exist, generates seed and prompts, saves everything to git,
     and transitions to MINER_GENERATION stage.
     If no submissions, transitions directly to FINALIZING.
@@ -217,6 +241,8 @@ async def _collect_submissions(
         await _transition_stage(git=git, state=state, ref=ref, settings=settings, stage=RoundStage.FINALIZING)
         await discord.notify_no_submissions(state.current_round)
         return None
+
+    await _attach_hardware(submissions=submissions, get_hardware=get_hardware)
 
     seed = secrets.randbits(32)
     prompts = await select_prompts(git=git, round_num=state.current_round, config=config, seed=seed, ref=ref)
@@ -324,6 +350,24 @@ async def _read_submissions_from_chain(
     return submissions
 
 
+async def _attach_hardware(submissions: list[Submission], get_hardware: HardwareFn) -> None:
+    """Read each kept miner's declared verification hardware and attach it in place.
+
+    Fetches with bounded concurrency to stay under GitHub's secondary rate limit. The
+    per-miner default (and the warning naming the miner's repo) lives in parse_hardware,
+    so every submission ends with a non-empty configuration list.
+    """
+    semaphore = asyncio.Semaphore(HARDWARE_FETCH_CONCURRENCY)
+
+    async def fetch(submission: Submission) -> list[str]:
+        async with semaphore:
+            return await get_hardware(submission.repo, submission.commit)
+
+    hardware_lists = await asyncio.gather(*[fetch(s) for s in submissions])
+    for submission, hardware in zip(submissions, hardware_lists, strict=True):
+        submission.hardware = hardware
+
+
 async def _filter_by_conviction_lock(
     submissions: list[Submission],
     get_hotkey_owners: Callable[[], Awaitable[dict[str, str]]],
@@ -373,6 +417,7 @@ def _serialize_submissions(submissions: list[Submission], config: CompetitionCon
             "cdn_url": str(s.cdn_url),
             "revealed_at_block": s.reveal_block,
             "round": f"{config.name}-{round_num}",
+            "hardware": s.hardware,
         }
         for s in submissions
     }

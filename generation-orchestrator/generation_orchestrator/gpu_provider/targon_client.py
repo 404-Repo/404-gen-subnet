@@ -26,6 +26,7 @@ class TargonClientError(GPUClientError):
 _TARGON_SKUS: dict[tuple[str, int], str] = {
     ("H200", 1): "h200-small",
     ("H200", 4): "h200-large",
+    ("RTX6000Pro", 4): "rtx6000pro-large",
 }
 
 

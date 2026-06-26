@@ -2,6 +2,7 @@ import json
 
 from loguru import logger
 from pydantic import BaseModel, Field, HttpUrl, ValidationError
+from subnet_common.competition.submissions import DEFAULT_HARDWARE, SUPPORTED_HARDWARE
 
 
 class Submission(BaseModel):
@@ -10,6 +11,43 @@ class Submission(BaseModel):
     repo: str = Field(..., pattern=r"^[\w-]+/[\w-]+$", description="GitHub repo of winning solution")
     commit: str = Field(..., pattern=r"^[a-f0-9]{40}$", description="Git commit SHA")
     cdn_url: HttpUrl = Field(..., description="CDN URL of the directory with generated GLB files")
+    hardware: list[str] = Field(default_factory=lambda: [DEFAULT_HARDWARE])
+
+
+def parse_hardware(content: str | None, log_id: str) -> list[str]:
+    """Parse a miner's hardware.json into the verification configurations it targets.
+
+    Falls back to [DEFAULT_HARDWARE] when the file is absent, malformed, or names no
+    recognized configuration. Unknown tokens are dropped; declared order is preserved and
+    duplicates removed. Only the miner's content is forgiven here — a failed fetch raises
+    before reaching this point and restarts the iteration.
+
+    An absent file is the common case (most miners run the default), so it defaults
+    silently. Warnings fire only on present-but-broken data and name the miner's repo.
+    """
+    if content is None:
+        return [DEFAULT_HARDWARE]
+
+    try:
+        declared = json.loads(content)["hardware"]
+    except (json.JSONDecodeError, TypeError, KeyError) as e:
+        logger.warning(f"{log_id}: malformed hardware.json, defaulting to {DEFAULT_HARDWARE}: {e}")
+        return [DEFAULT_HARDWARE]
+
+    if not isinstance(declared, list):
+        logger.warning(f"{log_id}: hardware.json 'hardware' must be a list, defaulting to {DEFAULT_HARDWARE}")
+        return [DEFAULT_HARDWARE]
+
+    hardware: list[str] = []
+    for token in declared:
+        if token in SUPPORTED_HARDWARE and token not in hardware:
+            hardware.append(token)
+
+    if not hardware:
+        logger.warning(f"{log_id}: hardware.json names no supported configuration, defaulting to {DEFAULT_HARDWARE}")
+        return [DEFAULT_HARDWARE]
+
+    return hardware
 
 
 def parse_commitment(

@@ -25,7 +25,18 @@ Your service must expose four HTTP endpoints on port **10006**:
 
 ## Hardware
 
-Each pod has **4× H200 SXM** GPUs (141 GB HBM3e each, ~564 GB total VRAM). How you distribute work across GPUs is entirely up to you.
+Verification pods come in two GPU configurations, selected via a `hardware.json` file at your repository root:
+
+| `hardware.json` token | GPUs | Per-GPU VRAM | Total VRAM |
+|----|----|----|----|
+| `4xH200` (default) | 4× H200 SXM | 141 GB HBM3e | ~564 GB |
+| `4xRTX6000Pro` | 4× RTX PRO 6000 (Blackwell) | 96 GB GDDR7 | ~384 GB |
+
+```json
+{ "hardware": ["4xH200", "4xRTX6000Pro"] }
+```
+
+`hardware` is a list of one or more supported tokens. Listing more than one declares that your pipeline runs on **any** of them — the orchestrator picks one available pod and verifies you there in a single run. If `hardware.json` is absent or its list is empty, you default to `["4xH200"]`. Your image must fit within the VRAM and compute of whichever listed configuration is selected. How you distribute work across the 4 GPUs is entirely up to you.
 
 ## Docker Image Requirements
 
@@ -83,7 +94,7 @@ At any point where `/status` is polled, the service may also return `replace` to
 
 ### Sequence
 
-1. The orchestrator deploys your Docker image on a 4×H200 pod.
+1. The orchestrator deploys your Docker image on a verification pod (4×H200 by default, or the configuration you declared in `hardware.json` — see [Hardware](#hardware)).
 2. It polls `GET /health` until it returns `200`, confirming the service is up.
 3. It polls `GET /status`. Your service reports `warming_up` while loading models.
 4. Once `/status` returns `ready`, the orchestrator sends the first batch via `POST /generate`.

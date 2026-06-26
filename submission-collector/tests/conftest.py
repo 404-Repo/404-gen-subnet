@@ -5,6 +5,7 @@ from pydantic import SecretStr
 from subnet_common.competition.config import CompetitionConfig
 from subnet_common.competition.schedule import RoundSchedule
 from subnet_common.competition.state import CompetitionState, RoundStage
+from subnet_common.competition.submissions import DEFAULT_HARDWARE
 from subnet_common.git_batcher import GitBatcher
 from subnet_common.testing import MockGitHubClient
 
@@ -130,6 +131,21 @@ def make_get_locked_alpha(locked: dict[str, float] | None = None, default: float
         return locked.get(coldkey, 0.0)
 
     return get_locked_alpha
+
+
+def make_get_hardware(by_repo: dict[str, list[str]] | None = None):
+    """Factory for a controllable get_hardware function (repo -> declared hardware).
+
+    Without an explicit mapping, every repo resolves to the default, matching an absent
+    hardware.json.
+    """
+
+    async def get_hardware(repo: str, commit: str) -> list[str]:
+        if by_repo is None:
+            return [DEFAULT_HARDWARE]
+        return by_repo.get(repo, [DEFAULT_HARDWARE])
+
+    return get_hardware
 
 
 class SpyDownloadFn:
