@@ -15,7 +15,7 @@ from subnet_common.competition.leader import require_leader_state
 from subnet_common.competition.seed import require_seed_from_git
 from subnet_common.competition.source_audit import AuditResult, AuditVerdict, get_source_audits
 from subnet_common.competition.state import CompetitionState, RoundStage, require_state
-from subnet_common.competition.submissions import MinerSubmission, require_submissions
+from subnet_common.competition.submissions import DEFAULT_HARDWARE, MinerSubmission, require_submissions
 from subnet_common.git_batcher import GitBatcher
 from subnet_common.github import GitHubClient
 from subnet_common.graceful_shutdown import GracefulShutdown
@@ -24,6 +24,7 @@ from generation_orchestrator.build_tracker import BuildTracker
 from generation_orchestrator.discord import NULL_DISCORD_NOTIFIER, DiscordNotifier
 from generation_orchestrator.generation_stop import GenerationStop, GenerationStopManager
 from generation_orchestrator.gpu_provider import GPUProviderManager
+from generation_orchestrator.hardware import select_hardware
 from generation_orchestrator.miner_runner import MinerRunner
 from generation_orchestrator.prompts import Prompt, ensure_prompts_cached_from_git
 from generation_orchestrator.settings import Settings
@@ -75,7 +76,9 @@ async def run_generation_iteration(
                 discord=discord,
             )
         finally:
-            await gpu_manager.cleanup_by_prefix(f"miner-{state.current_round}")
+            # Must match the zero-padded prefix in MinerRunner._miner_prefix ("miner-{round:02d}-...");
+            # an unpadded "miner-5" would not startswith-match "miner-05-..." and silently clean nothing.
+            await gpu_manager.cleanup_by_prefix(f"miner-{state.current_round:02d}")
 
         return None
 
@@ -148,6 +151,7 @@ async def _run_generation(
                 prompts=prompts,
                 seed=seed,
                 round_num=state.current_round,
+                submissions=submissions,
                 audit_repeats=audit_repeats,
                 shutdown=shutdown,
                 stop_manager=stop_manager,
@@ -192,6 +196,8 @@ async def _generate_leader(
     if leader is None:
         raise RuntimeError("Leader docker image not found")
 
+    leader_gpu_type, leader_gpu_count = select_hardware(leader.hardware, log_id="leader")
+
     await MinerRunner(
         settings=settings,
         semaphore=semaphore,
@@ -199,6 +205,8 @@ async def _generate_leader(
         git_batcher=git_batcher,
         hotkey="leader",
         docker_image=leader.docker,
+        gpu_type=leader_gpu_type,
+        gpu_count=leader_gpu_count,
         current_round=round_num,
         prompts=prompts,
         seed=seed,
@@ -218,6 +226,7 @@ async def _process_audit_requests(
     prompts: list[Prompt],
     seed: int,
     round_num: int,
+    submissions: dict[str, MinerSubmission],
     audit_repeats: int,
     shutdown: GracefulShutdown,
     stop_manager: GenerationStopManager,
@@ -277,6 +286,7 @@ async def _process_audit_requests(
                 prompts=prompts,
                 seed=seed,
                 round_num=round_num,
+                submissions=submissions,
                 audit_repeats=audit_repeats,
                 discord=discord,
             )
@@ -334,6 +344,7 @@ def _spawn_new(
     prompts: list[Prompt],
     seed: int,
     round_num: int,
+    submissions: dict[str, MinerSubmission],
     audit_repeats: int,
     discord: DiscordNotifier,
 ) -> None:
@@ -345,6 +356,8 @@ def _spawn_new(
         processed.add(hotkey)
         stop = stop_manager.new_stop()
         hotkey_stops[hotkey] = stop
+        submission = submissions.get(hotkey)
+        declared_hardware = submission.hardware if submission is not None else [DEFAULT_HARDWARE]
         hotkey_tasks[hotkey] = tg.create_task(
             _generate_report(
                 settings=settings,
@@ -357,6 +370,7 @@ def _spawn_new(
                 prompts=prompts,
                 seed=seed,
                 round_num=round_num,
+                declared_hardware=declared_hardware,
                 audit_repeats=audit_repeats,
                 reports=reports,
                 stop=stop,
@@ -399,6 +413,7 @@ async def _generate_report(
     prompts: list[Prompt],
     seed: int,
     round_num: int,
+    declared_hardware: list[str],
     audit_repeats: int,
     reports: dict[str, GenerationReport],
     stop: GenerationStop,
@@ -422,6 +437,8 @@ async def _generate_report(
                 reason="Failed to build a docker image",
             )
 
+        gpu_type, gpu_count = select_hardware(declared_hardware, log_id=hotkey[:10])
+
         return await MinerRunner(
             settings=settings,
             semaphore=semaphore,
@@ -430,6 +447,8 @@ async def _generate_report(
             git_batcher=git_batcher,
             hotkey=hotkey,
             docker_image=docker,
+            gpu_type=gpu_type,
+            gpu_count=gpu_count,
             current_round=round_num,
             prompts=prompts,
             seed=seed,

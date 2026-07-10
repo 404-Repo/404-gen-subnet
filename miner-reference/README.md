@@ -36,7 +36,7 @@ Key scoring facts:
 
 ## Why a batch API for verification
 
-During verification, the orchestrator deploys your Docker image on a 4×H200 pod and sends the same prompts in sequential batches. The batch model gives you full control over how verification runs on your hardware:
+During verification, the orchestrator deploys your Docker image on a verification pod (4× H200 by default, or the configuration you declare in [`hardware.json`](#hardware)) and sends the same prompts in sequential batches. The batch model gives you full control over how verification runs on your hardware:
 
 - **Scheduling is yours.** How to parallelize across GPUs, when to retry a failed generation, how to allocate compute to harder prompts — all up to you.
 - **Hardware diagnostics are yours.** Your code decides when a pod is good enough and when to request a replacement.
@@ -67,6 +67,7 @@ The tradeoff is responsibility: you're building health checks and failure recove
 | [`validator/test/budget-probes/`](validator/test/budget-probes/) | Complexity-tier fixtures showing how realistic outputs sit relative to the caps |
 | [`miner_reference/`](miner_reference/) | Reference pod-side HTTP service (Python/FastAPI) implementing the batch API |
 | [`docker/Dockerfile`](docker/Dockerfile) | Reference Dockerfile in the required `docker/` location — see [Docker Image Requirements](api_specification.md#docker-image-requirements) |
+| `hardware.json` | Optional repo-root file declaring the verification GPU configuration(s) your pipeline targets — see [Hardware](#hardware). Absent → defaults to `["4xH200"]` |
 
 ## Specifications
 
@@ -232,7 +233,24 @@ docker run -p 10006:10006 miner-reference
 
 ### Hardware
 
-Each verification pod has **4× H200 SXM** GPUs (141 GB HBM3e each, ~564 GB total VRAM). How you distribute work across GPUs is up to you.
+Verification pods come in two GPU configurations:
+
+| `hardware.json` token | GPUs | Per-GPU VRAM | Total VRAM |
+|----|----|----|----|
+| `4xH200` (default) | 4× H200 SXM | 141 GB HBM3e | ~564 GB |
+| `4xRTX6000Pro` | 4× RTX PRO 6000 (Blackwell) | 96 GB GDDR7 | ~384 GB |
+
+By default your image is verified on a **4× H200 SXM** pod. To target a different configuration, add a `hardware.json` file at the **root of your repository**:
+
+```json
+{ "hardware": ["4xRTX6000Pro"] }
+```
+
+- `hardware` is a list of one or more supported tokens (`4xH200`, `4xRTX6000Pro`).
+- Listing more than one — e.g. `["4xH200", "4xRTX6000Pro"]` — declares that your pipeline runs on **any** of them. The orchestrator picks one available pod and verifies you there in a single regeneration run; it does **not** regenerate on every listed configuration.
+- If `hardware.json` is absent (or its list is empty), you default to `["4xH200"]`.
+
+Your Docker image and pipeline must fit within the VRAM and compute of whichever listed configuration the orchestrator selects. If you list only `4xRTX6000Pro`, design within ~384 GB; if you list both, design to run on either. How you distribute work across the 4 GPUs is up to you.
 
 ### GPU allocation
 
@@ -265,7 +283,7 @@ This is the core loop. The quality of the Three.js code you produce here is what
 
 Verification confirms one thing: that your Docker image actually produces what you submitted. It runs in two phases.
 
-8. **Regeneration (generation orchestrator).** When you become a winner candidate, validators deploy your Docker image on a 4×H200 pod and send the same prompts via the batch API (see [API Specification](api_specification.md)). Your service regenerates the outputs and validators render them into the same view bundles used for judging.
+8. **Regeneration (generation orchestrator).** When you become a winner candidate, validators deploy your Docker image on a verification pod (4× H200 by default, or the configuration you declared in [`hardware.json`](#hardware)) and send the same prompts via the batch API (see [API Specification](api_specification.md)). Your service regenerates the outputs and validators render them into the same view bundles used for judging.
 
 9. **Verification duel (judge service).** The judge then runs a duel between your **submitted** outputs and your **regenerated** outputs, prompt by prompt, using the same multi-stage VLM pipeline used for tournament duels.
 

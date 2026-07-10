@@ -69,13 +69,8 @@ class GPUProviderManager:
                 providers.append(provider_map[name])
         return providers
 
-    @property
-    def provider_count(self) -> int:
-        """Number of enabled providers."""
-        return len(self._providers)
-
     def get_provider(self, index: int) -> GPUProvider:
-        """Get provider by index (wraps around if index >= provider_count)."""
+        """Get provider by index (wraps around if index >= number of providers)."""
         return self._providers[index % len(self._providers)]
 
     def get_generation_token(self, provider: GPUProvider) -> str | None:

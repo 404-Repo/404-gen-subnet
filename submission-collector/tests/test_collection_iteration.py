@@ -15,6 +15,7 @@ from tests.conftest import (
     make_commitment,
     make_get_block,
     make_get_commitments,
+    make_get_hardware,
     make_get_hotkey_owners,
     make_get_locked_alpha,
 )
@@ -39,6 +40,7 @@ async def test_unhandled_stage_returns_next_stage_eta_and_does_nothing(
         get_commitments=make_get_commitments(),
         get_hotkey_owners=make_get_hotkey_owners(),
         get_locked_alpha=make_get_locked_alpha(),
+        get_hardware=make_get_hardware(),
         download_fn=download,
         settings=settings,
     )
@@ -60,6 +62,7 @@ async def test_open_before_reveal_window_returns_eta(git: MockGitHubClient, sett
         get_commitments=make_get_commitments(),
         get_hotkey_owners=make_get_hotkey_owners(),
         get_locked_alpha=make_get_locked_alpha(),
+        get_hardware=make_get_hardware(),
         download_fn=download,
         settings=settings,
     )
@@ -81,6 +84,7 @@ async def test_open_no_submissions_transitions_to_finalizing(git: MockGitHubClie
         get_commitments=make_get_commitments({}),
         get_hotkey_owners=make_get_hotkey_owners(),
         get_locked_alpha=make_get_locked_alpha(),
+        get_hardware=make_get_hardware(),
         download_fn=download,
         settings=settings,
     )
@@ -103,6 +107,7 @@ async def test_miner_generation_before_deadline_returns_eta(git: MockGitHubClien
         get_commitments=make_get_commitments(),
         get_hotkey_owners=make_get_hotkey_owners(),
         get_locked_alpha=make_get_locked_alpha(),
+        get_hardware=make_get_hardware(),
         download_fn=download,
         settings=settings,
     )
@@ -125,6 +130,7 @@ async def test_miner_generation_past_deadline_transitions_to_downloading_and_cal
         get_commitments=make_get_commitments(),
         get_hotkey_owners=make_get_hotkey_owners(),
         get_locked_alpha=make_get_locked_alpha(),
+        get_hardware=make_get_hardware(),
         download_fn=download,
         settings=settings,
     )
@@ -160,6 +166,7 @@ async def test_open_collects_submissions_and_transitions_to_miner_generation(
         get_commitments=make_get_commitments(commitments),
         get_hotkey_owners=make_get_hotkey_owners({HOTKEY: "coldkey-1"}),
         get_locked_alpha=make_get_locked_alpha(),
+        get_hardware=make_get_hardware(),
         download_fn=download,
         settings=settings,
     )
@@ -194,6 +201,32 @@ async def test_open_collects_submissions_and_transitions_to_miner_generation(
     assert HOTKEY in submissions
     assert submissions[HOTKEY]["repo"] == "test/model"
     assert submissions[HOTKEY]["commit"] == "a" * 40
+    # Absent hardware.json defaults to 4xH200
+    assert submissions[HOTKEY]["hardware"] == ["4xH200"]
+
+
+async def test_open_records_declared_hardware(git: MockGitHubClient, settings: Settings) -> None:
+    add_state(git, stage=RoundStage.OPEN, round_num=0)
+    add_schedule(git, round_num=0, latest_reveal_block=200, generation_deadline_block=500)
+    add_config(git, prompts_per_round=3, carryover_prompts=0)
+    add_prompts(git, ["prompt_a", "prompt_b", "prompt_c"])
+
+    commitments = {HOTKEY: make_commitment(repo="test/model", block=150)}
+    download = SpyDownloadFn()
+
+    await collection_iteration(
+        git=git,
+        get_block=make_get_block(200),
+        get_commitments=make_get_commitments(commitments),
+        get_hotkey_owners=make_get_hotkey_owners({HOTKEY: "coldkey-1"}),
+        get_locked_alpha=make_get_locked_alpha(),
+        get_hardware=make_get_hardware({"test/model": ["4xH200", "4xRTX6000Pro"]}),
+        download_fn=download,
+        settings=settings,
+    )
+
+    submissions = json.loads(git.committed["rounds/0/submissions.json"])
+    assert submissions[HOTKEY]["hardware"] == ["4xH200", "4xRTX6000Pro"]
 
 
 HOTKEY_2 = "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY"
@@ -214,6 +247,7 @@ async def test_open_insufficient_lock_drops_submission(git: MockGitHubClient, se
         get_commitments=make_get_commitments(commitments),
         get_hotkey_owners=make_get_hotkey_owners({HOTKEY: "coldkey-1"}),
         get_locked_alpha=make_get_locked_alpha({"coldkey-1": 99.0}),
+        get_hardware=make_get_hardware(),
         download_fn=download,
         settings=settings,
     )
@@ -242,6 +276,7 @@ async def test_open_lock_requirement_scales_with_submitting_hotkeys_per_coldkey(
         get_commitments=make_get_commitments(commitments),
         get_hotkey_owners=make_get_hotkey_owners({HOTKEY: "coldkey-1", HOTKEY_2: "coldkey-1"}),
         get_locked_alpha=make_get_locked_alpha({"coldkey-1": 100.0}),
+        get_hardware=make_get_hardware(),
         download_fn=download,
         settings=settings,
     )
@@ -265,6 +300,7 @@ async def test_open_sufficient_lock_keeps_all_coldkey_hotkeys(git: MockGitHubCli
         get_commitments=make_get_commitments(commitments),
         get_hotkey_owners=make_get_hotkey_owners({HOTKEY: "coldkey-1", HOTKEY_2: "coldkey-1"}),
         get_locked_alpha=make_get_locked_alpha({"coldkey-1": 200.0}),
+        get_hardware=make_get_hardware(),
         download_fn=download,
         settings=settings,
     )
@@ -288,6 +324,7 @@ async def test_open_hotkey_not_in_metagraph_is_dropped(git: MockGitHubClient, se
         get_commitments=make_get_commitments(commitments),
         get_hotkey_owners=make_get_hotkey_owners({HOTKEY: "coldkey-1"}),
         get_locked_alpha=make_get_locked_alpha({"coldkey-1": 100.0}),
+        get_hardware=make_get_hardware(),
         download_fn=download,
         settings=settings,
     )

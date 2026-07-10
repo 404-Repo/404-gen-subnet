@@ -7,6 +7,7 @@ from pydantic import TypeAdapter
 from subnet_common.competition.audit_requests import AuditRequest
 from subnet_common.competition.generation_report import GenerationReport, GenerationReportOutcome, RepeatStats
 from subnet_common.competition.state import CompetitionState, RoundStage
+from subnet_common.competition.submissions import MinerSubmission
 from subnet_common.git_batcher import GitBatcher
 from subnet_common.graceful_shutdown import GracefulShutdown
 from subnet_common.testing import MockGitHubClient
@@ -52,6 +53,17 @@ async def test_audit_loop_spawns_and_saves_result(settings: Settings) -> None:
 
     test_settings = settings.model_copy(update={"check_audit_interval_seconds": 0})
 
+    submissions = {
+        HOTKEY: MinerSubmission(
+            repo="owner/repo",
+            commit="a" * 40,
+            cdn_url="https://cdn.example.com",
+            revealed_at_block=1,
+            round="test-1",
+            hardware=["4xH200", "4xRTX6000Pro"],
+        )
+    }
+
     with (
         patch(f"{MODULE}.require_state", AsyncMock(side_effect=[state_gen, state_gen, state_done])),
         patch(f"{MODULE}._generate_report", AsyncMock(return_value=expected_report)) as mock_gen,
@@ -65,6 +77,7 @@ async def test_audit_loop_spawns_and_saves_result(settings: Settings) -> None:
             prompts=[],
             seed=42,
             round_num=1,
+            submissions=submissions,
             audit_repeats=3,
             shutdown=shutdown,
             stop_manager=stop_manager,
@@ -73,6 +86,8 @@ async def test_audit_loop_spawns_and_saves_result(settings: Settings) -> None:
     mock_gen.assert_called_once()
     assert mock_gen.call_args.kwargs["hotkey"] == HOTKEY
     assert mock_gen.call_args.kwargs["audit_repeats"] == 3
+    # The miner's declared hardware is threaded from submissions to the per-miner runner.
+    assert mock_gen.call_args.kwargs["declared_hardware"] == ["4xH200", "4xRTX6000Pro"]
 
     reports_path = "rounds/1/generation_reports.json"
     assert reports_path in mock_git.committed
@@ -118,6 +133,7 @@ async def test_audit_loop_skips_already_completed(settings: Settings) -> None:
             prompts=[],
             seed=42,
             round_num=1,
+            submissions={},
             audit_repeats=3,
             shutdown=shutdown,
             stop_manager=stop_manager,

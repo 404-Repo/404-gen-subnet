@@ -262,6 +262,7 @@ def _find_new_leader(
         repo=round_result.repo,
         commit=round_result.commit,
         docker=round_result.docker_image,
+        hardware=round_result.hardware,
         weight=1.0,
         effective_block=effective_block,
     )

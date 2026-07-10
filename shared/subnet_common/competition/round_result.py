@@ -1,5 +1,6 @@
 from pydantic import BaseModel, Field
 
+from subnet_common.competition.submissions import DEFAULT_HARDWARE
 from subnet_common.git_batcher import GitBatcher
 from subnet_common.github import GitHubClient
 
@@ -11,6 +12,10 @@ class RoundResult(BaseModel):
     repo: str = Field(description="GitHub repo of the winner")
     commit: str = Field(description="Git commit SHA of the winner")
     docker_image: str = Field(description="Docker image of the winner")
+    hardware: list[str] = Field(
+        default_factory=lambda: [DEFAULT_HARDWARE],
+        description="Verification GPU configurations the winner's pipeline targets",
+    )
 
 
 async def get_round_result(git: GitHubClient, round_num: int, ref: str) -> RoundResult | None:

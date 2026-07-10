@@ -1,8 +1,43 @@
+from abc import ABC, abstractmethod
+
 from subnet_common.competition.generation_report import GenerationReport, GenerationReportOutcome
 from subnet_common.discord import DiscordWebhook
 
 
-class DiscordNotifier:
+class DiscordNotifier(ABC):
+    @abstractmethod
+    async def notify_generation_report(self, report: GenerationReport) -> None: ...
+
+    @abstractmethod
+    async def notify_generation_progress(
+        self,
+        *,
+        hotkey: str,
+        round_num: int,
+        generated: int,
+        total: int,
+        fails: int,
+        total_generation_time: float,
+        replacements_used: int,
+    ) -> None: ...
+
+    @abstractmethod
+    async def notify_pod_deploy_failed(self, hotkey: str, pod_id: str) -> None: ...
+
+    @abstractmethod
+    async def notify_batch_submit_failed(self, hotkey: str, pod_id: str) -> None: ...
+
+    @abstractmethod
+    async def notify_batch_download_failed(self, hotkey: str, pod_id: str) -> None: ...
+
+    @abstractmethod
+    async def notify_pod_unreachable(self, hotkey: str, pod_id: str) -> None: ...
+
+    @abstractmethod
+    async def notify_cycle_error(self, error: Exception) -> None: ...
+
+
+class WebhookDiscordNotifier(DiscordNotifier):
     def __init__(self, webhook_url: str) -> None:
         self._webhook = DiscordWebhook(webhook_url)
 
@@ -90,13 +125,20 @@ class DiscordNotifier:
 
 
 class NullDiscordNotifier(DiscordNotifier):
-    def __init__(self) -> None:
-        pass
-
     async def notify_generation_report(self, report: GenerationReport) -> None:
         pass
 
-    async def notify_generation_progress(self, **kwargs: object) -> None:  # type: ignore[override]
+    async def notify_generation_progress(
+        self,
+        *,
+        hotkey: str,
+        round_num: int,
+        generated: int,
+        total: int,
+        fails: int,
+        total_generation_time: float,
+        replacements_used: int,
+    ) -> None:
         pass
 
     async def notify_pod_deploy_failed(self, hotkey: str, pod_id: str) -> None:

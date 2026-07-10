@@ -7,7 +7,7 @@ from subnet_common.graceful_shutdown import (
 )
 from subnet_common.utils import calculate_wait_time, format_duration
 
-from generation_orchestrator.discord import DiscordNotifier, NullDiscordNotifier
+from generation_orchestrator.discord import DiscordNotifier, NullDiscordNotifier, WebhookDiscordNotifier
 from generation_orchestrator.generation_iteration import run_generation_iteration
 from generation_orchestrator.settings import Settings
 
@@ -33,7 +33,7 @@ async def main() -> None:
     shutdown.setup_signal_handlers()
 
     discord: DiscordNotifier = (
-        DiscordNotifier(settings.discord_webhook_url) if settings.discord_webhook_url else NullDiscordNotifier()
+        WebhookDiscordNotifier(settings.discord_webhook_url) if settings.discord_webhook_url else NullDiscordNotifier()
     )
 
     logger.info("Generation orchestrator started")

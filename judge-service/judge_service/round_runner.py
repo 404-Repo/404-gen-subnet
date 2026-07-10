@@ -571,6 +571,7 @@ class RoundRunner:
                 repo=build.repo,
                 commit=build.commit,
                 docker_image=build.docker_image,
+                hardware=build.hardware,
             )
 
         leader_state = await require_leader_state(self._git, ref=self._ref)
@@ -583,6 +584,7 @@ class RoundRunner:
             repo=leader.repo,
             commit=leader.commit,
             docker_image=leader.docker,
+            hardware=leader.hardware,
         )
 
     async def _transition_to_next_stage(self, reason: str) -> None:

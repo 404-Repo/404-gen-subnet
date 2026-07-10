@@ -2,7 +2,7 @@ from enum import Enum
 
 from pydantic import BaseModel, Field, TypeAdapter
 
-from subnet_common.competition.submissions import MinerSubmission
+from subnet_common.competition.submissions import DEFAULT_HARDWARE, MinerSubmission
 from subnet_common.git_batcher import GitBatcher
 from subnet_common.github import GitHubClient
 
@@ -20,6 +20,10 @@ class BuildInfo(BaseModel):
     repo: str = Field(..., description="GitHub repository in format 'owner/repo'")
     commit: str = Field(..., description="Git commit SHA")
     revealed_at_block: int = Field(..., description="Block number when miner's submission was revealed")
+    hardware: list[str] = Field(
+        default_factory=lambda: [DEFAULT_HARDWARE],
+        description="Verification GPU configurations the miner's pipeline targets",
+    )
     tag: str = Field(..., description="Docker image tag")
     status: BuildStatus = Field(default=BuildStatus.PENDING, description="Build status")
     docker_image: str | None = Field(default=None, description="Docker image URL")
@@ -30,6 +34,7 @@ class BuildInfo(BaseModel):
             repo=submission.repo,
             commit=submission.commit,
             revealed_at_block=submission.revealed_at_block,
+            hardware=submission.hardware,
             tag=f"{submission.commit[:7]}-{submission.round}",
         )
 

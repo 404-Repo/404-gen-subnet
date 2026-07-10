@@ -15,15 +15,17 @@ TERMINAL_STATUSES = frozenset(
         BuildStatus.SUCCESS,
         BuildStatus.FAILURE,
         BuildStatus.TIMED_OUT,
-        BuildStatus.NOT_FOUND,
     }
 )
 """Build statuses that indicate no further progress is expected.
 
-NOT_FOUND is terminal: once the build run exists, its per-hotkey matrix jobs are
-present, so a hotkey with no matching job genuinely has no build to wait for. Without
-this, `track()` would never satisfy `_all_resolved()` and would spin forever (the
-timeout sweep only converts PENDING/IN_PROGRESS)."""
+A hotkey with no matching job is deliberately NOT terminal. "No job this poll" is
+ambiguous — it can mean a transient GitHub error, jobs that haven't materialized yet
+after the run was queued, or a genuinely absent build — and a single poll can't tell
+them apart. Treating it as terminal (the old NOT_FOUND fast-path) falsely rejected
+miners whose build was fine but momentarily unobservable. Instead a missing job stays
+PENDING and is resolved by the build deadline as TIMED_OUT, so `_all_resolved()` is
+still guaranteed to be reached."""
 
 
 class BuildTracker:
@@ -87,7 +89,9 @@ class BuildTracker:
 
         while not self._shutdown.should_stop:
             jobs = await self._fetch_build_jobs(run_id=run_id)
-            changed = self._sync_build_statuses(jobs=jobs)
+            # A failed fetch (None) is skipped, not treated as an empty job list — otherwise a
+            # transient GitHub error would flip every in-flight build backward / to TIMED_OUT.
+            changed = self._sync_build_statuses(jobs=jobs) if jobs is not None else set()
 
             if _now() >= deadline:
                 changed.update(self._timeout_incomplete())
@@ -157,13 +161,15 @@ class BuildTracker:
         logger.info("Shutdown before build run found")
         return None
 
-    async def _fetch_build_jobs(self, run_id: int) -> dict[str, GitHubJob]:
-        """Fetch build jobs keyed by miner hotkey."""
+    async def _fetch_build_jobs(self, run_id: int) -> dict[str, GitHubJob] | None:
+        """Fetch build jobs keyed by miner hotkey. Returns None if the fetch itself failed,
+        so the caller can skip this poll rather than mistaking an unreachable GitHub for an
+        empty job list (which would wrongly resolve in-flight builds)."""
         try:
             jobs = await self._git_batcher.git.get_jobs(run_id=run_id)
         except Exception as e:
             logger.warning(f"Failed to fetch build jobs: {e}")
-            return {}
+            return None
         return {hotkey: job for job in jobs if (hotkey := _parse_hotkey(job_name=job.name))}
 
     def _sync_build_statuses(self, jobs: dict[str, GitHubJob]) -> set[str]:
@@ -210,9 +216,13 @@ def _parse_hotkey(job_name: str) -> str | None:
 
 
 def _derive_status(job: GitHubJob | None) -> BuildStatus:
-    """Determine build status from the job state."""
+    """Determine build status from the job state.
+
+    A missing job (None) is PENDING, not terminal — see TERMINAL_STATUSES. The deadline
+    resolves a genuinely absent build as TIMED_OUT.
+    """
     if job is None:
-        return BuildStatus.NOT_FOUND
+        return BuildStatus.PENDING
     if job.conclusion == "success":
         return BuildStatus.SUCCESS
     if job.conclusion in ("failure", "cancelled", "skipped", "timed_out", "action_required"):
