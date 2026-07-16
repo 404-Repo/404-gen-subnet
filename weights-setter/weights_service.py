@@ -20,7 +20,7 @@ class WeightsService:
     def __init__(
         self,
         *,
-        subtensor: bt.async_subtensor,
+        subtensor: bt.AsyncSubtensor,
         repo: str,
         branch: str,
         token: str | None,
@@ -31,7 +31,7 @@ class WeightsService:
         next_leader_wait_interval_sec: int,
         subnet_owner_uid: int,
         netuid: int,
-        wallet: bt.wallet,
+        wallet: bt.Wallet,
         discord: DiscordNotifier = NULL_DISCORD_NOTIFIER,
     ) -> None:
         self._subtensor = subtensor
@@ -157,12 +157,18 @@ class WeightsService:
                 netuid=self._netuid,
                 weights=weights.weights,
                 uids=weights.uids,
-                wait_for_inclusion=False,
+                wait_for_inclusion=True,
                 wait_for_finalization=False,
             )
             if not res:
                 logger.warning(f"Failed to set weights: {error_msg}")
                 return False
+
+            if await subtensor.commit_reveal_enabled(netuid=self._netuid):
+                # With commit-reveal, weights apply at reveal (next epoch), so last_update
+                # won't move until then. Inclusion of the commit is the verification.
+                logger.info(f"Successfully committed weights (reveal at next epoch): {weights}")
+                return True
 
             logger.info("Verifying weights...")
             weights_updated = await self._check_weights_updated(subtensor=subtensor, ref_block=current_block)
@@ -188,7 +194,7 @@ class WeightsService:
 
     async def _resolve_leader(
         self,
-        subtensor: bt.async_subtensor,
+        subtensor: bt.AsyncSubtensor,
         leader_state: LeaderState,
     ) -> tuple[int | None, float]:
         logger.info("Getting current block for leader resolution...")
@@ -219,7 +225,7 @@ class WeightsService:
         )
         return WeightsResult(uids=[self._subnet_owner_uid, leader_uid], weights=[owner_weight, leader_weight])
 
-    async def _check_weights_updated(self, *, subtensor: bt.async_subtensor, ref_block: int) -> bool:
+    async def _check_weights_updated(self, *, subtensor: bt.AsyncSubtensor, ref_block: int) -> bool:
         for i in range(self._confirmation_blocks):
             try:
                 logger.info(f"Waiting for confirmation block {i+1}/{self._confirmation_blocks}...")

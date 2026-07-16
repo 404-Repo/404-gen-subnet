@@ -11,17 +11,17 @@ from weights_service import WeightsService
 async def main() -> None:
     logger.info("Starting weights service")
     if settings.wallet_path:
-        wallet = bt.wallet(
+        wallet = bt.Wallet(
             name=settings.wallet_name,
             hotkey=settings.wallet_hotkey,
             path=settings.wallet_path,
         )
     else:
-        wallet = bt.wallet(
+        wallet = bt.Wallet(
             name=settings.wallet_name,
             hotkey=settings.wallet_hotkey,
         )
-    subtensor = bt.async_subtensor(settings.subtensor_endpoint)
+    subtensor = bt.AsyncSubtensor(settings.subtensor_endpoint)
     discord: DiscordNotifier = (
         DiscordNotifier(settings.discord_webhook_url) if settings.discord_webhook_url else NullDiscordNotifier()
     )
