@@ -20,8 +20,6 @@ class CompetitionConfig(BaseModel):
         default=1.0, description="Skip day if FINALIZING with less than this remaining"
     )
     win_margin: float = Field(..., description="Challenger must win by this fraction to dethrone leader")
-    weight_decay: float = Field(..., description="Weight reduction per round if leader not defeated")
-    weight_floor: float = Field(..., description="Minimum leader weight")
     prompts_per_round: int = Field(..., description="Number of prompts to select for each round")
     carryover_prompts: int = Field(..., description="Number of prompts retained from the previous round")
     round_duration_days: int = Field(default=1, description="Round duration in days")

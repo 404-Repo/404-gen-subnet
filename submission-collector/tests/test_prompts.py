@@ -19,8 +19,6 @@ def _config(prompts_per_round: int = 3, carryover_prompts: int = 0, **kwargs) ->
         last_competition_date="2025-12-31",
         generation_stage_minutes=180,
         win_margin=0.05,
-        weight_decay=0.1,
-        weight_floor=0.1,
         prompts_per_round=prompts_per_round,
         carryover_prompts=carryover_prompts,
     )

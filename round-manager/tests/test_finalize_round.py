@@ -1,6 +1,5 @@
 from datetime import UTC, date, datetime, time
 
-import pytest
 import time_machine
 from subnet_common.competition.config import CompetitionConfig
 from subnet_common.competition.leader import LeaderEntry, LeaderListAdapter
@@ -35,8 +34,6 @@ def add_config(git: MockGitHubClient, **overrides) -> CompetitionConfig:
         "generation_stage_minutes": 120,
         "finalization_buffer_hours": 1.0,
         "win_margin": 0.05,
-        "weight_decay": 0.2,
-        "weight_floor": 0.5,
         "prompts_per_round": 10,
         "carryover_prompts": 5,
         "round_duration_days": 1,
@@ -94,9 +91,7 @@ async def test_new_leader_takes_over(git: MockGitHubClient, settings: Settings) 
     add_config(git)
     schedule = add_schedule(git, round_num=1)
     add_leader(git, weight=1.0)
-    add_round_result(
-        git, round_num=1, winner_hotkey="miner_hotkey", repo="miner/repo", hardware=["4xRTX6000Pro"]
-    )
+    add_round_result(git, round_num=1, winner_hotkey="miner_hotkey", repo="miner/repo", hardware=["4xRTX6000Pro"])
 
     await finalize_round(git=git, get_block=make_get_block(block=7200), settings=settings)
 
@@ -187,32 +182,12 @@ async def test_competition_ended(git: MockGitHubClient, settings: Settings) -> N
 
 
 @time_machine.travel(datetime(2026, 1, 1, 8, 0, 0, tzinfo=UTC), tick=False)
-async def test_leader_defends_weight_decays(git: MockGitHubClient, settings: Settings) -> None:
-    """Leader defends, weight above floor → weight decays."""
+async def test_leader_defends_no_transition(git: MockGitHubClient, settings: Settings) -> None:
+    """Leader defends → no leader transition committed."""
     add_state(git, current_round=1)
     add_config(git)
     add_schedule(git, round_num=1)
     add_leader(git, weight=1.0)
-    add_round_result(git, round_num=1, winner_hotkey="leader")
-
-    await finalize_round(git=git, get_block=make_get_block(block=7200), settings=settings)
-
-    committed = git.committed
-    assert "leader.json" in committed
-
-    leaders = LeaderListAdapter.validate_json(committed["leader.json"])
-    assert len(leaders) == 2  # original + decay entry
-    assert leaders[-1].hotkey == "leader_hotkey"
-    assert leaders[-1].weight == pytest.approx(0.8)
-
-
-@time_machine.travel(datetime(2026, 1, 1, 8, 0, 0, tzinfo=UTC), tick=False)
-async def test_leader_defends_weight_at_floor(git: MockGitHubClient, settings: Settings) -> None:
-    """Leader defends, weight already at floor → no leader transition committed."""
-    add_state(git, current_round=1)
-    add_config(git)
-    add_schedule(git, round_num=1)
-    add_leader(git, weight=0.2)
     add_round_result(git, round_num=1, winner_hotkey="leader")
 
     await finalize_round(git=git, get_block=make_get_block(block=7200), settings=settings)
@@ -223,11 +198,11 @@ async def test_leader_defends_weight_at_floor(git: MockGitHubClient, settings: S
 
 @time_machine.travel(datetime(2026, 1, 1, 8, 0, 0, tzinfo=UTC), tick=False)
 async def test_leader_remains_same_repo_and_commit(git: MockGitHubClient, settings: Settings) -> None:
-    """Different hotkey wins but same repo+commit as leader → treated as defense, weight decays."""
+    """Different hotkey wins but same repo+commit as leader → treated as defense."""
     add_state(git, current_round=1)
     add_config(git)
     add_schedule(git, round_num=1)
-    add_leader(git, weight=0.8, repo="shared/repo", commit="same_hash")
+    add_leader(git, repo="shared/repo", commit="same_hash")
     add_round_result(
         git,
         round_num=1,
@@ -239,8 +214,4 @@ async def test_leader_remains_same_repo_and_commit(git: MockGitHubClient, settin
     await finalize_round(git=git, get_block=make_get_block(block=7200), settings=settings)
 
     committed = git.committed
-    assert "leader.json" in committed
-
-    leaders = LeaderListAdapter.validate_json(committed["leader.json"])
-    assert leaders[-1].hotkey == "leader_hotkey"  # original leader kept
-    assert leaders[-1].weight == pytest.approx(0.6)
+    assert "leader.json" not in committed
