@@ -175,6 +175,41 @@ async function renderInPage(source, params, mode, safeThreeConfig, safeThreeBund
       scene.add(new THREE.AmbientLight(0xffffff, 0.4));
       followLight = new THREE.DirectionalLight(0xffffff, 1.5);
       scene.add(followLight);
+    } else if (params.lighting === 'neutral') {
+      // Camera-follow key light (view-stable shading, as in 'follow') plus a
+      // real luminous environment. 'studio' builds its envmap from a scene
+      // containing only a HemisphereLight — lights are not visible geometry,
+      // so that cubemap is black and metalness>=0.9 materials render as black
+      // mirrors. Here the PMREM scene contains actual emissive surfaces
+      // (RoomEnvironment-style shell + panels), so metals reflect something
+      // and dielectrics pick up soft ambient, at levels calibrated to keep
+      // non-metal luminance close to the 'follow' baseline.
+      followLight = new THREE.DirectionalLight(0xffffff, 1.1);
+      scene.add(followLight);
+
+      const pmrem = new THREE.PMREMGenerator(renderer);
+      const envScene = new THREE.Scene();
+
+      const shellMat = new THREE.MeshBasicMaterial({ side: THREE.BackSide });
+      shellMat.color.setRGB(0.32, 0.32, 0.32);
+      envScene.add(new THREE.Mesh(new THREE.BoxGeometry(10, 10, 10), shellMat));
+
+      const addPanel = (w, h, intensity, x, y, z, rx, ry) => {
+        const mat = new THREE.MeshBasicMaterial();
+        mat.color.setRGB(intensity, intensity, intensity);
+        const panel = new THREE.Mesh(new THREE.PlaneGeometry(w, h), mat);
+        panel.position.set(x, y, z);
+        panel.rotation.set(rx, ry, 0);
+        envScene.add(panel);
+      };
+      addPanel(4, 4, 2.6, 0, 4.9, 0, Math.PI / 2, 0);     // ceiling key panel
+      addPanel(3, 2, 1.4, -4.9, 1.5, 0, 0, Math.PI / 2);  // left fill panel
+      addPanel(3, 2, 1.1, 4.9, 1.0, -1, 0, -Math.PI / 2); // right fill panel
+      addPanel(4, 1.5, 0.9, 0, 1.0, -4.9, 0, 0);          // back rim panel
+
+      scene.environment = pmrem.fromScene(envScene, 0.04).texture;
+      scene.environmentIntensity = 0.9;
+      pmrem.dispose();
     } else {
       scene.add(new THREE.AmbientLight(0xffffff, 0.12));
 
@@ -306,6 +341,33 @@ async function renderInPage(source, params, mode, safeThreeConfig, safeThreeBund
     if (!root || !root.isObject3D) {
       return { error: 'generate() did not return an Object3D' };
     }
+
+    // Lighting is renderer-controlled, so a material must not be able to opt
+    // out of it. Three.js skips `scene.environment` for any material that sets
+    // its own `envMap` (WebGLRenderer only forwards `scene.environmentIntensity`
+    // when `material.envMap === null`), and a raw non-PMREM texture is not
+    // valid IBL input — so assigning one silently disables image-based
+    // lighting and returns metals to the black-mirror look this mode fixes.
+    // Clearing it keeps every material on the renderer's environment.
+    // Three.js invokes these hooks with the live renderer, scene, and camera
+    // as arguments — a reference the safeTHREE Proxy cannot filter, since it
+    // is handed in rather than reached through the THREE namespace. A scene
+    // that sets one can rewrite `toneMappingExposure` (or any other renderer
+    // state) mid-frame. Nothing in the object model needs them for a static
+    // single-frame render, so drop them.
+    root.traverse((obj) => {
+      if (obj.onBeforeRender) obj.onBeforeRender = () => {};
+      if (obj.onAfterRender) obj.onAfterRender = () => {};
+
+      const materials = Array.isArray(obj.material) ? obj.material : [obj.material];
+      for (const material of materials) {
+        if (material && material.envMap) {
+          material.envMap = null;
+          material.needsUpdate = true;
+        }
+      }
+    });
+
     scene.add(root);
 
     function sphericalToCartesian(thetaDeg, phiDeg, radius) {
