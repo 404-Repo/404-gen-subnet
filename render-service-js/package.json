@@ -1,6 +1,6 @@
 {
   "name": "render-service-js",
-  "version": "0.4.7",
+  "version": "0.4.8",
   "description": "Renders miner Three.js submissions to multi-view PNG previews via headless Chromium with GPU WebGL.",
   "type": "module",
   "main": "src/server.js",

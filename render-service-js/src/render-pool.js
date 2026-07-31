@@ -184,6 +184,13 @@ async function renderInPage(source, params, mode, safeThreeConfig, safeThreeBund
       // (RoomEnvironment-style shell + panels), so metals reflect something
       // and dielectrics pick up soft ambient, at levels calibrated to keep
       // non-metal luminance close to the 'follow' baseline.
+      // Exposure is metered, not eyeballed: a photographic 18% grey card (a
+      // matte sphere at 0.18 linear reflectance) must land near 118 sRGB —
+      // middle grey — so neither dark nor pale submissions are systematically
+      // mis-scored. Scoped to this branch so `follow` and `studio` output
+      // stays bit-for-bit what it was.
+      renderer.toneMappingExposure = 1.32;
+
       followLight = new THREE.DirectionalLight(0xffffff, 1.1);
       scene.add(followLight);
 
