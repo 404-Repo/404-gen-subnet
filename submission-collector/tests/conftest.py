@@ -64,8 +64,6 @@ def add_config(git: MockGitHubClient, **kwargs) -> CompetitionConfig:
         last_competition_date="2025-12-31",
         generation_stage_minutes=180,
         win_margin=0.05,
-        weight_decay=0.1,
-        weight_floor=0.1,
         prompts_per_round=3,
         carryover_prompts=0,
     )

@@ -81,15 +81,17 @@ async def finalize_round(
     if current_leader is None:
         raise RuntimeError("Leader state is unexpectedly empty - competition must have a leader")
 
-    leader_transition = _compute_leader_transition(
+    new_leader = _find_new_leader(
         round_result=round_result,
         current_leader=current_leader,
-        config=config,
         effective_block=next_round_start_block,
     )
 
-    if leader_transition:
-        leader_state.transitions.append(leader_transition)
+    if new_leader:
+        logger.info(f"New leader: {new_leader.hotkey} ({new_leader.repo}@{new_leader.commit[:8]})")
+        leader_state.transitions.append(new_leader)
+    else:
+        logger.info("Leader defended.")
 
     next_stage = _determine_next_stage(next_round_schedule, settings.pause_on_stage_end)
     next_round = state.current_round if next_round_schedule is None else state.current_round + 1
@@ -99,18 +101,17 @@ async def finalize_round(
         next_round=next_round,
         next_stage=next_stage,
         leader_state=leader_state,
-        leader_changed=leader_transition is not None,
+        leader_changed=new_leader is not None,
         next_round_schedule=next_round_schedule,
         latest_commit_sha=ref,
         next_stage_eta=next_round_start if next_round_schedule else None,
         branch=settings.github_branch,
     )
 
-    is_new_leader = leader_transition is not None and leader_transition.commit != current_leader.commit
-    if is_new_leader:
+    if new_leader:
         await discord.notify_leader_change(
             old_leader=current_leader,
-            new_leader=leader_transition,  # type: ignore[arg-type]
+            new_leader=new_leader,
             round_num=state.current_round,
         )
     if next_round_schedule is None:
@@ -208,37 +209,6 @@ def _determine_next_stage(next_round_schedule: RoundSchedule | None, pause_on_st
     if next_round_schedule is None:
         return RoundStage.FINISHED
     return RoundStage.PAUSED if pause_on_stage_end else RoundStage.OPEN
-
-
-def _compute_leader_transition(
-    round_result: RoundResult,
-    current_leader: LeaderEntry,
-    config: CompetitionConfig,
-    effective_block: int,
-) -> LeaderEntry | None:
-    """
-    Compute the leader transition entry for this round.
-
-    Returns a new LeaderEntry to append to transitions, or None if no transition is needed.
-    """
-    new_leader = _find_new_leader(round_result, current_leader, effective_block)
-    if new_leader:
-        logger.info(f"New leader: {new_leader.hotkey} ({new_leader.repo}@{new_leader.commit[:8]})")
-        return new_leader
-
-    if current_leader.weight <= config.weight_floor:
-        logger.info("Leader defended. Weight already at floor.")
-        return None
-
-    decayed_weight = round(max(config.weight_floor, current_leader.weight - config.weight_decay), 10)
-    logger.info(f"Leader defended. Weight decayed to {decayed_weight}")
-
-    return current_leader.model_copy(
-        update={
-            "weight": decayed_weight,
-            "effective_block": effective_block,
-        }
-    )
 
 
 def _find_new_leader(
