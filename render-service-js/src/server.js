@@ -24,6 +24,20 @@ import { validationPool } from './validation-pool.js';
 
 const PORT = parseInt(process.env.PORT || '80', 10);
 
+// Every lighting mode the renderer implements. Anything else is a client bug.
+const LIGHTING_MODES = new Set(['follow', 'studio', 'neutral']);
+
+/**
+ * A request the service refuses deterministically.
+ *
+ * Reported as 422, matching how validation failures are already surfaced —
+ * NOT 400. `subnet_common.render._is_retryable` treats 400 as a transient
+ * serverless-proxy artifact and retries it, on the documented assumption that
+ * this service never legitimately emits one. A 400 here would turn a client
+ * asking for an unsupported lighting mode into a retry storm that still fails.
+ */
+class InvalidRequestError extends Error {}
+
 let ready = false;
 
 function parseQuery(urlStr) {
@@ -54,8 +68,22 @@ function parseQuery(urlStr) {
   const bgColor = url.searchParams.get('bg_color');
   if (bgColor) params.bgColor = bgColor;
 
+  // Reject unknown lighting modes instead of silently falling back to the
+  // default. Before this check an unrecognized value (a typo, or a client
+  // asking for a mode the deployed image predates) quietly rendered `studio`
+  // — the mode that crushes dark and metallic surfaces to black. A migration
+  // that flips clients to a new mode ahead of the service would have degraded
+  // every render with no error anywhere. Failing loudly makes the ordering
+  // mistake obvious in one request rather than one dataset later.
   const lighting = url.searchParams.get('lighting');
-  if (lighting === 'follow') params.lighting = 'follow';
+  if (lighting !== null) {
+    if (!LIGHTING_MODES.has(lighting)) {
+      throw new InvalidRequestError(
+        `unknown lighting '${lighting}'; expected one of: ${[...LIGHTING_MODES].join(', ')}`,
+      );
+    }
+    params.lighting = lighting;
+  }
 
   return params;
 }
@@ -205,6 +233,11 @@ const server = http.createServer(async (req, res) => {
 
     sendError(res, 404, 'not found');
   } catch (err) {
+    if (err instanceof InvalidRequestError) {
+      console.log(`[request] invalid request: ${err.message}`);
+      sendError(res, 422, err.message);
+      return;
+    }
     console.error('Request error:', err);
     sendError(res, 500, err.message || 'internal server error');
   }

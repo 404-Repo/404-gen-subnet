@@ -139,6 +139,28 @@ function wrapWithProxy(backing, { contextLabel, disallowedKnown, allowedKeys }) 
         // comment above for rationale.
         throw new TypeError(`${contextLabel}.${prop} is forbidden`);
       }
+      if (allowedKeys.has(prop)) {
+        // Explicitly allowlisted, but absent from the Three.js build we pin —
+        // e.g. `LuminanceFormat`, a WebGL1-era constant dropped upstream when
+        // Three.js went WebGL2-only. `buildAllowedBackingObject` skips such
+        // names, so without this branch they would fall through to the
+        // "not recognized" throw below.
+        //
+        // Before the runtime Proxy existed, reading one of these simply
+        // yielded `undefined` and execution continued (typically leaving a
+        // default in place: passing it as `DataTexture`'s `format` argument
+        // falls back to `RGBAFormat`). Throwing instead turns scenes that
+        // rendered for years into hard failures, so we preserve the old
+        // semantics here. This is not a hole in the boundary: the name had to
+        // be on the allowlist to get here, and an allowlisted-but-missing
+        // member exposes no capability — there is nothing to return.
+        //
+        // The honest fix is upstream: prune allowlist entries that no longer
+        // exist in the pinned Three.js so the static analyzer rejects them at
+        // submission time, with a clear message, instead of letting authors
+        // discover the no-op at render time.
+        return undefined;
+      }
       throw new TypeError(`${contextLabel}.${prop} is not a recognized Three.js API`);
     },
     has(target, prop) {

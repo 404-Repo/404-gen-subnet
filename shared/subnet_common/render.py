@@ -59,8 +59,20 @@ GRAY_BG = "808080"
 _BG_LABELS = {WHITE_BG: "white", GRAY_BG: "gray"}
 
 # Camera params are fixed across all views and both bg modes — see api_specification.md.
+#
+# `neutral` (since render-service 0.4.7) lights the scene with a camera-follow key
+# plus a real luminous environment map. `follow` had no environment at all, so
+# metallic materials — which show their colour only by reflecting incoming light —
+# reflected a void and rendered as black silhouettes. That hid the geometry from
+# both human voters and the judge on every metal submission. `studio` was worse
+# still: its environment map is baked from a scene containing only a light, and
+# lights are not visible geometry, so the cubemap was black too.
+#
+# DEPLOYMENT ORDER: render-service 0.4.7+ must be live before this value ships.
+# Older images do not know `neutral`; they now reject it with 422 rather than
+# silently falling back to `studio`, so a wrong-order rollout fails loudly.
 _RENDER_DEFAULTS = {
-    "lighting": "follow",
+    "lighting": "neutral",
     "img_size": "1024",
     "cam_radius": "2.0",
     "cam_fov_deg": "49.1",
