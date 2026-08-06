@@ -51,7 +51,13 @@ async def run_collection_iteration(
     settings: Settings, discord: DiscordNotifier = NULL_DISCORD_NOTIFIER
 ) -> datetime | None:
     """Entry point: creates I/O dependencies and delegates to collection_iteration."""
-    async with bt.AsyncSubtensor(network=settings.network) as subtensor:
+    subtensor = bt.AsyncSubtensor(network=settings.network)
+    # Initialize before `async with`: __aenter__ connects without a timeout, and a
+    # transient DNS failure deadlocks connect() forever inside async-substrate-interface
+    # (present in 2.2.1 and earlier). initialize() is idempotent, so __aenter__ re-calling
+    # it is a no-op.
+    await asyncio.wait_for(subtensor.initialize(), timeout=settings.subtensor_timeout_seconds)
+    async with subtensor:
 
         async def get_block() -> int:
             block: int = await asyncio.wait_for(
