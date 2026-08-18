@@ -189,6 +189,13 @@ async def test_initial_deploy_retry_succeeds(settings: Settings) -> None:
     assert result.outcome == GenerationReportOutcome.COMPLETED
     assert gpu_manager.get_healthy_pod.call_count == 2
 
+    # Initial warmup runs under the initial-attempts budget, not the replacement budget:
+    # attempt 1 of 2 has one retry behind it, attempt 2 has none. Reporting the untouched
+    # replacement budget here would promise the pod a replacement it can't get.
+    deploy_calls = gpu_manager.get_healthy_pod.call_args_list
+    assert deploy_calls[0].kwargs["replacements_remaining"] == 1
+    assert deploy_calls[1].kwargs["replacements_remaining"] == 0
+
 
 async def test_stop_during_warmup_cleans_up(settings: Settings) -> None:
     """When stop fires during pod warmup, returns None and cleans up."""
@@ -281,6 +288,8 @@ async def test_deploys_on_configured_hardware(settings: Settings) -> None:
 
 async def test_replacement_on_crash(settings: Settings) -> None:
     """When the pod signals unreachable mid-batch, a replacement is deployed and work continues."""
+    settings.max_initial_deploy_attempts = 2
+    settings.max_replacements = 4
     prompts = [make_prompt("p1")]
 
     mock_git = MockGitHubClient(files=_make_git_files(submitted={"p1": done_result()}))
@@ -307,6 +316,16 @@ async def test_replacement_on_crash(settings: Settings) -> None:
     assert result.outcome == GenerationReportOutcome.COMPLETED
     assert gpu_manager.get_healthy_pod.call_count == 2
     assert gpu_manager.delete_container.call_count == 2
+
+    # The initial warmup reports from the initial-attempts budget (1 retry behind attempt 1);
+    # the replacement warmup reports from the replacement budget, minus the one just consumed.
+    deploy_calls = gpu_manager.get_healthy_pod.call_args_list
+    assert deploy_calls[0].kwargs["replacements_remaining"] == 1
+    assert deploy_calls[1].kwargs["replacements_remaining"] == 3
+    # Working sessions report the replacement budget: full for pod 0, one less for pod 1.
+    session_calls = MockSession.call_args_list
+    assert session_calls[0].kwargs["remaining_replacements"] == 4
+    assert session_calls[1].kwargs["remaining_replacements"] == 3
 
 
 async def test_replacement_on_pod_request(settings: Settings) -> None:
