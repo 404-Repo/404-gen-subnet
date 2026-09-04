@@ -289,7 +289,11 @@ class MinerRunner:
             if self._stop.should_stop:
                 return None
             pod_index = attempt - 1
-            deployed = await self._deploy_and_wait_healthy(f"{self._miner_prefix}-{pod_index}", attempt_index=pod_index)
+            deployed = await self._deploy_and_wait_healthy(
+                f"{self._miner_prefix}-{pod_index}",
+                attempt_index=pod_index,
+                replacements_remaining=max_attempts - attempt,
+            )
             if deployed is not None:
                 return pod_index, deployed
             if self._stop.should_stop:
@@ -307,7 +311,11 @@ class MinerRunner:
         """
         pod_index = start_index
         while not self._stop.should_stop:
-            deployed = await self._deploy_and_wait_healthy(f"{self._miner_prefix}-{pod_index}", attempt_index=pod_index)
+            deployed = await self._deploy_and_wait_healthy(
+                f"{self._miner_prefix}-{pod_index}",
+                attempt_index=pod_index,
+                replacements_remaining=self._settings.max_replacements - self._replacements_used,
+            )
             if deployed is not None:
                 return pod_index, deployed
             if self._stop.should_stop:
@@ -437,12 +445,18 @@ class MinerRunner:
             return _Verdict.PARTIAL
         return _Verdict.EARLY_STOP
 
-    async def _deploy_and_wait_healthy(self, pod_id: str, attempt_index: int) -> DeployedContainer | None:
+    async def _deploy_and_wait_healthy(
+        self, pod_id: str, attempt_index: int, replacements_remaining: int
+    ) -> DeployedContainer | None:
         """Deploy a pod and wait for it to reach `/status=ready`.
 
         `attempt_index` drives provider rotation — every successive deploy attempt for
         this miner starts the round-robin at the next provider, so after a working pod
         on provider A (attempt N), the replacement attempt (N+1) tries provider B first.
+
+        `replacements_remaining` is supplied by the caller because initial and replacement
+        deploys run under different budgets: a warmup failure here burns an initial attempt
+        for `_warmup_initial_pod` but a replacement for `_deploy_next_pod`.
         """
         logger.debug(f"{pod_id}: deploying")
 
@@ -452,7 +466,7 @@ class MinerRunner:
             gpu_type=self._gpu_type,
             gpu_count=self._gpu_count,
             stop=self._stop,
-            replacements_remaining=self._settings.max_replacements - self._replacements_used,
+            replacements_remaining=replacements_remaining,
             start_index=attempt_index,
         )
 
