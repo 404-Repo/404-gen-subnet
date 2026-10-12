@@ -1,0 +1,329 @@
+"""Real TLS + early native proof over WebSockets; no OpenAI calls."""
+
+from __future__ import annotations
+
+import json
+import socket
+import ssl
+import subprocess
+import time
+import uuid
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+from typing import cast
+
+import httpx
+import pytest
+from bittensor_wallet import Keypair
+from conftest import MemoryStore, certificates, connected_channels
+from witness_client import WitnessClient, WitnessConfig, WitnessError
+from witness_client.response import completed_response, http_body
+from witness_client.transport import exchange
+from witness_client.types import EarlyDisclosure, HandshakeDisclosure
+
+from identity import Provider, miner_prefix, signed_exchange
+from storage import json_bytes
+from worker import PROVIDERS, relay
+
+WITNESS = Path(__file__).resolve().parents[2] / "verifier"
+
+
+class MinerLeft(Exception):
+    pass
+
+
+@pytest.mark.parametrize(
+    "abandon,usage_known,provider_status,terminal",
+    [
+        (False, True, 200, "completed"),
+        (True, True, 200, "completed"),
+        (False, False, 200, "completed"),
+        (False, False, 400, "failed"),
+        (False, False, 404, "failed"),
+        (False, False, 401, "failed"),
+        (False, False, 403, "failed"),
+        (True, False, 429, "failed"),
+        (False, False, 500, "failed"),
+        (False, True, 200, "failed"),
+        (False, True, 200, "incomplete"),
+    ],
+)
+@pytest.mark.parametrize("provider_name", ["api", "codex"])
+def test_real_tls_gate_records_large_exchange_even_when_miner_leaves(
+    tmp_path: Path,
+    abandon: bool,
+    usage_known: bool,
+    provider_status: int,
+    terminal: str,
+    provider_name: Provider,
+    identity: tuple[Keypair, str],
+) -> None:
+    hotkey, _ = identity
+    certificates(tmp_path)
+    directory = tmp_path / "witness"
+    directory.mkdir()
+    (directory / "ca.pem").write_bytes((tmp_path / "ca.pem").read_bytes())
+    store = MemoryStore()
+    identifier = str(uuid.uuid4())
+    group = miner_prefix("1", hotkey.ss58_address)
+    prefix_key = f"{group}/{identifier}"
+    store.put(prefix_key + "/status.json", b'{"status":"running"}')
+    credential = "fixture-" + "a" * 80
+    path = PROVIDERS[provider_name][1]
+    body = json_bytes({"model": "fixture", "input": "x" * (1024 * 1024)})
+    text = "// fixture\n" + "y" * (1024 * 1024)
+    response_body = (
+        "data: "
+        + json.dumps(
+            {
+                "type": f"response.{terminal}",
+                "response": {
+                    "status": terminal,
+                    "output": [
+                        {
+                            "type": "message",
+                            "content": [{"type": "output_text", "text": text}],
+                        }
+                    ],
+                    "usage": (
+                        {"input_tokens": 123, "output_tokens": 456, "total_tokens": 579}
+                        if usage_known
+                        else None
+                    ),
+                },
+            }
+        )
+        + "\n\n"
+    ).encode()
+    if provider_status != 200:
+        response_body = json_bytes({"error": {"message": "Fixture provider rejection"}})
+    response = (
+        f"HTTP/1.1 {provider_status} Fixture\r\nContent-Length: {len(response_body)}\r\nConnection: close\r\n\r\n".encode()
+        + response_body
+    )
+    prefix = (
+        f"POST {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Length: {len(body)}\r\nContent-Type: application/json\r\nAccept: text/event-stream\r\nAuthorization: Bearer "
+    ).encode()
+    suffix = (
+        b"\r\n\r\n"
+        if provider_name == "api"
+        else b"\r\nChatGPT-Account-Id: abc123\r\n\r\n"
+    ) + body
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.minimum_version = context.maximum_version = ssl.TLSVersion.TLSv1_3
+    context.load_cert_chain(tmp_path / "leaf.pem", tmp_path / "key.pem")
+
+    def verify(mode: str, directory: Path) -> dict[str, object]:
+        if (
+            mode == "handshake"
+            and not abandon
+            and usage_known
+            and terminal == "completed"
+        ):
+            wrong_provider = "codex" if provider_name == "api" else "api"
+            rejected = subprocess.run(
+                [
+                    "node",
+                    str(Path(__file__).with_name("verify-fixture.mjs")),
+                    mode,
+                    str(directory),
+                    str(WITNESS / "params"),
+                    wrong_provider,
+                ],
+                capture_output=True,
+                timeout=180,
+                check=False,
+            )
+            assert rejected.returncode != 0
+            assert b"Invalid HEAD probe" in rejected.stderr
+        result = subprocess.run(
+            [
+                "node",
+                str(Path(__file__).with_name("verify-fixture.mjs")),
+                mode,
+                str(directory),
+                str(WITNESS / "params"),
+                provider_name,
+            ],
+            capture_output=True,
+            timeout=180,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr.decode()
+        return cast(dict[str, object], json.loads(result.stdout))
+
+    def evidence(request: httpx.Request) -> httpx.Response:
+        route = f"/exchanges/{identifier}/"
+        assert request.url.path.startswith(route)
+        assert "authorization" not in request.headers
+        assert request.headers["x-bittensor-hotkey"] == hotkey.ss58_address
+        assert request.headers["x-bittensor-receiver"] == "404-witness"
+        key = prefix_key + "/" + request.url.path.removeprefix(route)
+        assert request.method == "GET"
+        data = store.get(key)
+        return (
+            httpx.Response(200, content=data)
+            if data is not None
+            else httpx.Response(404, json={"error": "object_not_ready"})
+        )
+
+    config: WitnessConfig = {
+        "witness_url": "https://witness.test",
+        "proof_parameters": str(WITNESS / "params"),
+        "state_directory": str(tmp_path / "client"),
+    }
+    with (
+        WitnessClient(
+            config,
+            openai_api_key=credential if provider_name == "api" else None,
+            subscription="codex" if provider_name == "codex" else None,
+            hotkey=hotkey,
+            delivery_timeout=180,
+        ) as client,
+        httpx.Client(
+            base_url=client._http.base_url, transport=httpx.MockTransport(evidence)
+        ) as http,
+        socket.socket() as server,
+        connected_channels(identifier) as (tunnel, channel),
+    ):
+        client._gateway.http = http
+        (client._state / identifier).mkdir(mode=0o700)
+        (client._state / identifier / "job.json").write_bytes(
+            json_bytes(
+                signed_exchange(
+                    hotkey, identifier, int(time.time()) + 180, provider=provider_name
+                )
+            )
+        )
+        server.bind(("127.0.0.1", 0))
+        server.listen()
+
+        def provider() -> bytes:
+            with context.wrap_socket(
+                server.accept()[0], server_side=True
+            ) as connection:
+                connection.settimeout(90)
+                probe = bytearray()
+                while b"\r\n\r\n" not in probe:
+                    part = connection.recv(65536)
+                    if not part:
+                        raise RuntimeError("Incomplete fixture probe")
+                    probe.extend(part)
+                assert (
+                    probe
+                    == f"HEAD {path} HTTP/1.1\r\nHost: localhost\r\nConnection: keep-alive\r\n\r\n".encode()
+                )
+                assert credential.encode() not in probe
+                assert store.get(prefix_key + "/authorization.json") is None
+                connection.sendall(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: keep-alive\r\n\r\n"
+                )
+                request = bytearray()
+                length = len(prefix) + len(credential) + len(suffix)
+                while len(request) < length:
+                    part = connection.recv(65536)
+                    if not part:
+                        raise RuntimeError("Incomplete fixture request")
+                    request.extend(part)
+                assert store.get(prefix_key + "/authorization.json") is not None
+                assert store.get(prefix_key + "/request.json") == body
+                connection.sendall(response)
+                return bytes(request)
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            actual_request = executor.submit(provider)
+
+            def witness() -> dict[str, object]:
+                try:
+                    return relay(
+                        store,
+                        prefix_key,
+                        time.monotonic() + 180,
+                        directory,
+                        verify,
+                        channel,
+                        round_number="1",
+                        hotkey=hotkey.ss58_address,
+                        host="127.0.0.1",
+                        port=server.getsockname()[1],
+                    )
+                except Exception:
+                    store.put(prefix_key + "/status.json", b'{"status":"failed"}')
+                    raise
+
+            observed = executor.submit(witness)
+
+            def handshake(disclosure: HandshakeDisclosure) -> None:
+                tunnel.flush()
+                client._handshake(tunnel, disclosure)
+
+            def authorize(disclosure: EarlyDisclosure) -> None:
+                tunnel.flush()
+                client._authorize(tunnel, disclosure)
+                if abandon:
+                    tunnel.close()
+                    raise MinerLeft
+
+            try:
+                raw = exchange(
+                    tunnel,
+                    "localhost",
+                    [(False, prefix), (True, credential.encode()), (False, suffix)],
+                    handshake=handshake,
+                    authorize=authorize,
+                    ca_file=str(tmp_path / "ca.pem"),
+                    timeout=180,
+                )
+                assert not abandon
+                if provider_status == 200:
+                    assert http_body(raw) == response_body
+                else:
+                    with pytest.raises(WitnessError) as failure:
+                        http_body(raw)
+                    assert failure.value.status_code == provider_status
+            except MinerLeft:
+                assert abandon
+            finally:
+                tunnel.close()
+            metadata = observed.result(timeout=90)
+            assert client._gateway.response(identifier) == response_body
+            assert (
+                actual_request.result(timeout=10)
+                == prefix + credential.encode() + suffix
+            )
+    if provider_status == 200 and terminal == "completed":
+        assert (
+            completed_response(store.objects[prefix_key + "/response.sse"])[0] == text
+        )
+    assert store.objects[prefix_key + "/request.json"] == body
+    manifest = json.loads(store.objects[prefix_key + "/manifest.json"])
+    assert manifest["round"] == "1"
+    assert manifest["hotkey"] == hotkey.ss58_address
+    assert manifest["exchange_id"] == identifier
+    assert manifest["provider_status"] == provider_status
+    assert manifest["provider_rejected"] is (
+        provider_status in (400, 401, 403, 404, 429)
+    )
+    if usage_known:
+        assert metadata["usage"] == {
+            "input_tokens": 123,
+            "output_tokens": 456,
+            "total_tokens": 579,
+        }
+    elif provider_status in (400, 401, 403, 404, 429):
+        assert metadata["usage"] is None
+        assert (
+            json.loads(store.objects[prefix_key + "/status.json"])["usage_state"]
+            == "rejected"
+        )
+    else:
+        assert metadata["usage"] is None
+    assert all(credential.encode() not in value for value in store.objects.values())
+    assert not any(
+        "/transport/" in key
+        or key.endswith(("/active.json", "/started.json", "/index.json"))
+        for key in store.objects
+    )
+    assert store.writes.index(prefix_key + "/authorization.json") < store.writes.index(
+        prefix_key + "/manifest.json"
+    )

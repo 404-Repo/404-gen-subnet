@@ -1,0 +1,23 @@
+{
+  "name": "404-witness-gateway",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "check": "\"${PYTHON:-python3}\" -m mypy",
+    "test": "npm run build && node --test test/*.test.mjs",
+    "dev": "npm run build && wrangler dev"
+  },
+  "dependencies": {
+    "@polkadot/util-crypto": "14.0.3",
+    "@polkadot/wasm-crypto": "7.5.4",
+    "@polkadot/wasm-crypto-wasm": "7.5.4"
+  },
+  "devDependencies": {
+    "esbuild": "0.25.10",
+    "miniflare": "4.20251011.1",
+    "wrangler": "4.45.0",
+    "ws": "8.18.0"
+  },
+  "engines": {"node": ">=22.13"}
+}

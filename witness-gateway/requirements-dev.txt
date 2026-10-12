@@ -1,0 +1,5 @@
+-r requirements.txt
+mypy==2.4.0
+workers-runtime-sdk==0.1.0
+pyodide-py==0.28.3
+ruff==0.14.0

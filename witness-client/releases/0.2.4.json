@@ -1,0 +1,53 @@
+{
+  "distribution": "404-witness-client",
+  "import_package": "witness_client",
+  "version": "0.2.4",
+  "status": "built and locally verified; not published",
+  "platform": "Linux x86_64, Debian 12 (glibc 2.36+), Python 3.11+",
+  "proof_key_sha256": "6478059e4ad0d39e8c157c76cea9c6dd777c2ab5143cf8694876094facf39b16",
+  "proof_parameters_url": "https://subnet404.xyz/witness-client/releases/0.2.0/witness-proof-parameters-v1.tar.gz",
+  "files": {
+    "witness-proof-parameters-v1.tar.gz": {
+      "sha256": "c5e2264bdf3fefd50ec20d3384c388e8dc709a0e7968ee840f32fbf1386fc244",
+      "bytes": 37902483
+    },
+    "404_witness_client-0.2.4-py3-none-linux_x86_64.whl": {
+      "sha256": "dd1ab66c4e0a8ae253b7d040b3e50495daccd92eaf32b8c23e643e506998fbe5",
+      "bytes": 7362288
+    }
+  },
+  "validation": {
+    "clean_linux_install": {
+      "distribution": "404-witness-client",
+      "version": "0.2.4",
+      "import": "witness_client",
+      "installed_package_import": true,
+      "old_distribution_absent": true,
+      "native_library_load": "passed"
+    },
+    "linux_installed_wheel_focused_tests": {
+      "passed": 48,
+      "seconds": 4.03,
+      "network": "disabled; local HTTP mocks only"
+    },
+    "strict_type_checks": "passed; 27 source files",
+    "wheel_python_sources": "17 files match source_commit byte for byte",
+    "pypi_name_check": {
+      "date": "2026-10-02",
+      "witness-client": "Existing unrelated WitnessCo project, version 0.0.1",
+      "404-witness-client": "No project listed (JSON API returned HTTP 404); name not reserved"
+    },
+    "runtime_changes_since_cloud_test": "Only the missing-native-library error message names the new distribution. Request, TLS, proof, admission, and recovery behavior are unchanged.",
+    "tagged_source_build": "Clean git archive of source_tag used the original cached build and produced the byte-identical retained wheel"
+  },
+  "previous_live_cloud_test": "results/cloud-2026-10-02.json",
+  "live_cloud_end_to_end": "Passed on source commit 8e0cf9d with the P2 fix. Not repeated for this distribution-only rename.",
+  "source_commit": "e108c75e7eab821ffdc3e6b232e5229308052621",
+  "native_library_sha256": "a6a83d7ac21c0a7508cb220aa0cd5dbf49c6e8051946ff6b5f4bf3f0bc22a89e",
+  "native_library_matches_0_2_0": true,
+  "previous_release": "releases/0.2.3.json",
+  "supported_protocols": [
+    2
+  ],
+  "source_tag": "witness-client-v0.2.4"
+}

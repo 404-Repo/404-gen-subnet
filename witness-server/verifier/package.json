@@ -1,0 +1,16 @@
+{
+  "name": "404-witness-verifier",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test --test-concurrency=1 *.test.mjs",
+    "test:proof": "go -C ../../witness-client/native test ./...",
+    "build:proof": "go -C ../../witness-client/native build -trimpath -o privateauth ."
+  },
+  "dependencies": {
+    "@reclaimprotocol/tls": "0.1.4"
+  },
+  "engines": {
+    "node": ">=22.13"
+  }
+}

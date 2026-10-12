@@ -1,0 +1,17 @@
+[tool.mypy]
+python_version = "3.13"
+files = ["src", "client.py", "test/python_request.py", "test/live.py", "test/runpod-handler.py", "test/runtime_contract.py", "test/worker_probe.py"]
+mypy_path = ["stubs", "src", "../witness-server/worker", "../witness-client/src"]
+strict = true
+untyped_calls_exclude = ["workers"]
+
+[[tool.mypy.overrides]]
+module = ["boto3", "botocore.*", "runpod"]
+ignore_missing_imports = true
+
+[tool.ruff]
+target-version = "py313"
+line-length = 88
+
+[tool.ruff.lint.per-file-ignores]
+"test/runtime_contract.py" = ["E402"]

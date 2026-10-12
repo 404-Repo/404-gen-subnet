@@ -1,0 +1,354 @@
+{
+  "date": "2026-10-09",
+  "finished_at": "2026-10-09T19:41:05.901037+00:00",
+  "result": "passed",
+  "source": {
+    "runtime_commit": "c5a6b6fefcc8a0e1fc25b1d0fefa65f2cc56bf54",
+    "build": "Clean git archive; no uncommitted runtime files included.",
+    "installed_python_modules_match_source": 14,
+    "test_helper": "queue_live_test.py uses RuntimeError for deliberate disconnect so the transport does not reclassify the test signal.",
+    "test_helper_sha256": "4371215cb48989e4b7963fdcc57136425b24d3df727e5a0e30ce95efbd24b6b0",
+    "preexisting_gateway_edit": "Left untouched and excluded from this test."
+  },
+  "artifact": {
+    "wheel": "404_witness_client-0.2.13.dev0-py3-none-manylinux_2_34_x86_64.whl",
+    "sha256": "9d10542c01f25a1f001ec1fdd31cbce0542c2930358749e1551aff999bb98201",
+    "bytes": 8039127,
+    "published": false,
+    "platform": "Linux x86_64, Python 3.11, installed wheel in fresh Docker processes"
+  },
+  "deployment": {
+    "gateway": "https://404-witness-retest-20261005.subnet404.workers.dev",
+    "gateway_compatibility_date": "2025-10-11",
+    "initial_open_version": "5b0d6aac-7561-4064-b641-affc98fb352c",
+    "redeployed_version": "6a206184-6cc0-43f8-9c97-7715b557931a",
+    "final_closed_version": "598a4c3b-9c5f-4a8b-a49e-3e938795f127",
+    "runpod_endpoint": "6y1jev9r0zvmw0",
+    "runpod_type": "QUEUE",
+    "worker_image": "europe-docker.pkg.dev/gen-456515/docker-test/queued-witness@sha256:ef2210573c00a0b5f88fbee6fe9084b3cad0479a4c7ce8eb39df0d2e9caa39b7",
+    "configured_workers": {
+      "min": 0,
+      "max": 1,
+      "idleTimeout": 10
+    },
+    "round": "2026100901",
+    "proof_parameters_sha256": {
+      "circuit.bin": "451b8ebe434e1b9cee5982a46f4630d3d3647fe49c11f2ec6d88b8731617f9c7",
+      "proving.bin": "31bd198d1325f526f5f1add2272bf73ffaff23c9e2d0ac7463c0f5e88c8701e7",
+      "verifying.bin": "6478059e4ad0d39e8c157c76cea9c6dd777c2ab5143cf8694876094facf39b16"
+    }
+  },
+  "checks": {
+    "installed_wheel_tests": {
+      "passed": 216,
+      "warnings": 1
+    },
+    "helper_black": "passed",
+    "helper_ruff": "passed",
+    "helper_mypy_strict": "passed",
+    "gateway_deploy_dry_run": "passed",
+    "native_verifier_and_r2_health": "passed",
+    "subscription_generation_stream_true": "passed",
+    "miner_disconnect_after_authorization": "passed",
+    "separate_process_result_recovery": "passed",
+    "public_request_response_usage_match": "passed",
+    "no_plaintext_credentials_in_evidence": "passed",
+    "authentication": {
+      "valid": 200,
+      "replay": 401,
+      "anonymous": 401,
+      "forged": 401,
+      "other_miner": 404,
+      "unregistered": 403
+    },
+    "same_request_id_deduplicated": true,
+    "second_active_request_rejected": true,
+    "retired_miner_socket_rejected": true,
+    "old_id_deduplicated_after_redeploy": true,
+    "uncached_download_after_redeploy": {
+      "exchange_id": "35dab786-3195-44f7-bbe6-7bc9342ff9d4",
+      "duplicate_job_state": "finished",
+      "downloaded_response_after_cache_removal": true,
+      "response_sha256": "4ac30ee89b0e79d6193dd53af013c0495c56ec27acc69e70829c64b7b30a58ae",
+      "same_answer_and_usage": true
+    }
+  },
+  "recovery_job_counters": {
+    "before_first_recovery": {
+      "completed": 8,
+      "failed": 0,
+      "inProgress": 0,
+      "inQueue": 0,
+      "retried": 0
+    },
+    "after_first_recovery": {
+      "completed": 8,
+      "failed": 0,
+      "inProgress": 0,
+      "inQueue": 0,
+      "retried": 0
+    },
+    "before_redeploy": {
+      "completed": 10,
+      "failed": 0,
+      "inProgress": 0,
+      "inQueue": 0,
+      "retried": 0
+    },
+    "after_redeploy_and_two_recoveries": {
+      "completed": 10,
+      "failed": 0,
+      "inProgress": 0,
+      "inQueue": 0,
+      "retried": 0
+    }
+  },
+  "replacement": {
+    "stopped_runpod_job": "5d4ddb09-6827-4c31-ae8d-c6a9f396187c-e1",
+    "runpod_stop_result": "CANCELLED",
+    "no_paid_request_before_stop": {
+      "exchange_id": "2db6463e-485c-4862-a774-6176934838a9",
+      "objects": [
+        "session.json",
+        "status.json"
+      ],
+      "cancelled_before_authorization": true,
+      "no_provider_request_recorded": true
+    },
+    "exchange_id": "2db6463e-485c-4862-a774-6176934838a9",
+    "before": {
+      "round": "2026100901",
+      "hotkey": "5HH88xJdwAfTqreADaUtPgTTCMLRCggW1w5n5jxrRZGhQRAX",
+      "exchange_id": "2db6463e-485c-4862-a774-6176934838a9",
+      "queue_state": "connected",
+      "deadline": 1791581257
+    },
+    "after": {
+      "round": "2026100901",
+      "hotkey": "5HH88xJdwAfTqreADaUtPgTTCMLRCggW1w5n5jxrRZGhQRAX",
+      "exchange_id": "2db6463e-485c-4862-a774-6176934838a9",
+      "queue_state": "retired",
+      "deadline": 1791581257
+    },
+    "stale_miner_rejected": true,
+    "retired_id_not_requeued": true,
+    "replacement_exchange_id": "a7a6f5f7-0f22-4374-9464-97bea34ac07f",
+    "note": "RunPod cancellation still showed connected at the gateway. Explicit client.release() retired the allocation before replacement; this is not a claim of automatic crash detection."
+  },
+  "runpod_generation_jobs": [
+    {
+      "id": "f887a2f8-20fb-45a5-94c9-fcaa6c163111-e1",
+      "worker_id": "3an9kz5dhqfccv",
+      "status": "COMPLETED",
+      "delay_ms": 5782,
+      "execution_ms": 44331,
+      "exchange_id": "35dab786-3195-44f7-bbe6-7bc9342ff9d4",
+      "usage": {
+        "input_tokens": 42,
+        "output_tokens": 20,
+        "total_tokens": 62
+      }
+    },
+    {
+      "id": "fc55f6da-3706-4297-8046-1d3dd47dae70-e1",
+      "worker_id": "3an9kz5dhqfccv",
+      "status": "COMPLETED",
+      "delay_ms": 1219,
+      "execution_ms": 45247,
+      "exchange_id": "1e8b7b23-7c4f-434e-a3d2-f393fe79eef9",
+      "usage": {
+        "input_tokens": 42,
+        "output_tokens": 20,
+        "total_tokens": 62
+      }
+    },
+    {
+      "id": "ce04cbc2-ae73-4175-986f-080eb3981d54-e2",
+      "worker_id": "pl96bwr3pskf3l",
+      "status": "COMPLETED",
+      "delay_ms": 1644,
+      "execution_ms": 43590,
+      "exchange_id": "a7a6f5f7-0f22-4374-9464-97bea34ac07f",
+      "usage": {
+        "input_tokens": 42,
+        "output_tokens": 20,
+        "total_tokens": 62
+      }
+    },
+    {
+      "id": "4d912d04-b4be-4cc7-b49f-0269f4a6c90c-e2",
+      "worker_id": "pl96bwr3pskf3l",
+      "status": "COMPLETED",
+      "delay_ms": 1368,
+      "execution_ms": 43032,
+      "exchange_id": "8db6f011-7396-4d99-a5bd-7a2f0f919550",
+      "usage": {
+        "input_tokens": 42,
+        "output_tokens": 20,
+        "total_tokens": 62
+      }
+    }
+  ],
+  "exchanges": [
+    {
+      "case": "normal",
+      "exchange_id": "35dab786-3195-44f7-bbe6-7bc9342ff9d4",
+      "model": "gpt-6-astra",
+      "output_text": "const geometry = new THREE.BoxGeometry(1, 1, 1);",
+      "usage": {
+        "input_tokens": 42,
+        "output_tokens": 20,
+        "total_tokens": 62
+      },
+      "client_seconds": 65.755,
+      "recovered": false,
+      "request_sha256": "71dac6ac712793e1f84de125fd9d287df81ea67d28023e26771e2047a105aff8",
+      "response_sha256": "4ac30ee89b0e79d6193dd53af013c0495c56ec27acc69e70829c64b7b30a58ae",
+      "manifest_url": "https://subnet404.xyz/rounds/2026100901/5HH88xJdwAfTqreADaUtPgTTCMLRCggW1w5n5jxrRZGhQRAX/35dab786-3195-44f7-bbe6-7bc9342ff9d4/manifest.json",
+      "evidence_objects": {
+        "authorization.json": 599,
+        "claim.json": 3649,
+        "client.bin": 3129,
+        "handshake.json": 149,
+        "manifest.json": 605,
+        "request.json": 313,
+        "response.sse": 10304,
+        "server.bin": 18579,
+        "session.json": 285,
+        "status.json": 182
+      }
+    },
+    {
+      "case": "disconnect",
+      "exchange_id": "1e8b7b23-7c4f-434e-a3d2-f393fe79eef9",
+      "model": "gpt-6-astra",
+      "output_text": "const geometry = new THREE.BoxGeometry(1, 1, 1);",
+      "usage": {
+        "input_tokens": 42,
+        "output_tokens": 20,
+        "total_tokens": 62
+      },
+      "client_seconds": 14.878,
+      "recovered": true,
+      "request_sha256": "71dac6ac712793e1f84de125fd9d287df81ea67d28023e26771e2047a105aff8",
+      "response_sha256": "a3e6b3ee721631118c399d301d8d78175e11acf23affa4493cd8ca525280028a",
+      "manifest_url": "https://subnet404.xyz/rounds/2026100901/5HH88xJdwAfTqreADaUtPgTTCMLRCggW1w5n5jxrRZGhQRAX/1e8b7b23-7c4f-434e-a3d2-f393fe79eef9/manifest.json",
+      "evidence_objects": {
+        "authorization.json": 599,
+        "claim.json": 3653,
+        "client.bin": 3129,
+        "handshake.json": 149,
+        "manifest.json": 606,
+        "request.json": 313,
+        "response.sse": 11046,
+        "server.bin": 19181,
+        "session.json": 285,
+        "status.json": 182
+      }
+    },
+    {
+      "case": "replacement",
+      "exchange_id": "a7a6f5f7-0f22-4374-9464-97bea34ac07f",
+      "model": "gpt-6-astra",
+      "output_text": "const geometry = new THREE.BoxGeometry(1, 1, 1);",
+      "usage": {
+        "input_tokens": 42,
+        "output_tokens": 20,
+        "total_tokens": 62
+      },
+      "client_seconds": 60.227,
+      "recovered": false,
+      "request_sha256": "71dac6ac712793e1f84de125fd9d287df81ea67d28023e26771e2047a105aff8",
+      "response_sha256": "cb9c3d12bfd7705a4235b27550a34c847a994568f9297a8724a2dbb817cda3ad",
+      "manifest_url": "https://subnet404.xyz/rounds/2026100901/5HH88xJdwAfTqreADaUtPgTTCMLRCggW1w5n5jxrRZGhQRAX/a7a6f5f7-0f22-4374-9464-97bea34ac07f/manifest.json",
+      "evidence_objects": {
+        "authorization.json": 599,
+        "claim.json": 3649,
+        "client.bin": 3129,
+        "handshake.json": 149,
+        "manifest.json": 606,
+        "request.json": 313,
+        "response.sse": 11046,
+        "server.bin": 19175,
+        "session.json": 285,
+        "status.json": 182
+      }
+    },
+    {
+      "case": "disconnect-checked",
+      "exchange_id": "8db6f011-7396-4d99-a5bd-7a2f0f919550",
+      "model": "gpt-6-astra",
+      "output_text": "const geometry = new THREE.BoxGeometry(1, 1, 1);",
+      "usage": {
+        "input_tokens": 42,
+        "output_tokens": 20,
+        "total_tokens": 62
+      },
+      "client_seconds": 16.968,
+      "recovered": true,
+      "request_sha256": "71dac6ac712793e1f84de125fd9d287df81ea67d28023e26771e2047a105aff8",
+      "response_sha256": "739173647831e52174e9d213cc86eb252b8f636b0774484d9e8b3c0ab650fbaa",
+      "manifest_url": "https://subnet404.xyz/rounds/2026100901/5HH88xJdwAfTqreADaUtPgTTCMLRCggW1w5n5jxrRZGhQRAX/8db6f011-7396-4d99-a5bd-7a2f0f919550/manifest.json",
+      "evidence_objects": {
+        "authorization.json": 599,
+        "claim.json": 3649,
+        "client.bin": 3129,
+        "handshake.json": 149,
+        "manifest.json": 605,
+        "request.json": 313,
+        "response.sse": 11046,
+        "server.bin": 19178,
+        "session.json": 285,
+        "status.json": 182
+      }
+    }
+  ],
+  "total_usage": {
+    "input_tokens": 168,
+    "output_tokens": 80,
+    "total_tokens": 248
+  },
+  "test_setup_notes": [
+    "The initial container test invocation omitted the proof parameter mount. The corrected invocation passed all 216 tests.",
+    "The first disconnect injection worked, but the previous helper exited 1 because the transport wrapped ConnectionError. The helper was corrected and the live disconnect/recovery test repeated successfully.",
+    "An early recovery probe ran before the helper saved its exchange ID and raised KeyError without making a provider call. Recovery after the ID was saved passed."
+  ],
+  "scope": {
+    "membership": "Disposable hotkeys admitted through a synthetic private KV snapshot; live on-chain membership refresh was not exercised.",
+    "requests": "Four tiny subscription requests with stream=True, not an image/large-payload or 250-miner load test.",
+    "api_key_generation_tested": false,
+    "faults": "Miner disconnect, explicit RunPod job cancellation/release, and gateway redeployment. No physical pod kill or full provider outage injected.",
+    "uncertain_enqueue": "Covered by the committed local regression tests; not injected into RunPod in this cloud test.",
+    "performance": "Linux amd64 client ran under Docker emulation on macOS arm64; timings are smoke-test observations, not production latency benchmarks."
+  },
+  "observations": [
+    "A non-fatal cryptography certificate-serial deprecation warning appeared during live TLS setup.",
+    "RunPod worker-list snapshots included extra idle/initializing workers while endpoint health reported one active-capacity worker. Max-workers configuration is not proof that every listed physical worker is immediately removed."
+  ],
+  "cleanup": {
+    "round_closed": true,
+    "signed_request_after_close": 403,
+    "synthetic_membership_cleared": true,
+    "membership_keepalive_stopped": true,
+    "test_hotkeys_deleted": true,
+    "copied_subscription_login_deleted": true,
+    "public_evidence_retained": true
+  },
+  "final_runpod_health": {
+    "jobs": {
+      "completed": 10,
+      "failed": 0,
+      "inProgress": 0,
+      "inQueue": 0,
+      "retried": 0
+    },
+    "workers": {
+      "idle": 1,
+      "initializing": 0,
+      "ready": 1,
+      "running": 0,
+      "throttled": 0,
+      "unhealthy": 0
+    }
+  }
+}

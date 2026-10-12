@@ -1,0 +1,264 @@
+{
+  "date": "2026-10-05",
+  "recorded_at": "2026-10-05T20:08:31.029271+00:00",
+  "status": "passed",
+  "path": "Installed Python wheel -> Cloudflare Worker -> RunPod serverless queue -> OpenAI -> public R2 evidence",
+  "source_commit": "53578c29bd7374215247609bcef218f0502b4f81",
+  "client": {
+    "package": "404-witness-client",
+    "version": "0.2.13.dev0",
+    "platform": "Linux x86_64, Python 3.11, fresh Docker processes",
+    "artifact": {
+      "file": "404_witness_client-0.2.13.dev0-py3-none-manylinux_2_34_x86_64.whl",
+      "sha256": "d32c8bcb1bad9e310a31a6923bc22f17b91f246bc4a049cce13211c486c8583b",
+      "bytes": 8033952,
+      "matching_python_source_files": 15,
+      "native_library_sha256": "ba1d29d8c786d6558068c17687dc3280bdba9afee05e1ab3895698b5f7608b27"
+    },
+    "artifact_role": "Development retest build",
+    "installed_package_import_verified": true
+  },
+  "gateway": {
+    "name": "404-witness-retest-20261005",
+    "url": "https://404-witness-retest-20261005.subnet404.workers.dev",
+    "final_version": "1529665c-e58e-4872-b67c-773a4719ac95",
+    "deployed_worker_js_sha256": "469c9650705dd046e54c9b384a696baf52e8928b4c35dd52c68e7e033c1179b4",
+    "deployed_worker_js_matches_build": true,
+    "kv_namespace": "7f85f42a64d648ddb3a1eb16ac18edff",
+    "durable_object_namespace": "64c10c0f560b4be487e10886a0dce319",
+    "r2_bucket": "404-gen",
+    "runpod_api_key_binding": "secret_text",
+    "final_round_end": "0"
+  },
+  "membership": {
+    "kind": "Private synthetic fixture with two disposable sr25519 hotkeys",
+    "network": "finney",
+    "netuid": 17,
+    "round": "2026100501",
+    "miner_hotkey": "5EAaqj5PeFQHsayLUmdcQvghcppYdgVpgc1AUfDZwE4aRikN",
+    "refresh_stopped": true
+  },
+  "runpod": {
+    "endpoint": "6y1jev9r0zvmw0",
+    "configuration": {
+      "id": "6y1jev9r0zvmw0",
+      "name": "404-witness-retest-20261005",
+      "image": "europe-docker.pkg.dev/gen-456515/docker-test/queued-witness@sha256:31741717f45c63d5ce0325d0116badcbed75b167a8768cc5afe86276e19db5ab",
+      "type": "QUEUE",
+      "cpu": [
+        {
+          "id": "cpu3c",
+          "memory": 4,
+          "vcpuCount": 2
+        }
+      ],
+      "workers": {
+        "idleTimeout": 10,
+        "max": 1,
+        "min": 0
+      },
+      "scaling": {
+        "queueDelay": 4,
+        "type": "QUEUE_DELAY"
+      },
+      "flashboot": "FLASHBOOT",
+      "timeout": 2400000
+    },
+    "health_job": {
+      "id": "a960946d-2a92-44df-b79c-561670d5d04c-e2",
+      "status": "COMPLETED",
+      "delayTime": 365094,
+      "executionTime": 2003
+    },
+    "health_checks": {
+      "proof_key_sha256": "6478059e4ad0d39e8c157c76cea9c6dd777c2ab5143cf8694876094facf39b16",
+      "r2": "read-write-ok",
+      "receiver": "404-witness",
+      "round": "2026100501",
+      "status": "ready"
+    },
+    "exchange_jobs": {
+      "interrupted_subscription": {
+        "id": "829ee6cc-4675-4a5b-a1c5-880722caf8ad-e1",
+        "status": "COMPLETED",
+        "delayTime": 248998,
+        "executionTime": 52204,
+        "workerId": "eowcc4ihuxj1zq"
+      },
+      "api_rejection": {
+        "id": "51eda0c1-a89f-4e5b-9c30-b8122cbbdb24-e2",
+        "status": "COMPLETED",
+        "delayTime": 6285,
+        "executionTime": 31577,
+        "workerId": "6zaaf0kngn3rpn"
+      },
+      "subscription_after_api_rejection": {
+        "id": "c71a88c1-3585-4671-99e1-01d42363fef5-e1",
+        "status": "COMPLETED",
+        "delayTime": 2608,
+        "executionTime": 48854,
+        "workerId": "6zaaf0kngn3rpn"
+      }
+    },
+    "final_job_counts": {
+      "completed": 4,
+      "failed": 0,
+      "inProgress": 0,
+      "inQueue": 0,
+      "retried": 0
+    },
+    "final_reported_worker_counts": {
+      "idle": 1,
+      "initializing": 0,
+      "ready": 1,
+      "running": 0,
+      "throttled": 0,
+      "unhealthy": 0
+    },
+    "idle_observation": "One idle/ready worker remained reported. Actual scale-to-zero and idle billing were not established."
+  },
+  "exchanges": [
+    {
+      "kind": "subscription_generation_with_client_disconnect",
+      "id": "1baaa04a-2344-428f-abed-f81ca9cc00e9",
+      "model": "gpt-6-astra",
+      "output_text": "const geometry = new THREE.BoxGeometry(1, 1, 1);",
+      "usage": {
+        "input_tokens": 42,
+        "output_tokens": 20,
+        "total_tokens": 62
+      },
+      "cached_input_tokens": 0,
+      "request_sha256": "950d1e7d90f30062ea2a91da16995aee102b4b7115f1c531cac83d60ea0618fe",
+      "response_sha256": "6f6992500c6f12e68dc43e698dd634dc88368bec168116eba4a8b30363202ff2",
+      "manifest_url": "https://subnet404.xyz/rounds/2026100501/5EAaqj5PeFQHsayLUmdcQvghcppYdgVpgc1AUfDZwE4aRikN/1baaa04a-2344-428f-abed-f81ca9cc00e9/manifest.json"
+    },
+    {
+      "kind": "api_authentication_rejection",
+      "exchange_id": "9b1ed32a-5aad-4cb8-9773-b1a8f0eaa4d3",
+      "job_id": "51eda0c1-a89f-4e5b-9c30-b8122cbbdb24-e2",
+      "provider": "api",
+      "provider_status": 401,
+      "provider_code": "invalid_api_key",
+      "usage": null,
+      "usage_state": "rejected",
+      "provider_rejected": true,
+      "request_sha256": "0433f9fec03b64166d3d673bc4aae9de6a5360295681af2a68d3850a68175bf7",
+      "response_sha256": "cb819a7b6359cfc05debd901efd0be5f8cb6e0b23e0e790a6d77ba8f03788646",
+      "credential": "Deliberately invalid dummy API key",
+      "rejection_recovered_without_new_job": true,
+      "subsequent_same_miner_subscription_generation_succeeded": true
+    },
+    {
+      "kind": "subscription_generation_after_api_rejection",
+      "id": "0b0f0c70-85ad-45b1-9922-1bb71b34f829",
+      "model": "gpt-6-astra",
+      "output_text": "const geometry = new THREE.BoxGeometry(1, 1, 1);",
+      "usage": {
+        "input_tokens": 42,
+        "output_tokens": 20,
+        "total_tokens": 62
+      },
+      "cached_input_tokens": 0,
+      "request_sha256": "950d1e7d90f30062ea2a91da16995aee102b4b7115f1c531cac83d60ea0618fe",
+      "response_sha256": "1d7063a771b760f3270d38157dca5fe5ae19576079830f2d185c7080e7df26d1",
+      "manifest_url": "https://subnet404.xyz/rounds/2026100501/5EAaqj5PeFQHsayLUmdcQvghcppYdgVpgc1AUfDZwE4aRikN/0b0f0c70-85ad-45b1-9922-1bb71b34f829/manifest.json"
+    }
+  ],
+  "total_successful_generation_usage": {
+    "input_tokens": 84,
+    "output_tokens": 40,
+    "total_tokens": 124
+  },
+  "recovery": {
+    "client_disconnected_immediately_after_authorization": true,
+    "first_recovery_fresh_process_seconds": 15.27,
+    "witness_completed_capture_after_client_disconnect": true,
+    "gateway_redeployed": true,
+    "post_redeployment_uncached_recovery": {
+      "uncached_response_download": true,
+      "sha256": "6f6992500c6f12e68dc43e698dd634dc88368bec168116eba4a8b30363202ff2",
+      "fresh_process": true,
+      "seconds": 14.404,
+      "same_original_exchange": true
+    },
+    "same_admission_and_runpod_job_after_redeployment": true,
+    "no_additional_generation_for_recovery": true
+  },
+  "evidence_checks": {
+    "indexed_exchanges": 3,
+    "public_objects_checked": 61,
+    "exact_client_request_and_response_match_manifest_r2_and_cdn": true,
+    "usage_matches_provider_stream_client_manifest_and_status": true,
+    "api_rejection_claim_response_key_and_tls_capture_preserved": true,
+    "subscription_access_token_absent_from_checked_public_objects": true,
+    "active_miner_hold_absent": true
+  },
+  "gateway_checks_before_and_after_redeployment": {
+    "same_job_admission": true,
+    "duplicate_submission": true,
+    "anonymous_rejected_http": 401,
+    "signature_replay_rejected_http": 401,
+    "forged_signature_rejected_http": 401,
+    "other_registered_miner_rejected_http": 404,
+    "unregistered_rejected_http": 403,
+    "missing_provider_rejected_http": 400,
+    "missing_provider_not_allocated_http": 404,
+    "unsupported_provider_rejected_http": 400,
+    "unsupported_provider_not_allocated_http": 404,
+    "no_new_runpod_jobs": true
+  },
+  "closed_generation_phase_checks": {
+    "new_generation": {
+      "status": 403,
+      "error": "round_closed"
+    },
+    "job_status": {
+      "status": 403,
+      "error": "round_closed"
+    },
+    "exchange_status": {
+      "status": 403,
+      "error": "round_closed"
+    },
+    "response_delivery": {
+      "status": 403,
+      "error": "round_closed"
+    },
+    "upload": {
+      "status": 403,
+      "error": "round_closed"
+    }
+  },
+  "local_checks": {
+    "installed_linux_wheel_tests_passed": 140,
+    "installed_linux_wheel_seconds": 22.93,
+    "gateway_tests_passed": 21,
+    "gateway_typescript_check": "passed",
+    "gateway_mypy_check": "passed",
+    "concurrent_gateway_admission": {
+      "miners": 250,
+      "runpod_backend": "Local stub",
+      "status": "passed"
+    },
+    "worker_unit_tests_passed": 29,
+    "worker_real_tls_and_proof_tests_passed": 22,
+    "worker_container_tests_passed": 2,
+    "worker_mypy_check": "passed",
+    "verifier_checks_passed": 11,
+    "native_go_tests": "passed"
+  },
+  "scope": {
+    "live_successful_generation": "Two small Codex subscription responses",
+    "live_api_route": "Authenticated provider 401 with a dummy key",
+    "membership": "Synthetic fixture, rather than live chain registration",
+    "concurrency": "250 admissions exercised locally against a stub",
+    "recovery": "Client disconnection and gateway redeployment; in-flight worker termination was not injected"
+  },
+  "final_state": {
+    "cloud_resources": "Deployed, with the test generation phase closed",
+    "transcripts": "Retained in public R2",
+    "local_subscription_copy_deleted": true,
+    "disposable_private_hotkeys_deleted": true
+  }
+}

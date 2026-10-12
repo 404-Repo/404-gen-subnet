@@ -1,0 +1,73 @@
+{
+  "date": "2026-10-02",
+  "source_tag": "witness-client-v0.2.7",
+  "source_commit": "fabf54ce21631c2475458d2da76c9814fcbcecae",
+  "go_version": "go1.27.1",
+  "supported_release_lines": [
+    "1.27",
+    "1.26"
+  ],
+  "support_policy": "https://go.dev/doc/devel/release#policy",
+  "official_download_metadata": "https://go.dev/dl/?mode=json",
+  "linux_builder_image": "golang:1.27.1-bookworm@sha256:69a7b9788769bec032d238959b61854e9ae87f57be9029ec04e9885fabf99195",
+  "macos_sdk_archive": {
+    "filename": "go1.27.1.darwin-arm64.tar.gz",
+    "os": "darwin",
+    "arch": "arm64",
+    "version": "go1.27.1",
+    "sha256": "ee215d57e0ec269c60cc9ceca68e6bda321ba9ee5afe24f4b0988703c2d87d12",
+    "size": 68100347,
+    "kind": "archive"
+  },
+  "minimum_module_go_version": "1.27.1",
+  "docker_toolchain_selection": "GOTOOLCHAIN=local",
+  "old_toolchain_rejected": "go: go.mod requires go >= 1.27.1 (running go 1.25.7; GOTOOLCHAIN=local)",
+  "previous_wheel_library": {
+    "version": "0.2.6",
+    "sha256": "183a14fcab13899f5e0f9b3eb55aaab0646e9f3e4b7f52b40a46cad23aec5919",
+    "go_version": "go1.25.7",
+    "checked_with": "go version -m on the retained wheel library"
+  },
+  "linux_library": {
+    "sha256": "15add051c57a1e27e50499bffc0ac127b24420d76423d5240e77fea1704f994d",
+    "go_version": "go1.27.1",
+    "build_mode": "c-shared"
+  },
+  "linux_helper": {
+    "sha256": "bba874b26096cef3c98405513b3f56940e5e065dd6d34d0aafc975b06189b736",
+    "go_version": "go1.27.1",
+    "cgo_enabled": false
+  },
+  "linux_build_info": "libwitnessproof.so: go1.27.1\n\tpath\tsubnet404/privateauth\n\tmod\tsubnet404/privateauth\t(devel)\t\n\tdep\tgithub.com/bits-and-blooms/bitset\tv1.24.4\th1:95H15Og1clikBrKr/DuzMXkQzECs1M6hhoGXLwLQOZE=\n\tdep\tgithub.com/blang/semver/v4\tv4.0.0\th1:1PFHFE6yCCTv8C1TeyNNarDzntLi7wMI5i/pzqYIsAM=\n\tdep\tgithub.com/consensys/gnark\tv0.15.0\th1:MwNpcGP2PawnGR3T9AnXDQS67aY22QTNb2Go8p/1gto=\n\tdep\tgithub.com/consensys/gnark-crypto\tv0.20.1\th1:PXDUBvk8AzhvWowHLWBEAfUQcV1/aZgWIqD6eMpXmDg=\n\tdep\tgithub.com/fxamacker/cbor/v2\tv2.9.0\th1:NpKPmjDBgUfBms6tr6JZkTHtfFGcMKsw3eGcmD/sapM=\n\tdep\tgithub.com/google/pprof\tv0.0.0-20260202012954-cb029daf43ef\th1:xpF9fUHpoIrrjX24DURVKiwHcFpw19ndIs+FwTSMbno=\n\tdep\tgithub.com/mattn/go-colorable\tv0.1.14\th1:9A9LHSqF/7dyVVX6g0U9cwm9pG3kP9gSzcuIPHPsaIE=\n\tdep\tgithub.com/mattn/go-isatty\tv0.0.20\th1:xfD0iDuEKnDkl03q4limB+vH+GxLEtL/jb4xVJSWWEY=\n\tdep\tgithub.com/ronanh/intcomp\tv1.1.1\th1:+1bGV/wEBiHI0FvzS7RHgzqOpfbBJzLIxkqMJ9e6yxY=\n\tdep\tgithub.com/rs/zerolog\tv1.34.0\th1:k43nTLIwcTVQAncfCw4KZ2VY6ukYoZaBPNOE8txlOeY=\n\tdep\tgithub.com/x448/float16\tv0.8.4\th1:qLwI1I70+NjRFUR3zs1JPUCgaCXSh3SW62uAKT1mSBM=\n\tdep\tgolang.org/x/crypto\tv0.48.0\th1:/VRzVqiRSggnhY7gNRxPauEQ5Drw9haKdM0jqfcCFts=\n\tdep\tgolang.org/x/sync\tv0.19.0\th1:vV+1eWNmZ5geRlYjzm2adRgW2/mcpevXNg50YZtPCE4=\n\tdep\tgolang.org/x/sys\tv0.41.0\th1:Ivj+2Cp/ylzLiEU89QhWblYnOE9zerudt9Ftecq2C6k=\n\tbuild\t-buildmode=c-shared\n\tbuild\t-compiler=gc\n\tbuild\t-trimpath=true\n\tbuild\tCGO_ENABLED=1\n\tbuild\tGOARCH=amd64\n\tbuild\tGOOS=linux\n\tbuild\tGOAMD64=v1\nprivateauth: go1.27.1\n\tpath\tsubnet404/privateauth\n\tmod\tsubnet404/privateauth\t(devel)\t\n\tdep\tgithub.com/bits-and-blooms/bitset\tv1.24.4\th1:95H15Og1clikBrKr/DuzMXkQzECs1M6hhoGXLwLQOZE=\n\tdep\tgithub.com/blang/semver/v4\tv4.0.0\th1:1PFHFE6yCCTv8C1TeyNNarDzntLi7wMI5i/pzqYIsAM=\n\tdep\tgithub.com/consensys/gnark\tv0.15.0\th1:MwNpcGP2PawnGR3T9AnXDQS67aY22QTNb2Go8p/1gto=\n\tdep\tgithub.com/consensys/gnark-crypto\tv0.20.1\th1:PXDUBvk8AzhvWowHLWBEAfUQcV1/aZgWIqD6eMpXmDg=\n\tdep\tgithub.com/fxamacker/cbor/v2\tv2.9.0\th1:NpKPmjDBgUfBms6tr6JZkTHtfFGcMKsw3eGcmD/sapM=\n\tdep\tgithub.com/google/pprof\tv0.0.0-20260202012954-cb029daf43ef\th1:xpF9fUHpoIrrjX24DURVKiwHcFpw19ndIs+FwTSMbno=\n\tdep\tgithub.com/mattn/go-colorable\tv0.1.14\th1:9A9LHSqF/7dyVVX6g0U9cwm9pG3kP9gSzcuIPHPsaIE=\n\tdep\tgithub.com/mattn/go-isatty\tv0.0.20\th1:xfD0iDuEKnDkl03q4limB+vH+GxLEtL/jb4xVJSWWEY=\n\tdep\tgithub.com/ronanh/intcomp\tv1.1.1\th1:+1bGV/wEBiHI0FvzS7RHgzqOpfbBJzLIxkqMJ9e6yxY=\n\tdep\tgithub.com/rs/zerolog\tv1.34.0\th1:k43nTLIwcTVQAncfCw4KZ2VY6ukYoZaBPNOE8txlOeY=\n\tdep\tgithub.com/x448/float16\tv0.8.4\th1:qLwI1I70+NjRFUR3zs1JPUCgaCXSh3SW62uAKT1mSBM=\n\tdep\tgolang.org/x/crypto\tv0.48.0\th1:/VRzVqiRSggnhY7gNRxPauEQ5Drw9haKdM0jqfcCFts=\n\tdep\tgolang.org/x/sync\tv0.19.0\th1:vV+1eWNmZ5geRlYjzm2adRgW2/mcpevXNg50YZtPCE4=\n\tdep\tgolang.org/x/sys\tv0.41.0\th1:Ivj+2Cp/ylzLiEU89QhWblYnOE9zerudt9Ftecq2C6k=\n\tbuild\t-buildmode=exe\n\tbuild\t-compiler=gc\n\tbuild\t-trimpath=true\n\tbuild\tCGO_ENABLED=0\n\tbuild\tGOARCH=amd64\n\tbuild\tGOOS=linux\n\tbuild\tGOAMD64=v1\n",
+  "native_go_tests": {
+    "platform": "macOS arm64",
+    "go_version": "go1.27.1",
+    "result": "passed",
+    "seconds": 80.995
+  },
+  "macos_client_tests": {
+    "passed": 101,
+    "warnings": 2,
+    "seconds": 139.63
+  },
+  "linux_installed_wheel_tests": {
+    "passed": 101,
+    "warnings": 2,
+    "seconds": 272.73,
+    "network": "disabled; local TLS witnesses and HTTP mocks only"
+  },
+  "proof_parameters": "Unchanged published v1 set; positive proofs and negative parameter checks passed",
+  "python_dependency_audit": "results/dependencies-0.2.6.json; exact third-party versions unchanged",
+  "remaining_release_blockers": [
+    {
+      "package": "ecdsa",
+      "version": "0.19.2",
+      "id": "CVE-2024-23342",
+      "url": "https://github.com/tlsfuzzer/python-ecdsa/security/advisories/GHSA-wj6h-64fc-37mp",
+      "patched_version": null,
+      "client_relevance": "Configured secp256r1 key shares use tlslite ECDHKeyExchange and python-ecdsa for private-key generation and ECDH.",
+      "decision": "Keep public release blocked pending a separate TLS implementation fix. No suppression or automatic waiver.",
+      "demonstrated_client_attack": false
+    }
+  ]
+}
