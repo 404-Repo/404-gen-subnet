@@ -144,8 +144,10 @@ empty the variable to disable it. Regular miners continue to use the live Finney
 
 The build copies Python sources into `dist/python` and bundles only the crypto
 bridge. Wrangler uploads that Python entry point and its modules with
-`python_workers` and `python_workers_314` enabled. `requirements.txt` and `requirements-dev.txt` are for
-local diagnostics and tests; they are not Worker package manifests. The pinned
+`python_workers`, `python_workers_314`, and `python_dedicated_snapshot` enabled.
+The deployment snapshot captures Python imports and initialization so new instances
+restore the initialized application. `requirements.txt` and `requirements-dev.txt`
+are for local diagnostics and tests; they are not Worker package manifests. The pinned
 Wrangler may warn about `requirements.txt`, but does not upload those packages.
 
 Each miner request checks this cached registration list. Chain reads run on the
