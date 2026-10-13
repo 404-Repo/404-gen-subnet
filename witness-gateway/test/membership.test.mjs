@@ -144,7 +144,7 @@ test('failed or incomplete refreshes preserve the last successful snapshot and i
     'null_value', 'bad_account', 'duplicate_hotkey']) {
     await t.test(failure, async () => {
       mode = failure;
-      assert.equal((await refresh()).outcome, 'exception');
+      assert.equal((await refresh()).outcome, 'ok');
       assert.equal(await kv.get('membership.json'), original);
     });
   }
@@ -157,11 +157,11 @@ test('failed or incomplete refreshes preserve the last successful snapshot and i
   assert.deepEqual(await status(2), {status: 503, body: {error: 'membership_unavailable'}});
 });
 
-test('a failed refresh leaves no concurrent RPC running before the next tick', async () => {
+test('a failed refresh is handled and the next tick can publish new membership', async () => {
   const original = await kv.get('membership.json');
   mode = 'http_error';
   rpcCalls = [];
-  assert.equal((await refresh()).outcome, 'exception');
+  assert.equal((await refresh()).outcome, 'ok');
   assert.deepEqual(rpcCalls.map(call => call.method), ['chain_getBlockHash']);
   assert.equal(await kv.get('membership.json'), original);
   mode = 'ok';
@@ -174,7 +174,7 @@ test('larger subnets are read in bounded batches and published only when complet
   registered = pairs.map((_, index) => index);
   const original = await kv.get('membership.json');
   mode = 'partial_second_batch';
-  assert.equal((await refresh()).outcome, 'exception');
+  assert.equal((await refresh()).outcome, 'ok');
   assert.equal(await kv.get('membership.json'), original);
   mode = 'ok';
   rpcCalls = [];

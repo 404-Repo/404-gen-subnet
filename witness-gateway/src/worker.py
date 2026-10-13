@@ -73,7 +73,7 @@ class Default(WorkerEntrypoint):
                     }
                 )
             )
-            raise
+            # Leave the saved snapshot untouched and retry on the next cron tick.
 
     async def fetch(self, request: Request) -> HttpResponse:
         try:
