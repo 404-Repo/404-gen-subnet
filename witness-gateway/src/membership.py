@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import re
 from typing import cast
 
@@ -127,23 +126,20 @@ async def read_membership(env: Env) -> Membership:
     ):
         raise ValueError("Invalid membership configuration")
     rpc = SubtensorRpc(env.SUBTENSOR_RPC_URL, AbortSignal.timeout(45_000))
-    genesis, block_hash = await asyncio.gather(
-        rpc.call("chain_getBlockHash", [0]), rpc.call("chain_getFinalizedHead")
-    )
+    genesis = await rpc.call("chain_getBlockHash", [0])
     if genesis != FINNEY_GENESIS:
         raise ValueError("RPC is not connected to Finney")
+    block_hash = await rpc.call("chain_getFinalizedHead")
     hex_bytes(block_hash, 32)
     block_hash = cast(str, block_hash)
     crypto = crypto_bridge()
-    header, values = await asyncio.gather(
-        rpc.call("chain_getHeader", [block_hash]),
-        rpc.storage(
-            [
-                crypto.storageKey("Timestamp", "Now"),
-                crypto.storageKey("SubtensorModule", "SubnetworkN") + u16(netuid),
-            ],
-            block_hash,
-        ),
+    header = await rpc.call("chain_getHeader", [block_hash])
+    values = await rpc.storage(
+        [
+            crypto.storageKey("Timestamp", "Now"),
+            crypto.storageKey("SubtensorModule", "SubnetworkN") + u16(netuid),
+        ],
+        block_hash,
     )
     height = record(header).get("number")
     if not isinstance(height, str) or not re.fullmatch(r"0x[0-9a-f]+", height):
