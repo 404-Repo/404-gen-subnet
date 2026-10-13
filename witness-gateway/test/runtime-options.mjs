@@ -1,12 +1,12 @@
 import {readdirSync} from 'node:fs';
 import {resolve} from 'node:path';
 
-export function runtimeOptions() {
+export function runtimeOptions(entrypoint = 'worker.py') {
   const directory = resolve('dist/python');
   return {
     modulesRoot: directory,
-    modules: [{type: 'PythonModule', path: `${directory}/worker.py`},
-      ...readdirSync(directory).filter(file => file.endsWith('.py') && file !== 'worker.py')
+    modules: [{type: 'PythonModule', path: `${directory}/${entrypoint}`},
+      ...readdirSync(directory).filter(file => file.endsWith('.py') && file !== entrypoint)
         .map(file => ({type: 'PythonModule', path: `${directory}/${file}`})),
       {type: 'ESModule', path: `${directory}/crypto.mjs`},
       {type: 'CompiledWasm', path: `${directory}/crypto.wasm`}],

@@ -16,7 +16,6 @@ from workers import DurableObject, Request, WorkerEntrypoint
 
 from auth import UUID, authenticate, exchange_payload
 from bindings import Buffer, DurableState, HttpResponse, Socket
-from membership import refresh_membership
 from models import (
     Connection,
     Env,
@@ -58,22 +57,6 @@ def sha256(value: str) -> str:
 
 class Default(WorkerEntrypoint):
     env: Env
-
-    async def scheduled(self, controller: JsProxy, env: Env, ctx: JsProxy) -> None:
-        try:
-            await refresh_membership(self.env)
-        except Exception as error:
-            print(
-                dumps(
-                    {
-                        "event": "membership_refresh_failed",
-                        "network": self.env.NETWORK,
-                        "netuid": self.env.NETUID,
-                        "error": str(error),
-                    }
-                )
-            )
-            # Leave the saved snapshot untouched and retry on the next cron tick.
 
     async def fetch(self, request: Request) -> HttpResponse:
         try:

@@ -6,8 +6,10 @@ import re
 from typing import cast
 
 from js import AbortSignal, URL, fetch
+from pyodide.ffi import JsProxy
+from workers import WorkerEntrypoint
 
-from models import Env, Json, Membership
+from models import Json, Membership, MembershipEnv
 from runtime import (
     bounded_text,
     crypto_bridge,
@@ -117,7 +119,7 @@ class SubtensorRpc:
         return [values[key] for key in keys]
 
 
-async def read_membership(env: Env) -> Membership:
+async def read_membership(env: MembershipEnv) -> Membership:
     netuid = int(env.NETUID)
     if (
         env.NETWORK != "finney"
@@ -171,7 +173,7 @@ async def read_membership(env: Env) -> Membership:
     }
 
 
-async def refresh_membership(env: Env) -> None:
+async def refresh_membership(env: MembershipEnv) -> None:
     snapshot = await read_membership(env)
     await env.REGISTRY.put("membership.json", dumps(snapshot))
     print(
@@ -184,3 +186,25 @@ async def refresh_membership(env: Env) -> None:
             }
         )
     )
+
+
+class Default(WorkerEntrypoint):
+    env: MembershipEnv
+
+    async def scheduled(
+        self, controller: JsProxy, env: MembershipEnv, ctx: JsProxy
+    ) -> None:
+        try:
+            await refresh_membership(self.env)
+        except Exception as error:
+            print(
+                dumps(
+                    {
+                        "event": "membership_refresh_failed",
+                        "network": self.env.NETWORK,
+                        "netuid": self.env.NETUID,
+                        "error": str(error),
+                    }
+                )
+            )
+            # Leave the saved snapshot untouched and retry on the next cron tick.

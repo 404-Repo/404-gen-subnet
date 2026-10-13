@@ -77,18 +77,28 @@ async function chain(request) {
 }
 
 function options(roundEnd = Math.floor(Date.now() / 1000) + 3600) {
-  return {
-    ...runtimeOptions(),
-    durableObjects: {MINERS: {className: 'MinerAdmission', useSQLite: true}},
-    kvNamespaces: ['REGISTRY'],
-    bindings: {ROUND: '1', NETWORK: 'finney', NETUID: '17', SUBTENSOR_RPC_URL: rpcUrl,
-      ROUND_END: String(roundEnd), RUNPOD_ENDPOINT: 'unused', MAX_JOBS_PER_MINER: '2'},
-    outboundService: chain,
-  };
+  return {workers: [
+    {
+      name: 'gateway',
+      ...runtimeOptions(),
+      durableObjects: {MINERS: {className: 'MinerAdmission', useSQLite: true}},
+      kvNamespaces: {REGISTRY: 'finney-membership'},
+      bindings: {ROUND: '1', NETWORK: 'finney', NETUID: '17',
+        ROUND_END: String(roundEnd), RUNPOD_ENDPOINT: 'unused', MAX_JOBS_PER_MINER: '2'},
+      outboundService: () => { throw new Error('Gateway status must not read the chain'); },
+    },
+    {
+      name: 'membership',
+      ...runtimeOptions('membership.py'),
+      kvNamespaces: {REGISTRY: 'finney-membership'},
+      bindings: {NETWORK: 'finney', NETUID: '17', SUBTENSOR_RPC_URL: rpcUrl},
+      outboundService: chain,
+    },
+  ]};
 }
 
 async function refresh() {
-  const worker = await mf.getWorker();
+  const worker = await mf.getWorker('membership');
   return await worker.scheduled({cron: '* * * * *'});
 }
 
@@ -108,7 +118,7 @@ async function status(index) {
 before(async () => {
   mf = new Miniflare(convertV4MiniflareOptions(options()));
   await mf.ready;
-  kv = await mf.getKVNamespace('REGISTRY');
+  kv = await mf.getKVNamespace('REGISTRY', 'gateway');
 });
 after(async () => { await mf?.dispose(); });
 
@@ -185,7 +195,7 @@ test('larger subnets are read in bounded batches and published only when complet
 
 test('a refresh still runs with gateway access closed between rounds', async () => {
   await mf.setOptions(convertV4MiniflareOptions(options(0)));
-  kv = await mf.getKVNamespace('REGISTRY');
+  kv = await mf.getKVNamespace('REGISTRY', 'gateway');
   registered = [0];
   assert.equal((await refresh()).outcome, 'ok');
   assert.deepEqual(JSON.parse(await kv.get('membership.json')).hotkeys, [hotkeys[0]]);

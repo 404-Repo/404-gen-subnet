@@ -16,12 +16,11 @@
   "migrations": [{"tag": "v1", "new_sqlite_classes": ["MinerAdmission"]}],
   "kv_namespaces": [{"binding": "REGISTRY", "id": "7f85f42a64d648ddb3a1eb16ac18edff"}],
   "r2_buckets": [{"binding": "TRANSCRIPTS", "bucket_name": "404-gen"}],
-  "triggers": {"crons": ["* * * * *"]},
+  "triggers": {"crons": []},
   "vars": {
     "ROUND": "test-0",
     "NETWORK": "finney",
     "NETUID": "17",
-    "SUBTENSOR_RPC_URL": "https://entrypoint-finney.opentensor.ai",
     "ROUND_END": "4102444800",
     "RUNPOD_ENDPOINT": "6y1jev9r0zvmw0",
     "MAX_JOBS_PER_MINER": "7680",

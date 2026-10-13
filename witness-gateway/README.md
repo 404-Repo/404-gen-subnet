@@ -116,9 +116,11 @@ Node remains a build/test dependency for Wrangler and the cryptographic bundle.
 the existing Polkadot SS58, sr25519, and Substrate storage-key functions. The
 build statically imports the existing WASM binary. Routing, authentication
 policy, registration reads, allocation, alarms, and relay handling are Python.
-No additional service or cryptographic implementation is required.
+A separate Python Worker runs membership refreshes and shares the private KV
+namespace with the gateway.
 
-Set [wrangler.jsonc](wrangler.jsonc) for the deployment:
+Set [wrangler.jsonc](wrangler.jsonc) for the gateway and
+[wrangler.membership.jsonc](wrangler.membership.jsonc) for membership refreshes:
 
 The checked-in configuration uses the fixed round `test-0` and live Finney subnet
 17 membership. Its availability is independent of competition phases. RunPod
@@ -129,18 +131,29 @@ registration, only in `test-0`. It still requires valid signatures and follows
 the same membership freshness, replay, ownership, rate and job limits. Remove or
 empty the variable to disable it. Regular miners continue to use the live Finney membership snapshot.
 
-1. Bind private KV as `REGISTRY`, and the witness evidence bucket as `TRANSCRIPTS`.
+1. Bind the same private KV namespace as `REGISTRY` in both Workers. Bind the
+   witness evidence bucket as `TRANSCRIPTS` only in the gateway.
 2. Set `ROUND`, `RUNPOD_ENDPOINT`, `MAX_JOBS_PER_MINER`, and `ROUND_END` in Unix
-   seconds. Set the same round as `WITNESS_ROUND` on RunPod. Registration defaults
-   to Finney subnet 17 (`NETWORK=finney`, `NETUID=17`). `SUBTENSOR_RPC_URL` is the
-   HTTPS endpoint used for chain reads.
-3. Store the endpoint-restricted RunPod key with
+   seconds on the gateway. Set the same round as `WITNESS_ROUND` on RunPod. Both
+   Workers use Finney subnet 17 (`NETWORK=finney`, `NETUID=17`). Set the HTTPS
+   `SUBTENSOR_RPC_URL` only on the membership Worker.
+3. Store the endpoint-restricted RunPod key on the gateway with
    `npx wrangler secret put RUNPOD_API_KEY`.
-4. Keep the configured one-minute Cron Trigger enabled. The gateway reads
-   registration from a finalized Finney block and replaces the private KV
-   `membership.json` snapshot. Check for a `membership_refreshed` log before
-   opening the round. Refreshes also run while the round is closed.
-5. Run `npm run build`, then `npx wrangler deploy --dry-run` before deployment.
+4. Keep the configured one-minute Cron Trigger on the membership Worker. It
+   reads registration from a finalized Finney block and replaces the private KV
+   `membership.json` snapshot. It has no public route or RunPod credentials.
+   The gateway has no Cron Trigger. Refreshes also run while the round is closed.
+5. Run `npm run build`, then dry-run and deploy both configurations:
+
+   ```sh
+   npx wrangler deploy --config wrangler.membership.jsonc --dry-run
+   npx wrangler deploy --dry-run
+   npx wrangler deploy --config wrangler.membership.jsonc
+   npx wrangler deploy
+   ```
+
+   Check for a `membership_refreshed` log on the membership Worker before opening
+   access. Cron Trigger changes can take up to 15 minutes to propagate.
 
 The build copies Python sources into `dist/python` and bundles only the crypto
 bridge. Wrangler uploads that Python entry point and its modules with

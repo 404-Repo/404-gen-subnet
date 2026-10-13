@@ -17,7 +17,6 @@ class Env(Protocol):
     ROUND: str
     NETWORK: str
     NETUID: str
-    SUBTENSOR_RPC_URL: str
     ROUND_END: str
     RUNPOD_ENDPOINT: str
     RUNPOD_API_KEY: str
@@ -26,6 +25,13 @@ class Env(Protocol):
     MINERS: Namespace
     REGISTRY: KV
     TRANSCRIPTS: Bucket
+
+
+class MembershipEnv(Protocol):
+    NETWORK: str
+    NETUID: str
+    SUBTENSOR_RPC_URL: str
+    REGISTRY: KV
 
 
 class Exchange(TypedDict):
