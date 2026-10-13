@@ -13,6 +13,7 @@ from models import Env, Exchange, GatewayRequest, Rejection
 from runtime import bounded_bytes, crypto_bridge, dumps, loads, now_ms, safe_integer
 
 WITNESS_ID = "404-witness"
+MEMBERSHIP_MAX_AGE_MS = 48 * 60 * 60 * 1000
 UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 
 
@@ -57,7 +58,7 @@ async def registered(hotkey: str, env: Env) -> None:
         if (
             not safe_integer(value)
             or cast(int, value) > now + 30_000
-            or now - cast(int, value) > 300_000
+            or now - cast(int, value) > MEMBERSHIP_MAX_AGE_MS
         ):
             raise Rejection(503, "membership_unavailable")
     if env.ROUND == "test-0" and hotkey == getattr(env, "TEST_HOTKEY", ""):

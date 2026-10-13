@@ -13,7 +13,7 @@
   "rules": [{"type": "ESModule", "globs": ["**/*.mjs"], "fallthrough": true}],
   "observability": {"enabled": true, "traces": {"enabled": true, "head_sampling_rate": 0.1}},
   "kv_namespaces": [{"binding": "REGISTRY", "id": "7f85f42a64d648ddb3a1eb16ac18edff"}],
-  "triggers": {"crons": ["* * * * *"]},
+  "triggers": {"crons": ["*/10 * * * *"]},
   "vars": {
     "NETWORK": "finney",
     "NETUID": "17",

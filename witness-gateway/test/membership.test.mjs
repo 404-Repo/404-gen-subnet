@@ -99,7 +99,7 @@ function options(roundEnd = Math.floor(Date.now() / 1000) + 3600) {
 
 async function refresh() {
   const worker = await mf.getWorker('membership');
-  return await worker.scheduled({cron: '* * * * *'});
+  return await worker.scheduled({cron: '*/10 * * * *'});
 }
 
 async function status(index) {
@@ -160,11 +160,35 @@ test('failed or incomplete refreshes preserve the last successful snapshot and i
   }
   mode = 'ok';
   assert.equal((await status(2)).status, 404, 'A brief RPC outage keeps fresh membership usable');
-  const stale = {...JSON.parse(original), fetched_at: Date.now() - 300_001};
+  const stale = {...JSON.parse(original), fetched_at: Date.now() - 48 * 60 * 60 * 1000 - 1};
   await kv.put('membership.json', JSON.stringify(stale));
   assert.deepEqual(await status(2), {status: 503, body: {error: 'membership_unavailable'}});
-  await kv.put('membership.json', JSON.stringify({...stale, fetched_at: Date.now(), block_time: Date.now() - 300_001}));
+  await kv.put('membership.json', JSON.stringify({...stale, fetched_at: Date.now(), block_time: Date.now() - 48 * 60 * 60 * 1000 - 1}));
   assert.deepEqual(await status(2), {status: 503, body: {error: 'membership_unavailable'}});
+});
+
+test('cached membership survives refresh outages for up to 48 hours', async () => {
+  mode = 'ok';
+  await refresh();
+  const original = await kv.get('membership.json');
+  try {
+    for (const age of [10 * 60_000, 24 * 60 * 60_000, 48 * 60 * 60_000 - 60_000]) {
+      const snapshot = {...JSON.parse(original), fetched_at: Date.now() - age,
+        block_time: Date.now() - age - 1000};
+      await kv.put('membership.json', JSON.stringify(snapshot));
+      mode = 'http_error';
+      assert.equal((await refresh()).outcome, 'ok');
+      assert.deepEqual(JSON.parse(await kv.get('membership.json')), snapshot,
+        'Failed refreshes must not extend the snapshot lifetime');
+      const reads = rpcCalls.length;
+      assert.equal((await status(2)).status, 404, 'A cached member can reach the gateway');
+      assert.deepEqual(await status(3), {status: 403, body: {error: 'hotkey_not_registered'}});
+      assert.equal(rpcCalls.length, reads, 'Miner traffic must not trigger a refresh');
+    }
+  } finally {
+    mode = 'ok';
+    await kv.put('membership.json', original);
+  }
 });
 
 test('a failed refresh is handled and the next tick can publish new membership', async () => {

@@ -139,7 +139,7 @@ empty the variable to disable it. Regular miners continue to use the live Finney
    `SUBTENSOR_RPC_URL` only on the membership Worker.
 3. Store the endpoint-restricted RunPod key on the gateway with
    `npx wrangler secret put RUNPOD_API_KEY`.
-4. Keep the configured one-minute Cron Trigger on the membership Worker. It
+4. Keep the configured ten-minute Cron Trigger on the membership Worker. It
    reads registration from a finalized Finney block and replaces the private KV
    `membership.json` snapshot. It has no public route or RunPod credentials.
    The gateway has no Cron Trigger. Refreshes also run while the round is closed.
@@ -166,9 +166,11 @@ Wrangler may warn about `requirements.txt`, but does not upload those packages.
 Each miner request checks this cached registration list. Chain reads run on the
 schedule, independently of miner traffic. Registration changes become visible
 after refresh and KV propagation. A failed refresh preserves the previous
-snapshot and its timestamps and emits `membership_refresh_failed`. If either
-the snapshot or its finalized block is more than five minutes old, the gateway
-returns `membership_unavailable` until a fresh snapshot is available.
+snapshot and its timestamps and emits `membership_refresh_failed`. The gateway
+accepts the last successful snapshot for up to 48 hours. If either the snapshot
+or its finalized block exceeds that age, it returns `membership_unavailable`.
+The membership Worker only publishes a snapshot when its finalized block is at
+most five minutes old. Failed refreshes never extend the saved snapshot's lifetime.
 
 Control requests have a per-miner burst of 20 and refill at two requests per
 second. New allocations have the persistent per-round job allowance. These
@@ -226,10 +228,6 @@ the existing WASM verifier independently of application policy. Wrangler's dry
 run checks the upload bundle; it does not verify a cloud deployment. Run the
 release checklist's Cloudflare → RunPod → OpenAI validation before opening a
 generation round.
-
-Pending membership policy work is separate: a ten-minute refresh cadence,
-bounded retries, and the associated freshness tolerance. The migration retains
-the one-minute schedule, 45-second refresh limit, and five-minute freshness checks.
 
 [client.py](client.py) is a low-level queue diagnostic. Miner applications use
 `WitnessClient`. Deployment validation is tracked in the

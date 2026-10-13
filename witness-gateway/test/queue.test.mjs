@@ -118,9 +118,9 @@ test('the configured test hotkey is limited to test-0 and keeps signatures and j
     const kv = await mf.getKVNamespace('REGISTRY');
     await kv.delete('membership.json');
     assert.equal((await send(request(identity, 'GET', path))).value.error, 'membership_unavailable');
-    await membership({fetched_at: Date.now() - 300_001});
+    await membership({fetched_at: Date.now() - 48 * 60 * 60 * 1000 - 1});
     assert.equal((await send(request(identity, 'GET', path))).value.error, 'membership_unavailable');
-    await membership({block_time: Date.now() - 300_001});
+    await membership({block_time: Date.now() - 48 * 60 * 60 * 1000 - 1});
     assert.equal((await send(request(identity, 'GET', path))).value.error, 'membership_unavailable');
     await membership();
     assert.equal((await send(request(outsider, 'GET', path))).value.error, 'hotkey_not_registered');
@@ -216,7 +216,7 @@ test('tampering, stale signatures, unregistered hotkeys and stale membership nev
   const signed = request(identity, 'POST', '/run', job(identity));
   signed.options.body += ' ';
   assert.equal((await send(signed)).status, 401);
-  await membership({block_time: Date.now() - 300001});
+  await membership({block_time: Date.now() - 48 * 60 * 60 * 1000 - 1});
   assert.equal((await send(request(identity, 'POST', '/run', job(identity)))).status, 503);
   await membership({netuid: 18});
   assert.equal((await send(request(identity, 'POST', '/run', job(identity)))).status, 503);
