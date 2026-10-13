@@ -72,6 +72,24 @@ files before loading them.
 The gateway assigns each request to its configured round and queues a worker.
 The same configuration works with either API-key or subscription authentication.
 
+## Test your connection
+
+After installation and a local Codex login, run this from the repository root:
+
+```sh
+python witness-client/examples/check_witness.py --subscription --model gpt-6-astra \
+  --wallet-name my-wallet --wallet-hotkey my-hotkey \
+  --wallet-path ~/.bittensor/wallets
+```
+
+The script makes one small request through Cloudflare, RunPod and OpenAI, then
+prints the response and token usage. It uses the public witness URL and this
+checkout's proof parameters. For API-key authentication, set `OPENAI_API_KEY`
+and omit `--subscription`. Use `--help` for endpoint and timeout overrides.
+
+Failures print the error source, HTTP status, code and exchange ID. To retrieve
+a recorded result, rerun with the same arguments and `--resume EXCHANGE_ID`.
+
 ## Public playground: rendering and budget
 
 You can work on **128 3D models per miner**. For each input image, the complete
