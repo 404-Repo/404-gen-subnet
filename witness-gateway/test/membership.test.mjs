@@ -68,6 +68,7 @@ async function chain(request) {
     if (mode === 'duplicate_key') changes[1] = changes[0];
     if (mode === 'wrong_key') changes[0][0] = hotkeyPrefix + 'ffff';
     if (mode === 'null_value') changes[0][1] = null;
+    if (mode === 'trailing_hex') changes[0][1] += '\n';
     if (mode === 'bad_account') changes[0][1] = '0xab';
     if (mode === 'partial_second_batch' && keys.length === 1) changes = [];
   }
@@ -89,7 +90,7 @@ function options(roundEnd = Math.floor(Date.now() / 1000) + 3600) {
     },
     {
       name: 'membership',
-      ...runtimeOptions('membership.py'),
+      ...runtimeOptions('membership.mjs'),
       kvNamespaces: {REGISTRY: 'finney-membership'},
       bindings: {NETWORK: 'finney', NETUID: '17', SUBTENSOR_RPC_URL: rpcUrl},
       outboundService: chain,
@@ -151,7 +152,7 @@ test('failed or incomplete refreshes preserve the last successful snapshot and i
   const original = await kv.get('membership.json');
   for (const failure of ['http_error', 'rpc_error', 'bad_id', 'oversized', 'wrong_network',
     'wrong_block', 'stale', 'future', 'too_many', 'missing', 'duplicate_key', 'wrong_key',
-    'null_value', 'bad_account', 'duplicate_hotkey']) {
+    'null_value', 'bad_account', 'trailing_hex', 'duplicate_hotkey']) {
     await t.test(failure, async () => {
       mode = failure;
       assert.equal((await refresh()).outcome, 'ok');

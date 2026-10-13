@@ -561,7 +561,7 @@ test('concurrent different requests reserve one slot and identify it for release
 });
 
 test('a miner cannot send worker control messages or bypass the frame limit', async () => {
-  for (const message of ['{"type":"finished"}', Buffer.alloc(256 * 1024 + 1)]) {
+  for (const message of ['{"type":"finished"}', '{"type":["handshake"]}', Buffer.alloc(256 * 1024 + 1)]) {
     const identity = await registeredMiner(), value = job(identity);
     await send(request(identity, 'POST', '/run', value));
     const worker = await attachWorker(value);
@@ -574,7 +574,7 @@ test('a miner cannot send worker control messages or bypass the frame limit', as
   }
 });
 
-test('JavaScript records retain identity, replay protection, capability and allowance in Python', async t => {
+test('Python records retain identity, replay protection, capability and allowance in TypeScript', async t => {
   const identity = await registeredMiner(), value = job(identity);
   // Auth and nonce expiry must use the same clock across the runtime restart.
   // A minute-old fixture also catches accidentally falling back to wall time.
@@ -588,20 +588,10 @@ test('JavaScript records retain identity, replay protection, capability and allo
   await membership({fetched_at: instant, block_time: instant});
   const {signature, ...payload} = value;
   const token = 'a1'.repeat(32);
-  const fixture = `export default {fetch() {return new Response('fixture');}}
-    export class MinerAdmission {
-      constructor(ctx) {this.ctx = ctx;}
-      async alarm() {}
-      async fetch(request) {
-        const data = await request.json();
-        await this.ctx.storage.put(data.records);
-        await this.ctx.storage.setAlarm(data.deadline * 1000);
-        return new Response(this.ctx.id.toString());
-      }
-    }`;
+  const fixture = await readFile('test/legacy-state.py', 'utf8');
   await mf.dispose();
-  mf = new Miniflare(convertV4MiniflareOptions({...options(), compatibilityFlags: [],
-    modules: [{type: 'ESModule', path: resolve('dist/python/legacy-state.mjs'), contents: fixture}]}));
+  mf = new Miniflare(convertV4MiniflareOptions({...options(), compatibilityFlags: ['python_workers', 'python_workers_314', 'python_dedicated_snapshot'],
+    modules: [{type: 'PythonModule', path: resolve('dist/gateway/legacy-state.py'), contents: fixture}]}));
   await mf.ready;
   const signed = request(identity, 'POST', '/run', value);
   const namespace = await mf.getDurableObjectNamespace('MINERS');
@@ -617,13 +607,8 @@ test('JavaScript records retain identity, replay protection, capability and allo
   })});
   const originalId = await response.text();
   const configuration = options();
-  const clock = `import runtime
-def now_ms() -> int:
-    return ${instant}
-runtime.now_ms = now_ms
-from worker import Default as Default, MinerAdmission as MinerAdmission
-`;
-  configuration.modules = [{type: 'PythonModule', path: resolve('dist/python/migration_clock.py'), contents: clock}, ...configuration.modules];
+  // Freeze the new runtime at the same instant as the Python-written records.
+  configuration.modules[0].contents = (await readFile('dist/gateway/worker.mjs', 'utf8')).replaceAll('Date.now()', String(instant));
   await mf.dispose(); mf = new Miniflare(convertV4MiniflareOptions(configuration)); await mf.ready;
   const restored = await mf.getDurableObjectNamespace('MINERS');
   assert.equal(restored.idFromName(`${activeRound}/${identity.hotkey}`).toString(), originalId);
@@ -643,8 +628,8 @@ from worker import Default as Default, MinerAdmission as MinerAdmission
 
 test('hibernation restores the actual allocation sockets and their message limits', async () => {
   const configuration = options();
-  const probe = await readFile('test/worker_probe.py', 'utf8');
-  configuration.modules = [{type: 'PythonModule', path: resolve('dist/python/probe.py'), contents: probe}, ...configuration.modules];
+  const probe = await readFile('test/worker-probe.mjs', 'utf8');
+  configuration.modules = [{type: 'ESModule', path: resolve('dist/gateway/probe.mjs'), contents: probe}, ...configuration.modules];
   await mf.dispose(); mf = new Miniflare(convertV4MiniflareOptions(configuration)); await mf.ready;
   try {
     const identity = await registeredMiner(), value = job(identity);
@@ -676,8 +661,8 @@ test('hibernation restores the actual allocation sockets and their message limit
 
 test('deadline alarm retires an idle allocation and releases its server sockets', async () => {
   const configuration = options();
-  const probe = await readFile('test/worker_probe.py', 'utf8');
-  configuration.modules = [{type: 'PythonModule', path: resolve('dist/python/probe.py'), contents: probe}, ...configuration.modules];
+  const probe = await readFile('test/worker-probe.mjs', 'utf8');
+  configuration.modules = [{type: 'ESModule', path: resolve('dist/gateway/probe.mjs'), contents: probe}, ...configuration.modules];
   await mf.dispose(); mf = new Miniflare(convertV4MiniflareOptions(configuration)); await mf.ready;
   let worker, minerSocket;
   try {
@@ -729,13 +714,20 @@ test('a runtime interruption during enqueue leaves a recoverable submitting allo
 test('malformed signatures, unsupported crypto and unsafe numeric jobs fail closed', async () => {
   const identity = await registeredMiner(), before = calls.length;
   for (const changes of [
-    {'x-bittensor-signature': '0x00'}, {'x-bittensor-signature': '0x' + 'FF'.repeat(64)},
+    {'x-bittensor-signature': '0x00'}, {'x-bittensor-signature': '0x' + 'aa'.repeat(64) + '\n'}, {'x-bittensor-signature': '0x' + 'FF'.repeat(64)},
     {'x-bittensor-crypto': 'ed25519'}, {'x-bittensor-hotkey': identity.hotkey.slice(0, -1) + '0'},
   ]) assert.equal((await send(request(identity, 'POST', '/run', job(identity), changes))).status, 401, JSON.stringify(changes));
   for (const deadline of ['true', '1' + '0'.repeat(500), '1e500', 'NaN']) {
     const raw = Buffer.from(JSON.stringify(job(identity)).replace(/"deadline":\d+/, `"deadline":${deadline}`));
     assert.equal((await send(request(identity, 'POST', '/run', raw))).status, 400);
   }
+  for (const changes of [{exchange_id: randomUUID() + '\n'}, {replace: randomUUID() + '\n'}]) {
+    assert.equal((await send(request(identity, 'POST', '/run', job(identity, changes)))).status, 400);
+  }
+  const bom = Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from(JSON.stringify(job(identity)))]);
+  assert.equal((await send(request(identity, 'POST', '/run', bom))).status, 400);
+  const trailingSignature = job(identity); trailingSignature.signature += '\n';
+  assert.equal((await send(request(identity, 'POST', '/run', trailingSignature))).status, 400);
   await membership({version: true});
   assert.equal((await send(request(identity, 'POST', '/run', job(identity)))).status, 503);
   await membership();

@@ -1,6 +1,6 @@
 # Witness gateway
 
-A public Python Cloudflare Worker authenticates registered Bittensor miners, queues
+A public TypeScript Cloudflare Worker authenticates registered Bittensor miners, queues
 RunPod jobs, and connects each miner to its assigned witness worker. A Durable
 Object per round and hotkey owns allocation state and the infrastructure allowance.
 
@@ -106,18 +106,14 @@ A competition **submission** is separate from an exchange allocation.
 
 ## Configuration and deployment
 
-Python runs inside Cloudflare's Python 3.14 Pyodide/workerd runtime. The application
-uses the standard library and Workers bindings, with no Python packages to upload.
-The configured 30,000 ms CPU limit matches the Workers Paid default. Membership
-refreshes require the Paid plan because they exceed the Free plan's 10 ms allowance.
-Node remains a build/test dependency for Wrangler and the cryptographic bundle.
+Both Workers run TypeScript compiled to ES modules, with explicit protocol and
+storage types and Cloudflare's native bindings. The 30,000 ms CPU limit and
+existing Workers Paid controls remain in place.
 
-[crypto.mjs](src/crypto.mjs) is the complete JavaScript bridge: 33 lines calling
-the existing Polkadot SS58, sr25519, and Substrate storage-key functions. The
-build statically imports the existing WASM binary. Routing, authentication
-policy, registration reads, allocation, alarms, and relay handling are Python.
-A separate Python Worker runs membership refreshes and shares the private KV
-namespace with the gateway.
+[crypto.mjs](src/crypto.mjs) calls the existing Polkadot SS58, sr25519, and
+Substrate storage-key functions. The build statically imports the same WASM
+binary. A separate TypeScript Worker refreshes membership and shares the
+private KV namespace with the gateway.
 
 Set [wrangler.jsonc](wrangler.jsonc) for the gateway and
 [wrangler.membership.jsonc](wrangler.membership.jsonc) for membership refreshes:
@@ -155,13 +151,11 @@ empty the variable to disable it. Regular miners continue to use the live Finney
    Check for a `membership_refreshed` log on the membership Worker before opening
    access. Cron Trigger changes can take up to 15 minutes to propagate.
 
-The build copies Python sources into `dist/python` and bundles only the crypto
-bridge. Wrangler uploads that Python entry point and its modules with
-`python_workers`, `python_workers_314`, and `python_dedicated_snapshot` enabled.
-The deployment snapshot captures Python imports and initialization so new instances
-restore the initialized application. `requirements.txt` and `requirements-dev.txt`
-are for local diagnostics and tests; they are not Worker package manifests. The pinned
-Wrangler may warn about `requirements.txt`, but does not upload those packages.
+The build bundles [worker.ts](src/worker.ts) and
+[membership.ts](src/membership.ts) into separate entry points in `dist`.
+Wrangler uploads only the selected bundle and its static WASM module. No
+Python runtime or FFI is deployed. The Python client and RunPod worker remain
+unchanged. `requirements.txt` is for local Python diagnostic helpers.
 
 Each miner request checks this cached registration list. Chain reads run on the
 schedule, independently of miner traffic. Registration changes become visible
@@ -186,7 +180,7 @@ the Durable Object namespace and migration history across deployments.
 Keep the Worker name, `MinerAdmission` class, `MINERS` binding, and `v1` SQLite
 migration. Object names remain `<round>/<hotkey>`. Storage keys `job/<ID>`,
 `nonce/<nonce>`, `current`, `count`, and `rate`, job field names, alarms, and socket
-attachments retain their existing formats. The Python migration requires no
+attachments retain their existing formats. The TypeScript migration requires no
 Durable Object migration entry or data reset.
 
 Deploy the client, gateway, and RunPod image together between generation rounds.
@@ -194,18 +188,22 @@ The protocol uses live sockets throughout; public R2 objects are evidence.
 
 ## Checks and reading order
 
-Read [auth.py](src/auth.py), [membership.py](src/membership.py), [worker.py](src/worker.py), then
+Read [auth.ts](src/auth.ts), [membership.ts](src/membership.ts),
+[worker.ts](src/worker.ts), then
 [the exchange sequence](../witness-client/SEQUENCE.md).
 
-Use Node 22.13+ and Python 3.13 in the witness-client test environment. Install
-the gateway checking tools there with `python -m pip install -r requirements-dev.txt`.
-Application records use typed dictionaries, and [bindings.py](src/bindings.py)
-types the Workers APIs used by the application. [runtime.py](src/runtime.py)
-contains the explicit Python/JavaScript conversions and the state-lock helper.
+Use Node 22.13+ and Python 3.13 in the witness-client test environment for the
+unchanged Python transport tests. [models.ts](src/models.ts) describes protocol
+and persisted records; [runtime.ts](src/runtime.ts) contains bounded reads,
+response helpers, hashing, and the existing state-lock policy. `npm run check`
+builds the bundles, generates binding/runtime types from both Wrangler configs,
+and runs strict TypeScript checking. Generated types stay in ignored build
+directories. The required RunPod secret name is declared in the gateway config;
+its value remains an encrypted Cloudflare secret.
 
 ```sh
 npm ci --ignore-scripts --no-audit --no-fund
-PYTHON=/path/to/test-environment/bin/python npm run check
+npm run check
 PYTHON=/path/to/test-environment/bin/python npm test
 ```
 
@@ -216,18 +214,21 @@ restarts, ownership, disconnected workers, live WebSocket framing, and 250
 simultaneous miners. The burst test measures local gateway admission, not cloud
 throughput.
 
-Migration checks seed existing JavaScript storage records, interrupt dispatch,
+Migration checks seed existing records through the previous Python storage conversion, interrupt dispatch,
 exercise deadline alarms, and verify actual hibernation with retained socket
 counters. A local HTTPS/WSS test runs the unchanged synchronous `GatewayClient`
 and `WorkerChannel`, then exercises `WitnessClient.resume()` against fixture R2
 evidence. It sends fixture transport bytes and claims, not an OpenAI request or
 a native cryptographic proof. It requires OpenSSL and the built witness client.
 
-The [isolated compatibility probe](python-compat/README.md) tests Python importing
-the existing WASM verifier independently of application policy. Wrangler's dry
-run checks the upload bundle; it does not verify a cloud deployment. Run the
-release checklist's Cloudflare → RunPod → OpenAI validation before opening a
-generation round.
+A small Python fixture exists only in the local storage migration test. It uses
+the previous Worker's `to_js(..., dict_converter=Object.fromEntries)` conversion
+to verify compatibility of identity, nonces, capabilities, alarms, and allowances.
+It is never included in either deployment. Wrangler's dry run checks packaging;
+the release checklist's Cloudflare → RunPod → OpenAI validation establishes the
+live path. Check actual scheduled invocations and a fresh KV snapshot as well
+as the configured cron, since scheduler activation can fail independently of
+the application runtime.
 
 [client.py](client.py) is a low-level queue diagnostic. Miner applications use
 `WitnessClient`. Deployment validation is tracked in the

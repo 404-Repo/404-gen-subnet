@@ -4,7 +4,7 @@ import wasm from './crypto.wasm';
 
 let ready;
 
-/** The Python application uses the same Polkadot primitives as the gateway. */
+/** The gateway and membership refresher share the existing Polkadot primitives. */
 export function publicKey(hotkey) {
   if (typeof hotkey !== 'string' || hotkey.length !== 48) throw new Error('Invalid hotkey');
   const key = decodeAddress(hotkey, false, 42);

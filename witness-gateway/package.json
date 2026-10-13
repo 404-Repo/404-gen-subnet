@@ -4,9 +4,10 @@
   "type": "module",
   "scripts": {
     "build": "node build.mjs",
-    "check": "\"${PYTHON:-python3}\" -m mypy",
+    "check": "npm run build && npm run types && tsc",
     "test": "npm run build && node --test test/*.test.mjs",
-    "dev": "npm run build && wrangler dev"
+    "dev": "npm run build && wrangler dev",
+    "types": "wrangler types .wrangler/types/gateway.d.ts --env-interface GatewayBindings --strict-vars=false && wrangler types .wrangler/types/membership.d.ts --config wrangler.membership.jsonc --env-interface MembershipBindings --strict-vars=false --include-runtime=false"
   },
   "dependencies": {
     "@polkadot/util-crypto": "14.0.3",
@@ -17,7 +18,8 @@
     "esbuild": "0.25.10",
     "miniflare": "5.20261006.1-alpha",
     "wrangler": "4.149.0",
-    "ws": "8.18.0"
+    "ws": "8.18.0",
+    "typescript": "5.9.3"
   },
   "engines": {
     "node": ">=22.13"

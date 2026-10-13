@@ -22,7 +22,7 @@ flowchart LR
 | Area | Required work |
 | --- | --- |
 | Artifacts | Build from a tagged commit, audit dependencies, include licences, and record gateway bundle, worker image, native verifier, verification-key hash, and compatible client version. |
-| Membership | Deploy the separate Python membership Worker using [its configuration](../witness-gateway/wrangler.membership.jsonc) and confirm `membership_refreshed` logs for Finney subnet 17. Its ten-minute Cron Trigger publishes complete snapshots from a finalized block at most five minutes old. Failed refreshes preserve the snapshot and its timestamps. The gateway has no Cron Trigger and accepts cached membership for up to 48 hours. |
+| Membership | Deploy the separate TypeScript membership Worker using [its configuration](../witness-gateway/wrangler.membership.jsonc) and confirm `membership_refreshed` logs for Finney subnet 17. Its ten-minute Cron Trigger publishes complete snapshots from a finalized block at most five minutes old. Failed refreshes preserve the snapshot and its timestamps. The gateway has no Cron Trigger and accepts cached membership for up to 48 hours. |
 | Cutover | Deploy matching client, gateway, and worker between generation rounds. Preserve Durable Object state and job allowances. |
 | Generation phase | Set the gateway and worker to the active round. Close gateway access when generation ends. Retain public transcripts needed for validation. |
 | Gateway access | Configure anonymous edge rate limits and test up to 250 miners with representative transcript sizes, queue delays, polling, and provider throttling. |
@@ -40,16 +40,17 @@ Preserve Durable Object namespaces and migration identifiers when deploying:
 they contain the reservations that prevent duplicate jobs. Publish proof parameters
 matching the client's pinned hashes.
 
-The Python gateway preserves the `MinerAdmission` class, object names, stored
-records, and `v1` migration. Local workerd checks cover its bundled sr25519
-bridge, WebSockets, hibernation, alarms, JavaScript-written state, and the Python
-client/worker transport contract. Local RunPod and evidence fixtures do not
-establish Cloudflare → RunPod → OpenAI operation. The language migration does
-not itself deploy the gateway or the scheduled membership reader.
+The TypeScript gateway preserves the `MinerAdmission` class, object names,
+stored records, and `v1` migration. Local workerd checks cover the existing
+sr25519 primitives, WebSockets, hibernation, alarms, Python-written state, and
+the unchanged Python client/worker transport contract. Local RunPod and
+evidence fixtures do not establish Cloudflare → RunPod → OpenAI operation.
+Record both deployed Worker versions and confirm actual membership scheduled
+invocations, fresh KV snapshots, and the absence of gateway scheduled events.
 
 Legacy behavior to validate during deployment: the pinned local Miniflare
 runtime delays the miner's idle-alarm close notification in both the original
-JavaScript gateway and Python. Local checks verify allocation retirement,
+JavaScript and Python gateways. Local checks verify allocation retirement,
 worker-side closure, and removal of both server sockets. Confirm prompt closure
 at both clients in Cloudflare before opening the round; this migration preserves
 the existing alarm and close policy.
