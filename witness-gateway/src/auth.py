@@ -32,8 +32,6 @@ def exchange_payload(job: Exchange) -> str:
 
 
 async def registered(hotkey: str, env: Env) -> None:
-    if env.ROUND == "test-0" and hotkey == getattr(env, "TEST_HOTKEY", ""):
-        return
     raw = await env.REGISTRY.get("membership.json")
     try:
         snapshot = loads(raw) if raw and len(raw) <= 512 * 1024 else None
@@ -62,6 +60,8 @@ async def registered(hotkey: str, env: Env) -> None:
             or now - cast(int, value) > 300_000
         ):
             raise Rejection(503, "membership_unavailable")
+    if env.ROUND == "test-0" and hotkey == getattr(env, "TEST_HOTKEY", ""):
+        return
     if hotkey not in hotkeys:
         raise Rejection(403, "hotkey_not_registered")
 

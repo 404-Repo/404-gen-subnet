@@ -10,6 +10,6 @@ export function runtimeOptions() {
         .map(file => ({type: 'PythonModule', path: `${directory}/${file}`})),
       {type: 'ESModule', path: `${directory}/crypto.mjs`},
       {type: 'CompiledWasm', path: `${directory}/crypto.wasm`}],
-    compatibilityDate: '2025-10-11', compatibilityFlags: ['python_workers'],
+    compatibilityDate: '2025-10-11', compatibilityFlags: ['python_workers', 'python_workers_314'],
   };
 }

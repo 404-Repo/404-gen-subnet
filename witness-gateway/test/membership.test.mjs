@@ -1,7 +1,7 @@
 import {after, before, test} from 'node:test';
 import assert from 'node:assert/strict';
 import {createHash, randomUUID} from 'node:crypto';
-import {Miniflare} from 'miniflare';
+import {Miniflare, convertV4MiniflareOptions} from 'miniflare';
 import {cryptoWaitReady, encodeAddress, sr25519PairFromSeed, sr25519Sign} from '@polkadot/util-crypto';
 import {runtimeOptions} from './runtime-options.mjs';
 
@@ -106,7 +106,7 @@ async function status(index) {
 }
 
 before(async () => {
-  mf = new Miniflare(options());
+  mf = new Miniflare(convertV4MiniflareOptions(options()));
   await mf.ready;
   kv = await mf.getKVNamespace('REGISTRY');
 });
@@ -171,7 +171,7 @@ test('larger subnets are read in bounded batches and published only when complet
 });
 
 test('a refresh still runs with gateway access closed between rounds', async () => {
-  await mf.setOptions(options(0));
+  await mf.setOptions(convertV4MiniflareOptions(options(0)));
   kv = await mf.getKVNamespace('REGISTRY');
   registered = [0];
   assert.equal((await refresh()).outcome, 'ok');

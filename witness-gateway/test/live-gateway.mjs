@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict';
 import {readFile, writeFile} from 'node:fs/promises';
 import {join} from 'node:path';
-import {Miniflare} from 'miniflare';
+import {Miniflare, convertV4MiniflareOptions} from 'miniflare';
 import {runtimeOptions} from './runtime-options.mjs';
 
 const [directory, endpoint] = process.argv.slice(2);
@@ -15,12 +15,12 @@ const calls = JSON.parse(await readFile(join(directory, 'upstream.json'), 'utf8'
   if (error.code !== 'ENOENT') throw error;
   return '[]';
 }));
-const mf = new Miniflare({
+const mf = new Miniflare(convertV4MiniflareOptions({
   host: '127.0.0.1', port: 0,
   ...runtimeOptions(),
   durableObjects: {MINERS: {className: 'MinerAdmission', useSQLite: true}},
-  durableObjectsPersist: join(directory, 'objects'),
-  kvNamespaces: ['REGISTRY'], kvPersist: join(directory, 'kv'),
+  resourcePersistencePath: directory,
+  kvNamespaces: ['REGISTRY'],
   bindings: {ROUND: String(identity.round), NETWORK: 'finney', NETUID: '17',
     ROUND_END: String(Math.floor(Date.now() / 1000) + 1800),
     RUNPOD_ENDPOINT: endpoint, RUNPOD_API_KEY: process.env.RUNPOD_API_KEY, MAX_JOBS_PER_MINER: '2'},
@@ -40,7 +40,7 @@ const mf = new Miniflare({
     await writeFile(join(directory, 'upstream.json'), JSON.stringify(calls, null, 2) + '\n');
     return response;
   },
-});
+}));
 const url = await mf.ready;
 const kv = await mf.getKVNamespace('REGISTRY');
 async function membership() {

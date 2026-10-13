@@ -106,8 +106,10 @@ A competition **submission** is separate from an exchange allocation.
 
 ## Configuration and deployment
 
-Python runs inside Cloudflare's Pyodide/workerd runtime. The application uses
-the standard library and Workers bindings, with no Python packages to upload.
+Python runs inside Cloudflare's Python 3.14 Pyodide/workerd runtime. The application
+uses the standard library and Workers bindings, with no Python packages to upload.
+The configured 1,000 ms CPU limit requires the Workers Paid plan. Membership
+refreshes exceed the Free plan's 10 ms CPU allowance.
 Node remains a build/test dependency for Wrangler and the cryptographic bundle.
 
 [crypto.mjs](src/crypto.mjs) is the complete JavaScript bridge: 33 lines calling
@@ -124,8 +126,8 @@ must use `WITNESS_ROUND=test-0`; signed request deadlines still limit each job.
 
 `TEST_HOTKEY` optionally admits one operator-controlled hotkey without subnet
 registration, only in `test-0`. It still requires valid signatures and follows
-the same replay, ownership, rate and job limits. Remove or empty the variable to
-disable it. Regular miners continue to use the live Finney membership snapshot.
+the same membership freshness, replay, ownership, rate and job limits. Remove or
+empty the variable to disable it. Regular miners continue to use the live Finney membership snapshot.
 
 1. Bind private KV as `REGISTRY`, and the witness evidence bucket as `TRANSCRIPTS`.
 2. Set `ROUND`, `RUNPOD_ENDPOINT`, `MAX_JOBS_PER_MINER`, and `ROUND_END` in Unix
@@ -142,7 +144,7 @@ disable it. Regular miners continue to use the live Finney membership snapshot.
 
 The build copies Python sources into `dist/python` and bundles only the crypto
 bridge. Wrangler uploads that Python entry point and its modules with
-`python_workers` enabled. `requirements.txt` and `requirements-dev.txt` are for
+`python_workers` and `python_workers_314` enabled. `requirements.txt` and `requirements-dev.txt` are for
 local diagnostics and tests; they are not Worker package manifests. The pinned
 Wrangler may warn about `requirements.txt`, but does not upload those packages.
 

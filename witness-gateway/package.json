@@ -15,9 +15,11 @@
   },
   "devDependencies": {
     "esbuild": "0.25.10",
-    "miniflare": "4.20251011.1",
-    "wrangler": "4.45.0",
+    "miniflare": "5.20261006.1-alpha",
+    "wrangler": "4.149.0",
     "ws": "8.18.0"
   },
-  "engines": {"node": ">=22.13"}
+  "engines": {
+    "node": ">=22.13"
+  }
 }

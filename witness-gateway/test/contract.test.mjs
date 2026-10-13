@@ -2,11 +2,11 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
 import {execFile, spawn} from 'node:child_process';
-import {mkdtemp, rm} from 'node:fs/promises';
+import {mkdtemp, readFile, rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {promisify} from 'node:util';
-import {Miniflare} from 'miniflare';
+import {Miniflare, convertV4MiniflareOptions} from 'miniflare';
 import {cryptoWaitReady, encodeAddress, sr25519PairFromSeed} from '@polkadot/util-crypto';
 import {runtimeOptions} from './runtime-options.mjs';
 
@@ -37,7 +37,7 @@ test('Python transports connect over HTTPS/WSS and WitnessClient recovers eviden
     const seed = createHash('sha256').update('python-wire-contract').digest();
     const hotkey = encodeAddress(sr25519PairFromSeed(seed).publicKey, 42);
     let dispatches = 0;
-    mf = new Miniflare({...runtimeOptions(), https: true, httpsKeyPath: key, httpsCertPath: certificate,
+    mf = new Miniflare(convertV4MiniflareOptions({...runtimeOptions(), https: true, httpsKey: await readFile(key, 'utf8'), httpsCert: await readFile(certificate, 'utf8'),
       host: '127.0.0.1', port: 0, durableObjects: {MINERS: {className: 'MinerAdmission', useSQLite: true}},
       kvNamespaces: ['REGISTRY'], r2Buckets: ['TRANSCRIPTS'],
       bindings: {ROUND: 'test-0', NETWORK: 'finney', NETUID: '17', ROUND_END: String(Math.floor(Date.now() / 1000) + 120),
@@ -63,7 +63,7 @@ test('Python transports connect over HTTPS/WSS and WitnessClient recovers eviden
         running.catch(() => {}); workers.push(running);
         return Response.json({id: 'fixture-job'});
       },
-    });
+    }));
     const origin = String(await mf.ready).replace(/\/$/, '');
     const kv = await mf.getKVNamespace('REGISTRY');
     await kv.put('membership.json', JSON.stringify({version: 1, network: 'finney', netuid: 17,

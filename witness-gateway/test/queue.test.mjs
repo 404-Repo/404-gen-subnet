@@ -7,7 +7,7 @@ import {join, resolve} from 'node:path';
 import {execFile} from 'node:child_process';
 import {promisify} from 'node:util';
 import {setTimeout as delay} from 'node:timers/promises';
-import {Miniflare} from 'miniflare';
+import {Miniflare, convertV4MiniflareOptions} from 'miniflare';
 import {cryptoWaitReady, encodeAddress, sr25519PairFromSeed, sr25519Sign} from '@polkadot/util-crypto';
 import {runtimeOptions} from './runtime-options.mjs';
 import WebSocket from 'ws';
@@ -31,9 +31,9 @@ function options() {
   return {
     ...runtimeOptions(),
     durableObjects: {MINERS: {className: 'MinerAdmission', useSQLite: true}},
-    durableObjectsPersist: join(directory, 'objects'),
-    r2Buckets: ['TRANSCRIPTS'], r2Persist: join(directory, 'r2'),
-    kvNamespaces: ['REGISTRY'], kvPersist: join(directory, 'kv'),
+    resourcePersistencePath: directory,
+    r2Buckets: ['TRANSCRIPTS'],
+    kvNamespaces: ['REGISTRY'],
     bindings: {ROUND: activeRound, NETWORK: 'finney', NETUID: '17',
       ROUND_END: String(roundEnd), RUNPOD_ENDPOINT: 'fixture-endpoint',
       RUNPOD_API_KEY: secret, MAX_JOBS_PER_MINER: '2'},
@@ -90,7 +90,7 @@ async function send(signed) {
 
 before(async () => {
   directory = await mkdtemp(join(tmpdir(), '404-gateway-'));
-  mf = new Miniflare(options());
+  mf = new Miniflare(convertV4MiniflareOptions(options()));
   await mf.ready;
   await membership();
 });
@@ -108,13 +108,21 @@ test('the configured test hotkey is limited to test-0 and keeps signatures and j
   const originalRound = activeRound;
   const configuration = options();
   configuration.bindings.TEST_HOTKEY = identity.hotkey;
-  await mf.setOptions(configuration);
+  await mf.setOptions(convertV4MiniflareOptions(configuration));
   try {
     const path = `/status/${randomUUID()}`;
     assert.equal((await send(request(identity, 'GET', path))).value.error, 'hotkey_not_registered');
     activeRound = 'test-0';
     configuration.bindings.ROUND = activeRound;
-    await mf.setOptions(configuration);
+    await mf.setOptions(convertV4MiniflareOptions(configuration));
+    const kv = await mf.getKVNamespace('REGISTRY');
+    await kv.delete('membership.json');
+    assert.equal((await send(request(identity, 'GET', path))).value.error, 'membership_unavailable');
+    await membership({fetched_at: Date.now() - 300_001});
+    assert.equal((await send(request(identity, 'GET', path))).value.error, 'membership_unavailable');
+    await membership({block_time: Date.now() - 300_001});
+    assert.equal((await send(request(identity, 'GET', path))).value.error, 'membership_unavailable');
+    await membership();
     assert.equal((await send(request(outsider, 'GET', path))).value.error, 'hotkey_not_registered');
     const forged = request(identity, 'GET', path, undefined, {'x-bittensor-signature': '0x' + '00'.repeat(64)});
     assert.equal((await send(forged)).value.error, 'invalid_signature');
@@ -130,11 +138,11 @@ test('the configured test hotkey is limited to test-0 and keeps signatures and j
     assert.equal(calls.length, before);
     const registered = await registeredMiner();
     assert.equal((await send(request(registered, 'POST', '/run', job(registered)))).status, 200);
-    await mf.setOptions(options());
+    await mf.setOptions(convertV4MiniflareOptions(options()));
     assert.equal((await send(request(identity, 'GET', path))).value.error, 'hotkey_not_registered');
   } finally {
     activeRound = originalRound;
-    await mf.setOptions(options());
+    await mf.setOptions(convertV4MiniflareOptions(options()));
   }
 });
 
@@ -158,7 +166,7 @@ test('real sr25519 auth queues the fixed worker job and returns only safe status
 test('a long queue deadline cannot extend the endpoint execution timeout', async () => {
   const previousEnd = roundEnd;
   roundEnd = Math.floor(Date.now() / 1000) + 7 * 86400;
-  await mf.setOptions(options());
+  await mf.setOptions(convertV4MiniflareOptions(options()));
   try {
     const identity = await registeredMiner(), value = job(identity, {deadline: roundEnd});
     const result = await send(request(identity, 'POST', '/run', value));
@@ -170,7 +178,7 @@ test('a long queue deadline cannot extend the endpoint execution timeout', async
     await send(request(identity, 'POST', `/release/${value.exchange_id}`));
   } finally {
     roundEnd = previousEnd;
-    await mf.setOptions(options());
+    await mf.setOptions(convertV4MiniflareOptions(options()));
   }
 });
 
@@ -274,7 +282,7 @@ test('lost RunPod reply and gateway restart do not cause a second enqueue', asyn
   const signed = request(identity, 'POST', '/run', value);
   assert.equal((await send(signed)).value.queue_state, 'uncertain');
   upstreamMode = 'ok';
-  await mf.dispose(); mf = new Miniflare(options()); await mf.ready;
+  await mf.dispose(); mf = new Miniflare(convertV4MiniflareOptions(options())); await mf.ready;
   assert.equal((await send(signed)).value.error, 'hotkey_auth_replayed');
   const retried = await send(request(identity, 'POST', '/run', value));
   assert.equal(retried.status, 202);
@@ -418,7 +426,7 @@ test('replacement retires old workers and remains idempotent across lost replies
   const count = calls.length;
   assert.equal((await attachWorker(original, firstToken)).status, 409);
   assert.equal((await send(request(identity, 'POST', '/run', replacement))).status, 200);
-  await mf.dispose(); mf = new Miniflare(options()); await mf.ready;
+  await mf.dispose(); mf = new Miniflare(convertV4MiniflareOptions(options())); await mf.ready;
   assert.equal((await send(request(identity, 'POST', '/run', replacement))).status, 200);
   assert.equal(calls.length, count);
   assert.equal((await send(request(identity, 'POST', '/run', job(identity, {replace: replacement.exchange_id})))).value.error, 'job_limit_reached');
@@ -574,7 +582,7 @@ test('JavaScript records retain identity, replay protection, capability and allo
   fixedRequestTime = instant;
   t.after(async () => {
     fixedRequestTime = undefined;
-    await mf.dispose(); mf = new Miniflare(options()); await mf.ready;
+    await mf.dispose(); mf = new Miniflare(convertV4MiniflareOptions(options())); await mf.ready;
     await membership();
   });
   await membership({fetched_at: instant, block_time: instant});
@@ -592,8 +600,8 @@ test('JavaScript records retain identity, replay protection, capability and allo
       }
     }`;
   await mf.dispose();
-  mf = new Miniflare({...options(), compatibilityFlags: [],
-    modules: [{type: 'ESModule', path: resolve('dist/python/legacy-state.mjs'), contents: fixture}]});
+  mf = new Miniflare(convertV4MiniflareOptions({...options(), compatibilityFlags: [],
+    modules: [{type: 'ESModule', path: resolve('dist/python/legacy-state.mjs'), contents: fixture}]}));
   await mf.ready;
   const signed = request(identity, 'POST', '/run', value);
   const namespace = await mf.getDurableObjectNamespace('MINERS');
@@ -616,7 +624,7 @@ runtime.now_ms = now_ms
 from worker import Default as Default, MinerAdmission as MinerAdmission
 `;
   configuration.modules = [{type: 'PythonModule', path: resolve('dist/python/migration_clock.py'), contents: clock}, ...configuration.modules];
-  await mf.dispose(); mf = new Miniflare(configuration); await mf.ready;
+  await mf.dispose(); mf = new Miniflare(convertV4MiniflareOptions(configuration)); await mf.ready;
   const restored = await mf.getDurableObjectNamespace('MINERS');
   assert.equal(restored.idFromName(`${activeRound}/${identity.hotkey}`).toString(), originalId);
   const before = calls.length;
@@ -637,7 +645,7 @@ test('hibernation restores the actual allocation sockets and their message limit
   const configuration = options();
   const probe = await readFile('test/worker_probe.py', 'utf8');
   configuration.modules = [{type: 'PythonModule', path: resolve('dist/python/probe.py'), contents: probe}, ...configuration.modules];
-  await mf.dispose(); mf = new Miniflare(configuration); await mf.ready;
+  await mf.dispose(); mf = new Miniflare(convertV4MiniflareOptions(configuration)); await mf.ready;
   try {
     const identity = await registeredMiner(), value = job(identity);
     await send(request(identity, 'POST', '/run', value));
@@ -662,7 +670,7 @@ test('hibernation restores the actual allocation sockets and their message limit
     await disconnected;
     assert.equal((await send(request(identity, 'GET', `/status/${value.exchange_id}`))).value.queue_state, 'retired');
   } finally {
-    await mf.dispose(); mf = new Miniflare(options()); await mf.ready;
+    await mf.dispose(); mf = new Miniflare(convertV4MiniflareOptions(options())); await mf.ready;
   }
 });
 
@@ -670,7 +678,7 @@ test('deadline alarm retires an idle allocation and releases its server sockets'
   const configuration = options();
   const probe = await readFile('test/worker_probe.py', 'utf8');
   configuration.modules = [{type: 'PythonModule', path: resolve('dist/python/probe.py'), contents: probe}, ...configuration.modules];
-  await mf.dispose(); mf = new Miniflare(configuration); await mf.ready;
+  await mf.dispose(); mf = new Miniflare(convertV4MiniflareOptions(configuration)); await mf.ready;
   let worker, minerSocket;
   try {
     const identity = await registeredMiner(), value = job(identity, {deadline: Math.floor(Date.now() / 1000) + 5});
@@ -697,7 +705,7 @@ test('deadline alarm retires an idle allocation and releases its server sockets'
     assert.equal((await send(request(identity, 'POST', '/run', job(identity)))).status, 200);
   } finally {
     worker?.terminate(); minerSocket?.terminate();
-    await mf.dispose(); mf = new Miniflare(options()); await mf.ready;
+    await mf.dispose(); mf = new Miniflare(convertV4MiniflareOptions(options())); await mf.ready;
   }
 });
 
@@ -710,7 +718,7 @@ test('a runtime interruption during enqueue leaves a recoverable submitting allo
   await mf.dispose();
   unblockDispatch(); unblockDispatch = undefined; upstreamMode = 'ok';
   await pending;
-  mf = new Miniflare(options()); await mf.ready;
+  mf = new Miniflare(convertV4MiniflareOptions(options())); await mf.ready;
   assert.equal((await send(request(identity, 'POST', '/run', value))).value.queue_state, 'submitting');
   assert.equal(calls.length, before + 1);
   const worker = await attachWorker(value, token);
@@ -744,7 +752,7 @@ test('gateway assigns its active round and rejects miner-supplied rounds', async
   }
   assert.equal(calls.length, before);
   activeRound = '42';
-  await mf.dispose(); mf = new Miniflare(options()); await mf.ready;
+  await mf.dispose(); mf = new Miniflare(convertV4MiniflareOptions(options())); await mf.ready;
   try {
     const value = job(identity);
     assert.equal(Object.hasOwn(value, 'round'), false);
@@ -754,14 +762,14 @@ test('gateway assigns its active round and rejects miner-supplied rounds', async
     assertJob(value, '42');
   } finally {
     activeRound = '1';
-    await mf.dispose(); mf = new Miniflare(options()); await mf.ready;
+    await mf.dispose(); mf = new Miniflare(convertV4MiniflareOptions(options())); await mf.ready;
   }
 });
 
 test('queueing rejects a signed body that finishes uploading after phase closure', async () => {
   const identity = await registeredMiner();
   roundEnd = Math.floor(Date.now() / 1000) + 15;
-  await mf.dispose(); mf = new Miniflare(options()); await mf.ready;
+  await mf.dispose(); mf = new Miniflare(convertV4MiniflareOptions(options())); await mf.ready;
   try {
     const signed = request(identity, 'POST', '/run', job(identity));
     const bytes = Buffer.from(signed.options.body);
@@ -782,7 +790,7 @@ test('queueing rejects a signed body that finishes uploading after phase closure
     assert.equal(calls.length, before);
   } finally {
     roundEnd = Math.floor(Date.now() / 1000) + 3600;
-    await mf.dispose(); mf = new Miniflare(options()); await mf.ready;
+    await mf.dispose(); mf = new Miniflare(convertV4MiniflareOptions(options())); await mf.ready;
   }
 });
 
@@ -791,7 +799,7 @@ test('closed phase blocks queueing, retries, status, downloads and uploads', asy
   await send(request(identity, 'POST', '/run', value));
   const before = calls.length;
   roundEnd = 0;
-  await mf.dispose(); mf = new Miniflare(options()); await mf.ready;
+  await mf.dispose(); mf = new Miniflare(convertV4MiniflareOptions(options())); await mf.ready;
   const path = `/exchanges/${value.exchange_id}/`;
   for (const [method, route, body] of [
     ['POST', '/run', job(identity)], ['POST', '/run', value],
