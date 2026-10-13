@@ -22,7 +22,7 @@ flowchart LR
 | Area | Required work |
 | --- | --- |
 | Artifacts | Build from a tagged commit, audit dependencies, include licences, and record gateway bundle, worker image, native verifier, verification-key hash, and compatible client version. |
-| Membership | Deploy the gateway's one-minute Cron Trigger and confirm `membership_refreshed` logs for Finney subnet 17. The [chain reader](../witness-gateway/src/membership.py) publishes private KV snapshots and preserves their timestamps on failure. Authentication rejects snapshots or finalized blocks older than five minutes. Ten-minute refreshes, retries, and freshness tolerance remain separate pending policy work. |
+| Membership | Deploy the separate Python membership Worker using [its configuration](../witness-gateway/wrangler.membership.jsonc) and confirm `membership_refreshed` logs for Finney subnet 17. Its ten-minute Cron Trigger publishes complete snapshots from a finalized block at most five minutes old. Failed refreshes preserve the snapshot and its timestamps. The gateway has no Cron Trigger and accepts cached membership for up to 48 hours. |
 | Cutover | Deploy matching client, gateway, and worker between generation rounds. Preserve Durable Object state and job allowances. |
 | Generation phase | Set the gateway and worker to the active round. Close gateway access when generation ends. Retain public transcripts needed for validation. |
 | Gateway access | Configure anonymous edge rate limits and test up to 250 miners with representative transcript sizes, queue delays, polling, and provider throttling. |
