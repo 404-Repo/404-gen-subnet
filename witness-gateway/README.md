@@ -108,8 +108,8 @@ A competition **submission** is separate from an exchange allocation.
 
 Python runs inside Cloudflare's Python 3.14 Pyodide/workerd runtime. The application
 uses the standard library and Workers bindings, with no Python packages to upload.
-The configured 1,000 ms CPU limit requires the Workers Paid plan. Membership
-refreshes exceed the Free plan's 10 ms CPU allowance.
+The configured 30,000 ms CPU limit matches the Workers Paid default. Membership
+refreshes require the Paid plan because they exceed the Free plan's 10 ms allowance.
 Node remains a build/test dependency for Wrangler and the cryptographic bundle.
 
 [crypto.mjs](src/crypto.mjs) is the complete JavaScript bridge: 33 lines calling

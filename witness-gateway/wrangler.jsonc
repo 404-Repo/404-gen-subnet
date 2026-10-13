@@ -7,7 +7,7 @@
   "no_bundle": true,
   "compatibility_date": "2025-10-11",
   "compatibility_flags": ["python_workers", "python_workers_314", "python_dedicated_snapshot"],
-  "limits": {"cpu_ms": 1000},
+  "limits": {"cpu_ms": 30000},
   "rules": [{"type": "ESModule", "globs": ["**/*.mjs"], "fallthrough": true}],
   "observability": {"enabled": true, "traces": {"enabled": true, "head_sampling_rate": 0.1}},
   "durable_objects": {
