@@ -8,7 +8,10 @@ export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 export function json(value: unknown, status = 200): Response {
-  return new Response(JSON.stringify(value), {status, headers: {
+  return new Response(JSON.stringify(value, (_key, item: unknown) => {
+    if (typeof item === 'number' && !Number.isFinite(item)) throw new Error('Non-finite JSON number');
+    return item;
+  }), {status, headers: {
     'content-type': 'application/json', 'cache-control': 'no-store',
   }});
 }

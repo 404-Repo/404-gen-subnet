@@ -15,13 +15,20 @@ async function completedStatus(env: GatewayEnv, input: GatewayRequest, prefix: s
   // The manifest is written after verification and every evidence upload.
   const manifest = await env.TRANSCRIPTS.get(prefix + '/manifest.json');
   if (!manifest) return null;
-  const data: unknown = JSON.parse(await boundedText(manifest.body, 64 * 1024));
+  const integerStatuses = new WeakSet<object>();
+  const data: unknown = JSON.parse(await boundedText(manifest.body, 64 * 1024),
+    function(key, value: unknown, context?: {source?: string}) {
+      // Python distinguishes integer tokens from decimal/exponent numbers.
+      if (key === 'provider_status' && typeof value === 'number'
+        && /^-?\d+$/.test(context?.source || '')) integerStatuses.add(this);
+      return value;
+    });
   if (!isRecord(data)) throw new Rejection(503, 'invalid_evidence_manifest');
   const verifiedAt = data.verified_at, providerStatus = data.provider_status;
   if (data.prefix !== prefix || data.round !== env.ROUND || data.hotkey !== input.hotkey
     || data.exchange_id !== input.requestId || typeof verifiedAt !== 'number'
     || !Number.isFinite(verifiedAt) || verifiedAt <= 0 || typeof providerStatus !== 'number'
-    || !Number.isInteger(providerStatus) || providerStatus < 100 || providerStatus > 599
+    || !integerStatuses.has(data) || !Number.isInteger(providerStatus) || providerStatus < 100 || providerStatus > 599
     || typeof data.provider_rejected !== 'boolean') throw new Rejection(503, 'invalid_evidence_manifest');
   const usage = data.usage ?? null;
   return json({status: 'issued', authorized: true, usage, provider_status: providerStatus,

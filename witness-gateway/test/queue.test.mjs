@@ -533,6 +533,69 @@ test('manifest recovery preserves provider rejection and the original evidence e
   }
 });
 
+test('manifest recovery rejects non-finite usage and expiry overflow without redispatching', async () => {
+  const identity = await registeredMiner(), value = job(identity);
+  await send(request(identity, 'POST', '/run', value));
+  const bucket = await mf.getR2Bucket('TRANSCRIPTS');
+  const prefix = `rounds/${activeRound}/${value.hotkey}/${value.exchange_id}`;
+  const path = `/exchanges/${value.exchange_id}/progress`;
+  const usage = {input_tokens: 3, output_tokens: 1, total_tokens: 4};
+  const manifest = {prefix, round: activeRound, hotkey: value.hotkey, exchange_id: value.exchange_id,
+    verified_at: Math.floor(Date.now() / 1000), provider_status: 200, provider_rejected: false, usage};
+  const source = JSON.stringify(manifest), before = calls.length;
+  for (const invalid of [
+    source.replace('"input_tokens":3', '"input_tokens":1e500'),
+    source.replace('"usage":' + JSON.stringify(usage), '"usage":[{"tokens":-1e500}]'),
+    JSON.stringify({...manifest, verified_at: 1e308}),
+  ]) {
+    await bucket.put(prefix + '/manifest.json', invalid);
+    const result = await send(request(identity, 'GET', path));
+    assert.equal(result.status, 503);
+    assert.deepEqual(result.value, {error: 'gateway_unavailable'});
+  }
+  await bucket.put(prefix + '/manifest.json', source);
+  const result = await send(request(identity, 'GET', path));
+  assert.equal(result.status, 200);
+  assert.equal(result.value.status, 'issued');
+  assert.deepEqual(result.value.usage, usage);
+  assert.equal(result.value.evidence_expires, (manifest.verified_at + 7 * 86400) * 1000);
+  assert.equal(calls.length, before);
+});
+
+test('manifest provider status requires an integer JSON token on the top-level field', async () => {
+  const identity = await registeredMiner(), value = job(identity);
+  await send(request(identity, 'POST', '/run', value));
+  const bucket = await mf.getR2Bucket('TRANSCRIPTS');
+  const prefix = `rounds/${activeRound}/${value.hotkey}/${value.exchange_id}`;
+  const path = `/exchanges/${value.exchange_id}/progress`;
+  const usage = {provider_status: 200, detail: '"provider_status":200.0'};
+  const source = JSON.stringify({prefix, round: activeRound, hotkey: value.hotkey,
+    exchange_id: value.exchange_id, verified_at: Math.floor(Date.now() / 1000),
+    provider_status: 200, provider_rejected: false, usage});
+  const before = calls.length;
+  for (const token of ['200.0', '2e2', '200e0', '200.00000000000000001']) {
+    await bucket.put(prefix + '/manifest.json', source.replace('"provider_status":200', `"provider_status":${token}`));
+    const result = await send(request(identity, 'GET', path));
+    assert.equal(result.status, 503, token);
+    assert.deepEqual(result.value, {error: 'invalid_evidence_manifest'}, token);
+  }
+  const duplicate = source.replace('"provider_status":200', '"provider_status":200,"provider_status":200.0');
+  await bucket.put(prefix + '/manifest.json', duplicate);
+  assert.deepEqual((await send(request(identity, 'GET', path))).value, {error: 'invalid_evidence_manifest'});
+  for (const valid of [source,
+    source.replace('"provider_status":200', '"provider_status":200.0,"provider_status":200'),
+    source.replace('"provider_status":200', '"provider_\\u0073tatus":200'),
+    source.replace('"usage":{"provider_status":200', '"usage":{"provider_status":200.0'),
+  ]) {
+    await bucket.put(prefix + '/manifest.json', valid);
+    const result = await send(request(identity, 'GET', path));
+    assert.equal(result.status, 200);
+    assert.equal(result.value.provider_status, 200);
+    assert.deepEqual(result.value.usage, usage);
+  }
+  assert.equal(calls.length, before);
+});
+
 test('an in-flight dispatch does not block replacement or restore its retired allocation', async () => {
   const identity = await registeredMiner(), original = job(identity);
   upstreamMode = 'hold';
