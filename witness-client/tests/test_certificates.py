@@ -1,6 +1,8 @@
 """Exercise provider authentication against constrained wildcard certificates."""
 
 import datetime
+import ssl
+import warnings
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
@@ -9,6 +11,7 @@ import pytest
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.utils import CryptographyDeprecationWarning
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 from cryptography.x509.verification import VerificationError
 
@@ -18,10 +21,13 @@ if TYPE_CHECKING:
     from witness_client._tls import TLSConnection
 
 
+@pytest.mark.parametrize("legacy_root", [False, True])
 @pytest.mark.parametrize(
     "case", ["valid", "permitted", "excluded", "hostname", "expired"]
 )
-def test_provider_certificate_policy(tmp_path: Path, case: str) -> None:
+def test_provider_certificate_policy(
+    tmp_path: Path, case: str, legacy_root: bool
+) -> None:
     now = datetime.datetime.now(datetime.UTC)
     keys = [ec.generate_private_key(ec.SECP256R1()) for _ in range(3)]
     names = [
@@ -37,7 +43,7 @@ def test_provider_certificate_policy(tmp_path: Path, case: str) -> None:
             .subject_name(names[index])
             .issuer_name(names[issuer])
             .public_key(keys[index].public_key())
-            .serial_number(x509.random_serial_number())
+            .serial_number(1 if index == 0 else x509.random_serial_number())
             .not_valid_before(now - datetime.timedelta(days=2))
             .not_valid_after(
                 now + datetime.timedelta(days=-1 if case == "expired" and not ca else 1)
@@ -84,8 +90,16 @@ def test_provider_certificate_policy(tmp_path: Path, case: str) -> None:
                 x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH]), critical=False
             )
         certificates.append(builder.sign(keys[issuer], hashes.SHA256()))
+    root_der = certificates[0].public_bytes(serialization.Encoding.DER)
+    if legacy_root:
+        # Keep the trusted public key and change only the anchor's serial to zero.
+        version_and_serial = b"\xa0\x03\x02\x01\x02\x02\x01\x01"
+        assert root_der.count(version_and_serial) == 1
+        root_der = root_der.replace(
+            version_and_serial, version_and_serial[:-1] + b"\x00"
+        )
     ca_file = tmp_path / "root.pem"
-    ca_file.write_bytes(certificates[0].public_bytes(serialization.Encoding.PEM))
+    ca_file.write_text(ssl.DER_cert_to_PEM_cert(root_der), encoding="ascii")
     connection = cast(
         "TLSConnection",
         SimpleNamespace(
@@ -102,10 +116,12 @@ def test_provider_certificate_policy(tmp_path: Path, case: str) -> None:
         ),
     )
     host = "unrelated.test" if case == "hostname" else "blocked.example.test"
-    if case == "valid":
-        _check_certificates(connection, host, ca_file)
-    else:
-        # Regressions for GHSA-m2h6-j472-rp4c and GHSA-m959-cc7f-wv43,
-        # through the client's actual certificate-validation entry point.
-        with pytest.raises(VerificationError):
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", CryptographyDeprecationWarning)
+        if case == "valid":
             _check_certificates(connection, host, ca_file)
+        else:
+            # Regressions for GHSA-m2h6-j472-rp4c and GHSA-m959-cc7f-wv43,
+            # through the client's actual certificate-validation entry point.
+            with pytest.raises(VerificationError):
+                _check_certificates(connection, host, ca_file)

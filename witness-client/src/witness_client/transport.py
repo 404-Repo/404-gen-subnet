@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import ssl
 import time
+import warnings
 from collections.abc import Callable, Generator, Sequence
 from os import PathLike
 from typing import TYPE_CHECKING, Literal, cast
@@ -16,6 +17,7 @@ from typing import TYPE_CHECKING, Literal, cast
 from cryptography import x509
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
+from cryptography.utils import CryptographyDeprecationWarning
 from cryptography.x509.verification import PolicyBuilder, Store
 
 from .tunnel import WebSocketTunnel
@@ -306,10 +308,17 @@ def _check_certificates(
         raise ValueError("Invalid provider certificate chain length")
     chain = [x509.load_der_x509_certificate(bytes(c.bytes)) for c in certificates]
     context = ssl.create_default_context(cafile=ca_file)
-    roots = [
-        x509.load_der_x509_certificate(c)
-        for c in context.get_ca_certs(binary_form=True)
-    ]
+    # System trust stores still include legacy roots with serial number zero.
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message="Parsed a serial number which wasn't positive",
+            category=CryptographyDeprecationWarning,
+        )
+        roots = [
+            x509.load_der_x509_certificate(c)
+            for c in context.get_ca_certs(binary_form=True)
+        ]
     verifier = (
         PolicyBuilder().store(Store(roots)).build_server_verifier(x509.DNSName(host))
     )
