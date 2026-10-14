@@ -20,6 +20,7 @@ from .auth import WITNESS_ID, hotkey_headers
 from .delivery import request, retry
 from .errors import WitnessError
 from .state import save
+from .timing import identify_exchange, measure, timed
 from .tunnel import MAX_BYTES, WebSocketTunnel
 from .types import AllocationStatus, ExchangeStatus, JSONObject, Session
 
@@ -100,6 +101,7 @@ class GatewayClient:
             )
         return remaining
 
+    @timed("allocation")
     def queue_and_wait_for_worker(
         self, provider: Literal["api", "codex"], *, replace: str | None = None
     ) -> Session:
@@ -117,6 +119,7 @@ class GatewayClient:
         if provider not in ("api", "codex"):
             raise ValueError("Unknown witness provider")
         identifier = str(uuid.uuid4())
+        identify_exchange(identifier)
         job: JSONObject = {
             "operation": "exchange",
             "hotkey": self.hotkey.ss58_address,
@@ -136,7 +139,10 @@ class GatewayClient:
         save(directory / "job.json", body)
         deadline = time.monotonic() + self.delivery_timeout
         try:
-            reply = self._request_with_retry("POST", "/run", body, deadline=deadline)
+            with measure("gateway_admission_dispatch"):
+                reply = self._request_with_retry(
+                    "POST", "/run", body, deadline=deadline
+                )
             job_reply = _parse_allocation(
                 reply or b"{}", identifier, self.hotkey.ss58_address
             )
@@ -144,9 +150,10 @@ class GatewayClient:
             save(directory / "job.json", encode(job))
             deadline = time.monotonic() + self.remaining_seconds(identifier)
             while time.monotonic() < deadline:
-                raw = self._request_with_retry(
-                    "GET", f"/status/{identifier}", deadline=deadline
-                )
+                with measure("allocation_poll"):
+                    raw = self._request_with_retry(
+                        "GET", f"/status/{identifier}", deadline=deadline
+                    )
                 if time.monotonic() >= deadline:
                     break
                 status = _parse_allocation(
@@ -163,7 +170,8 @@ class GatewayClient:
                     and status["session"] is not None
                 ):
                     return status["session"]
-                time.sleep(min(5, max(0, deadline - time.monotonic())))
+                with measure("allocation_poll_sleep"):
+                    time.sleep(min(5, max(0, deadline - time.monotonic())))
             raise WitnessError(
                 "Queued exchange deadline reached", identifier, source="gateway"
             )
@@ -228,6 +236,7 @@ class GatewayClient:
                 source="gateway",
             ) from error
 
+    @timed("recorded_response_download")
     def response(self, identifier: str) -> bytes:
         """Download the recorded OpenAI response body as bytes.
 
@@ -261,16 +270,18 @@ class GatewayClient:
             str(self.http.base_url).rstrip("/").replace("https://", "wss://", 1) + path
         )
         try:
-            with connect(
-                url,
-                additional_headers=headers,
-                proxy=None,
-                compression=None,
-                max_size=256 * 1024,
-                max_queue=16,
-                open_timeout=30,
-                close_timeout=5,
-            ) as socket:
+            with measure("websocket_connect"):
+                socket = connect(
+                    url,
+                    additional_headers=headers,
+                    proxy=None,
+                    compression=None,
+                    max_size=256 * 1024,
+                    max_queue=16,
+                    open_timeout=30,
+                    close_timeout=5,
+                )
+            with socket:
                 yield WebSocketTunnel(socket, identifier)
         except (WebSocketException, OSError, TimeoutError) as error:
             raise WitnessError(

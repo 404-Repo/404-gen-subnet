@@ -98,10 +98,21 @@ func TestPythonProverRejectsModifiedKeys(t *testing.T) {
 func TestPythonProverUsesAuthenticatedSnapshot(t *testing.T) {
 	directory := copyParameters(t)
 	pythonProver.Lock()
-	err := loadPythonProver(directory)
+	timings := newProofTimings()
+	err := loadPythonProver(directory, timings)
 	pythonProver.Unlock()
 	if err != nil {
 		t.Fatal(err)
+	}
+	if timings.ParametersCached || timings.StepsMS["parameter_read_verify"] <= 0 || timings.StepsMS["proving_key_deserialize"] <= 0 {
+		t.Fatal("cold initialization must report pin verification and deserialization")
+	}
+	cached := newProofTimings()
+	pythonProver.Lock()
+	err = loadPythonProver(directory, cached)
+	pythonProver.Unlock()
+	if err != nil || !cached.ParametersCached || len(cached.StepsMS) != 0 {
+		t.Fatal("repeated initialization must use the authenticated cache")
 	}
 	// A replacement after initialization cannot reach the prover. It uses the
 	// authenticated in-memory objects, including when disk files disappear.

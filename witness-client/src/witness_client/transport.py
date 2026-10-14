@@ -20,6 +20,7 @@ from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 from cryptography.utils import CryptographyDeprecationWarning
 from cryptography.x509.verification import PolicyBuilder, Store
 
+from .timing import measure, timed
 from .tunnel import WebSocketTunnel
 from .types import (
     Disclosures,
@@ -155,6 +156,7 @@ class Capture:
         self.disclosures[side].append(info)
 
 
+@timed("tls_exchange")
 def exchange(
     tunnel: WebSocketTunnel,
     host: str,
@@ -178,10 +180,12 @@ def exchange(
     settings.dhGroups = []
     settings.certificate_compression_receive = []
     settings.use_heartbeat_extension = False
-    connection.handshakeClientCert(
-        settings=settings, serverName=host, alpn=[bytearray(b"http/1.1")]
-    )
-    _check_certificates(connection, host, ca_file)
+    with measure("tls_handshake"):
+        connection.handshakeClientCert(
+            settings=settings, serverName=host, alpn=[bytearray(b"http/1.1")]
+        )
+    with measure("certificate_validation"):
+        _check_certificates(connection, host, ca_file)
     # Only this fixed unauthenticated HEAD may precede proof verification. Its
     # keep-alive response avoids the provider's short initial request deadline.
     path = chunks[0][1].split(b" ", 2)[1]
@@ -204,15 +208,17 @@ def exchange(
             "probe": True,
         }
     )
-    _read_probe(connection)
-    for hidden, data in chunks:
-        if hidden != capture.hidden:
-            # The update is protected by the OLD key, including the private
-            # update immediately after the credential. Never disclose that key.
-            for _ in connection.send_keyupdate_request(0):
-                pass
-        capture.hidden = hidden
-        connection.write(data)
+    with measure("probe_response_wait"):
+        _read_probe(connection)
+    with measure("request_tls_encoding"):
+        for hidden, data in chunks:
+            if hidden != capture.hidden:
+                # The update is protected by the OLD key, including the private
+                # update immediately after the credential. Never disclose that key.
+                for _ in connection.send_keyupdate_request(0):
+                    pass
+            capture.hidden = hidden
+            connection.write(data)
 
     # TLS is established, but HTTP is held until the credential proof passes.
     tunnel.flush()
@@ -230,34 +236,35 @@ def exchange(
     closed = False
     # Read records directly after the authenticated handshake. This protocol
     # permits tickets followed by HTTP and a close alert, but no more key updates.
-    while True:
-        try:
-            for record in connection._recordLayer.recvRecord():
-                if record not in (0, 1):
-                    break
-        except TLSAbruptCloseError:
-            break  # HTTP parser must still prove an explicitly complete body.
-        header, parser = cast("DecryptedRecord", record)
-        data = bytes(parser.bytes)
-        if closed:
-            raise ValueError("TLS data after close")
-        if header.type == 23:
-            response.extend(data)
-            if len(response) > MAX_BYTES:
-                raise ValueError("HTTP response exceeds limit")
-        elif header.type == 21 and data == b"\x01\x00":
-            closed = True
-        elif header.type == 22 and not response:
-            # The witness independently checks these are NewSessionTickets.
-            offset = 0
-            while offset < len(data):
-                if offset + 4 > len(data) or data[offset] != 4:
-                    raise ValueError("Unsupported post-handshake message")
-                offset += 4 + int.from_bytes(data[offset + 1 : offset + 4], "big")
-            if offset != len(data):
-                raise ValueError("Truncated session ticket")
-        else:
-            raise ValueError("Unsupported provider TLS record")
+    with measure("response_delivery_wait_and_decrypt"):
+        while True:
+            try:
+                for record in connection._recordLayer.recvRecord():
+                    if record not in (0, 1):
+                        break
+            except TLSAbruptCloseError:
+                break  # HTTP parser must still prove an explicitly complete body.
+            header, parser = cast("DecryptedRecord", record)
+            data = bytes(parser.bytes)
+            if closed:
+                raise ValueError("TLS data after close")
+            if header.type == 23:
+                response.extend(data)
+                if len(response) > MAX_BYTES:
+                    raise ValueError("HTTP response exceeds limit")
+            elif header.type == 21 and data == b"\x01\x00":
+                closed = True
+            elif header.type == 22 and not response:
+                # The witness independently checks these are NewSessionTickets.
+                offset = 0
+                while offset < len(data):
+                    if offset + 4 > len(data) or data[offset] != 4:
+                        raise ValueError("Unsupported post-handshake message")
+                    offset += 4 + int.from_bytes(data[offset + 1 : offset + 4], "big")
+                if offset != len(data):
+                    raise ValueError("Truncated session ticket")
+            else:
+                raise ValueError("Unsupported provider TLS record")
     return bytes(response)
 
 

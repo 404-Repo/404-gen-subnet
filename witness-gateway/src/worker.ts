@@ -1,5 +1,6 @@
 /** Public admission and private allocation for queue-based witness workers. */
 import {DurableObject} from 'cloudflare:workers';
+import {measure, timing} from './timing';
 import {UUID, authenticate, exchangePayload} from './auth';
 import {Rejection, type Connection, type GatewayEnv, type GatewayRequest, type Job,
   type Json, type Rate, type Role, type WorkerConnection} from './models';
@@ -38,6 +39,8 @@ async function completedStatus(env: GatewayEnv, input: GatewayRequest, prefix: s
 
 export default {
   async fetch(request: Request, env: GatewayEnv): Promise<Response> {
+    const started = performance.now();
+    let exchangeId: string | null = null, outcome = 'ok';
     try {
       requireOpenRound(env);
       const url = new URL(request.url);
@@ -52,7 +55,10 @@ export default {
           headers: {Upgrade: 'websocket', 'x-witness-input': JSON.stringify({requestId: worker[3], token})},
         }));
       }
+      const authStarted = performance.now();
       const input = await authenticate(request, env);
+      exchangeId = input.requestId;
+      timing(exchangeId, 'authenticate', authStarted);
       if (input.connect && (request.headers.get('Upgrade') || '').toLowerCase() !== 'websocket') {
         throw new Rejection(426, 'websocket_required');
       }
@@ -77,7 +83,8 @@ export default {
         'content-type': input.object === 'status.json' ? 'application/json' : 'application/octet-stream',
         'cache-control': 'no-store', 'content-length': String(evidence.size),
       }});
-    } catch (error) {return failure(error);}
+    } catch (error) {outcome = 'error'; return failure(error);}
+    finally {timing(exchangeId, 'request', started, outcome);}
   },
 } satisfies ExportedHandler<GatewayEnv>;
 
@@ -99,7 +106,8 @@ export class MinerAdmission extends DurableObject<GatewayEnv> {
       const token = crypto.randomUUID().replaceAll('-', '') + crypto.randomUUID().replaceAll('-', '');
       const digest = input.exchange ? await sha256(exchangePayload(input.exchange)) : '';
       const tokenHash = await sha256(token);
-      const result = await withStateLock(this.ctx, () => this.reserve(input, digest, tokenHash));
+      const result = await measure(input.requestId, 'admission',
+        () => withStateLock(this.ctx, () => this.reserve(input, digest, tokenHash)));
       if (result instanceof Response) {
         if (!input.exchange && !input.object && !input.connect && !input.release) return await this.refreshStatus(input);
         return result;
@@ -177,12 +185,13 @@ export class MinerAdmission extends DurableObject<GatewayEnv> {
     let runpodId: string | undefined;
     try {
       const lifetime = Math.max(1000, Math.min(604_800_000, reservation.deadline * 1000 - nowMs()));
-      const remote = await this.runpod('/run', {input: {...input.exchange!, round: this.env.ROUND,
-        expires: reservation.deadline, gateway: input.origin, token}, policy: {ttl: lifetime}});
+      const remote = await measure(input.requestId, 'runpod_dispatch', () => this.runpod('/run', {input: {...input.exchange!, round: this.env.ROUND,
+        expires: reservation.deadline, gateway: input.origin, token}, policy: {ttl: lifetime}}));
       if (typeof remote.id !== 'string' || !/^[a-zA-Z0-9_-]{1,128}(?![\s\S])/.test(remote.id)) throw new Error('Invalid upstream ID');
       runpodId = remote.id;
     } catch {console.log(JSON.stringify({event: 'runpod_queue_uncertain', exchange_id: input.requestId}));}
-    await withStateLock(this.ctx, () => this.saveDispatch(input.requestId, runpodId));
+    await measure(input.requestId, 'dispatch_persistence',
+      () => withStateLock(this.ctx, () => this.saveDispatch(input.requestId, runpodId)));
   }
   async saveDispatch(requestId: string, runpodId: string | undefined): Promise<void> {
     const job = (await this.job(requestId))!;
@@ -231,7 +240,8 @@ export class MinerAdmission extends DurableObject<GatewayEnv> {
       if (connection.role === 'worker' && value.type === 'ready') {
         const session = value.session;
         if (job.session || length > 4096 || !isRecord(session) || session.id !== requestId) throw new Error('Invalid session');
-        await this.saveJob(requestId, {...job, session: session as {[key: string]: Json}});
+        await measure(requestId, 'worker_ready_persistence',
+          () => this.saveJob(requestId, {...job, session: session as {[key: string]: Json}}));
         return;
       }
       if (connection.role === 'worker' && value.type === 'finished') {

@@ -17,9 +17,6 @@ from functools import partial
 from pathlib import Path
 from typing import cast
 
-from websockets.exceptions import WebSocketException
-from websockets.sync.client import connect
-
 from channel import Channel, WorkerChannel
 from identity import (
     WITNESS_ID,
@@ -30,6 +27,12 @@ from identity import (
     worker_connection,
 )
 from storage import MAX_BYTES, R2Store, Store, json_bytes
+from timing import emit, identify_exchange, measure, snapshot, timed
+from timing import exchange_id as _exchange_id
+from timing import forward as _verifier_timings
+from timing import started as timing_started
+from websockets.exceptions import WebSocketException
+from websockets.sync.client import connect
 
 HERE = Path(__file__).resolve().parent
 WITNESS = HERE.parent / "verifier"
@@ -55,25 +58,33 @@ def complete_records(data: bytes | bytearray) -> bool:
 def verify(
     mode: str, directory: Path, *, provider: Provider | None = None
 ) -> dict[str, object]:
-    result = subprocess.run(
-        [
-            "node",
-            str(HERE / "verify.mjs"),
-            mode,
-            str(directory),
-            str(PARAMETERS),
-            *([provider] if provider is not None else []),
-        ],
-        capture_output=True,
-        timeout=180,
-        check=False,
-        env={**os.environ, "NODE_OPTIONS": "--max-old-space-size=384"},
-    )
+    with measure("verifier_subprocess"):
+        result = subprocess.run(
+            [
+                "node",
+                str(HERE / "verify.mjs"),
+                mode,
+                str(directory),
+                str(PARAMETERS),
+                *([provider] if provider is not None else []),
+            ],
+            capture_output=True,
+            timeout=180,
+            check=False,
+            env={
+                **os.environ,
+                "NODE_OPTIONS": "--max-old-space-size=384",
+                "WITNESS_EXCHANGE_ID": _exchange_id(),
+                "WITNESS_VERIFIER_MODE": mode,
+            },
+        )
+    _verifier_timings(result.stderr)
     if result.returncode:
         raise ValueError("Witness verification rejected the exchange")
     return cast(dict[str, object], json.loads(result.stdout))
 
 
+@timed("relay")
 def relay(
     store: Store,
     prefix: str,
@@ -94,6 +105,7 @@ def relay(
     """
     if prefix.rsplit("/", 1)[0] != miner_prefix(round_number, hotkey):
         raise ValueError("Transcript path differs from authenticated identity")
+    identify_exchange(prefix.rsplit("/", 1)[1])
     started = time.monotonic()
     hello_deadline = min(deadline, started + CLIENT_HELLO_TIMEOUT)
     authorization_deadline = min(deadline, started + AUTHORIZATION_TIMEOUT)
@@ -103,24 +115,33 @@ def relay(
     handshake = False
     handshake_bytes = 0
     try:
-        with socket.create_connection((host, port), timeout=10) as provider:
+        with measure("provider_tcp_connect"):
+            connection = socket.create_connection((host, port), timeout=10)
+        with connection as provider:
             # Read one whole TLS record, then let the shared gate validate it.
-            while len(client) < 5 or len(client) < 5 + int.from_bytes(
-                client[3:5], "big"
-            ):
-                if time.monotonic() >= hello_deadline:
-                    raise TimeoutError("ClientHello deadline reached")
-                chunk = channel.recv(hello_deadline)
-                if not chunk:
-                    raise ValueError("Missing ClientHello")
-                client.extend(chunk)
-                if len(client) >= 5 and 5 + int.from_bytes(client[3:5], "big") > 16645:
-                    raise ValueError("Oversized ClientHello")
+            with measure("client_hello_wait"):
+                while len(client) < 5 or len(client) < 5 + int.from_bytes(
+                    client[3:5], "big"
+                ):
+                    if time.monotonic() >= hello_deadline:
+                        raise TimeoutError("ClientHello deadline reached")
+                    chunk = channel.recv(hello_deadline)
+                    if not chunk:
+                        raise ValueError("Missing ClientHello")
+                    client.extend(chunk)
+                    if (
+                        len(client) >= 5
+                        and 5 + int.from_bytes(client[3:5], "big") > 16645
+                    ):
+                        raise ValueError("Oversized ClientHello")
             (directory / "client.bin").write_bytes(client)
-            gate = verifier("hello", directory)
+            with measure("verify_hello"):
+                gate = verifier("hello", directory)
             released = int(str(gate["released"]))
             provider.sendall(client[:released])
 
+            handshake_started = timing_started()
+            authorization_started = handshake_started
             # The server's first TLS flight is safe to deliver. Verify and
             # release Finished first, then verify and release the HTTP request.
             while time.monotonic() < authorization_deadline:
@@ -165,11 +186,14 @@ def relay(
                 (directory / "server.bin").write_bytes(server)
                 (directory / claim_name).write_bytes(raw_claim)
                 if not handshake:
-                    verifier("handshake", directory)
-                    store.put(
-                        prefix + "/handshake.json",
-                        (directory / "handshake.json").read_bytes(),
-                    )
+                    emit("handshake_capture_wait", handshake_started)
+                    with measure("verify_handshake"):
+                        verifier("handshake", directory)
+                    with measure("handshake_persistence"):
+                        store.put(
+                            prefix + "/handshake.json",
+                            (directory / "handshake.json").read_bytes(),
+                        )
                     handshake_bytes = len(server)
                     handshake = True
                     channel.notify(
@@ -177,49 +201,62 @@ def relay(
                     )
                     provider.sendall(client[released:])
                     released = len(client)
+                    authorization_started = timing_started()
                     continue
-                verifier("authorize", directory)
+                emit("authorization_claim_wait", authorization_started)
+                with measure("verify_authorize"):
+                    verifier("authorize", directory)
                 # These writes complete before any billable HTTP bytes leave.
-                for name in (
-                    "client.bin",
-                    "server.bin",
-                    "claim.json",
-                    "authorization.json",
-                    "request.json",
-                ):
-                    store.put(prefix + "/" + name, (directory / name).read_bytes())
-                store.put(
-                    prefix + "/status.json",
-                    json_bytes(
-                        {"status": "running", "handshook": True, "authorized": True}
-                    ),
-                )
+                with measure("authorization_persistence"):
+                    for name in (
+                        "client.bin",
+                        "server.bin",
+                        "claim.json",
+                        "authorization.json",
+                        "request.json",
+                    ):
+                        store.put(prefix + "/" + name, (directory / name).read_bytes())
+                    store.put(
+                        prefix + "/status.json",
+                        json_bytes(
+                            {"status": "running", "handshook": True, "authorized": True}
+                        ),
+                    )
                 if time.monotonic() >= authorization_deadline:
                     raise TimeoutError("Request authorization deadline reached")
                 channel.notify(
                     {"status": "running", "handshook": True, "authorized": True}
                 )
                 handshake_bytes = len(server)
-                provider.sendall(client[released:])
-                break
+                with measure("provider_request_release"):
+                    provider.sendall(client[released:])
+                    break
             else:
                 raise TimeoutError("Request authorization deadline reached")
 
+            response_started = timing_started()
+            first_response = True
             # Do not consume client messages or let its disconnect cancel GPT.
-            while time.monotonic() < deadline:
-                if not select.select([provider], [], [], 0.2)[0]:
-                    continue
-                chunk = provider.recv(65536)
-                if not chunk:
-                    break
-                server.extend(chunk)
-                if len(server) > MAX_BYTES:
-                    raise ValueError("Provider traffic exceeds 16 MiB")
-            else:
-                raise TimeoutError("Provider exchange deadline reached")
+            with measure("provider_response_capture"):
+                while time.monotonic() < deadline:
+                    if not select.select([provider], [], [], 0.2)[0]:
+                        continue
+                    chunk = provider.recv(65536)
+                    if not chunk:
+                        break
+                    if first_response:
+                        emit("provider_first_ciphertext_wait", response_started)
+                        first_response = False
+                    server.extend(chunk)
+                    if len(server) > MAX_BYTES:
+                        raise ValueError("Provider traffic exceeds 16 MiB")
+                else:
+                    raise TimeoutError("Provider exchange deadline reached")
         (directory / "server.bin").write_bytes(server)
-        store.put(prefix + "/server.bin", bytes(server))
-        metadata = verifier("finish", directory)
+        with measure("final_transcript_persistence"):
+            store.put(prefix + "/server.bin", bytes(server))
+        with measure("verify_finish"):
+            metadata = verifier("finish", directory)
         metadata.update(
             {
                 "verified_at": time.time(),
@@ -231,33 +268,36 @@ def relay(
                 "exchange_id": prefix.rsplit("/", 1)[1],
             }
         )
-        for name in ("request.json", "response.sse"):
-            store.put(prefix + "/" + name, (directory / name).read_bytes())
-        store.put(prefix + "/manifest.json", json_bytes(metadata))
-        store.put(
-            prefix + "/status.json",
-            json_bytes(
-                {
-                    "status": "issued",
-                    "authorized": True,
-                    "usage": metadata.get("usage"),
-                    "provider_status": metadata["provider_status"],
-                    "usage_state": (
-                        "rejected"
-                        if metadata["provider_rejected"]
-                        else (
-                            "recorded"
-                            if metadata.get("usage") is not None
-                            else "unknown"
-                        )
+        with measure("evidence_persistence"):
+            for name in ("request.json", "response.sse"):
+                store.put(prefix + "/" + name, (directory / name).read_bytes())
+            with measure("manifest_persistence"):
+                store.put(prefix + "/manifest.json", json_bytes(metadata))
+            with measure("final_status_persistence"):
+                store.put(
+                    prefix + "/status.json",
+                    json_bytes(
+                        {
+                            "status": "issued",
+                            "authorized": True,
+                            "usage": metadata.get("usage"),
+                            "provider_status": metadata["provider_status"],
+                            "usage_state": (
+                                "rejected"
+                                if metadata["provider_rejected"]
+                                else (
+                                    "recorded"
+                                    if metadata.get("usage") is not None
+                                    else "unknown"
+                                )
+                            ),
+                            "evidence_expires": int((time.time() + 7 * 86400) * 1000),
+                        }
                     ),
-                    "evidence_expires": int((time.time() + 7 * 86400) * 1000),
-                }
-            ),
-        )
+                )
         issued = True
         # Capture is durable before delivery. A disconnected miner can recover it.
-        with suppress(OSError, WebSocketException):
+        with measure("delivery"), suppress(OSError, WebSocketException):
             channel.send(bytes(server[handshake_bytes:]))
             channel.finish()
         return metadata
@@ -267,9 +307,13 @@ def relay(
                 channel.finish()
 
 
+@timed("job")
 def handler(job: dict[str, object]) -> dict[str, object]:
     data = cast(dict[str, object], job["input"])
-    proof_hash = hashlib.sha256((PARAMETERS / "verifying.bin").read_bytes()).hexdigest()
+    with measure("verifying_key_hash"):
+        proof_hash = hashlib.sha256(
+            (PARAMETERS / "verifying.bin").read_bytes()
+        ).hexdigest()
     if data.get("operation") == "health":
         validate_round(os.environ["WITNESS_ROUND"])
         store = R2Store()
@@ -291,7 +335,9 @@ def handler(job: dict[str, object]) -> dict[str, object]:
     if data.get("operation") != "exchange":
         raise ValueError("Unknown operation")
     round_number = os.environ["WITNESS_ROUND"]
-    hotkey, identifier, provider = authenticate_exchange(data, round_number)
+    with measure("authenticate_job"):
+        hotkey, identifier, provider = authenticate_exchange(data, round_number)
+    identify_exchange(identifier)
     host, path = PROVIDERS[provider]
     gateway_url, token, expires = worker_connection(data)
     deadline = time.monotonic() + expires - time.time()
@@ -307,26 +353,29 @@ def handler(job: dict[str, object]) -> dict[str, object]:
     }
     # Claim before opening the provider connection or writing evidence. A duplicate
     # RunPod delivery cannot reuse the private, single-use gateway capability.
-    with connect(
-        gateway_url,
-        additional_headers={"Authorization": f"Bearer {token}"},
-        proxy=None,
-        compression=None,
-        max_size=2 * 1024 * 1024,
-        max_queue=16,
-        open_timeout=30,
-        close_timeout=5,
-    ) as socket:
+    with measure("gateway_websocket_connect"):
+        socket = connect(
+            gateway_url,
+            additional_headers={"Authorization": f"Bearer {token}"},
+            proxy=None,
+            compression=None,
+            max_size=2 * 1024 * 1024,
+            max_queue=16,
+            open_timeout=30,
+            close_timeout=5,
+        )
+    with socket:
         channel = WorkerChannel(socket)
         try:
-            store.put(
-                prefix + "/status.json",
-                json_bytes({"status": "running", "authorized": False}),
-            )
-            store.put(prefix + "/session.json", json_bytes(session))
-            socket.send(json_bytes({"type": "ready", "session": session}).decode())
+            with measure("session_persistence_and_ready"):
+                store.put(
+                    prefix + "/status.json",
+                    json_bytes({"status": "running", "authorized": False}),
+                )
+                store.put(prefix + "/session.json", json_bytes(session))
+                socket.send(json_bytes({"type": "ready", "session": session}).decode())
             with tempfile.TemporaryDirectory(prefix="witness-") as temporary:
-                return relay(
+                result = relay(
                     store,
                     prefix,
                     deadline,
@@ -346,6 +395,9 @@ def handler(job: dict[str, object]) -> dict[str, object]:
             raise RuntimeError(
                 f"Exchange {identifier} failed ({type(error).__name__})"
             ) from None
+
+    result["timings"] = snapshot()
+    return result
 
 
 if __name__ == "__main__":

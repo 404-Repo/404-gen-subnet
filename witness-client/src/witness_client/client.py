@@ -29,6 +29,7 @@ from .gateway import GatewayClient
 from .proof import Prover
 from .response import completed_response, http_body, provider_error
 from .state import save as _save
+from .timing import identify_exchange, measure, timed
 from .transport import exchange
 from .tunnel import WebSocketTunnel
 from .types import (
@@ -65,6 +66,7 @@ class WitnessClient:
     validator can replay the miner's code without calling OpenAI again.
     """
 
+    @timed("initialize")
     def __init__(
         self,
         config: WitnessConfig | str | os.PathLike[str],
@@ -128,16 +130,18 @@ class WitnessClient:
         self._state.mkdir(mode=0o700, parents=True, exist_ok=True)
         if self._state.stat().st_mode & 0o077:
             raise ValueError("Witness state directory must be private (chmod 700)")
-        self._prover = Prover(parameters)
+        with measure("prover_initialize"):
+            self._prover = Prover(parameters)
         self._hotkey = hotkey
-        context = ssl.create_default_context()
-        self._http = httpx.Client(
-            base_url=base,
-            verify=context,
-            timeout=30,
-            follow_redirects=False,
-            trust_env=False,
-        )
+        with measure("http_initialize"):
+            context = ssl.create_default_context()
+            self._http = httpx.Client(
+                base_url=base,
+                verify=context,
+                timeout=30,
+                follow_redirects=False,
+                trust_env=False,
+            )
         self._gateway = GatewayClient(
             self._http,
             self._hotkey,
@@ -162,6 +166,7 @@ class WitnessClient:
     ) -> None:
         self.close()
 
+    @timed("create")
     def create(self, **params: Unpack[ResponseCreateParamsStreaming]) -> WitnessResult:
         """Make one OpenAI request and wait for its witnessed response.
 
@@ -203,8 +208,10 @@ class WitnessClient:
                 )
                 print(result.output_text, result.usage)
         """
-        body = openai_request.serialize_body(params, self._mode)
-        openai_request.load_credentials(self._config, self._mode, self._api_key)
+        with measure("serialize_request"):
+            body = openai_request.serialize_body(params, self._mode)
+        with measure("credentials_before_queue"):
+            openai_request.load_credentials(self._config, self._mode, self._api_key)
         host, path = openai_request.PROVIDERS[self._mode]
         identifier: str | None = None
         try:
@@ -227,12 +234,13 @@ class WitnessClient:
                 os.close(fd)
             _save(directory / "session.json", _encode_json(session))
             try:
-                request = openai_request.prepare_request(
-                    self._config,
-                    self._mode,
-                    self._api_key,
-                    body=body,
-                )
+                with measure("prepare_request_and_credentials"):
+                    request = openai_request.prepare_request(
+                        self._config,
+                        self._mode,
+                        self._api_key,
+                        body=body,
+                    )
             except Exception:
                 # Release the unused worker without masking the credential error.
                 with suppress(Exception):
@@ -248,8 +256,9 @@ class WitnessClient:
                     authorize=lambda disclosure: self._authorize(tunnel, disclosure),
                     timeout=self._gateway.remaining_seconds(identifier),
                 )
-            response = http_body(raw)
-            _save(directory / "response.bin", response)
+            with measure("parse_and_save_response"):
+                response = http_body(raw)
+                _save(directory / "response.bin", response)
             return self.resume(identifier)
         except WitnessError as error:
             error.exchange_id = error.exchange_id or identifier
@@ -269,6 +278,7 @@ class WitnessClient:
         """
         self._gateway.release(str(uuid.UUID(exchange_id)))
 
+    @timed("resume")
     def resume(self, exchange_id: str) -> WitnessResult:
         """Retrieve a recorded result without making another OpenAI request.
 
@@ -280,6 +290,7 @@ class WitnessClient:
         exchange is unavailable, unfinished, or rejected by the provider.
         """
         identifier = str(uuid.UUID(exchange_id))
+        identify_exchange(identifier)
         try:
             directory = self._state / identifier
             session = recovery.load_session(directory)
@@ -289,7 +300,8 @@ class WitnessClient:
                     "Cannot resume an exchange from a different provider",
                     identifier,
                 )
-            status = self._gateway.wait_for_evidence(identifier)
+            with measure("evidence_retrieval_wait"):
+                status = self._gateway.wait_for_evidence(identifier)
             if status["status"] != "issued":
                 raise WitnessError("Witness has not accepted this exchange", identifier)
             provider_status = status.get("provider_status")
@@ -342,32 +354,36 @@ class WitnessClient:
     ) -> None:
         """Verify TLS and its fixed HEAD probe before slow proof preparation."""
         claim = _disclosure_claim(disclosure)
-        tunnel.verify(
-            "handshake",
-            _encode_json(claim),
-            min(
-                self._gateway.delivery_timeout,
-                self._gateway.remaining_seconds(tunnel.identifier),
-            ),
-        )
+        with measure("handshake_verification_wait"):
+            tunnel.verify(
+                "handshake",
+                _encode_json(claim),
+                min(
+                    self._gateway.delivery_timeout,
+                    self._gateway.remaining_seconds(tunnel.identifier),
+                ),
+            )
 
     def _authorize(self, tunnel: WebSocketTunnel, disclosure: EarlyDisclosure) -> None:
         """Commit disclosure before the witness releases this one provider request."""
-        credential = self._prover.prove(disclosure["private"])
+        with measure("credential_proof"):
+            credential = self._prover.prove(disclosure["private"])
         claim: Claim = {
             "credential": credential,
             **_disclosure_claim(disclosure),
         }
-        raw = _encode_json(claim)
-        _save(self._state / tunnel.identifier / "claim.json", raw)
-        tunnel.verify(
-            "authorize",
-            raw,
-            min(
-                self._gateway.delivery_timeout,
-                self._gateway.remaining_seconds(tunnel.identifier),
-            ),
-        )
+        with measure("claim_encode_and_save"):
+            raw = _encode_json(claim)
+            _save(self._state / tunnel.identifier / "claim.json", raw)
+        with measure("authorization_verification_wait"):
+            tunnel.verify(
+                "authorize",
+                raw,
+                min(
+                    self._gateway.delivery_timeout,
+                    self._gateway.remaining_seconds(tunnel.identifier),
+                ),
+            )
 
 
 def _encode_json(value: object) -> bytes:

@@ -23,6 +23,7 @@ witness-server/worker/**
 !witness-server/worker/worker.py
 !witness-server/worker/storage.py
 !witness-server/worker/channel.py
+!witness-server/worker/timing.py
 !witness-server/worker/identity.py
 !witness-server/worker/verify.mjs
 !witness-server/worker/worker-requirements.txt

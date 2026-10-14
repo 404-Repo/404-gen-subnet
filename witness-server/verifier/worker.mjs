@@ -1,10 +1,13 @@
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { performance } from 'node:perf_hooks';
+import { timing } from './timing.mjs';
 
 export const DEFAULT_BINARY = fileURLToPath(new URL('../../witness-client/native/privateauth', import.meta.url));
 export const DEFAULT_PARAMS = fileURLToPath(new URL('params', import.meta.url));
 
 export function runProof(mode, input, { binary = DEFAULT_BINARY, params = DEFAULT_PARAMS, timeout = 120000 } = {}) {
+  const started = performance.now();
   return new Promise((resolve, reject) => {
     const child = spawn(binary, [mode, params], { stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, GOMAXPROCS: '2', GOMEMLIMIT: '768MiB' } });
     let output = Buffer.alloc(0), error = Buffer.alloc(0), failure;
@@ -15,9 +18,21 @@ export function runProof(mode, input, { binary = DEFAULT_BINARY, params = DEFAUL
     child.once('error', reason => { clearTimeout(timer); reject(reason); });
     child.once('close', code => {
       clearTimeout(timer);
+      timing(`native_${mode}_subprocess`, started, failure || code !== 0 ? 'error' : 'ok');
       if (failure) return reject(failure);
       if (code !== 0) return reject(new Error(`Credential ${mode} failed: ${error.toString().slice(0, 200)}`));
-      try { resolve(JSON.parse(output.toString())); } catch { reject(new Error('Invalid proof result')); }
+      try {
+        const result = JSON.parse(output.toString());
+        if (mode === 'verify') {
+          for (const phase of ['verifying_key_load', 'proof_verify']) {
+            const duration = result.timings_ms?.[phase];
+            if (typeof duration === 'number' && Number.isFinite(duration) && duration >= 0) {
+              timing(`native_${phase}`, 0, 'ok', duration);
+            }
+          }
+        }
+        resolve(result);
+      } catch { reject(new Error('Invalid proof result')); }
     });
     child.stdin.on('error', () => {});
     child.stdin.end(JSON.stringify(input));

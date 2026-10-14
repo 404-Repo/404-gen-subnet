@@ -22,6 +22,6 @@ COPY --from=proof /privateauth /app/witness-client/native/privateauth
 COPY witness-client/LICENSE witness-client/THIRD_PARTY_NOTICES.md /app/licenses/
 COPY witness-server/verifier/*.mjs /app/witness-server/verifier/
 COPY witness-server/verifier/params/verifying.bin /app/witness-server/verifier/params/verifying.bin
-COPY witness-server/worker/worker.py witness-server/worker/storage.py witness-server/worker/identity.py witness-server/worker/channel.py witness-server/worker/verify.mjs ./
-ENV PYTHONUNBUFFERED=1
+COPY witness-server/worker/worker.py witness-server/worker/storage.py witness-server/worker/identity.py witness-server/worker/channel.py witness-server/worker/timing.py witness-server/worker/verify.mjs ./
+ENV PYTHONUNBUFFERED=1 WITNESS_TIMINGS=1
 CMD ["python", "-u", "worker.py"]

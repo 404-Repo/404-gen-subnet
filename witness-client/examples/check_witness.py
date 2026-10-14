@@ -10,7 +10,6 @@ import time
 from pathlib import Path
 
 from bittensor_wallet import Wallet
-
 from witness_client import WitnessClient, WitnessConfig, WitnessError
 from witness_client.types import Credentials
 
@@ -25,6 +24,7 @@ class Arguments(argparse.Namespace):
     subscription: bool
     delivery_timeout: float
     resume: str | None
+    requests: int
 
 
 def main() -> None:
@@ -59,7 +59,16 @@ def main() -> None:
     parser.add_argument(
         "--resume", help="Retrieve this exchange instead of generating."
     )
+    parser.add_argument(
+        "--requests",
+        type=int,
+        choices=range(1, 6),
+        default=1,
+        help="Make 1–5 sequential test requests using one client (default: 1).",
+    )
     args = parser.parse_args(namespace=Arguments())
+    if args.resume and args.requests != 1:
+        parser.error("--resume requires --requests=1")
     auth: Credentials
     if args.subscription:
         auth = {"subscription": "codex"}
@@ -89,16 +98,20 @@ def main() -> None:
         with WitnessClient(
             config, hotkey=hotkey, delivery_timeout=args.delivery_timeout, **auth
         ) as client:
-            result = (
-                client.resume(args.resume)
-                if args.resume
-                else client.create(
-                    stream=True,
-                    model=args.model,
-                    input="Reply with exactly: witness test OK",
-                    reasoning={"effort": "low"},
+            for index in range(args.requests):
+                result = (
+                    client.resume(args.resume)
+                    if args.resume
+                    else client.create(
+                        stream=True,
+                        model=args.model,
+                        input="Reply with exactly: witness test OK",
+                        reasoning={"effort": "low"},
+                    )
                 )
-            )
+                if args.requests > 1:
+                    print(f"Request {index + 1}: {result.output_text}", flush=True)
+                    print(f"Usage: {json.dumps(result.usage)}", flush=True)
     except WitnessError as error:
         print(
             json.dumps(

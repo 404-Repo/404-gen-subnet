@@ -136,14 +136,19 @@ func run() error {
 		return json.NewEncoder(os.Stdout).Encode(map[string]any{"verified": true})
 	}
 	if mode == "verify" {
+		timings := make(map[string]float64)
+		phaseStarted := time.Now()
 		vk := groth16.NewVerifyingKey(ecc.BN254)
 		if e = readObject(filepath.Join(dir, "verifying.bin"), vk); e != nil {
 			return e
 		}
+		timings["verifying_key_load"] = float64(time.Since(phaseStarted).Nanoseconds()) / 1e6
+		phaseStarted = time.Now()
 		if e = verify(in, vk); e != nil {
 			return e
 		}
-		return json.NewEncoder(os.Stdout).Encode(map[string]any{"verified": true, "seconds": time.Since(start).Seconds()})
+		timings["proof_verify"] = float64(time.Since(phaseStarted).Nanoseconds()) / 1e6
+		return json.NewEncoder(os.Stdout).Encode(map[string]any{"verified": true, "seconds": time.Since(start).Seconds(), "timings_ms": timings})
 	}
 	ccs := groth16.NewCS(ecc.BN254)
 	if e = readObject(filepath.Join(dir, "circuit.bin"), ccs); e != nil {

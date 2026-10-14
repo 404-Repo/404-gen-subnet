@@ -9,6 +9,7 @@ from typing import Protocol, cast
 import boto3
 from botocore.config import Config
 from botocore.exceptions import ClientError
+from timing import timed
 
 MAX_BYTES = 16 * 1024 * 1024
 CHUNK_BYTES = 256 * 1024
@@ -32,6 +33,7 @@ class S3(Protocol):
 
 
 class R2Store:
+    @timed("r2_initialize")
     def __init__(self) -> None:
         self.bucket = os.environ.get("R2_BUCKET", "404-gen")
         self.client = cast(
@@ -66,6 +68,7 @@ class R2Store:
             raise ValueError("R2 object exceeds the exchange limit")
         return data
 
+    @timed("r2_put")
     def put(self, key: str, data: bytes) -> None:
         self.client.put_object(
             Bucket=self.bucket,

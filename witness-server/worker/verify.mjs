@@ -5,6 +5,9 @@ import { pathToFileURL } from 'node:url';
 import { authorizeHandshake, authorizeRequest, finishAuthorizedResponse } from '../verifier/verify.mjs';
 import { ClientHelloGate, responseUsage, providerRejected } from '../verifier/gate.mjs';
 import { DEFAULT_BINARY } from '../verifier/worker.mjs';
+import { measure, timing } from '../verifier/timing.mjs';
+
+timing('process_start_to_ready', 0);
 
 export async function run(mode, directory, params, provider, overrides = {}) {
   const targets = {
@@ -30,12 +33,12 @@ export async function run(mode, directory, params, provider, overrides = {}) {
       const a = claim.response_key, b = handshake.responseKey;
       if (a?.key !== b.key || a?.iv !== b.iv || a?.number !== b.number) throw new Error('Response key changed after handshake');
     }
-    const authorization = await (mode === 'handshake' ? authorizeHandshake : authorizeRequest)({
+    const authorization = await measure('verification', () => (mode === 'handshake' ? authorizeHandshake : authorizeRequest)({
       observed: { client: [readFileSync(join(directory, 'client.bin'))], server: [readFileSync(join(directory, 'server.bin'))] },
       claim,
       ...target,
       proofOptions: { params }, ...overrides,
-    });
+    }));
     if (mode === 'handshake') {
       writeFileSync(join(directory, 'handshake.json'), JSON.stringify(authorization));
       return { handshake: true };

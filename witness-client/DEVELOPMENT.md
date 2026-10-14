@@ -2,6 +2,7 @@
 
 The [sequence diagrams](SEQUENCE.md) trace job queueing, TLS setup, both
 disclosures, and response capture across the client and witness services.
+See [TIMINGS.md](TIMINGS.md) for monotonic diagnostics and a bounded repeated-request sample.
 
 A **submission** is a miner's entry for a competition round. A **job** is one
 queued witness worker run. An **exchange** is the OpenAI request and response

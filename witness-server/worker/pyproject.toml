@@ -4,7 +4,7 @@ pythonpath = [".", "../../witness-client/src"]
 
 [tool.mypy]
 python_version = "3.11"
-files = ["storage.py", "identity.py", "worker.py", "channel.py", "tests"]
+files = ["storage.py", "identity.py", "worker.py", "channel.py", "timing.py", "tests"]
 strict = true
 mypy_path = ["../../witness-client/src"]
 

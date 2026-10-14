@@ -12,6 +12,7 @@ from typing import BinaryIO, TypedDict, cast
 
 from bittensor_wallet import Keypair
 
+from .timing import measure, timed
 from .types import JSONObject, JSONValue
 
 WITNESS_ID = "404-witness"
@@ -68,6 +69,7 @@ def hotkey_headers(
     }
 
 
+@timed("subscription_credentials")
 def subscription_credentials(
     home: str | os.PathLike[str] | None = None, executable: str = "codex"
 ) -> tuple[str, str]:
@@ -84,9 +86,11 @@ def subscription_credentials(
         )["exp"]
         return token, data["tokens"]["account_id"], expiry
 
-    token, account, expiry = read()
+    with measure("credential_load"):
+        token, account, expiry = read()
     if expiry < time.time() + 300:
-        _refresh_codex(home_path, executable)
+        with measure("credential_refresh"):
+            _refresh_codex(home_path, executable)
         token, account, expiry = read()
     if expiry < time.time() + 300:
         raise ValueError(

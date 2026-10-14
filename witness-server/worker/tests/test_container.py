@@ -35,6 +35,7 @@ def test_build_context_excludes_credentials_and_local_state(tmp_path: Path) -> N
         "witness-server/verifier/params/verifying.bin",
         "witness-server/worker/worker.py",
         "witness-server/worker/channel.py",
+        "witness-server/worker/timing.py",
         "witness-server/worker/worker-requirements.txt",
     }
     excluded = {
