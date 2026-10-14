@@ -3,7 +3,7 @@ import json
 import pytest
 
 from witness_client import WitnessError
-from witness_client.response import completed_response, http_body
+from witness_client.response import completed_response, http_body, provider_error
 from witness_client.types import CompletedResponse, OutputItem, ResponseEvent
 
 
@@ -253,3 +253,39 @@ def test_stream_error_preserves_provider_diagnostics() -> None:
     assert failure.value.provider_code == "server_error"
     assert failure.value.provider_message == "Generation failed"
     assert failure.value.param is None
+
+
+def test_subscription_rejection_preserves_detail() -> None:
+    body = b'{"detail":"Input must be a list"}'
+    raw = (
+        f"HTTP/1.1 400 Bad Request\r\nContent-Length: {len(body)}\r\n\r\n".encode()
+        + body
+    )
+    with pytest.raises(WitnessError) as failure:
+        http_body(raw)
+    error = failure.value
+    assert error.source == "provider"
+    assert error.status_code == 400
+    assert error.code == "provider_rejected"
+    assert error.provider_message == "Input must be a list"
+    assert error.provider_code is None and error.param is None
+    assert provider_error(400, body).provider_message == error.provider_message
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        b"not JSON",
+        b"null",
+        b"[]",
+        b"{}",
+        b'{"detail":null}',
+        b'{"detail":{"private":"value"}}',
+    ],
+)
+def test_provider_error_does_not_expose_unstructured_bodies(body: bytes) -> None:
+    error = provider_error(400, body)
+    assert error.status_code == 400
+    assert error.code == "provider_rejected"
+    assert error.provider_message is None
+    assert error.provider_code is None and error.param is None

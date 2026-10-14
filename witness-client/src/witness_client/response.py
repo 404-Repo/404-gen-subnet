@@ -74,6 +74,8 @@ def provider_error(status: int, body: bytes) -> WitnessError:
         value = json.loads(body)
         if isinstance(value, dict) and isinstance(value.get("error"), dict):
             details = value["error"]
+        elif isinstance(value, dict):
+            details = {"message": value.get("detail")}
     except ValueError:
         pass
     message, code, param = (details.get(key) for key in ("message", "code", "param"))

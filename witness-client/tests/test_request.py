@@ -25,25 +25,26 @@ def config() -> WitnessConfig:
     }
 
 
+@pytest.mark.parametrize("prompt", ["", "Make a 🚚"])
 @pytest.mark.parametrize("mode", ["api", "codex"])
 def test_request_body_matches_wire_and_only_credential_is_hidden(
     config: WitnessConfig,
     mode: Literal["api", "codex"],
+    prompt: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
         "witness_client.request.subscription_credentials",
         lambda *args: (TOKEN, "abc123"),
     )
-    body = serialize_body(
-        {
-            "model": "fixture",
-            "input": "Make a 🚚",
-            "stream": True,
-            "reasoning": {"effort": "high"},
-        },
-        mode,
-    )
+    params: ResponseCreateParamsStreaming = {
+        "model": "fixture",
+        "input": prompt,
+        "stream": True,
+        "reasoning": {"effort": "high"},
+    }
+    body = serialize_body(params, mode)
+    assert params["input"] == prompt
     request = prepare_request(config, mode, TOKEN if mode == "api" else None, body=body)
     prefix, credential, suffix = request.chunks
     assert (prefix[0], credential[0], suffix[0]) == (False, True, False)
@@ -60,19 +61,44 @@ def test_request_body_matches_wire_and_only_credential_is_hidden(
     )
     expected: dict[str, object] = {
         "model": "fixture",
-        "input": "Make a 🚚",
+        "input": prompt,
         "tools": [],
         "reasoning": {"effort": "high"},
         "stream": True,
     }
     if mode == "codex":
-        expected.update(store=False, instructions="")
+        expected.update(
+            store=False,
+            instructions="",
+            input=[
+                {"role": "user", "content": [{"type": "input_text", "text": prompt}]}
+            ],
+        )
     assert json.loads(body) == expected
     assert request.url == (
         "https://api.openai.com/v1/responses"
         if mode == "api"
         else "https://chatgpt.com/backend-api/codex/responses"
     )
+
+
+@pytest.mark.parametrize("mode", ["api", "codex"])
+def test_structured_input_is_preserved(mode: Literal["api", "codex"]) -> None:
+    items: ResponseInputParam = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "input_text", "text": "Describe the image"},
+                {
+                    "type": "input_image",
+                    "image_url": "https://example.org/image.png",
+                    "detail": "auto",
+                },
+            ],
+        }
+    ]
+    body = serialize_body({"model": "fixture", "input": items, "stream": True}, mode)
+    assert json.loads(body)["input"] == items
 
 
 def test_subscription_preserves_settings_except_required_store(

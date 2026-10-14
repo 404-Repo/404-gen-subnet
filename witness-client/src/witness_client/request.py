@@ -54,6 +54,11 @@ def serialize_body(
     if mode == "codex":
         request["store"] = False
         request.setdefault("instructions", "")
+        prompt = request.get("input")
+        if isinstance(prompt, str):
+            request["input"] = [
+                {"role": "user", "content": [{"type": "input_text", "text": prompt}]}
+            ]
     body = json.dumps(
         request,
         default=_json_default,
