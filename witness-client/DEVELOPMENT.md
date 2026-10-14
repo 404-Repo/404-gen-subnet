@@ -156,6 +156,77 @@ disconnects after request authorization; a fresh invocation with `--recover`
 retrieves the retained answer without calling `create()` again. A normal run
 spends one small subscription generation; recovery does not start another.
 
+## Public example release acceptance
+
+`release_acceptance.py` is the explicit, billable release gate. It invokes the
+unchanged `examples/check_witness.py` and `examples/miner.py` as subprocesses,
+once with `OPENAI_API_KEY` and once with `--subscription`. Both miner runs use
+the same single image. Ordinary unit tests use fake evidence and spend no tokens.
+Acceptance requires all four public commands to exit successfully, the text
+check to return `witness test OK`, and the miner to save matching JavaScript and
+metadata with token usage. Requests, delivered responses and usage must match
+the corresponding R2 objects served through the evidence origin.
+
+Use a disposable admitted test hotkey, a funded API key, and a local Codex
+subscription login. Keep credentials, child logs, recovery state, generated files
+and reports in an ignored private `.reports` directory. Put only
+`OPENAI_API_KEY=...` in a mode-600 environment file; do not put credentials on the
+command line. Mount a private Codex login directory writable so its normal
+refresh helper can update the login. A valid login needs no Codex executable;
+if refresh is needed, provide the normal Linux Codex CLI on `PATH`.
+
+Build the repaired Linux wheel with the Dockerfile above from a clean archive.
+For an unpublished candidate, archive its committed revision instead of creating
+a release tag, and use a fresh candidate package version. Do not reuse a version
+whose artifact or source identity has already been recorded. The examples and
+gate are supplied alongside the wheel in that same archive, without edits.
+For example, from the repository root, after committing the candidate:
+
+```sh
+candidate_commit=$(git rev-parse HEAD)
+candidate_source="$PWD/.reports/release-candidate/source"
+mkdir -p "$candidate_source"
+git archive "$candidate_commit" | tar -x -C "$candidate_source"
+docker build --platform linux/amd64 -f "$candidate_source/witness-client/Dockerfile" \
+  --label "org.opencontainers.image.revision=$candidate_commit" \
+  -t witness-client:candidate "$candidate_source"
+```
+
+The Docker build installs the repaired wheel non-editably into `/venv`; the gate
+rejects an editable or source import and compares installed package bytes with
+the wheel. Run in a fresh container with private credentials prepared under
+`.reports/release-candidate/miner` (wallets and a `codex` login directory), and
+replace the wheel filename and wallet names with the candidate's values:
+
+```sh
+docker run --rm --platform linux/amd64 --entrypoint /venv/bin/python \
+  --env-file "$PWD/.reports/release-candidate/api.env" \
+  -e CODEX_HOME=/private/miner/codex \
+  -v "$PWD/.reports/release-candidate:/private" \
+  -v "$candidate_source/witness-server/verifier/params:/params:ro" \
+  witness-client:candidate /app/witness-client/release_acceptance.py \
+  --wheel /app/witness-client/dist/404_witness_client-<version>-py3-none-manylinux_2_34_x86_64.whl \
+  --source-commit "$candidate_commit" --model gpt-6-sol \
+  --wallet-path /private/miner/wallets --wallet-name witness-test --wallet-hotkey test \
+  --proof-parameters /params --output /private/run-1
+```
+
+The output directory must be new. `acceptance.json` records the source commit,
+distribution version, wheel SHA-256, imported package location, script hashes,
+commands, exit statuses, exchange IDs, provider diagnostics and per-run usage.
+Missing API credentials, quota rejections, skipped/pending cases, timeouts and
+output/evidence mismatches all fail the gate. A timeout or missing evidence after
+allocation stops subsequent cases: inspect the private state and use the public
+`check_witness.py --resume EXCHANGE_ID` command before starting another generation.
+The gate never substitutes authentication modes or retries generation.
+
+For operator acceptance, also retain a private snapshot of the gateway deployment
+and bindings and correlate these exchange IDs with the RunPod worker logs/job
+results. Confirm the configured Cloudflare gateway dispatched to the intended
+RunPod endpoint and its output hashes match the same R2 manifests. Record this
+alongside the gate report before calling the release accepted. Publishing a
+package, creating a tag or changing deployments is a separate action.
+
 ## Licence packaging
 
 `LICENSE` is an unchanged copy of the repository's MIT licence.
