@@ -132,7 +132,10 @@ def completed_response(body: bytes) -> tuple[str, Response]:
             if completed.get("status") != kind.removeprefix("response."):
                 raise ValueError("Inconsistent terminal response status")
         elif kind == "error":
-            raise provider_error(200, json.dumps({"error": value}).encode())
+            details = (
+                value if isinstance(value.get("error"), dict) else {"error": value}
+            )
+            raise provider_error(200, json.dumps(details).encode())
     if completed is None:
         raise ValueError("Missing completed OpenAI response")
     if not completed.get("output") and items:

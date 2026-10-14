@@ -289,3 +289,14 @@ def test_provider_error_does_not_expose_unstructured_bodies(body: bytes) -> None
     assert error.code == "provider_rejected"
     assert error.provider_message is None
     assert error.provider_code is None and error.param is None
+
+
+def test_nested_stream_error_preserves_provider_diagnostics() -> None:
+    body = b'data: {"type":"error","error":{"type":"insufficient_quota","code":"credit_balance_exhausted","message":"No API credits remaining","param":null}}\n\n'
+    with pytest.raises(WitnessError) as failure:
+        completed_response(body)
+    assert failure.value.source == "provider"
+    assert failure.value.status_code == 200
+    assert failure.value.provider_code == "credit_balance_exhausted"
+    assert failure.value.provider_message == "No API credits remaining"
+    assert failure.value.param is None

@@ -134,8 +134,10 @@ def test_rejects_mismatched_public_results(
         verify(evidence, 1 if fault == "exit-code" else 0)
 
 
+@pytest.mark.parametrize("streaming", [False, True])
 def test_quota_rejection_is_blocked_and_preserves_diagnostics(
     evidence: dict[str, Any],
+    streaming: bool,
 ) -> None:
     response = json.dumps(
         {
@@ -146,15 +148,36 @@ def test_quota_rejection_is_blocked_and_preserves_diagnostics(
             }
         }
     ).encode()
+    if streaming:
+        response = (
+            b"data: "
+            + json.dumps(
+                {
+                    "type": "error",
+                    "error": {
+                        "code": "credit_balance_exhausted",
+                        "message": "Test quota exhausted",
+                        "param": None,
+                    },
+                }
+            ).encode()
+            + b"\n\n"
+        )
     evidence["objects"]["response.sse"] = response
     evidence["manifest"].update(
         response_sha256=check.digest(response), usage=None, provider_rejected=True
     )
-    evidence["status"].update(provider_status=429, usage=None, usage_state="rejected")
+    evidence["status"].update(
+        provider_status=200 if streaming else 429,
+        usage=None,
+        usage_state="unknown" if streaming else "rejected",
+    )
     result = verify(evidence, 1)
     assert result["status"] == "blocked"
     assert result["usage"] is None
-    assert result["diagnostics"]["provider_code"] == "insufficient_quota"
+    assert result["diagnostics"]["provider_code"] == (
+        "credit_balance_exhausted" if streaming else "insufficient_quota"
+    )
     assert result["diagnostics"]["provider_message"] == "Test quota exhausted"
     with pytest.raises(ValueError, match="incorrectly accepted"):
         verify(evidence, 0)

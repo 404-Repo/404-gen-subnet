@@ -9,11 +9,12 @@ See the README for accounting rules and the public playground allowance.
 import argparse
 import json
 import os
+import sys
 from pathlib import Path
 
 from bittensor_wallet import Wallet
 
-from witness_client import WitnessClient
+from witness_client import WitnessClient, WitnessError
 from witness_client.types import Credentials
 
 
@@ -50,26 +51,45 @@ auth: Credentials = (
 )
 with WitnessClient(args.config, hotkey=hotkey, **auth) as client:
     for number, image_url in enumerate(args.image_urls, start=1):
-        result = client.responses.create(
-            stream=True,
-            model=args.model,
-            input=[
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "input_text",
-                            "text": "Give me 3D three.js for this image. Return only JavaScript, without Markdown fences.",
-                        },
-                        {
-                            "type": "input_image",
-                            "image_url": image_url,
-                            "detail": "auto",
-                        },
-                    ],
-                }
-            ],
-        )
+        try:
+            result = client.responses.create(
+                stream=True,
+                model=args.model,
+                input=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": "Give me 3D three.js for this image. Return only JavaScript, without Markdown fences.",
+                            },
+                            {
+                                "type": "input_image",
+                                "image_url": image_url,
+                                "detail": "auto",
+                            },
+                        ],
+                    }
+                ],
+            )
+        except WitnessError as error:
+            print(
+                json.dumps(
+                    {
+                        "error": str(error),
+                        "source": error.source,
+                        "http_status": error.status_code,
+                        "code": error.code,
+                        "provider_message": error.provider_message,
+                        "provider_code": error.provider_code,
+                        "param": error.param,
+                        "exchange_id": error.exchange_id,
+                    },
+                    indent=2,
+                ),
+                file=sys.stderr,
+            )
+            raise SystemExit(1) from None
         path = args.output / f"{number:03}.js"
         path.write_text(result.output_text, encoding="utf-8")
         submission = {

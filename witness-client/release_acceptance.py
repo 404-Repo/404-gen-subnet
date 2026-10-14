@@ -24,7 +24,8 @@ from typing import Any
 
 import httpx
 import witness_client
-from witness_client.response import provider_error
+from witness_client import WitnessError
+from witness_client.response import completed_response, provider_error
 
 CASES = ("check-api", "check-subscription", "miner-api", "miner-subscription")
 IMAGE = "https://sn12domain.org/procgen/45b19f215da1a99f434e4f3f2ad899f2057057aa1ef609a68bb0d5acf61e950c.png"
@@ -229,11 +230,27 @@ def verify_case(
         "response_sha256": digest(response),
         "usage": manifest.get("usage"),
     }
+    error: WitnessError | None = None
     if status["provider_status"] != 200:
         error = provider_error(status["provider_status"], response)
+    else:
+        try:
+            completed_response(response)
+        except WitnessError as streaming_error:
+            error = streaming_error
+    if error is not None:
         result.update(
             status=(
-                "blocked" if error.provider_code == "insufficient_quota" else "failed"
+                "blocked"
+                if error.provider_code
+                in {
+                    "insufficient_quota",
+                    "credit_balance_exhausted",
+                    "organization_spend_limit_exceeded",
+                    "project_spend_limit_exceeded",
+                    "organization_usage_limit_exceeded",
+                }
+                else "failed"
             ),
             diagnostics={
                 "source": error.source,
