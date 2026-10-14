@@ -235,3 +235,79 @@ def test_miner_artifacts_must_match_evidence(
     else:
         with pytest.raises(ValueError):
             run()
+
+
+@pytest.mark.parametrize(
+    "case", ["check-api", "check-subscription", "miner-api", "miner-subscription"]
+)
+@pytest.mark.parametrize("stream_format", ["item-events", "multiline-data"])
+def test_valid_stream_formats_match_public_artifacts(
+    evidence: dict[str, Any], case: str, stream_format: str
+) -> None:
+    subscription = case.endswith("subscription")
+    miner = case.startswith("miner")
+    output = "const scene = new THREE.Scene();" if miner else "witness test OK"
+    if subscription:
+        evidence["session"][
+            "provider"
+        ] = "https://chatgpt.com/backend-api/codex/responses"
+        check.save_json(evidence["state"] / "session.json", evidence["session"])
+        check.save_json(evidence["state"] / "job.json", {"provider": "codex"})
+        request = json.loads(evidence["objects"]["request.json"])
+        request.update(store=False, input=[{"role": "user", "content": "test"}])
+        raw_request = json.dumps(request).encode()
+        evidence["objects"]["request.json"] = raw_request
+        evidence["manifest"]["request_sha256"] = check.digest(raw_request)
+        (evidence["state"] / "request.json").write_bytes(raw_request)
+    terminal = json.loads(
+        evidence["objects"]["response.sse"].splitlines()[0].removeprefix(b"data: ")
+    )
+    item = terminal["response"]["output"][0]
+    item["content"][0]["text"] = output
+    if stream_format == "item-events":
+        terminal["response"]["output"] = []
+        events = [
+            {"type": "response.output_item.done", "output_index": 0, "item": item},
+            terminal,
+        ]
+        response = b"".join(
+            b"data: " + json.dumps(event).encode() + b"\n\n" for event in events
+        )
+    else:
+        data = "\r\n".join(
+            "data: " + line for line in json.dumps(terminal, indent=2).splitlines()
+        )
+        response = (
+            "event: response.completed\r\n" + data + "\r\n\r\ndata: [DONE]\r\n\r\n"
+        ).encode()
+    evidence["objects"]["response.sse"] = response
+    evidence["manifest"]["response_sha256"] = check.digest(response)
+    (evidence["state"] / "response.bin").write_bytes(response)
+    (evidence["directory"] / "stdout.log").write_text(
+        output + "\nUsage: " + json.dumps(evidence["usage"]) + "\n"
+    )
+    if miner:
+        directory = evidence["directory"] / "results"
+        directory.mkdir()
+        (directory / "001.js").write_text(output)
+        check.save_json(
+            directory / "001.json",
+            {
+                "hotkey": "test-hotkey",
+                "image_url": "https://image.test/lorry.png",
+                "result": "001.js",
+                "usage": evidence["usage"],
+            },
+        )
+    result = check.verify_case(
+        case,
+        evidence["directory"],
+        "https://evidence.test",
+        "test-0",
+        "https://image.test/lorry.png",
+        "test-model",
+        0,
+    )
+    assert result["status"] == "passed"
+    assert result["usage"] == evidence["usage"]
+    assert result["output_bytes"] == len(output.encode())

@@ -235,7 +235,7 @@ def verify_case(
         error = provider_error(status["provider_status"], response)
     else:
         try:
-            completed_response(response)
+            output, _ = completed_response(response)
         except WitnessError as streaming_error:
             error = streaming_error
     if error is not None:
@@ -270,11 +270,15 @@ def verify_case(
         response == (state / "response.bin").read_bytes(),
         "R2 response differs from delivered response",
     )
-    events = [
-        json.loads(line[5:])
-        for line in response.splitlines()
-        if line.startswith(b"data:") and line[5:].strip() != b"[DONE]"
-    ]
+    events = []
+    for event in response.decode("utf-8").replace("\r\n", "\n").split("\n\n"):
+        data = "\n".join(
+            line[5:].lstrip(" ")
+            for line in event.splitlines()
+            if line.startswith("data:")
+        )
+        if data and data != "[DONE]":
+            events.append(json.loads(data))
     completed = [
         event["response"]
         for event in events
@@ -306,13 +310,6 @@ def verify_case(
     require(
         status["usage_state"] == "recorded" and not manifest["provider_rejected"],
         "Provider completion was rejected",
-    )
-    output = "".join(
-        content["text"]
-        for item in answer["output"]
-        if item.get("type") == "message"
-        for content in item["content"]
-        if content.get("type") == "output_text"
     )
     stdout = (directory / "stdout.log").read_text()
     printed_usage = [
