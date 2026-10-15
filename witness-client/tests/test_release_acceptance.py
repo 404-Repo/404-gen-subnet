@@ -9,6 +9,29 @@ import pytest
 import release_acceptance as check
 
 
+def write_response(evidence: dict[str, Any], response: bytes) -> None:
+    evidence["objects"]["response.sse"] = response
+    evidence["manifest"]["response_sha256"] = check.digest(response)
+    (evidence["state"] / "response.bin").write_bytes(response)
+
+
+def write_miner_artifacts(
+    evidence: dict[str, Any], output: str, usage: dict[str, Any]
+) -> None:
+    directory = evidence["directory"] / "results"
+    directory.mkdir()
+    (directory / "001.js").write_text(output)
+    check.save_json(
+        directory / "001.json",
+        {
+            "hotkey": "test-hotkey",
+            "image_url": "https://image.test/lorry.png",
+            "result": "001.js",
+            "usage": usage,
+        },
+    )
+
+
 @pytest.fixture
 def evidence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     state = tmp_path / "state-home/404-witness-client/exchange"
@@ -199,24 +222,15 @@ def test_each_required_case_must_pass(status: str) -> None:
 def test_miner_artifacts_must_match_evidence(
     evidence: dict[str, Any], fault: str | None
 ) -> None:
-    directory = evidence["directory"] / "results"
-    directory.mkdir()
     output = "const scene = new THREE.Scene();"
     response = evidence["objects"]["response.sse"].replace(
         b"witness test OK", output.encode()
     )
-    evidence["objects"]["response.sse"] = response
-    evidence["manifest"]["response_sha256"] = check.digest(response)
-    (evidence["state"] / "response.bin").write_bytes(response)
-    (directory / "001.js").write_text("different" if fault == "javascript" else output)
-    check.save_json(
-        directory / "001.json",
-        {
-            "hotkey": "test-hotkey",
-            "image_url": "https://image.test/lorry.png",
-            "result": "001.js",
-            "usage": {} if fault == "metadata" else evidence["usage"],
-        },
+    write_response(evidence, response)
+    write_miner_artifacts(
+        evidence,
+        "different" if fault == "javascript" else output,
+        {} if fault == "metadata" else evidence["usage"],
     )
 
     def run() -> dict[str, Any]:
@@ -280,25 +294,12 @@ def test_valid_stream_formats_match_public_artifacts(
         response = (
             "event: response.completed\r\n" + data + "\r\n\r\ndata: [DONE]\r\n\r\n"
         ).encode()
-    evidence["objects"]["response.sse"] = response
-    evidence["manifest"]["response_sha256"] = check.digest(response)
-    (evidence["state"] / "response.bin").write_bytes(response)
+    write_response(evidence, response)
     (evidence["directory"] / "stdout.log").write_text(
         output + "\nUsage: " + json.dumps(evidence["usage"]) + "\n"
     )
     if miner:
-        directory = evidence["directory"] / "results"
-        directory.mkdir()
-        (directory / "001.js").write_text(output)
-        check.save_json(
-            directory / "001.json",
-            {
-                "hotkey": "test-hotkey",
-                "image_url": "https://image.test/lorry.png",
-                "result": "001.js",
-                "usage": evidence["usage"],
-            },
-        )
+        write_miner_artifacts(evidence, output, evidence["usage"])
     result = check.verify_case(
         case,
         evidence["directory"],

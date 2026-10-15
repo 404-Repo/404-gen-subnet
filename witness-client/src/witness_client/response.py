@@ -2,6 +2,7 @@
 
 import json
 import re
+from collections.abc import Iterator
 
 from openai.types.responses import Response
 
@@ -98,11 +99,8 @@ def provider_error(status: int, body: bytes) -> WitnessError:
     )
 
 
-def completed_response(body: bytes) -> tuple[str, Response]:
-    completed: CompletedResponse | None = None
-    items: dict[int, OutputItem] = {}
-    texts: dict[tuple[int, int], str] = {}
-    deltas: dict[tuple[int, int], list[str]] = {}
+def sse_events(body: bytes) -> Iterator[ResponseEvent]:
+    """Decode JSON events from SSE frames without interpreting their contents."""
     for event in body.decode("utf-8").replace("\r\n", "\n").split("\n\n"):
         data = "\n".join(
             line[5:].lstrip(" ")
@@ -112,6 +110,15 @@ def completed_response(body: bytes) -> tuple[str, Response]:
         if not data or data == "[DONE]":
             continue
         value: ResponseEvent = json.loads(data)
+        yield value
+
+
+def completed_response(body: bytes) -> tuple[str, Response]:
+    completed: CompletedResponse | None = None
+    items: dict[int, OutputItem] = {}
+    texts: dict[tuple[int, int], str] = {}
+    deltas: dict[tuple[int, int], list[str]] = {}
+    for value in sse_events(body):
         kind = value.get("type")
         key = (value.get("output_index", 0), value.get("content_index", 0))
         if kind == "response.output_text.delta":

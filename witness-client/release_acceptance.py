@@ -20,12 +20,12 @@ import time
 import zipfile
 from email.parser import BytesParser
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import httpx
 import witness_client
 from witness_client import WitnessError
-from witness_client.response import completed_response, provider_error
+from witness_client.response import completed_response, provider_error, sse_events
 
 CASES = ("check-api", "check-subscription", "miner-api", "miner-subscription")
 IMAGE = "https://sn12domain.org/procgen/45b19f215da1a99f434e4f3f2ad899f2057057aa1ef609a68bb0d5acf61e950c.png"
@@ -270,15 +270,7 @@ def verify_case(
         response == (state / "response.bin").read_bytes(),
         "R2 response differs from delivered response",
     )
-    events = []
-    for event in response.decode("utf-8").replace("\r\n", "\n").split("\n\n"):
-        data = "\n".join(
-            line[5:].lstrip(" ")
-            for line in event.splitlines()
-            if line.startswith("data:")
-        )
-        if data and data != "[DONE]":
-            events.append(json.loads(data))
+    events = list(sse_events(response))
     completed = [
         event["response"]
         for event in events
@@ -289,7 +281,7 @@ def verify_case(
         "Missing completed response",
     )
     answer = completed[0]
-    usage = answer["usage"]
+    usage = cast(dict[str, Any], answer["usage"])
     require(
         all(
             type(usage[k]) is int and usage[k] >= 0
