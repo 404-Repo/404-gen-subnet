@@ -217,3 +217,56 @@ def test_reuses_case_runner_and_summary_for_multiple_libraries(
     assert all(row["repeat_proof_median_seconds"] == 2 for row in summary)
     assert environment == {"GOMAXPROCS": "2", "WITNESS_BENCH_CPUS": "99"}
     assert not args.output.exists()
+
+
+@pytest.mark.parametrize("custom", [False, True])
+def test_records_custom_execution_environment(
+    benchmark: dict[str, Any], monkeypatch: pytest.MonkeyPatch, custom: bool
+) -> None:
+    host = {"GOMAXPROCS": "8", "GOMEMLIMIT": "2GiB", "GOGC": "200", "GODEBUG": "gctrace=1"}
+    for name, value in host.items():
+        monkeypatch.setenv(name, value)
+    environment = ({"GOMAXPROCS": "2", "GOMEMLIMIT": "1GiB", "GOGC": "100",
+                    "GODEBUG": "gctrace=0"} if custom else {})
+    prover, args = benchmark["prover"], benchmark["args"]
+    args.output.mkdir()
+    library, verifier, provenance = prover.build_benchmark(args, args.output, environment)
+    manifest = prover.benchmark_manifest(args, library, verifier, provenance, environment)
+    prover.run_case(library, verifier, args.parameters, 164, 1, environment, None, None)
+    assert manifest["runtime_environment"] == {name: environment.get(name) for name in host}
+    assert benchmark["state"]["cases"][-1][-2:] == (
+        environment.get("GOMAXPROCS"), environment.get("GOMEMLIMIT")
+    )
+
+
+@pytest.mark.parametrize("external", [False, True])
+def test_builds_with_relative_output(
+    benchmark: dict[str, Any], monkeypatch: pytest.MonkeyPatch, tmp_path: Path, external: bool
+) -> None:
+    prover, args = benchmark["prover"], benchmark["args"]
+    monkeypatch.chdir(tmp_path)
+    output = Path("results")
+    output.mkdir()
+    if external:
+        args.library = Path("external.dylib")
+        args.library.write_bytes(b"external library")
+    commands = []
+
+    def build(command: list[str], **kwargs: Any) -> None:
+        artifact = Path(command[command.index("-o") + 1])
+        commands.append((artifact, Path(kwargs["cwd"])))
+        # Go resolves -o relative to its working directory, not this process's.
+        if not artifact.is_absolute():
+            artifact = Path(kwargs["cwd"]) / artifact
+        artifact.parent.mkdir(parents=True, exist_ok=True)
+        artifact.write_bytes(b"synthetic build")
+
+    monkeypatch.setattr(prover.subprocess, "run", build)
+    library, verifier, provenance = prover.build_benchmark(args, output, {})
+    assert library.is_absolute() and library.is_file()
+    assert verifier == output.resolve() / "verifier" and verifier.is_file()
+    assert library.parent == (tmp_path if external else output.resolve())
+    assert all(artifact.is_absolute() and cwd == output.resolve() / "source"
+               for artifact, cwd in commands)
+    assert not (output / "source/results").exists()
+    assert provenance["source_sha256"]["main.go"] == prover.digest(benchmark["native"] / "main.go")

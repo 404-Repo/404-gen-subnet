@@ -188,6 +188,7 @@ def instrument_build(build: Path) -> None:
 def build_benchmark(args: argparse.Namespace, output: Path,
                     environment: dict[str, str]) -> tuple[Path, Path, dict]:
     """Build inside an existing output directory; return artifacts and provenance."""
+    output = output.resolve()
     source = args.source.resolve()
     build_environment = dict(environment, GOMAXPROCS="2", GOFLAGS="-p=2")
     build = output / "source"
@@ -212,7 +213,7 @@ def build_benchmark(args: argparse.Namespace, output: Path,
 
 
 def benchmark_manifest(args: argparse.Namespace, library: Path, verifier: Path,
-                       provenance: dict) -> dict:
+                       provenance: dict, environment: dict[str, str]) -> dict:
     def sysctl(name: str) -> str | None:
         if sys.platform != "darwin":
             return None
@@ -225,7 +226,7 @@ def benchmark_manifest(args: argparse.Namespace, library: Path, verifier: Path,
         "external_library": str(library) if args.library else None,
         "go_build_info": run([args.go, "version", "-m", str(library)]),
         "go_version": run([args.go, "version"]), "python_version": sys.version,
-        "runtime_environment": {name: os.environ.get(name) for name in
+        "runtime_environment": {name: environment.get(name) for name in
                                 ("GOMAXPROCS", "GOMEMLIMIT", "GOGC", "GODEBUG")},
         "hardware": {"platform": platform.platform(), "machine": platform.machine(),
                      "cpu_count": os.cpu_count(), "model": sysctl("hw.model"),
@@ -320,7 +321,7 @@ def benchmark(args: argparse.Namespace) -> None:
     environment = dict(os.environ, GOTOOLCHAIN="local", GOPROXY="off", GOSUMDB="off")
     environment.setdefault("GOCACHE", str(output / "go-cache"))
     library, verifier, provenance = build_benchmark(args, output, environment)
-    manifest = benchmark_manifest(args, library, verifier, provenance)
+    manifest = benchmark_manifest(args, library, verifier, provenance, environment)
     (output / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
     settings = parse_settings(args.settings)
     rows = run_cases(args, output, settings, library, verifier, environment)
