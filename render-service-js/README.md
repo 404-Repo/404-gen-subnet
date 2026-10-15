@@ -177,17 +177,21 @@ PMREM and is unchanged.
 Concurrent requests share the same pending bake. A failed bake is evicted so a
 later request can retry; replacing the browser creates a fresh cache. Nothing is
 persisted across service restarts, so changing Three.js or Chromium automatically
-rebakes the environments. The first use pays the baking and readback cost; later
-requests skip PMREM generation. Lighting values, camera settings and the existing
-studio environment are preserved.
+rebakes the environments. Pixels are cached only after a completed readback with
+no WebGL errors or context loss. The first use pays the baking and readback cost;
+later requests skip PMREM generation. Lighting values, camera settings and the
+existing studio environment are preserved.
 
 ### Cache checks and PNG equivalence
 
 `npm test` includes cache reuse, concurrent initialization, failure cleanup/retry,
-and browser replacement checks. `npm run test:pmrem` compares complete PNG bytes
-against the renderer before caching, with no pixel tolerance. It covers all ten
-repository example scenes plus a material roughness sweep, the validator's eight
-white and four gray 1024-pixel views, the default 518-pixel studio grid, and a
+and browser replacement checks. `npm run test:pmrem` first injects real WebGL
+readback failures (context loss, an invalid read and an unsupported texture type),
+checking rejection, context cleanup, retry and byte-identical recovery. It then
+compares complete PNG bytes against the renderer before caching, with no pixel
+tolerance. It covers all ten repository example scenes plus a material roughness
+sweep, the validator's eight white and four gray 1024-pixel views, the default
+518-pixel studio grid, and a
 `follow` control. It also checks warm reuse, recovery after a miner error, browser
 restarts and simultaneous requests with an empty cache.
 
@@ -205,7 +209,8 @@ docker run --rm --init --cpus=2 --memory=2g --pids-limit=512 --network none \
   --mount "type=bind,src=$PWD/render-service-js/test,dst=/app/test,readonly" \
   --mount "type=bind,src=$PMREM_REFERENCE_DIR/render-service-js,dst=/app/reference,readonly" \
   --mount "type=bind,src=$PWD/miner-reference/examples,dst=/fixtures,readonly" \
-  --entrypoint node "$PMREM_IMAGE_ID" test/pmrem-equivalence.test.mjs
+  --mount "type=bind,src=$PWD/render-service-js/package.json,dst=/app/package.json,readonly" \
+  --entrypoint npm "$PMREM_IMAGE_ID" run test:pmrem
 ```
 
 To save PNGs and a JSON report with source hashes, output hashes and timings,

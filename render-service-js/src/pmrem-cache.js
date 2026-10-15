@@ -39,7 +39,7 @@ async function bakeEnvironment(browser, lighting) {
   }
 }
 
-function bakeInPage(lighting) {
+async function bakeInPage(lighting) {
   const THREE = window.THREE;
   const renderer = new THREE.WebGLRenderer({
     antialias: true,
@@ -73,8 +73,19 @@ function bakeInPage(lighting) {
     }
 
     target = pmrem.fromScene(envScene, 0.04);
+    const gl = renderer.getContext();
+    if (gl.isContextLost() || gl.getError() !== gl.NO_ERROR) {
+      throw new Error('PMREM baking failed before pixel readback');
+    }
     const pixels = new Uint16Array(target.width * target.height * 4);
-    renderer.readRenderTargetPixels(target, 0, 0, target.width, target.height, pixels);
+    // The synchronous API can silently skip a read. Require a completed transfer
+    // and a healthy context before publishing these pixels to the shared cache.
+    const readback = await renderer.readRenderTargetPixelsAsync(
+      target, 0, 0, target.width, target.height, pixels,
+    );
+    if (readback !== pixels || gl.isContextLost() || gl.getError() !== gl.NO_ERROR) {
+      throw new Error('PMREM pixel readback failed');
+    }
     const bytes = new Uint8Array(pixels.buffer);
     let binary = '';
     for (let offset = 0; offset < bytes.length; offset += 32768) {
