@@ -15,6 +15,7 @@ import (
 	"os"
 	"runtime"
 	"runtime/debug"
+	"strconv"
 	"sync"
 	"time"
 	"unsafe"
@@ -60,7 +61,7 @@ func loadPythonProver(directory string, timings *proofTimings) error {
 	}
 	// Keep headroom on larger hosts and respect the runtime's CPU quota.
 	// Explicit Go runtime environment settings are read at process startup.
-	if os.Getenv("GOMAXPROCS") == "" {
+	if cpus, err := strconv.ParseInt(os.Getenv("GOMAXPROCS"), 10, 32); err != nil || cpus <= 0 {
 		runtime.GOMAXPROCS(min(4, runtime.GOMAXPROCS(0)))
 	}
 	if os.Getenv("GOMEMLIMIT") == "" {

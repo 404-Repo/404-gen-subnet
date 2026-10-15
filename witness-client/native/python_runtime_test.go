@@ -25,6 +25,10 @@ func TestPythonProverResourceLimits(t *testing.T) {
 		{"single_cpu", 1, 1, "", "", 1 << 62, 768 * mib},
 		{"limited_runtime", 2, 2, "", "", 1 << 62, 768 * mib},
 		{"explicit_cpu", 2, 2, "2", "", 1 << 62, 768 * mib},
+		{"zero_cpu", 8, 4, "0", "", 1 << 62, 768 * mib},
+		{"negative_cpu", 8, 4, "-1", "", 1 << 62, 768 * mib},
+		{"invalid_cpu", 8, 4, "invalid", "", 1 << 62, 768 * mib},
+		{"overflow_cpu", 8, 4, "2147483648", "", 1 << 62, 768 * mib},
 		{"explicit_memory", 8, 4, "", "2GiB", 2048 * mib, 2048 * mib},
 		{"explicit_both", 8, 8, "8", "2GiB", 2048 * mib, 2048 * mib},
 	} {

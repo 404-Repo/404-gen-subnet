@@ -153,10 +153,16 @@ def benchmark(args: argparse.Namespace) -> None:
     build_environment = dict(environment, GOMAXPROCS="2", GOFLAGS="-p=2")
     files = sorted(p for p in native.iterdir() if p.name in ("go.mod", "go.sum") or
                    (p.suffix == ".go" and not p.name.endswith("_test.go")))
+    source_commit = run(["git", "rev-parse", "HEAD"], cwd=source)
+    source_status = run(["git", "status", "--short"], cwd=source)
+    source_sha256 = {p.name: digest(p) for p in files}
     build = output / "source"
     build.mkdir()
     for file in files:
         shutil.copyfile(file, build / file.name)
+    copied_sha256 = {p.name: digest(build / p.name) for p in files}
+    if copied_sha256 != source_sha256:
+        raise RuntimeError("source checkout changed while copying benchmark sources")
     suffix = "dylib" if sys.platform == "darwin" else "so"
     library = output / f"libwitnessproof.{suffix}"
     verifier = output / "verifier"
@@ -179,15 +185,22 @@ def benchmark(args: argparse.Namespace) -> None:
         if args.settings != "default":
             raise ValueError("external library requires --settings default")
 
+    current_files = sorted(p for p in native.iterdir() if p.name in ("go.mod", "go.sum") or
+                           (p.suffix == ".go" and not p.name.endswith("_test.go")))
+    if (run(["git", "rev-parse", "HEAD"], cwd=source) != source_commit or
+            run(["git", "status", "--short"], cwd=source) != source_status or
+            {p.name: digest(p) for p in current_files} != source_sha256):
+        raise RuntimeError("source checkout changed while building benchmark")
+
     def sysctl(name: str) -> str | None:
         if sys.platform != "darwin":
             return None
         return run(["sysctl", "-n", name])
 
     manifest = {
-        "source_commit": run(["git", "rev-parse", "HEAD"], cwd=source),
-        "source_status": run(["git", "status", "--short"], cwd=source),
-        "source_sha256": {p.name: digest(p) for p in files},
+        "source_commit": source_commit,
+        "source_status": source_status,
+        "source_sha256": copied_sha256,
         "build_source_sha256": {p.name: digest(p) for p in sorted(build.iterdir())},
         "benchmark_sha256": digest(Path(__file__)),
         "library_sha256": digest(library), "verifier_sha256": digest(verifier),
