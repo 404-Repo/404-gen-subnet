@@ -1,5 +1,8 @@
 # Native credential prover benchmark
 
+See [RESULTS.md](RESULTS.md) for the measured resource matrix, selected defaults,
+and matched before/after results.
+
 `prover.py` builds the native C ABI from an explicit checkout and generates
 synthetic, valid TLS credential records locally. It never calls a provider or
 gateway. Use the client's Python environment (including `cryptography`), a native
