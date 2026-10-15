@@ -69,6 +69,13 @@ Set `proof_parameters` to the absolute path of
 `../witness-server/verifier/params` in your checkout. The client verifies the
 files before loading them.
 
+Native proving uses up to four Go CPUs by default, respecting a smaller runtime
+CPU quota, with a 768 MiB Go soft memory limit. Set `GOMAXPROCS` and/or
+`GOMEMLIMIT` before starting Python to choose different limits; for example,
+`GOMAXPROCS=2 GOMEMLIMIT=768MiB` retains the earlier resource settings. The Go
+memory limit excludes Python and other non-Go allocations. See the
+[local synthetic benchmark](benchmarks/README.md) for measurement and tuning.
+
 The gateway assigns each request to its configured round and queues a worker.
 The same configuration works with either API-key or subscription authentication.
 

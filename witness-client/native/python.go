@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"os"
 	"runtime"
 	"runtime/debug"
 	"sync"
@@ -57,8 +58,14 @@ func loadPythonProver(directory string, timings *proofTimings) error {
 		}
 		return nil
 	}
-	runtime.GOMAXPROCS(2)
-	debug.SetMemoryLimit(768 * 1024 * 1024)
+	// Keep headroom on larger hosts and respect the runtime's CPU quota.
+	// Explicit Go runtime environment settings are read at process startup.
+	if os.Getenv("GOMAXPROCS") == "" {
+		runtime.GOMAXPROCS(min(4, runtime.GOMAXPROCS(0)))
+	}
+	if os.Getenv("GOMEMLIMIT") == "" {
+		debug.SetMemoryLimit(768 * 1024 * 1024)
+	}
 	started := time.Now()
 	_, verifyingError := verifyingParameter.read(directory)
 	timings.step("parameter_read_verify", started)
