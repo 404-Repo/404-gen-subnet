@@ -62,7 +62,7 @@ try {
       try {
         const pending = getCachedPmrem(browser, 'neutral');
         assert.equal(getCachedPmrem(browser, 'neutral'), pending);
-        await assert.rejects(pending);
+        await assert.rejects(pending, Error);
         assert.equal(bakes, 1);
         assert.equal(browser.connected, true, 'A failed bake must not require a browser restart');
         assert.equal(browser.browserContexts().length, 1, 'The failed baking context must close');

@@ -182,18 +182,25 @@ no WebGL errors or context loss. The first use pays the baking and readback cost
 later requests skip PMREM generation. Lighting values, camera settings and the
 existing studio environment are preserved.
 
+Readback rejections are normalized to `Error` objects, including GPU waits that
+reject without a reason. They return HTTP 500; the service stays healthy and a
+later request can rebuild the failed cache entry.
+
 ### Cache checks and PNG equivalence
 
 `npm test` includes cache reuse, concurrent initialization, failure cleanup/retry,
 and browser replacement checks. `npm run test:pmrem` first injects real WebGL
 readback failures (context loss, an invalid read and an unsupported texture type),
 checking rejection, context cleanup, retry and byte-identical recovery. It then
-compares complete PNG bytes against the renderer before caching, with no pixel
-tolerance. It covers all ten repository example scenes plus a material roughness
-sweep, the validator's eight white and four gray 1024-pixel views, the default
-518-pixel studio grid, and a
-`follow` control. It also checks warm reuse, recovery after a miner error, browser
-restarts and simultaneous requests with an empty cache.
+checks both HTTP render endpoints for GPU-wait failure recovery: a 500 response,
+continued health, and byte-identical PNGs after retry and warm reuse. This HTTP
+test uses a 60-second render deadline to allow cold software rendering under CPU
+quotas. Finally it compares complete PNG bytes against the renderer before
+caching, with no pixel tolerance. It covers all ten repository example scenes
+plus a material roughness sweep, the validator's eight white and four gray
+1024-pixel views, the default 518-pixel studio grid, and a `follow` control. It also
+checks warm reuse, recovery after a miner error, browser restarts and simultaneous
+requests with an empty cache.
 
 Run both implementations in the same image with the same locked dependencies.
 From the repository root, after building a renderer image:

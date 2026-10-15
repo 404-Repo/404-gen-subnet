@@ -80,9 +80,15 @@ async function bakeInPage(lighting) {
     const pixels = new Uint16Array(target.width * target.height * 4);
     // The synchronous API can silently skip a read. Require a completed transfer
     // and a healthy context before publishing these pixels to the shared cache.
-    const readback = await renderer.readRenderTargetPixelsAsync(
-      target, 0, 0, target.width, target.height, pixels,
-    );
+    let readback;
+    try {
+      readback = await renderer.readRenderTargetPixelsAsync(
+        target, 0, 0, target.width, target.height, pixels,
+      );
+    } catch (cause) {
+      // Three.js's GPU wait can reject without a reason.
+      throw new Error('PMREM pixel readback failed', { cause });
+    }
     if (readback !== pixels || gl.isContextLost() || gl.getError() !== gl.NO_ERROR) {
       throw new Error('PMREM pixel readback failed');
     }
