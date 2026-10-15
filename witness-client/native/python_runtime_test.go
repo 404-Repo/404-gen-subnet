@@ -43,12 +43,7 @@ func TestPythonProverResourceLimits(t *testing.T) {
 				runtime.GOMAXPROCS(previousCPUs)
 				debug.SetMemoryLimit(previousMemory)
 			})
-			pythonProver.Lock()
-			err := loadPythonProver(t.TempDir(), nil)
-			pythonProver.Unlock()
-			if err == nil {
-				t.Fatal("missing parameters accepted")
-			}
+			configurePythonProverRuntime()
 			if got := runtime.GOMAXPROCS(0); got != tc.wantCPUs {
 				t.Fatalf("GOMAXPROCS = %d, want %d", got, tc.wantCPUs)
 			}
@@ -56,6 +51,37 @@ func TestPythonProverResourceLimits(t *testing.T) {
 				t.Fatalf("Go memory limit = %d, want %d", got, tc.wantMemory)
 			}
 		})
+	}
+}
+
+func TestPythonProverResourceLimitsOnCacheMiss(t *testing.T) {
+	t.Setenv("GOMAXPROCS", "")
+	t.Setenv("GOMEMLIMIT", "")
+	previousCPUs := runtime.GOMAXPROCS(0)
+	previousMemory := debug.SetMemoryLimit(-1)
+	t.Cleanup(func() {
+		runtime.GOMAXPROCS(previousCPUs)
+		debug.SetMemoryLimit(previousMemory)
+	})
+	directory := copyParameters(t)
+	pythonProver.Lock()
+	defer pythonProver.Unlock()
+	if err := loadPythonProver(directory, nil); err != nil {
+		t.Fatal(err)
+	}
+	runtime.GOMAXPROCS(8)
+	debug.SetMemoryLimit(2 << 30)
+	if err := loadPythonProver(directory, nil); err != nil {
+		t.Fatal(err)
+	}
+	if runtime.GOMAXPROCS(0) != 8 || debug.SetMemoryLimit(-1) != 2<<30 {
+		t.Fatal("cached parameters reapplied runtime defaults")
+	}
+	if err := loadPythonProver(t.TempDir(), nil); err == nil {
+		t.Fatal("missing parameters accepted")
+	}
+	if runtime.GOMAXPROCS(0) != 4 || debug.SetMemoryLimit(-1) != 768*1024*1024 {
+		t.Fatal("cache miss did not apply runtime defaults before reading parameters")
 	}
 }
 

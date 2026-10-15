@@ -143,26 +143,55 @@ def worker(args: argparse.Namespace) -> None:
     }), flush=True)
 
 
-def benchmark(args: argparse.Namespace) -> None:
-    output = args.output.resolve()
-    output.mkdir(parents=True, exist_ok=False)
-    source = args.source.resolve()
-    native = source / "witness-client/native"
-    environment = dict(os.environ, GOTOOLCHAIN="local", GOPROXY="off", GOSUMDB="off")
-    environment.setdefault("GOCACHE", str(output / "go-cache"))
-    build_environment = dict(environment, GOMAXPROCS="2", GOFLAGS="-p=2")
-    files = sorted(p for p in native.iterdir() if p.name in ("go.mod", "go.sum") or
-                   (p.suffix == ".go" and not p.name.endswith("_test.go")))
+Setting = tuple[str, int | None, int | None]
+
+
+def native_sources(native: Path) -> list[Path]:
+    return sorted(p for p in native.iterdir() if p.name in ("go.mod", "go.sum") or
+                  (p.suffix == ".go" and not p.name.endswith("_test.go")))
+
+
+def snapshot_source(source: Path, build: Path) -> dict:
+    files = native_sources(source / "witness-client/native")
     source_commit = run(["git", "rev-parse", "HEAD"], cwd=source)
     source_status = run(["git", "status", "--short"], cwd=source)
     source_sha256 = {p.name: digest(p) for p in files}
-    build = output / "source"
     build.mkdir()
     for file in files:
         shutil.copyfile(file, build / file.name)
     copied_sha256 = {p.name: digest(build / p.name) for p in files}
     if copied_sha256 != source_sha256:
         raise RuntimeError("source checkout changed while copying benchmark sources")
+    return {"source_commit": source_commit, "source_status": source_status,
+            "source_sha256": copied_sha256}
+
+
+def check_source_snapshot(source: Path, provenance: dict) -> None:
+    files = native_sources(source / "witness-client/native")
+    if (run(["git", "rev-parse", "HEAD"], cwd=source) != provenance["source_commit"] or
+            run(["git", "status", "--short"], cwd=source) != provenance["source_status"] or
+            {p.name: digest(p) for p in files} != provenance["source_sha256"]):
+        raise RuntimeError("source checkout changed while building benchmark")
+
+
+def instrument_build(build: Path) -> None:
+    metrics_file = Path(__file__).with_name("runtime_metrics.go")
+    shutil.copyfile(metrics_file, build / "benchmark_metrics.go")
+    file = build / "python.go"
+    text = file.read_text()
+    anchor = "\tstarted := time.Now()\n\t_, verifyingError := verifyingParameter.read(directory)"
+    if text.count(anchor) != 1:
+        raise RuntimeError("parameter loader changed; inspect benchmark injection")
+    file.write_text(text.replace(anchor, "\tbenchmarkConfigure()\n" + anchor))
+
+
+def build_benchmark(args: argparse.Namespace, output: Path,
+                    environment: dict[str, str]) -> tuple[Path, Path, dict]:
+    """Build inside an existing output directory; return artifacts and provenance."""
+    source = args.source.resolve()
+    build_environment = dict(environment, GOMAXPROCS="2", GOFLAGS="-p=2")
+    build = output / "source"
+    provenance = snapshot_source(source, build)
     suffix = "dylib" if sys.platform == "darwin" else "so"
     library = output / f"libwitnessproof.{suffix}"
     verifier = output / "verifier"
@@ -170,38 +199,27 @@ def benchmark(args: argparse.Namespace) -> None:
     subprocess.run([args.go, "build", "-trimpath", "-o", str(verifier), "."],
                    cwd=build, env=build_environment, check=True)
     if args.library is None:
-        metrics_file = Path(__file__).with_name("runtime_metrics.go")
-        shutil.copyfile(metrics_file, build / "benchmark_metrics.go")
-        file = build / "python.go"
-        text = file.read_text()
-        anchor = "\tstarted := time.Now()\n\t_, verifyingError := verifyingParameter.read(directory)"
-        if text.count(anchor) != 1:
-            raise RuntimeError("parameter loader changed; inspect benchmark injection")
-        file.write_text(text.replace(anchor, "\tbenchmarkConfigure()\n" + anchor))
+        instrument_build(build)
         subprocess.run([args.go, "build", "-trimpath", "-buildmode=c-shared",
                         "-o", str(library), "."], cwd=build, env=build_environment, check=True)
     else:
         library = args.library.resolve()
         if args.settings != "default":
             raise ValueError("external library requires --settings default")
+    check_source_snapshot(source, provenance)
+    provenance["build_source_sha256"] = {p.name: digest(p) for p in sorted(build.iterdir())}
+    return library, verifier, provenance
 
-    current_files = sorted(p for p in native.iterdir() if p.name in ("go.mod", "go.sum") or
-                           (p.suffix == ".go" and not p.name.endswith("_test.go")))
-    if (run(["git", "rev-parse", "HEAD"], cwd=source) != source_commit or
-            run(["git", "status", "--short"], cwd=source) != source_status or
-            {p.name: digest(p) for p in current_files} != source_sha256):
-        raise RuntimeError("source checkout changed while building benchmark")
 
+def benchmark_manifest(args: argparse.Namespace, library: Path, verifier: Path,
+                       provenance: dict) -> dict:
     def sysctl(name: str) -> str | None:
         if sys.platform != "darwin":
             return None
         return run(["sysctl", "-n", name])
 
-    manifest = {
-        "source_commit": source_commit,
-        "source_status": source_status,
-        "source_sha256": copied_sha256,
-        "build_source_sha256": {p.name: digest(p) for p in sorted(build.iterdir())},
+    return {
+        **provenance,
         "benchmark_sha256": digest(Path(__file__)),
         "library_sha256": digest(library), "verifier_sha256": digest(verifier),
         "external_library": str(library) if args.library else None,
@@ -224,9 +242,11 @@ def benchmark(args: argparse.Namespace) -> None:
         "rounds": args.rounds, "warm_repeats": args.repeats, "seed": args.seed,
         "worker_niceness_increment": 10,
     }
-    (output / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
-    settings = []
-    for value in args.settings.split(","):
+
+
+def parse_settings(raw: str) -> list[Setting]:
+    settings: list[Setting] = []
+    for value in raw.split(","):
         if value == "default":
             settings.append((value, None, None))
         else:
@@ -234,22 +254,33 @@ def benchmark(args: argparse.Namespace) -> None:
             if cpu < 1 or cpu > (os.cpu_count() or 1) or memory < 128:
                 raise ValueError("unsafe benchmark settings")
             settings.append((value, cpu, memory))
+    return settings
+
+
+def run_case(library: Path, verifier: Path, parameters: Path, length: int, repeats: int,
+             environment: dict[str, str], cpus: int | None, memory: int | None) -> dict:
+    child_env = dict(environment)
+    for name in ("WITNESS_BENCH_CPUS", "WITNESS_BENCH_MEMORY"):
+        child_env.pop(name, None)
+    if cpus is not None:
+        child_env["WITNESS_BENCH_CPUS"] = str(cpus)
+        child_env["WITNESS_BENCH_MEMORY"] = str(memory * 1024**2)
+    command = [sys.executable, str(Path(__file__).resolve()), "--worker",
+               "--library", str(library), "--verifier", str(verifier),
+               "--parameters", str(parameters.resolve()),
+               "--length", str(length), "--repeats", str(repeats)]
+    return json.loads(run(command, env=child_env, timeout=900))
+
+
+def run_cases(args: argparse.Namespace, output: Path, settings: list[Setting],
+              library: Path, verifier: Path, environment: dict[str, str]) -> list[dict]:
     rows = []
     for round_index in range(args.rounds):
         cases = [(setting, length) for setting in settings for length in args.lengths]
         random.Random(args.seed + round_index).shuffle(cases)
         for (label, cpus, memory), length in cases:
-            child_env = dict(environment)
-            for name in ("WITNESS_BENCH_CPUS", "WITNESS_BENCH_MEMORY"):
-                child_env.pop(name, None)
-            if cpus is not None:
-                child_env["WITNESS_BENCH_CPUS"] = str(cpus)
-                child_env["WITNESS_BENCH_MEMORY"] = str(memory * 1024**2)
-            command = [sys.executable, str(Path(__file__).resolve()), "--worker",
-                       "--library", str(library), "--verifier", str(verifier),
-                       "--parameters", str(args.parameters.resolve()),
-                       "--length", str(length), "--repeats", str(args.repeats)]
-            result = json.loads(run(command, env=child_env, timeout=900))
+            result = run_case(library, verifier, args.parameters, length, args.repeats,
+                              environment, cpus, memory)
             row = {"round": round_index, "setting": label, **result}
             rows.append(row)
             with (output / "samples.jsonl").open("a") as stream:
@@ -258,9 +289,14 @@ def benchmark(args: argparse.Namespace) -> None:
             print(f"round={round_index} setting={label} bytes={length} "
                   f"init={row['cold']['wall_seconds']:.3f}s warm={median:.3f}s "
                   f"peak={row['process']['peak_rss_bytes']/1024**2:.0f}MiB", flush=True)
+    return rows
+
+
+def summarize(rows: list[dict], settings: list[Setting], lengths: list[int],
+              repeats: int) -> list[dict]:
     summary = []
     for label, _, _ in settings:
-        for length in args.lengths:
+        for length in lengths:
             selected = [r for r in rows if r["setting"] == label and r["length"] == length]
             warm = [p["wall_seconds"] for r in selected for p in r["proofs"]]
             summary.append({
@@ -270,11 +306,25 @@ def benchmark(args: argparse.Namespace) -> None:
                 "first_proof_median_seconds": statistics.median(r["proofs"][0]["wall_seconds"] for r in selected),
                 "repeat_proof_median_seconds": (statistics.median(
                     p["wall_seconds"] for r in selected for p in r["proofs"][1:]
-                ) if args.repeats > 1 else None),
+                ) if repeats > 1 else None),
                 "warm_min_seconds": min(warm), "warm_max_seconds": max(warm),
                 "peak_rss_bytes": max(r["process"]["peak_rss_bytes"] for r in selected),
                 "verified_proofs": len(warm),
             })
+    return summary
+
+
+def benchmark(args: argparse.Namespace) -> None:
+    output = args.output.resolve()
+    output.mkdir(parents=True, exist_ok=False)
+    environment = dict(os.environ, GOTOOLCHAIN="local", GOPROXY="off", GOSUMDB="off")
+    environment.setdefault("GOCACHE", str(output / "go-cache"))
+    library, verifier, provenance = build_benchmark(args, output, environment)
+    manifest = benchmark_manifest(args, library, verifier, provenance)
+    (output / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+    settings = parse_settings(args.settings)
+    rows = run_cases(args, output, settings, library, verifier, environment)
+    summary = summarize(rows, settings, args.lengths, args.repeats)
     (output / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
 
 

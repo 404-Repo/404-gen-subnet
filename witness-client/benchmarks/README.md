@@ -9,6 +9,12 @@ gateway. Use the client's Python environment (including `cryptography`), a nativ
 Go 1.27.1 toolchain, a C compiler, and the published pinned parameters. Go modules
 must already be cached: builds use `GOTOOLCHAIN=local` and `GOPROXY=off`.
 
+The script separates source snapshots and builds, manifest collection, case
+execution, and aggregation into helpers. Custom local comparisons can reuse
+`build_benchmark`, `benchmark_manifest`, `run_case`, and `summarize`; `benchmark`
+composes them for the CLI matrix. `instrument_build` only patches the temporary
+Go source and rejects a missing or ambiguous parameter-loader anchor.
+
 From the repository root, with `go` on `PATH`:
 
 ```sh
