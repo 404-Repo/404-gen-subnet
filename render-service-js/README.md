@@ -165,6 +165,71 @@ Post-validation rule codes: `EMPTY_SCENE`, `BOUNDING_BOX_OUT_OF_RANGE`, `VERTEX_
 {"error": "Error creating WebGL context."}
 ```
 
+## PMREM cache
+
+The fixed `neutral` and `studio` lighting environments are baked once per
+Chromium instance, on first use. A trusted, disposable browser context generates
+each PMREM and reads its half-float pixels into a process-local cache. Each miner
+render still gets a fresh BrowserContext and uploads a private texture from those
+pixels. Miner code never runs in the baking context. `follow` lighting needs no
+PMREM and is unchanged.
+
+Concurrent requests share the same pending bake. A failed bake is evicted so a
+later request can retry; replacing the browser creates a fresh cache. Nothing is
+persisted across service restarts, so changing Three.js or Chromium automatically
+rebakes the environments. The first use pays the baking and readback cost; later
+requests skip PMREM generation. Lighting values, camera settings and the existing
+studio environment are preserved.
+
+### Cache checks and PNG equivalence
+
+`npm test` includes cache reuse, concurrent initialization, failure cleanup/retry,
+and browser replacement checks. `npm run test:pmrem` compares complete PNG bytes
+against the renderer before caching, with no pixel tolerance. It covers all ten
+repository example scenes plus a material roughness sweep, the validator's eight
+white and four gray 1024-pixel views, the default 518-pixel studio grid, and a
+`follow` control. It also checks warm reuse, recovery after a miner error, browser
+restarts and simultaneous requests with an empty cache.
+
+Run both implementations in the same image with the same locked dependencies.
+From the repository root, after building a renderer image:
+
+```sh
+PMREM_IMAGE_ID=$(docker image inspect render-service-js --format '{{.Id}}')
+PMREM_REFERENCE_DIR=$(mktemp -d)
+git archive c4dc226 render-service-js/src | tar -x -C "$PMREM_REFERENCE_DIR"
+docker run --rm --init --cpus=2 --memory=2g --pids-limit=512 --network none \
+  -e RENDER_POOL_SIZE=2 -e PMREM_REFERENCE_DIR=/app/reference \
+  -e PMREM_IMAGE_ID="$PMREM_IMAGE_ID" \
+  --mount "type=bind,src=$PWD/render-service-js/src,dst=/app/src,readonly" \
+  --mount "type=bind,src=$PWD/render-service-js/test,dst=/app/test,readonly" \
+  --mount "type=bind,src=$PMREM_REFERENCE_DIR/render-service-js,dst=/app/reference,readonly" \
+  --mount "type=bind,src=$PWD/miner-reference/examples,dst=/fixtures,readonly" \
+  --entrypoint node "$PMREM_IMAGE_ID" test/pmrem-equivalence.test.mjs
+```
+
+To save PNGs and a JSON report with source hashes, output hashes and timings,
+mount an output directory and set `PMREM_TEST_OUTPUT` to its container path.
+Byte identity is checked within the chosen runtime; this does not establish
+pixel determinism between different hosts or browser versions.
+
+Verified against `c4dc226` using the same pinned linux/amd64 runtime with
+Chrome 146.0.7680.153, a two-CPU quota, 2 GiB RAM and two render slots:
+179 PNG comparisons were byte-identical. Warm-request medians across ten scenes
+(excluding the first scene, which builds each cache entry) were:
+
+| Request | Original | Cached |
+| --- | ---: | ---: |
+| Neutral, eight white 1024-pixel views | 8.98 s | 5.21 s |
+| Neutral, four gray 1024-pixel views | 8.38 s | 4.22 s |
+| Studio, four-view 518-pixel grid | 8.35 s | 3.92 s |
+
+Legacy-only finding: concurrent initialization of a stopped browser can launch
+multiple Chromium instances in `browser.js`. The cache concurrency test starts
+Chromium before submitting requests, as service startup does, and asserts that
+two requests share one baking context. Browser startup synchronization remains a
+separate change.
+
 ## Security
 
 Each submission passes through four isolation stages, layered so each
