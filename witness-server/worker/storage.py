@@ -8,7 +8,7 @@ from typing import Protocol, cast
 
 import boto3
 from botocore.config import Config
-from botocore.exceptions import ClientError
+from botocore.exceptions import ClientError, ConnectionClosedError, ReadTimeoutError
 from timing import timed
 
 MAX_BYTES = 16 * 1024 * 1024
@@ -70,13 +70,18 @@ class R2Store:
 
     @timed("r2_put")
     def put(self, key: str, data: bytes) -> None:
-        self.client.put_object(
-            Bucket=self.bucket,
-            Key=key,
-            Body=data,
-            ContentType="application/octet-stream",
-            CacheControl="no-store",
-        )
+        try:
+            self.client.put_object(
+                Bucket=self.bucket,
+                Key=key,
+                Body=data,
+                ContentType="application/octet-stream",
+                CacheControl="no-store",
+            )
+        except (ReadTimeoutError, ConnectionClosedError):
+            # R2 may have saved the object before its acknowledgement was lost.
+            if self.get(key, limit=len(data)) != data:
+                raise
 
     def delete(self, key: str) -> None:
         self.client.delete_object(Bucket=self.bucket, Key=key)
