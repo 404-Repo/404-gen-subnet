@@ -8,6 +8,8 @@ Run available matches while checks are pending. Finalize the round once
 every miner in the surviving chain of winners has passed both checks.
 """
 
+from hashlib import blake2b
+
 from loguru import logger
 from openai import AsyncOpenAI
 from subnet_common.competition.config import require_competition_config
@@ -113,6 +115,12 @@ class RoundRunner:
         prompts = await require_prompts(git=git, round_num=round_num, ref=base_sha)
 
         submissions = await require_submissions(git=git, round_num=round_num, ref=base_sha)
+        submissions = dict(
+            sorted(
+                submissions.items(),
+                key=lambda item: (item[1].revealed_at_block, blake2b(f"{seed}:{item[0]}".encode()).digest()),
+            )
+        )
         logger.debug(f"Submission order: {list(submissions)}")
 
         match_matrix = await get_match_matrix(git=git, round_num=round_num, ref=base_sha)

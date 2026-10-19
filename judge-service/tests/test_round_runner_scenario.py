@@ -232,6 +232,29 @@ def _assert_verdicts_are_read_only(git: MockGitHubClient) -> None:
     assert "rounds/1/source_audit.json" not in git.committed
 
 
+@pytest.mark.parametrize("miners", [[HK_A, HK_B, HK_C], [HK_C, HK_B, HK_A]])
+@pytest.mark.parametrize("seed,expected", [(42, [HK_A, HK_C, HK_B]), (43, [HK_C, HK_A, HK_B])])
+async def test_seed_breaks_same_block_ties_after_reveal_block(
+    settings: Settings, miners: list[str], seed: int, expected: list[str]
+) -> None:
+    git = _world(miners)
+    submissions = json.loads(git.files["rounds/1/submissions.json"])
+    for hotkey, submission in submissions.items():
+        submission["revealed_at_block"] = 101 if hotkey == HK_B else 100
+    git.files["rounds/1/submissions.json"] = json.dumps(submissions)
+    git.files["rounds/1/seed.json"] = json.dumps({"seed": seed})
+
+    runner = await RoundRunner.create(
+        git_batcher=GitBatcher(git=git, branch="main", base_sha=git.ref_sha),
+        state=CompetitionState(current_round=1, stage=RoundStage.DUELS),
+        openai=AsyncMock(),
+        settings=settings,
+        discord=NullDiscordNotifier(),
+    )
+
+    assert runner._hotkeys == expected
+
+
 async def test_single_challenger_waits_for_both_verdicts(settings: Settings) -> None:
     git = _world([HK_A])
     passes = {HK_A: "passed"}
@@ -287,7 +310,7 @@ async def test_two_qualify_second_beats_first_second_wins(settings: Settings) ->
     assert _requested(discord) == [(HK_A, LEADER), (HK_B, HK_A)]
 
 
-async def test_collector_submission_order_determines_winner(settings: Settings) -> None:
+async def test_reveal_block_order_determines_winner(settings: Settings) -> None:
     git = _world([HK_A, HK_B])
     submissions = json.loads(git.files["rounds/1/submissions.json"])
     git.files["rounds/1/submissions.json"] = json.dumps({HK_B: submissions[HK_B], HK_A: submissions[HK_A]})
@@ -299,7 +322,7 @@ async def test_collector_submission_order_determines_winner(settings: Settings) 
         settings,
     )
 
-    assert _winner(git) == HK_B
+    assert _winner(git) == HK_A
 
 
 async def test_loser_becomes_candidate_when_defender_fails(settings: Settings) -> None:
