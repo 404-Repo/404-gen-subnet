@@ -1,5 +1,10 @@
 # Witness gateway
 
+The ordinary CPU Pod gateway is being implemented separately in
+[pod_gateway](PODS.md). Its allocation core has offline tests; its public
+transport and witness listener are not connected yet. The deployed gateway
+described below continues to use Serverless jobs.
+
 A public TypeScript Cloudflare Worker authenticates registered Bittensor miners, queues
 RunPod jobs, and connects each miner to its assigned witness worker. A Durable
 Object per round and hotkey owns allocation state and the infrastructure allowance.
