@@ -128,7 +128,7 @@ code-generation models.
 
 ### Rendering
 
-The round publishes the renderer build and options. The supplied
+The runtime fixes the renderer build and default options. The supplied
 `renderer.render(source)` produces a four-view preview grid; use `RenderOptions`
 for explicit preview settings. The runtime records those options for replay.
 Final judging uses `render-service-js` 0.4.8 with eight white views, four gray views
@@ -137,12 +137,10 @@ judging conditions.
 
 ## Python environment
 
-The target is Python 3.13 on Linux x86_64.
-[runtime/requirements.txt](runtime/requirements.txt) lists candidate direct
-dependencies. The operator must publish and retain the complete tested environment
-for each round, including the Python build, packages, bundled clients/proof files,
-native CPU/codec profile, wheel hashes and license notices, and renderer build/options.
-Generation, replay and later incumbent runs use that same environment.
+The runtime uses Python 3.13 on Linux x86_64.
+[runtime/requirements.txt](runtime/requirements.txt) lists the direct dependencies
+and pinned versions. Generation, replay and incumbent runs use the same Python
+build, installed packages, bundled clients and renderer configuration.
 
 Miner code can use the standard library, OpenAI request/result types, Pydantic,
 NumPy and Pillow. NumPy supports image arrays, masks, geometry calculations and
@@ -153,9 +151,6 @@ Do not install or upgrade packages during generation or replay.
 Miners can propose additional libraries in a pull request. Include a visual
 explanation showing how the library would improve generation, such as before/after
 renders, annotated images or geometry previews, and a small reproducible example.
-Accepted environment changes are announced before code collection closes and
-apply to later rounds. A withdrawn environment needs an announced outcome for
-affected submissions.
 
 ## Reproducibility
 

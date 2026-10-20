@@ -1,6 +1,5 @@
-# Candidate direct dependencies for Python 3.13 / Linux x86_64.
-# The operator bundles the witness/renderer clients and publishes the complete
-# tested environment for each round. This file is not that frozen environment.
+# Pinned direct dependencies for Python 3.13 / Linux x86_64.
+# The runtime also bundles the witness/renderer clients.
 tlslite-ng==0.8.2
 cryptography==50.0.2
 httpx==0.28.1

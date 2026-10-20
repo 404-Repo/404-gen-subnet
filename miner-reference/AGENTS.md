@@ -93,7 +93,7 @@ Plus any identifiers declared locally (`const`, `let`, `var`, function parameter
 
 ## Rendering context
 
-The round publishes the renderer build and camera, lighting, background and view
+The runtime specifies the renderer build and camera, lighting, background and view
 options. Your module constructs the asset; the renderer controls that setup.
 Use the supplied renderer client to inspect candidates under recorded preview
 settings. The local browser viewer does not reproduce judging conditions.

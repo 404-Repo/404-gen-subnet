@@ -79,13 +79,13 @@ Custom vertex attributes beyond `position`, `normal`, `uv`, and `color` are allo
 
 ## Rendering Context
 
-The round publishes its renderer build and camera, lighting, background and view options.
+The runtime specifies the renderer build and camera, lighting, background and view options.
 Use those settings when assessing your asset; the local viewer is an inspection tool.
 See [Rendering](README.md#rendering) for the preview and judging views.
 
 ## Three.js Version
 
-Pinned to **Three.js r183** (npm: `three@0.183.2`). The round's frozen environment identifies the exact bundle and its hash.
+Pinned to **Three.js r183** (npm: `three@0.183.2`). The runtime identifies the exact bundle and its hash.
 
 ## Determinism
 
