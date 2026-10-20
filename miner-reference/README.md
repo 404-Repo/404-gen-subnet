@@ -1,300 +1,391 @@
-# 404-GEN Miner Reference
+# 404-GEN Miner Guide
 
-Reference bundle for 404-GEN miners: specifications, examples, a local validator, a visual previewer, and a reference service implementation.
+Submit a Python repository with a `generate` function in its root `main.py`.
+The sandbox calls it for each prompt image and receives a Three.js module.
 
-**Your job is to build a pipeline that turns prompt images into procedural Three.js code.** Each round, prompts are published and you generate one JavaScript module per prompt — code that constructs the depicted 3D object from primitives. You submit these to a CDN for pairwise judging against other miners. Separately, your solution must be deployable as a Docker image so validators can regenerate your outputs and verify them.
+Copy [main.py](main.py) and the [miner_reference package](miner_reference/) into
+your repository root as a starting point. The example sends the reference image
+to OpenAI through the witness, renders the returned JavaScript, and returns that source.
 
-## The task
+The sandbox runner, automatic recording/replay and receipt submission described
+here still need implementation.
 
-Your goal is to build an **image-to-procedural-code** pipeline. Given a prompt image showing a 3D object, your system analyzes the image and produces a JavaScript module that reconstructs that object from Three.js primitives.
+## What to submit
 
-This is fundamentally different from direct 3D mesh generation. Your output is not a mesh — it is **code** that builds the mesh procedurally. The generated script must construct all geometry from the allowed Three.js API surface (primitive geometries, extrusions, lathes, buffer geometry, etc.), apply procedural materials and textures, and fit the result within the bounding box constraint. No precomputed vertex data, no embedded assets, no external resources.
+Register a Finney netuid 17 hotkey and submit these chain commitment fields:
 
-### Prompt images
+| Field | Value |
+| --- | --- |
+| `repo` | Repository URL containing `main.py` and its supporting source/data |
+| `commit` | Full 40-character commit, fixed before prompts and seed are published |
+| `cdn_url` | Base URL from which the collector downloads generated files |
 
-Each prompt is a single image (PNG or JPG) showing a 3D object. Your pipeline analyzes the image and produces a Three.js module that reconstructs the depicted object.
+Each submitting hotkey needs the 100-alpha lock. Multiple hotkeys per team are
+allowed; the coldkey must cover all their locks. Admission and anti-spam limits
+apply per hotkey, without guaranteed per-team queue fairness.
 
-The prompt set may include furniture, vehicles, architectural elements, household objects, and other categories. Some prompts will be well-suited to procedural approaches (geometric objects, hard-surface models); others will be more challenging (organic forms, complex topology).
+Commit every module, template, configuration file and data file that affects
+generation. The runner snapshots this source and records its hash. A branch name
+or moving tag cannot identify a submission. You supply Python source; the operator
+provides the sandbox and clients.
 
-### Scoring
+**Multiple Python files and packages are allowed.** Keep `main.py` at the
+repository root as the entry point, exposing `generate(...)`. It may import your
+other committed modules and packages. All supporting files must be included in
+the submitted commit and are available during both generation and replay.
+The runner puts the submission root on Python's import path.
 
-Each JavaScript module you return is validated and rendered under the canonical camera and lighting setup defined in the [Runtime Specification](runtime_specifications.md). The rendered image is then compared against the original prompt image by a **VLM (Vision-Language Model) judge** — the same evaluation pipeline used in previous 404 competitions.
+The example uses this layout:
 
-Key scoring facts:
-
-- **Quality matters, speed doesn't.** Finishing in 30 minutes scores the same as 119 minutes. Optimize for output quality within the time budget.
-- **Failed prompts are automatic losses.** A prompt that fails validation or rendering scores zero against every other miner. Reliability first, then quality.
-- **Partial batches always count.** 31 out of 32 is far better than 0 out of 32.
-- **Geometric correctness and visual fidelity both matter.** The VLM judge evaluates how well your rendered output matches the prompt image overall.
-
-### Model requirements
-
-- All models in your pipeline must be **open-source with commercial-use-compatible licenses**.
-- No closed-source API calls (OpenAI, Anthropic, etc.) during generation.
-- Fine-tuned models are allowed if the base model's license permits it.
-- Multiple models in a single pipeline are allowed and expected.
-
-## Why a batch API for verification
-
-During verification, the orchestrator deploys your Docker image on a verification pod (4× H200 by default, or the configuration you declare in [`hardware.json`](#hardware)) and sends the same prompts in sequential batches. The batch model gives you full control over how verification runs on your hardware:
-
-- **Scheduling is yours.** How to parallelize across GPUs, when to retry a failed generation, how to allocate compute to harder prompts — all up to you.
-- **Hardware diagnostics are yours.** Your code decides when a pod is good enough and when to request a replacement.
-- **Partial results count.** If one prompt fails, skip it and return the rest. 31 out of 32 is far better than timing out.
-- **Models stay warm.** No container teardown between batches. Load once, generate four times.
-
-The tradeoff is responsibility: you're building health checks and failure recovery into your service. A buggy service that crashes on startup burns through your pod budget. Test locally before deploying.
-
-## Contents
-
-| Path | Purpose |
-|---|---|
-| [`AGENTS.md`](AGENTS.md) | Compact rules reference for code-generation LLMs — all constraints, allowed APIs, and patterns in one file |
-| [`api_specification.md`](api_specification.md) | HTTP contract between orchestrator and miner pod |
-| [`output_specifications.md`](output_specifications.md) | What miners must produce — JS module format, constraints, allowed Three.js APIs |
-| [`runtime_specifications.md`](runtime_specifications.md) | How submissions are validated and rendered — sandbox, static analysis, rendering pipeline |
-| [`examples/car.js`](examples/car.js) | Canonical hand-written `generate.js` — a low-poly car using primitives, PBR, a `DataTexture`, and the `fitToUnitCube` pattern |
-| [`examples/material_variants.js`](examples/material_variants.js) | Three meshes side-by-side using `MeshBasicMaterial`, `MeshStandardMaterial`, and `MeshPhysicalMaterial` (with clearcoat) |
-| [`examples/custom_buffergeometry.js`](examples/custom_buffergeometry.js) | A square pyramid built from raw `BufferAttribute`s with explicit positions, normals, UVs, and an index buffer — the pattern for non-primitive geometry |
-| [`examples/instanced_mesh.js`](examples/instanced_mesh.js) | A double-helix of 240 cubes from a single `InstancedMesh` — per-instance translation and rotation via `setMatrixAt`, for any scene with many repeated elements (forests, particles, brick walls) |
-| [`examples/points_cloud.js`](examples/points_cloud.js) | A Fibonacci-sphere `Points` cloud with per-vertex colors, demonstrating `Points` + `PointsMaterial` + custom `BufferGeometry` + the `color` attribute |
-| [`examples/line_segments.js`](examples/line_segments.js) | A wireframe icosahedron built with `LineSegments` + `LineBasicMaterial` + `EdgesGeometry`, with a height-gradient via per-vertex colors |
-| [`examples/prompts/`](examples/prompts/) | Real prompt images (balloon, pumpkin, SUV, clock) |
-| [`examples/generated/`](examples/generated/) | Three.js modules generated from those prompts by a VLM + code-LLM pipeline |
-| [`examples/viewer.html`](examples/viewer.html) | Live browser previewer for any `generate.js` with HUD metrics; dropdown lists every fixture in this directory and `validator/test/budget-probes/` |
-| [`validator/`](validator/) | Conformance validator package (JS/Node), mirrors the production runtime's static and post-execution checks |
-| [`tools/validate.js`](tools/validate.js) | CLI wrapper around the validator package |
-| [`validator/test/budget-probes/`](validator/test/budget-probes/) | Complexity-tier fixtures showing how realistic outputs sit relative to the caps |
-| [`miner_reference/`](miner_reference/) | Reference pod-side HTTP service (Python/FastAPI) implementing the batch API |
-| [`docker/Dockerfile`](docker/Dockerfile) | Reference Dockerfile in the required `docker/` location — see [Docker Image Requirements](api_specification.md#docker-image-requirements) |
-| `hardware.json` | Optional repo-root file declaring the verification GPU configuration(s) your pipeline targets — see [Hardware](#hardware). Absent → defaults to `["4xH200"]` |
-
-## Specifications
-
-All three documents are required reading if you're building a miner.
-
-| Document | Covers |
-|---|---|
-| [API Specification](api_specification.md) | HTTP endpoints (`/health`, `/status`, `/generate`, `/results`), pod lifecycle, batch flow, pod replacement budget, time budget, scoring basics, [Docker image requirements](api_specification.md#docker-image-requirements) |
-| [Output Specification](output_specifications.md) | Function signature, execution constraints, literal budget, allowed and prohibited Three.js APIs, failure semantics with rule codes |
-| [Runtime Specification](runtime_specifications.md) | Three.js bundle pinning, static analysis, `isolated-vm` sandbox, double-execute render strategy, camera and lighting setup |
-
-## Example prompts and outputs
-
-The [`examples/prompts/`](examples/prompts/) folder contains real prompt images. [`examples/generated/`](examples/generated/) contains corresponding Three.js modules produced by a VLM + code-LLM pipeline. All generated files pass validation.
-
-| Prompt | Generated | Vertices | Draw calls | Notes |
-|--------|-----------|----------|------------|-------|
-| [`balloon.png`](examples/prompts/balloon.png) | [`balloon.js`](examples/generated/balloon.js) | 1,231 | 4 | Simple: LatheGeometry profile, TubeGeometry string, MeshPhysicalMaterial clearcoat |
-| [`pumpkin.png`](examples/prompts/pumpkin.png) | [`pumpkin.js`](examples/generated/pumpkin.js) | 3,409 | 13 | Organic: LatheGeometry segments with procedural DataTexture for surface detail |
-| [`suv.png`](examples/prompts/suv.png) | [`suv.js`](examples/generated/suv.js) | 3,331 | 67 | Complex hard-surface: many BoxGeometry parts, TubeGeometry roof rack, TorusGeometry tires |
-| [`clock.png`](examples/prompts/clock.png) | [`clock.js`](examples/generated/clock.js) | 5,957 | 109 | Mixed: TorusGeometry frame, CylinderGeometry hands, procedural face texture |
-
-Open the [viewer](examples/viewer.html) and select any entry from the "generated from prompts" dropdown group to preview the generated Three.js output. To compare against the source prompt, open the corresponding image from [`examples/prompts/`](examples/prompts/) in a separate browser tab — the viewer renders only the generated `.js`, not the prompt image itself. The pairs are meant to calibrate your expectations — this is the kind of procedural approximation the competition produces.
-
-## For miners: iterating on your `generate.js`
-
-The primary workflow is writing a `generate.js` file, validating it locally, previewing it visually, and iterating. The validator runs the same static analysis and post-execution checks as the production runtime, so anything that passes locally passes in production.
-
-### 1. Look at the examples
-
-The `examples/` directory holds **hand-written reference fixtures** that demonstrate every allowed pattern in the Output Spec. (For real prompt-to-output pairs from a VLM pipeline, see the "Example prompts and outputs" section above.) Read whichever ones match what your inference pipeline will emit:
-
-| File | Demonstrates |
-|---|---|
-| **`car.js`** | Primitive geometries, `MeshStandardMaterial`, a procedural `DataTexture`, a transform hierarchy, and the `fitToUnitCube` bounding-box normalization pattern. The canonical "start here" example. |
-| **`material_variants.js`** | The three mesh material types: `MeshBasicMaterial` (unlit), `MeshStandardMaterial` (PBR), `MeshPhysicalMaterial` (clearcoat). |
-| **`custom_buffergeometry.js`** | Hand-built `BufferGeometry` with explicit `BufferAttribute`s for position/normal/uv and a `setIndex` index buffer. The pattern for emitting raw vertex data instead of using primitives. |
-| **`instanced_mesh.js`** | `InstancedMesh` with 240 instances of a single geometry, each with a unique `Matrix4` transform via `setMatrixAt`. Counts as 1 draw call and 24 vertices in the budget regardless of instance count — the right pattern for any scene with many repeated elements (forests, particles, brick walls, crowds). |
-| **`points_cloud.js`** | `Points` + `PointsMaterial` + custom `BufferGeometry` + per-vertex colors via the `color` attribute. |
-| **`line_segments.js`** | `LineSegments` + `LineBasicMaterial` + `EdgesGeometry` (a built-in helper for extracting edges from any geometry), with a per-vertex color gradient. |
-
-Together these cover every category in the Output Spec's "Allowed Three.js APIs" section. Every example passes the validator with large margins on every cap. They are also wired into the validator's CI runner with metric annotations, so any future regression in their measured vertex/draw/depth/instance/texture counts is caught automatically.
-
-### 2. Install the validator (one time)
-
-```bash
-cd validator
-npm install
+```text
+main.py
+miner_reference/
+    __init__.py
+    pipeline.py
+    images.py
 ```
 
-This pulls `@babel/parser`, `@babel/traverse`, and `three@0.183.2` — everything the conformance tool needs.
+[main.py](main.py) delegates to the model/render flow in
+[pipeline.py](miner_reference/pipeline.py).
+[images.py](miner_reference/images.py) converts PNG bytes into data URLs
+for model requests. This is an example organization; keep `generate(...)` in the
+root entry module and organize your supporting code as needed.
 
-### 3. Validate your `generate.js` from the command line
+## The function
 
-```bash
-# from the miner-reference root
-node tools/validate.js path/to/my-generate.js
-
-# or as JSON for scripts / CI
-node tools/validate.js --json path/to/my-generate.js
+```python
+def generate(image: bytes, seed: int, witness: WitnessClient, renderer: Renderer) -> str | None:
+    ...
 ```
 
-The pretty output shows your stage-by-stage progress, live metrics (vertex count, draw calls, scene depth, instances, texture data, bounding box, execution time), and any failures with stable `{stage, rule, detail}` codes. Exit code is `0` on pass, `1` on fail.
+| Argument | Supplied by the runner |
+| --- | --- |
+| `image` | Frozen PNG prompt bytes, identical in generation and replay |
+| `seed` | Published round seed, an integer from zero through 2^64 − 1 |
+| `witness` | The `witness_client.WitnessClient` model-call interface |
+| `renderer` | The `renderer_client.Renderer` rendering interface |
 
-Quick sanity check against the canonical example:
+Return the final JavaScript string, or `None` to declare generation failure.
+An uncaught exception is a miner error. The runner checks the return type, UTF-8
+size and JavaScript rules.
 
-```bash
-node tools/validate.js examples/car.js
-```
+Use `witness.responses.create(stream=True, ...)` for model requests. It waits for
+the complete response and returns `output_text`, `response` and `usage`.
+`renderer.render(source, options)` returns PNG bytes or raises a structured
+`RenderRejected`. Send prompt images and rendered previews as PNG data URLs in
+`input_image` items. You may render, compare and refine candidates within the
+prompt's budget; the example makes one model request and one renderer call.
 
-### 4. Preview your output in a browser
+Both clients are supplied in generation and replay. Client construction,
+credentials, recording and recovery are handled by the runtime. Your function
+does not select replay mode, manage exchange IDs, parse a command line or handle
+input/output directories.
 
-The viewer loads any fixture via dynamic `import()`, runs `generate(THREE)`, adds the result to a PBR-lit scene, and shows live metrics in a HUD. It uses the same pinned Three.js bundle as the production renderer, so what you see in the browser matches what the validator will render.
+The runner writes successful returns to `{stem}.js` and declared failures to
+`_failed.json`, for example `{"pumpkin": "generation_failed"}`. Stems are unique
+lowercase alphanumeric prompt IDs. Your function handles one image per call;
+prompt count is a round setting.
 
-```bash
-# from the miner-reference root
-python3 -m http.server 8080
-```
+Outside `generate`, upload each successful file to
+`{cdn_url.rstrip('/')}/{stem}.js` and submit the runtime's receipt before cutoff.
+The receipt binds the admitted source, round/hotkey, inputs/seed, environment,
+rate table, output hashes and complete traffic records. The collector accepts
+only matching CDN bytes; a file or CDN timestamp alone is not a receipt.
+Receipt delivery and partial-submission handling still need implementation.
 
-Then open <http://localhost:8080/examples/viewer.html>. Use the dropdown in the top-left to switch between `car.js` and the budget-probe fixtures. Drag to orbit, scroll to zoom. The wireframe cube shows the `[-0.5, 0.5]` valid region; the RGB axis helper at the origin shows +Z (blue) as the forward axis your model should face.
+## Generated JavaScript
 
-### 5. Check headroom against realistic outputs
-
-Five hand-written probes in [`validator/test/budget-probes/`](validator/test/budget-probes/) exercise different complexity tiers (a detailed car, a wooden chair, a tree with 2,000 instanced leaves, a Gothic cathedral, a high-poly torus-knot statue). They all validate cleanly and together they tell you how close realistic outputs sit to the current caps.
-
-```bash
-cd validator
-npm test
-```
-
-Output is a summary table: each probe's vertex / draw-call / depth / instance / texture usage, as an absolute number and a percentage of the limit. A realistic output should sit at 0–20% of every cap. If your own `generate.js` is hitting 80% of something, the probes tell you whether that's normal or excessive.
-
-## Building your generation pipeline
-
-The part you need to build is the **generation pipeline**: the system that takes a prompt image and produces a conforming Three.js module. This is the core of your miner.
-
-You do not need to own GPUs or rent a dedicated machine just to start iterating on Subnet 17. For prototyping and inner-loop development, you can use serverless inference or serverless GPU providers; `chutes.ai` is a great first option since it is already within the ecosystem, and other hosted services can also help you move faster. Just keep in mind that your final miner must still be reproducible, Dockerized, and compliant with the subnet's open-source and commercial-use rules.
-
-### Suggested architecture
-
-A typical pipeline has multiple stages:
-
-1. **Image analysis.** A vision-language model (VLM) examines the prompt image and identifies the object's structure: what primitives approximate it, their relative sizes, positions, orientations, and spatial relationships.
-
-2. **Code generation.** A code-capable LLM takes the structural analysis and produces a Three.js `generate(THREE)` function. The LLM must be aware of the allowed API surface (see [Output Specification](output_specifications.md#allowed-threejs-apis)) and the constraints (bounding box, vertex limits, literal budget, determinism). Feed it [`AGENTS.md`](AGENTS.md) as context.
-
-3. **Validation and refinement.** Run the local validator on the generated code. If it fails, feed the error back to the LLM and retry. If it passes but renders poorly, refine. This agentic loop — generate, validate, diagnose, retry — is where much of the competitive advantage lies.
-
-4. **Material and texture application.** Procedural materials (`MeshStandardMaterial`, `MeshPhysicalMaterial`) and programmatically generated `DataTexture` instances can significantly improve visual fidelity. Consider tuning these separately from geometry.
-
-This is one approach. You are free to design any pipeline you want. Smaller models are unlikely to handle this problem well; plan for capable VLMs and code LLMs.
-
-### Key constraints to design around
-
-- **50 KB literal budget** prevents embedding precomputed vertex data. Your code must generate geometry algorithmically — parametric shapes, extrusions, lathes, CSG-style composition, instanced meshes.
-- **5-second execution timeout** means heavy computation (hundreds of thousands of vertices from custom `BufferGeometry`) needs to be efficient.
-- **Determinism** is mandatory — no `Math.random()`, no `Date`. Two executions of the same script must produce identical output.
-- **The code cannot access the prompt image at runtime.** Your model must fully encode the image's content as procedural code at generation time. The `generate(THREE)` function receives only the `THREE` namespace.
-
-### The validator as your inner loop
-
-The local validator runs the same static analysis and post-execution checks as production. Build it into your pipeline as a programmatic check:
+Each successful file exports exactly one synchronous default function:
 
 ```js
-import { validate } from '@404-subnet/validator';
-
-const result = await validate(generatedSource);
-if (!result.passed) {
-  // Feed result.failures back to the LLM for correction
+export default function generate(THREE) {
+  const root = new THREE.Group();
+  // Build the asset procedurally.
+  return root;
 }
 ```
 
-Code that passes the local validator will pass production. Use the `--json` flag or the library API for machine-readable output that an agent can parse and act on.
+Return a `Group`, `Mesh`, `LineSegments` or `Points`, centered in `[-0.5, 0.5]` on
+every axis, Y-up, +Z forward. Use `three@0.183.2` and only allowlisted APIs.
+`THREE` is available through the function parameter, not at module top level.
+No imports, external assets, network calls or nondeterministic JavaScript.
 
-## Reference verification service
+| Limit | Maximum |
+| --- | ---: |
+| Source file | 1 MiB |
+| String and numeric literals | 50 KB |
+| Module evaluation plus function execution | 5 seconds |
+| JavaScript heap | 256 MB |
+| Vertices | 250,000 |
+| Draw calls | 200 |
+| Scene depth | 32 |
+| Instances | 50,000 |
+| Texture data | 4 MiB |
 
-Your Docker image must expose an HTTP service for the verification flow (see "How a round works § Verification") and conform to the [Docker Image Requirements](api_specification.md#docker-image-requirements) — most importantly, the build pipeline expects a **`docker/Dockerfile`** at the repository root. You can write the service in any language. If you want a working starting point, there's a Python/FastAPI implementation in [`miner_reference/`](miner_reference) plus a reference [`docker/Dockerfile`](docker/Dockerfile) that builds it. It implements the four endpoints from the [API Specification](api_specification.md) and demonstrates:
+The [JavaScript reference](output_specifications.md) contains the full API allowlist,
+counting rules and failure codes. [AGENTS.md](AGENTS.md) is a compact reference for
+code-generation models.
 
-- Pod state machine (`warming_up` → `ready` → `generating` → `complete`)
-- GPU health benchmark at startup and per-batch: stress-tests each GPU's compute throughput (TFLOPS) and checks per-GPU VRAM via `torch.cuda`, requests `replace` when any GPU is degraded (if budget allows)
-- Partial-batch failure handling with a `_failed.json` manifest
-- Streamed ZIP response from `/results`
+### Rendering
 
-```bash
-poetry install
-python main.py
+The round publishes the renderer build and options. The supplied
+`renderer.render(source)` produces a four-view preview grid; use `RenderOptions`
+for explicit preview settings. The runtime records those options for replay.
+Final judging uses `render-service-js` 0.4.8 with eight white views, four gray views
+and a grid. The local browser viewer is for inspecting assets, not reproducing
+judging conditions.
+
+## Python environment
+
+The target is Python 3.13 on Linux x86_64.
+[runtime/requirements.txt](runtime/requirements.txt) lists candidate direct
+dependencies. The operator must publish and retain the complete tested environment
+for each round, including the Python build, packages, bundled clients/proof files,
+native CPU/codec profile, wheel hashes and license notices, and renderer build/options.
+Generation, replay and later incumbent runs use that same environment.
+
+Miner code can use the standard library, OpenAI request/result types, Pydantic,
+NumPy and Pillow. NumPy supports image arrays, masks, geometry calculations and
+seeded parameters; Pillow supports decoding, cropping, resizing and encoding images.
+Packages and subprocesses obey the same sandbox I/O restrictions as Python code.
+Do not install or upgrade packages during generation or replay.
+
+Miners can propose additional libraries in a pull request. Include a visual
+explanation showing how the library would improve generation, such as before/after
+renders, annotated images or geometry previews, and a small reproducible example.
+Accepted environment changes are announced before code collection closes and
+apply to later rounds. A withdrawn environment needs an announced outcome for
+affected submissions.
+
+## Reproducibility
+
+Use the supplied seed for local randomness. For NumPy, choose an explicit
+generator such as `Generator(PCG64(seed))`. Use stable ordering, explicit rounding,
+and fixed image modes, resize filters and encoding settings. Test the resulting
+request and output bytes on the supported runtime profile.
+
+Wall clocks, random UUIDs, Python's randomized `hash()`, directory order and worker
+scheduling must not decide requests or output. Seeded Python generation is allowed;
+randomness inside the generated JavaScript is forbidden.
+
+The runner fixes `PYTHONHASHSEED=0`, `OPENBLAS_NUM_THREADS=1`,
+`OMP_NUM_THREADS=1` and `MKL_NUM_THREADS=1` before Python starts. A seed and a single
+thread alone do not guarantee identical numerical or encoded results.
+
+Use committed source/data, the frozen prompt and environment, recorded model
+responses and verified renders. Local deterministic image processing is allowed.
+Additional remote inference, web fetches, host state, undeclared files, imported
+meshes, pretrained-weight downloads and baked image textures cannot supply assets.
+
+## Budget
+
+Each prompt has a nominal **5,000,000-credit budget and a 60-call cap**, shared across
+all models and every generation, refinement, criticism and comparison step.
+One credit represents $0.000001 of Standard API usage, so the allowance is equivalent
+to $5. Rejected and discarded attempts count too. Exactly 5,000,000 credits and
+exactly 60 calls are within the nominal limits. Restarts, credentials and model
+switches do not reset them.
+
+**Unused budget cannot transfer between prompts or offset another prompt's overrun.**
+Overrun allowances, any additional submission-wide limit and penalties remain
+undecided.
+
+The rate file gives credits per token. Add every call's charge for the same prompt:
+
+```text
+call_credits = input_tokens * input_weight + output_tokens * output_weight
+prompt_credits = sum(call_credits)
 ```
 
-The service starts on port **10006** (the port the orchestrator polls). Run tests with:
+Sum fractional credits exactly, without rounding each call.
 
-```bash
-poetry run pytest -v
+Use verified provider `usage.input_tokens` and `usage.output_tokens`, including
+image inputs and conversation history. Count all input tokens **once at the full
+published input rate**, including cache reads and writes. Cached/write token
+details are already included: do not subtract them, add them again or apply a
+cache-write premium. Output already includes reasoning tokens; do not add them
+again. `total_tokens` is only a consistency check.
+
+API keys and ChatGPT subscriptions use the same competition weights. Standard,
+Fast and Ultrafast are allowed and counted at Standard rates; Flex is forbidden.
+Actual bills, discounts, subscription limits and faster-tier premiums do not
+change competition accounting. The runtime and validator must enforce this on
+both API and subscription routes, explicitly defaulting to Standard so account
+defaults cannot select Flex.
+
+The [rate file](budgets/pricing.json) contains all seven candidate
+models, checked 2026-10-19. Values below are **credits per token**. With this credit
+scale, the numbers also equal the published USD price per million tokens: 2 credits
+per token represents $2 per million tokens.
+
+| Model | Input | Output | Long-context input | Long-context output |
+| --- | ---: | ---: | ---: | ---: |
+| `gpt-6-astra` | 10 | 50 | 20 | 75 |
+| `gpt-6.1-sol` | 2 | 10 | 4 | 15 |
+| `gpt-6-sol` | 2 | 10 | 4 | 15 |
+| `gpt-6-luna` | 0.10 | 0.50 | 0.20 | 0.75 |
+| `gpt-5.6-sol` | 4 | 20 | 8 | 30 |
+| `gpt-5.6-terra` | 2 | 12 | 4 | 18 |
+| `gpt-5.6-luna` | 0.20 | 1.20 | 0.40 | 1.80 |
+
+`long_context_above_input_tokens` is a pricing threshold for **one model request**,
+checked against `usage.input_tokens`, including images and conversation history.
+More than 272,000 input tokens switches the **whole request**, including output,
+to long-context weights. Exactly 272,000 uses the short tier. It is a pricing
+threshold, not an input limit or a total across the prompt's calls. Weights use the
+official [Standard prices](https://developers.openai.com/api/docs/pricing);
+each model's source is linked in the rate file. The credit scale and weights are
+frozen for the round, even if provider prices change.
+
+For example, Sol 6.1 with 10,000 input and 20,000 output tokens uses
+**220,000 credits and one call**, equivalent to $0.22 at Standard prices.
+
+Each round freezes the rate-file bytes/hash, exact allowed model IDs, endpoint
+mappings and context tiers. The witness supports API and Codex subscription
+Responses routes; access and usage support must be confirmed for each allowed
+combination. UI labels and undocumented aliases do not establish a pricing
+identity. Unknown model IDs cannot receive a guessed rate. Other providers or
+billable features need explicit evidence and accounting before being allowed.
+
+### Calls and failures
+
+Every distinct request dispatched to OpenAI counts once, including HTTP 429 and
+other provider rejections. Sending another request after an error counts again if
+dispatched. Recovering or downloading the same exchange does not add a call or
+charge its tokens again.
+
+Proven pre-dispatch failures, worker allocation, proof setup, polling, rendering,
+uploads and evidence reads are not model calls. An allocated exchange ID alone
+does not prove dispatch. Confirmed dispatches count even when final token usage
+is unknown; unknown dispatch state stays unresolved.
+
+Charge all verified final input/output usage, even for failed or discarded work.
+Unknown usage stays pending, with a known subtotal and no claimed remaining
+balance. A timeout does not prove zero usage. Settlement rules for proven unbilled
+rejections and unresolved exchanges are still open. A known limit breach remains
+a breach while another exchange is unresolved.
+
+The runtime assembles accounting automatically; miners do not build a ledger.
+Budget checking may happen during validation, without a realtime budget service.
+Use conservative output limits where supported to reduce the risk of overshooting.
+
+## Recording, replay and retries
+
+The runtime runs the same `main.py` in a fresh sandbox for generation and replay.
+Source and environment are read-only; scratch space is discarded between attempts.
+Recording and isolation start before importing `main.py` and cover libraries,
+native code and child processes. All permitted external traffic goes through the
+supplied clients. Direct network and alternate host-service access are blocked.
+Stdout/stderr are diagnostics and never become generation inputs.
+
+During generation, clients return live model responses and rendered images.
+During replay, model results come from verified recordings. Every render,
+including discarded candidates and structured rejections, is independently
+reproduced and verified before its original recorded result is returned. Replay
+has no live inference access. Calls, their order and final JavaScript bytes or
+`None` must match the recorded run.
+
+The runtime owns one durable ordered log per prompt, shared by both clients.
+It saves requests and model exchange handles before external dispatch, then saves
+complete responses/errors and PNGs/rejections before returning them to Python.
+Recordings, expected outputs, credentials and recovery state stay outside the sandbox;
+public records exclude credentials and private transport diagnostics.
+Only one owner may dispatch for a prompt. A log position identifies the same
+operation across attempts; identical calls within one run occupy distinct positions.
+Whole-round witness reconciliation prevents omitted, multiply attributed or
+double-charged exchanges.
+
+Replay compares the route and every model request field using the pinned witness
+serializer/decoder, including images, tools, reasoning, array order and missing
+versus null values. Render calls compare exact source, normalized options and
+renderer identity. Missing, extra, changed, reordered or unconsumed calls, invalid
+evidence and output discrepancies are validation findings. Request normalization
+and record format are fixed with the environment.
+
+Recovery is automatic. A generation restart replays the saved prefix through one
+shared cursor and recovers pending work before appending new calls. A model call
+that may have been dispatched must recover its original exchange. Fresh dispatch
+for that operation is allowed only when non-dispatch is proven. Completed work is
+never replaced by fresh inference. SDK retries that would repeat inference are
+disabled. Validation never appends calls or switches to live dispatch.
+
+Verified provider rejections, refusals, incomplete responses, argument errors and
+JavaScript/render resource rejections retain their complete outcomes in both modes.
+Miners may handle those outcomes and try another candidate within their budget.
+Transport timeouts, renderer crashes and transient service failures remain
+infrastructure failures, regardless of HTTP status. Unsettled work stops the run
+as unresolved; the runtime does not turn it into a miner-declared failure.
+
+The default retry policy is **three attempts per prompt per phase** (generation
+and validation), with delays of **one second, then two seconds**. Verification,
+sandbox startup and execution share the attempt limit; failed startup counts.
+The runner retains attempt counters and the original deadline outside the sandbox
+for each round/hotkey/prompt/phase. Polling, evidence checks and same-exchange
+recovery stay within these limits, without nested retry allowances.
+
+| Outcome | Runtime action |
+| --- | --- |
+| Temporary sandbox, worker, renderer or evidence-storage failure | Stop the old process tree; retry within the attempt limit and original deadline |
+| Possible model dispatch without a delivered result | Recover that same exchange |
+| Miner error, confirmed resource violation, reproducible rejection, changed replay call/output or invalid evidence | Preserve/report the outcome; do not retry to obtain a different result |
+| Infrastructure still unavailable after the retry limit or deadline | Leave the result unresolved |
+
+Both phases share the same prompt's usage ledger. Retries, runner/worker restarts,
+model changes and credential changes reset neither budgets nor attempt/deadline
+limits. Retain known usage and dispatch counts even when no result is returned.
+A known budget breach remains a breach while other work is unresolved.
+
+Exact source hashes and decoded render pixels are compared. The round must
+publish any render tolerance; exceeding it rejects the whole submission.
+Tolerances cannot weaken authentication or allow invented/reused evidence.
+Missing infrastructure evidence stays unresolved.
+
+## Round settings and open decisions
+
+The announcement specifies prompt count, capacity, generation window, first-seed
+time, cutoff, runtime/source resource limits, allowed model/route combinations,
+billable features, renderer options, retry policy and discrepancy tolerance.
+The generation window is separate from each JavaScript module's five-second
+execution limit.
+
+These policies remain undecided:
+
+- Additional images and shared adaptive work between prompts.
+- Exact source-package restrictions and sandbox CPU, memory and process limits.
+- Allowed model/endpoint features, including hosted tools or background requests.
+- Overrun allowances, any additional submission-total limit and penalties.
+- Render discrepancy thresholds and their per-prompt/per-submission scope.
+- Partial submissions, receipt format, cutoff/settlement grace and final handling
+  of proven unbilled rejections and unresolved usage.
+
+Replay checks code, evidence, reproduced outputs and budgets; source audit and
+quality judging are separate gates. Missing infrastructure results stay pending.
+A round is finalized after its result is persisted.
+
+The operator initializes its baseline with one generation attempt per prompt and
+no best-of selection. Later incumbent runs use the admitted code and environment
+on new prompts at the operator's expense, without resubmission by the incumbent.
+Candidate audits use replay.
+
+## Local validation
+
+Start with [car.js](examples/car.js) for a hand-written module. The [examples](examples/)
+also contain geometry/material patterns, prompt images and generated outputs.
+Install the validator with Node.js 20 or newer, then validate from this directory:
+
+```sh
+npm --prefix validator ci
+node tools/validate.js examples/car.js
 ```
 
-To build the Docker image the same way the orchestrator's pipeline does (build context = repo root, Dockerfile at `docker/Dockerfile`):
+Use `--json` for machine-readable results; see the [validator guide](validator/README.md).
+To preview the examples, run `python3 -m http.server 8080` from this directory and
+open the [browser viewer](http://localhost:8080/examples/viewer.html).
 
-```bash
-docker build -f docker/Dockerfile -t miner-reference .
-docker run -p 10006:10006 miner-reference
+### Tests
+
+Run the Three.js validator tests from this directory:
+
+```sh
+npm --prefix validator test
 ```
-
-`miner_reference/threejs_placeholder.py` returns the canonical [`examples/car.js`](examples/car.js) module for every prompt — the same fixture the validator treats as known-good. Replace `threejs_placeholder.py` with your inference pipeline when you're ready to generate real per-prompt output.
-
-### Hardware
-
-Verification pods come in two GPU configurations:
-
-| `hardware.json` token | GPUs | Per-GPU VRAM | Total VRAM |
-|----|----|----|----|
-| `4xH200` (default) | 4× H200 SXM | 141 GB HBM3e | ~564 GB |
-| `4xRTX6000Pro` | 4× RTX PRO 6000 (Blackwell) | 96 GB GDDR7 | ~384 GB |
-
-By default your image is verified on a **4× H200 SXM** pod. To target a different configuration, add a `hardware.json` file at the **root of your repository**:
-
-```json
-{ "hardware": ["4xRTX6000Pro"] }
-```
-
-- `hardware` is a list of one or more supported tokens (`4xH200`, `4xRTX6000Pro`).
-- Listing more than one — e.g. `["4xH200", "4xRTX6000Pro"]` — declares that your pipeline runs on **any** of them. The orchestrator picks one available pod and verifies you there in a single regeneration run; it does **not** regenerate on every listed configuration.
-- If `hardware.json` is absent (or its list is empty), you default to `["4xH200"]`.
-
-Your Docker image and pipeline must fit within the VRAM and compute of whichever listed configuration the orchestrator selects. If you list only `4xRTX6000Pro`, design within ~384 GB; if you list both, design to run on either. How you distribute work across the 4 GPUs is up to you.
-
-### GPU allocation
-
-Common patterns for allocating verification pod GPUs:
-
-- Dedicate GPUs to different models (e.g., VLM on GPU 0, code LLM on GPUs 1–3).
-- Process multiple prompts in parallel across GPUs.
-- Use some GPUs for generation and others for refinement/validation loops.
-
-32 prompts per batch means parallelism matters. A serial pipeline that takes 2 minutes per prompt needs ~64 minutes per batch — tight for 4 batches within the 2-hour generation window.
-
-## How a round works
-
-### Generation and submission (your primary workflow)
-
-1. A round opens. The **seed** and **prompt images** are published.
-2. You run your pipeline on the prompts — however you want, on your own hardware or any setup.
-3. For each prompt, your pipeline produces a `.js` module conforming to the [Output Specification](output_specifications.md).
-4. You submit the generated `.js` files to your CDN.
-
-This is the core loop. The quality of the Three.js code you produce here is what determines your score.
-
-### Judging
-
-5. Validators download your submissions, render each `.js` file in a sandboxed environment (static analysis → `isolated-vm` execution → headless Chrome render).
-6. Rendered images are compared against the original prompt images via **pairwise VLM duels** against other miners' outputs.
-7. **Failed prompts are automatic losses** — a prompt that fails validation or rendering scores zero against every other miner. Reliability first, then quality.
-
-### Verification
-
-Verification confirms one thing: that your Docker image actually produces what you submitted. It runs in two phases.
-
-8. **Regeneration (generation orchestrator).** When you become a winner candidate, validators deploy your Docker image on a verification pod (4× H200 by default, or the configuration you declared in [`hardware.json`](#hardware)) and send the same prompts via the batch API (see [API Specification](api_specification.md)). Your service regenerates the outputs and validators render them into the same view bundles used for judging.
-
-9. **Verification duel (judge service).** The judge then runs a duel between your **submitted** outputs and your **regenerated** outputs, prompt by prompt, using the same multi-stage VLM pipeline used for tournament duels.
-
-   You **pass** if the duel is a draw or your regeneration wins overall. You **fail** if your submission strictly beats your regeneration — i.e. you submitted something noticeably better than what your published code can actually produce. The margin requirement is 0%: any net loss for `generated` rejects you.
-
-10. **Generation time can also reject you.** Independently of the duel, your submission may be rejected if your pipeline cannot regenerate the prompts within the round's total generation-time budget (see [Hardware](#hardware) — 4 batches in the 2-hour window). The exact policy here is still being finalized: it may be strict (over-budget total time → reject) or lenient (only the batches that fit are accepted, the rest are dropped). Either way, design your pipeline to comfortably meet the per-batch and total-time targets.
-
-The batch API, Docker image, and pod lifecycle described in this bundle are the **verification interface**. You need to implement them so your solution can be verified, but they are not the primary competition surface — the quality of your generated `.js` files is.
-
-## See also
-
-- Pinned Three.js bundle: `three@0.183.2` (r183)
-- Validator internals: [`validator/README.md`](validator/README.md)
-- Canonical rule codes and the failure table: [`output_specifications.md`](output_specifications.md#failure-semantics)

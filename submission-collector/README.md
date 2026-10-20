@@ -25,7 +25,7 @@ Reads and writes to the competition Git repository:
 | `rounds/{n}/submissions.json` | W | Miner submissions from chain, plus each miner's target verification hardware |
 | `rounds/{n}/{hotkey}/submitted.json` | W | Downloaded GLB/PNG locations           |
 
-The target hardware is sourced from a `hardware.json` file at the root of each miner's own repository (not the competition repo), read at the submitted commit and defaulting to `["4xH200"]` when absent. See [`miner-reference/api_specification.md`](../miner-reference/api_specification.md#hardware) for the format.
+The target hardware is sourced from a `hardware.json` file at the root of each miner's own repository (not the competition repo), read at the submitted commit and defaulting to `["4xH200"]` when absent. See the [historical miner API specification](https://github.com/404-Repo/404-subnet/blob/c4dc2262c8d95b2630131a2f9e7d56ed089d3fdf/miner-reference/api_specification.md#hardware) for the format.
 
 ## Development
 ```bash

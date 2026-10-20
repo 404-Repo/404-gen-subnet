@@ -6,34 +6,10 @@
  * start the clock, spawn the worker, wait for a message (or a timeout, or a
  * crash), and resolve with a normalized result.
  *
- * ### Fidelity gaps closed by using a worker
- *
- *  1. **Preemptive timeout.** `worker.terminate()` kills the worker thread
- *     immediately, even in the middle of a synchronous CPU-bound loop. The
- *     previous Promise.race approach could not preempt sync code; this one
- *     can. Matches the behavior of production `isolated-vm`.
- *
- *  2. **Module load counted against the budget.** The wall-clock timer in
- *     the main thread starts *before* worker construction, so any work done
- *     at the miner module's top level (class declarations, constant initial-
- *     izers, eager computation) eats the 5-second budget. Matches Runtime
- *     Spec § Combined Budget.
- *
- *  3. **Real heap cap.** `resourceLimits.maxOldGenerationSizeMb` tells V8 to
- *     cap the worker's old generation heap. A miner allocating 1 GB of
- *     Float32Array buffers trips ERR_WORKER_OUT_OF_MEMORY and we report
- *     HEAP_EXCEEDED. First time we can enforce this locally; previously it
- *     was only enforceable in the production runtime.
- *
- * ### Fidelity gaps still open
- *
- *  - V8 young-generation GC pauses and JIT warmup cost a few hundred ms of
- *    worker startup overhead. Real miner execution will be slightly faster
- *    in production than here.
- *  - `isolated-vm` runs in its own isolate with no shared built-ins. Node
- *    workers share some built-ins with the host (e.g. `console`). The static
- *    analysis pass already rejects forbidden identifiers, so this is not a
- *    correctness gap, just an isolation gap.
+ * The main thread terminates a stalled worker. Worker startup, module load,
+ * generation and post-validation share the timer. V8's old-generation heap
+ * limit does not cap external ArrayBuffer/typed-array storage. This local
+ * conformance check is not the Python generation/replay sandbox.
  */
 
 import { Worker } from 'node:worker_threads';

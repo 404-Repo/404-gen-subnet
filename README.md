@@ -46,7 +46,7 @@ FINALIZING ──► OPEN ──► MINER_GENERATION ──► DOWNLOADING ─�
 | `submission-collector` | Monitors the round schedule, collects miner submissions, downloads 3D files, renders previews. Owns OPEN, MINER_GENERATION, and DOWNLOADING stages. |
 | `generation-orchestrator` | Verifies miner outputs by regenerating them using miner Docker images on serverless GPUs. Also generates baseline outputs using the leader's image. |
 | `render-service-js` | Renders miner Three.js submissions to multi-view PNG images via headless Chromium with WebGL. |
-| `miner-reference` | Reference miner implementation: specifications (API, output, runtime), a conformance validator, example fixtures, and a reference pod-side service. |
+| `miner-reference` | Miner guide, token budgets, a Three.js validator, examples and local tools. |
 | `image-distance-service` | Computes perceptual distance between images using DINOv3 embeddings. Used to verify regenerated outputs match submissions. |
 | `judge-service` | Runs VLM-based pairwise duels, requests verification for winners, selects the round winner. Owns the DUELS stage. |
 | `round-manager` | Updates the global leader, creates new rounds with schedules, decides when the competition ends. Owns the FINALIZING stage. |

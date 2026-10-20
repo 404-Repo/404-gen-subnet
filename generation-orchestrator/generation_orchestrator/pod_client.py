@@ -11,7 +11,7 @@ from tenacity import RetryCallState, retry, retry_if_exception, stop_after_attem
 
 
 class PodStatus(StrEnum):
-    """Pod lifecycle states reported by `GET /status` (see miner-reference/api_specification.md)."""
+    """Pod lifecycle states reported by `GET /status`."""
 
     WARMING_UP = "warming_up"
     READY = "ready"
