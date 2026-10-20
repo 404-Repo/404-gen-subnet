@@ -1,14 +1,23 @@
 # Submission Collector
 
-Collects miner submissions from a chain, downloads generated 3D files, and prepares them for judging.
+Collects Python miner submissions from chain, downloads their generated procedural Three.js modules, and prepares them for judging.
+
+Miners submit a repository and an exact commit containing root `main.py` with
+`generate(image: bytes, seed: int, witness: WitnessClient, renderer: Renderer) -> str | None`,
+plus supporting committed source. The operator supplies a fixed runtime and library set.
+See the current [miner guide](../miner-reference/README.md) for the contract.
+
+The collector freezes the on-chain `repo` (`owner/repo`), full 40-character `commit`
+and `cdn_url` entries in `submissions.json`. Source-copy CI consumes those immutable
+entries separately; the collector does not execute miner code or install dependencies.
 
 ## Algorithm
 
-1. **OPEN stage**: Wait for `latest_reveal_block`, then collect all valid submissions from a chain. For each submission, read `hardware.json` from the root of the miner's repo (at the submitted commit) to record the verification hardware the miner targets, defaulting to `["4xH200"]` when the file is absent. Generate seed and select prompts for the round. Save to git and transition to MINER_GENERATION.
+1. **OPEN stage**: Wait for `latest_reveal_block`, then collect valid submissions within the inclusive reveal window. Keep registered subnet hotkeys whose coldkey covers the conviction lock (default 100 alpha per submitting hotkey, aggregated by coldkey; multiple hotkeys are allowed). Preserve reveal-block ordering, generate the seed and select the configured number of prompts. Publish the admitted list, seed, prompts and MINER_GENERATION state in one Git commit. If none are admitted, transition to FINALIZING.
 
-2. **MINER_GENERATION stage**: Wait for `generation_deadline_block`. Miners use the published seed and prompts to generate 3D files and upload to their CDNs.
+2. **MINER_GENERATION stage**: Wait for `generation_deadline_block`. Miners use the published seed and prompts to generate `.js` files and upload to their CDNs.
 
-3. **DOWNLOADING stage**: For each submission, download PLY files from miner CDNs, render PNG previews, upload both to R2. Save progress after each file for crash recovery. Transition to DUELS when complete.
+3. **DOWNLOADING stage**: For each submission, download `.js` modules from miner CDNs, render PNG views and a grid, compute embeddings, and upload the bundle to R2. Save progress after each file for crash recovery. Transition to DUELS when complete.
 
 ## State Files
 
@@ -22,10 +31,8 @@ Reads and writes to the competition Git repository:
 | `rounds/{n}/schedule.json` | R | Round timing (reveal blocks, deadline) |
 | `rounds/{n}/seed.json` | W | Random seed for prompt selection       |
 | `rounds/{n}/prompts.txt` | W | Selected prompts for the round         |
-| `rounds/{n}/submissions.json` | W | Miner submissions from chain, plus each miner's target verification hardware |
-| `rounds/{n}/{hotkey}/submitted.json` | W | Downloaded GLB/PNG locations           |
-
-The target hardware is sourced from a `hardware.json` file at the root of each miner's own repository (not the competition repo), read at the submitted commit and defaulting to `["4xH200"]` when absent. See the [historical miner API specification](https://github.com/404-Repo/404-subnet/blob/c4dc2262c8d95b2630131a2f9e7d56ed089d3fdf/miner-reference/api_specification.md#hardware) for the format.
+| `rounds/{n}/submissions.json` | W | Admitted repo, exact commit, CDN URL, reveal block and round |
+| `rounds/{n}/{hotkey}/submitted.json` | W | JS URL, preview prefix, size and failure status |
 
 ## Development
 ```bash
