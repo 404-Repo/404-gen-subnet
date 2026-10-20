@@ -65,6 +65,13 @@ class R2StateStore:
         return cls(cast(S3, client), bucket)
 
     def load(self, key: str) -> Snapshot | None:
+        return self._load(key, MAX_JOURNAL_BYTES)
+
+    def read(self, key: str, limit: int = 16 * 1024 * 1024) -> bytes | None:
+        snapshot = self._load(key, limit)
+        return None if snapshot is None else snapshot.data
+
+    def _load(self, key: str, limit: int) -> Snapshot | None:
         try:
             result = self.client.get_object(Bucket=self.bucket, Key=key)
         except ClientError as error:
@@ -73,10 +80,10 @@ class R2StateStore:
             raise
         body = cast(Body, result["Body"])
         try:
-            data = body.read(MAX_JOURNAL_BYTES + 1)
+            data = body.read(limit + 1)
         finally:
             body.close()
-        if len(data) > MAX_JOURNAL_BYTES:
+        if len(data) > limit:
             raise ValueError("Allocation journal exceeds its size limit")
         return Snapshot(self._etag(result), data)
 

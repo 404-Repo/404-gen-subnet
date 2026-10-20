@@ -79,6 +79,15 @@ memory limit excludes Python and other non-Go allocations. See the
 The gateway assigns each request to its configured round and queues a worker.
 The same configuration works with either API-key or subscription authentication.
 
+For an operator running the Python CPU Pod gateway, set `transport` to
+`"pods-v1"` and pin `round` in the client configuration. The trusted runner binds
+the frozen prompt, source archive hash and generation seed with
+`for_generation()` or `run_generation()`. Identical requests within that
+generation reuse one stored response, including concurrent duplicates. Pass a
+different `witness_seed` to request a fresh exchange. See the
+[CPU Pod guide](../witness-gateway/PODS.md) for configuration, recovery and
+verified offline replay.
+
 ## Test your connection
 
 After installation and a local Codex login, run this from the repository root:

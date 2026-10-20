@@ -1,9 +1,9 @@
 # Witness gateway
 
-The ordinary CPU Pod gateway is being implemented separately in
-[pod_gateway](PODS.md). Its allocation core has offline tests; its public
-transport and witness listener are not connected yet. The deployed gateway
-described below continues to use Serverless jobs.
+The Python gateway for ordinary CPU witness Pods is documented in
+[PODS.md](PODS.md), including authentication, persistent capture, replay, idle
+cleanup and independent gateway recovery. It is opt-in with `transport=pods-v1`;
+the existing Serverless gateway described below remains available.
 
 A public TypeScript Cloudflare Worker authenticates registered Bittensor miners, queues
 RunPod jobs, and connects each miner to its assigned witness worker. A Durable

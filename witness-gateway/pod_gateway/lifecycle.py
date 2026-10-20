@@ -11,6 +11,7 @@ import uuid
 from dataclasses import replace
 from typing import Protocol
 
+from .admission import Admission
 from .models import Journal, Pod, PodSpec, Scope, Session, identifier
 from .runpod import CreateRejected, PodProvider, ProviderUnavailable
 from .state import StateStore
@@ -43,6 +44,7 @@ class Allocator:
         spec: PodSpec,
         *,
         max_starts: int = 1024,
+        admission: Admission | None = None,
     ) -> None:
         if not 1 <= max_starts <= 1024:
             raise ValueError("Invalid allocation history limit")
@@ -51,8 +53,11 @@ class Allocator:
         self.control = control
         self.spec = spec
         self.max_starts = max_starts
+        self.admission = admission
 
-    def acquire(self, scope: Scope, start_id: str, *, replaces: str | None = None) -> Session:
+    def acquire(
+        self, scope: Scope, start_id: str, *, replaces: str | None = None
+    ) -> Session:
         """A deliberate new connection uses a new UUID and the observed current ID.
 
         Transport retries reuse both arguments. Replaying an older UUID never
@@ -69,18 +74,29 @@ class Allocator:
             journal, etag = self._save(journal, None)
         else:
             journal, etag = loaded
-            previous = next((s for s in journal.sessions if s.start_id == start_id), None)
+            previous = next(
+                (s for s in journal.sessions if s.start_id == start_id), None
+            )
             if previous is not None:
-                if previous.replaces != replaces or previous.spec_hash != self.spec.fingerprint:
-                    raise AllocationConflict("Session ID was used with different parameters")
+                if (
+                    previous.replaces != replaces
+                    or previous.spec_hash != self.spec.fingerprint
+                ):
+                    raise AllocationConflict(
+                        "Session ID was used with different parameters"
+                    )
                 if start_id != journal.current:
+                    return previous
+                if previous.phase in ("allocated", "rejected", "lost", "retired"):
                     return previous
                 return self._advance(journal, etag)
             current = journal.session(journal.current)
             if replaces != current.start_id:
                 raise AllocationConflict("Replacement must name the current session")
-            if current.phase in ("draining", "creating"):
-                raise AllocationConflict("Current provisioning must be reconciled first")
+            if current.phase in ("draining", "creating", "retiring"):
+                raise AllocationConflict(
+                    "Current provisioning must be reconciled first"
+                )
             if len(journal.sessions) >= self.max_starts:
                 raise AllocationConflict("Round allocation history limit reached")
             journal = replace(
@@ -115,12 +131,41 @@ class Allocator:
         loaded = self._load(scope)
         return None if loaded is None else self._advance(*loaded)
 
+    def current(self, scope: Scope) -> Session | None:
+        loaded = self._load(scope)
+        return None if loaded is None else loaded[0].session(loaded[0].current)
+
+    def retire(self, scope: Scope, start_id: str, pod_id: str) -> Session:
+        loaded = self._load(scope)
+        if loaded is None or loaded[0].current != start_id:
+            raise AllocationConflict("Cannot retire a different current session")
+        journal, etag = loaded
+        current = journal.session(start_id)
+        if current.pod_id != pod_id or current.phase not in (
+            "allocated",
+            "retiring",
+            "retired",
+        ):
+            raise AllocationConflict("Cannot retire this Pod")
+        if current.phase == "allocated":
+            current = replace(current, phase="retiring")
+            journal, etag = self._save(
+                replace(journal, sessions=(*journal.sessions[:-1], current)), etag
+            )
+        return self._advance(journal, etag)
+
     def _new(self, start_id: str, replaces: str | None) -> Session:
-        return Session(start_id, replaces, "draining", self.spec.fingerprint, self.spec.image)
+        return Session(
+            start_id, replaces, "draining", self.spec.fingerprint, self.spec.image
+        )
 
     def _load(self, scope: Scope) -> tuple[Journal, str] | None:
         snapshot = self.store.load(scope.key)
-        return None if snapshot is None else (Journal.decode(snapshot.data, scope), snapshot.etag)
+        return (
+            None
+            if snapshot is None
+            else (Journal.decode(snapshot.data, scope), snapshot.etag)
+        )
 
     def _save(self, journal: Journal, expected: str | None) -> tuple[Journal, str]:
         journal = replace(journal, revision=str(uuid.uuid4()))
@@ -144,6 +189,22 @@ class Allocator:
     def _advance(self, journal: Journal, etag: str) -> Session:
         current = journal.session(journal.current)
         scope = journal.scope
+        if current.phase == "retiring":
+            assert current.pod_id is not None
+            pod = self.provider.get(current.pod_id)
+            if pod is not None:
+                self._check(pod, scope, current)
+                if not self.control.drain(pod):
+                    return current
+                try:
+                    self.provider.delete(pod.id)
+                except ProviderUnavailable:
+                    pass
+                if self.provider.get(pod.id) is not None:
+                    return current
+            if self.admission is not None:
+                self.admission.release(scope, current.start_id)
+            return self._update(journal, replace(current, phase="retired"), etag)
         if current.phase == "allocated":
             assert current.pod_id is not None
             pod = self.provider.get(current.pod_id)
@@ -160,7 +221,9 @@ class Allocator:
                 raise InventoryConflict("Multiple owned Pods need reconciliation")
             pod = pods[0]
             self._check(pod, scope, current)
-            return self._update(journal, replace(current, phase="allocated", pod_id=pod.id), etag)
+            return self._update(
+                journal, replace(current, phase="allocated", pod_id=pod.id), etag
+            )
         if current.phase != "draining":
             return current
         if current.spec_hash != self.spec.fingerprint:
@@ -180,10 +243,16 @@ class Allocator:
                         pass
                     if self.provider.get(pod.id) is not None:
                         return current
+            if self.admission is not None:
+                self.admission.release(scope, previous.start_id)
         # Block on stray owned Pods, including late creates and unknown sessions.
         # Never delete a resource merely because its name has our prefix.
         if self._owned(scope):
-            raise InventoryConflict("Existing owned Pods must be reconciled before creation")
+            raise InventoryConflict(
+                "Existing owned Pods must be reconciled before creation"
+            )
+        if self.admission is not None:
+            self.admission.reserve(scope, current.start_id)
         creating = replace(current, phase="creating")
         journal, etag = self._save(
             replace(journal, sessions=(*journal.sessions[:-1], creating)), etag
@@ -193,11 +262,19 @@ class Allocator:
             pod = self.provider.create(self.spec.body(scope, current.start_id))
         except CreateRejected as error:
             if error.status is None:
-                raise ValueError("Provider rejection must include an HTTP status") from None
+                raise ValueError(
+                    "Provider rejection must include an HTTP status"
+                ) from None
+            if self.admission is not None:
+                self.admission.release(scope, current.start_id)
             return self._update(
-                journal, replace(creating, phase="rejected", rejection=error.status), etag
+                journal,
+                replace(creating, phase="rejected", rejection=error.status),
+                etag,
             )
         except ProviderUnavailable:
             return creating
         self._check(pod, scope, creating)
-        return self._update(journal, replace(creating, phase="allocated", pod_id=pod.id), etag)
+        return self._update(
+            journal, replace(creating, phase="allocated", pod_id=pod.id), etag
+        )

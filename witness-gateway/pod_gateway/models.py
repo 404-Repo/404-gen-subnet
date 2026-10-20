@@ -6,12 +6,23 @@ import hashlib
 import json
 import re
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import Literal, Mapping, cast
+from typing import Literal, cast
 
-Phase = Literal["draining", "creating", "allocated", "rejected", "lost", "retired"]
-PHASES = {"draining", "creating", "allocated", "rejected", "lost", "retired"}
+Phase = Literal[
+    "draining", "creating", "allocated", "retiring", "rejected", "lost", "retired"
+]
+PHASES = {
+    "draining",
+    "creating",
+    "allocated",
+    "retiring",
+    "rejected",
+    "lost",
+    "retired",
+}
 MARKERS = (
     "WITNESS_DEPLOYMENT",
     "WITNESS_ROUND",
@@ -78,6 +89,7 @@ class PodSpec:
     port: int = 8000
     data_centers: tuple[str, ...] = ()
     env: Mapping[str, str] = field(default_factory=dict, repr=False)
+    capability_secret: bytes | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         if not re.fullmatch(r"[A-Za-z0-9_./:-]+@sha256:[0-9a-f]{64}", self.image):
@@ -99,8 +111,12 @@ class PodSpec:
             for k, v in self.env.items()
         ):
             raise ValueError("Environment must contain strings")
-        if set(self.env) & set(MARKERS) or any(k.startswith("RUNPOD_") for k in self.env):
+        if set(self.env) & {*MARKERS, "WITNESS_POD_CAPABILITY"} or any(
+            k.startswith("RUNPOD_") for k in self.env
+        ):
             raise ValueError("Reserved environment variable")
+        if self.capability_secret is not None and len(self.capability_secret) < 32:
+            raise ValueError("Pod capability master key is too short")
         # Copy caller-owned containers so the fingerprint cannot change in flight.
         if any(
             not isinstance(site, str) or not re.fullmatch(r"[A-Z0-9-]+", site)
@@ -125,13 +141,29 @@ class PodSpec:
 
     @property
     def fingerprint(self) -> str:
-        return hashlib.sha256(json_bytes(self._body())).hexdigest()
+        key_hash = (
+            hashlib.sha256(self.capability_secret).digest()
+            if self.capability_secret is not None
+            else b""
+        )
+        return hashlib.sha256(json_bytes(self._body()) + key_hash).hexdigest()
 
     def body(self, scope: Scope, start_id: str) -> dict[str, object]:
+        from .security import capability
+
+        private = (
+            {}
+            if self.capability_secret is None
+            else {
+                "WITNESS_POD_CAPABILITY": capability(
+                    self.capability_secret, scope, start_id
+                )
+            }
+        )
         return {
             **self._body(),
             "name": scope.name(start_id),
-            "env": {**self.env, **scope.markers(start_id, self.fingerprint)},
+            "env": {**self.env, **scope.markers(start_id, self.fingerprint), **private},
         }
 
 
@@ -142,6 +174,8 @@ class Pod:
     image: str
     status: str
     markers: Mapping[str, str]
+    tcp: Mapping[int, tuple[str, int]] = field(default_factory=dict)
+    hourly_cost: str | None = None
 
     def in_scope(self, scope: Scope) -> bool:
         return all(
@@ -210,9 +244,15 @@ class Journal:
     def decode(cls, data: bytes, scope: Scope) -> Journal:
         value = object_dict(json.loads(data))
         if (
-            set(value) != {
-                "version", "deployment", "round", "hotkey",
-                "current", "revision", "sessions",
+            set(value)
+            != {
+                "version",
+                "deployment",
+                "round",
+                "hotkey",
+                "current",
+                "revision",
+                "sessions",
             }
             or type(value["version"]) is not int
             or value["version"] != 1
@@ -253,11 +293,19 @@ def object_dict(value: object) -> dict[str, object]:
 def decode_session(value: object) -> Session:
     data = object_dict(value)
     if set(data) != {
-        "start_id", "replaces", "phase", "spec_hash", "image", "pod_id", "rejection",
+        "start_id",
+        "replaces",
+        "phase",
+        "spec_hash",
+        "image",
+        "pod_id",
+        "rejection",
     }:
         raise ValueError("Invalid allocation session")
     start_id = identifier(string(data["start_id"]))
-    replaces = None if data["replaces"] is None else identifier(string(data["replaces"]))
+    replaces = (
+        None if data["replaces"] is None else identifier(string(data["replaces"]))
+    )
     phase = string(data["phase"])
     spec_hash = string(data["spec_hash"])
     image = string(data["image"])
@@ -266,7 +314,7 @@ def decode_session(value: object) -> Session:
     if (
         phase not in PHASES
         or not re.fullmatch(r"[0-9a-f]{64}", spec_hash)
-        or (phase == "allocated" and pod_id is None)
+        or (phase in ("allocated", "retiring") and pod_id is None)
         or (phase in ("draining", "creating", "rejected") and pod_id is not None)
         or (
             rejection is not None
