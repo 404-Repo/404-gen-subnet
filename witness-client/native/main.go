@@ -130,10 +130,13 @@ func run() error {
 	}
 	start := time.Now()
 	if mode == "certificate" {
+		if certInput.TimeUnixNano == "" {
+			certInput.TimeUnixNano = fmt.Sprintf("%d", time.Now().UnixNano())
+		}
 		if e = verifyCertificates(certInput); e != nil {
 			return e
 		}
-		return json.NewEncoder(os.Stdout).Encode(map[string]any{"verified": true})
+		return json.NewEncoder(os.Stdout).Encode(map[string]any{"verified": true, "verified_at_ns": certInput.TimeUnixNano})
 	}
 	if mode == "verify" {
 		timings := make(map[string]float64)

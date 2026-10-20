@@ -21,6 +21,29 @@ export async function run(mode, directory, params, provider, overrides = {}) {
   }
   if (provider !== 'api' && provider !== 'codex') throw new Error('Unknown witness provider');
   const target = targets[provider];
+  if (mode === 'replay') {
+    // This manifest is loaded from the operator's immutable, hash-bound capture,
+    // never from a miner claim. Certificate rotation must not invalidate replay.
+    const recorded = JSON.parse(readFileSync(join(directory, 'manifest.json'), 'utf8'));
+    const certificateTimeUnixNs = recorded.certificate_time_unix_ns;
+    if (typeof certificateTimeUnixNs !== 'string' || !/^[1-9][0-9]{9,18}$/.test(certificateTimeUnixNs)
+      || BigInt(certificateTimeUnixNs) > BigInt(Date.now() + 30_000) * 1_000_000n) {
+      throw new Error('Invalid sealed capture time');
+    }
+    const {proofOptions: replayProofOptions = {}, ...replayOverrides} = overrides;
+    const authorization = await authorizeRequest({
+      observed: {client: [readFileSync(join(directory, 'client.bin'))],
+        server: [readFileSync(join(directory, 'authorization-server.bin'))]},
+      claim: JSON.parse(readFileSync(join(directory, 'claim.json'), 'utf8')),
+      ...target, ...replayOverrides, proofOptions: {params, ...replayProofOptions, certificateTimeUnixNs},
+    });
+    const result = finishAuthorizedResponse([readFileSync(join(directory, 'server.bin'))], authorization);
+    writeFileSync(join(directory, 'request.json'), result.requestBody);
+    writeFileSync(join(directory, 'response.sse'), result.responseBody);
+    return {request_sha256: result.request_sha256, response_sha256: result.response_sha256,
+      provider_status: result.responseStatus, provider_rejected: providerRejected(result.responseStatus),
+      usage: result.responseStatus === 200 ? responseUsage(result.responseBody) : null};
+  }
   if (mode === 'hello') {
     const gate = new ClientHelloGate();
     if (!gate.receive(readFileSync(join(directory, 'client.bin')))) throw new Error('Incomplete ClientHello');
@@ -57,7 +80,8 @@ export async function run(mode, directory, params, provider, overrides = {}) {
   writeFileSync(join(directory, 'response.sse'), result.responseBody);
   return { request_sha256: result.request_sha256, response_sha256: result.response_sha256,
     provider_status: result.responseStatus, provider_rejected: providerRejected(result.responseStatus),
-    usage: result.responseStatus === 200 ? responseUsage(result.responseBody) : null };
+    usage: result.responseStatus === 200 ? responseUsage(result.responseBody) : null,
+    certificate_time_unix_ns: saved.certificateTimeUnixNs };
 }
 
 if (import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {

@@ -68,7 +68,7 @@ async function verifyHandshake({ observed, claim, host, rootCAs, proofOptions, a
   ci++;
 
   const transcript = [helloBytes, shMessages[0].raw];
-  let handshake = Buffer.alloc(0), step = 0, serverFinished = false, certificates;
+  let handshake = Buffer.alloc(0), step = 0, serverFinished = false, certificates, certificateTimeUnixNs;
   const handshakeKey = ds[si];
   for (let number = 0; si < server.length && !serverFinished; si++, number++) {
     sameEpoch(ds[si], handshakeKey, number);
@@ -84,7 +84,7 @@ async function verifyHandshake({ observed, claim, host, rootCAs, proofOptions, a
       if (message.type === 11) {
         certificates = parseCertificates(message.body, { version: 'TLS1_3' }).certificates;
         check(certificates.length > 0, 'Missing server certificate');
-        await verifyServerCertificates(certificates, host, rootCAs, proofOptions);
+        certificateTimeUnixNs = await verifyServerCertificates(certificates, host, rootCAs, proofOptions);
       } else if (message.type === 15) {
         await verifyCertificateSignature({ ...parseServerCertificateVerify(message.body),
           publicKey: certificates[0].getPublicKey(), signatureData: await getSignatureDataTls13(transcript, SUITE) });
@@ -99,7 +99,7 @@ async function verifyHandshake({ observed, claim, host, rootCAs, proofOptions, a
   }
   check(serverFinished && step === 4, 'Unfinished server authentication');
 
-  return { client, server, dc, ds, ci, si };
+  return { client, server, dc, ds, ci, si, certificateTimeUnixNs };
 }
 
 function initialResponseKey(claim) {
@@ -169,7 +169,7 @@ async function verifyRequest(options) {
   const request = Buffer.concat([prefix.data, Buffer.alloc(tokenLength, '*'), ...suffixParts]);
   const requestBody = parseRequest(request, { host, path, tokenLength, authentication });
 
-  return { requestBody, serverStart: si, server, disclosures: ds };
+  return { requestBody, serverStart: si, server, disclosures: ds, certificateTimeUnixNs: verified.certificateTimeUnixNs };
 }
 
 // Verify the complete held generation request and the earlier probe response.
@@ -181,7 +181,8 @@ export async function authorizeRequest(options) {
   const response = serverApplication(verified.server, verified.serverStart,
     index => ({ ...responseKey, number: index - verified.serverStart }), true);
   check(probeLength(response) === response.length, 'Additional response before generation');
-  return { requestBody: verified.requestBody, serverStart: verified.serverStart, responseKey, probe: true };
+  return { requestBody: verified.requestBody, serverStart: verified.serverStart, responseKey, probe: true,
+    certificateTimeUnixNs: verified.certificateTimeUnixNs };
 }
 
 function serverApplication(server, si, disclosure, probe = false) {

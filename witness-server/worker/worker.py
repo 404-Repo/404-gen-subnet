@@ -97,6 +97,8 @@ def relay(
     hotkey: str,
     host: str,
     port: int = 443,
+    before_release: Callable[[bytes], None] | None = None,
+    extra_metadata: dict[str, object] | None = None,
 ) -> dict[str, object]:
     """Finish TLS promptly, then hold HTTP until a durable authorization exists.
 
@@ -224,6 +226,12 @@ def relay(
                     )
                 if time.monotonic() >= authorization_deadline:
                     raise TimeoutError("Request authorization deadline reached")
+                if before_release is not None:
+                    (directory / "authorization-server.bin").write_bytes(server)
+                    store.put(prefix + "/authorization-server.bin", bytes(server))
+                    before_release((directory / "request.json").read_bytes())
+                    if time.monotonic() >= authorization_deadline:
+                        raise TimeoutError("Request authorization deadline reached")
                 channel.notify(
                     {"status": "running", "handshook": True, "authorized": True}
                 )
@@ -268,6 +276,8 @@ def relay(
                 "exchange_id": prefix.rsplit("/", 1)[1],
             }
         )
+        if extra_metadata is not None:
+            metadata.update(extra_metadata)
         with measure("evidence_persistence"):
             for name in ("request.json", "response.sse"):
                 store.put(prefix + "/" + name, (directory / name).read_bytes())
@@ -302,6 +312,11 @@ def relay(
             channel.finish()
         return metadata
     finally:
+        # Ordinary Pods retain the spool for upload/finalization recovery. This
+        # never opens another provider connection or repeats a paid request.
+        with suppress(OSError):
+            (directory / "client.bin").write_bytes(client)
+            (directory / "server.bin").write_bytes(server)
         if not issued:
             with suppress(OSError, WebSocketException):
                 channel.finish()
