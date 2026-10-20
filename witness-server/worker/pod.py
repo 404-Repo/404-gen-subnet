@@ -15,6 +15,7 @@ from functools import partial
 from pathlib import Path
 from urllib.parse import urlsplit
 
+import httpx
 from channel import WorkerChannel
 from storage import Store
 from websockets.sync.client import connect
@@ -23,17 +24,15 @@ from witness_client.calls import Invocation
 from worker import PARAMETERS, PROVIDERS, relay, verify
 
 from pod_gateway.budget import Budget
-from pod_gateway.models import Journal, Scope, identifier, json_bytes, object_dict
+from pod_gateway.models import Scope, identifier, json_bytes, object_dict
 from pod_gateway.records import Call, CallRecords
-from pod_gateway.security import capture_token, seal, sealed
-from pod_gateway.state import StateStore
+from pod_gateway.security import capture_token
 
 
 class PodRuntime:
     def __init__(
         self,
         *,
-        state: StateStore,
         evidence: Store,
         records: CallRecords,
         budget: Budget,
@@ -61,12 +60,7 @@ class PodRuntime:
             raise ValueError("Gateway must be an HTTPS origin")
         if idle_seconds < 1800 or not 1 <= max_captures <= 32:
             raise ValueError("Invalid Pod concurrency or idle lifetime")
-        self.state, self.evidence, self.records, self.budget = (
-            state,
-            evidence,
-            records,
-            budget,
-        )
+        self.evidence, self.records, self.budget = evidence, records, budget
         self.scope, self.start_id, self.pod_id = scope, identifier(start_id), pod_id
         self.token, self.origin = token, f"wss://{url.netloc}"
         self.proof_hash, self.round_end = proof_hash, round_end
@@ -88,59 +82,18 @@ class PodRuntime:
         if self.spool.stat().st_mode & 0o077:
             raise ValueError("Witness spool must be private")
 
-    def selection(self) -> str:
-        saved = self.state.load(self.scope.key)
-        if saved is None:
-            return "pending"
-        journal = Journal.decode(saved.data, self.scope)
-        if journal.current != self.start_id:
-            return "retired"
-        session = journal.session(self.start_id)
-        if session.phase in ("creating", "draining"):
-            return "pending"
-        if session.phase == "allocated" and session.pod_id == self.pod_id:
-            return "selected"
-        return "retired"
-
     def drain(self) -> None:
         with self.lock:
             self.accepting, self.draining = False, True
 
     def tick(self) -> bool:
-        """True only after a permanent drain seal is durable; uploads count as busy."""
-        if sealed(self.state, self.scope, self.start_id, self.pod_id, self.token):
-            self.drain()
-            return True
-        requested = sealed(
-            self.state,
-            self.scope,
-            self.start_id,
-            self.pod_id,
-            self.token,
-            "request-drain",
-        )
-        selected = self.selection()
+        """True only after permanent local drain; pending uploads count as busy."""
         with self.lock:
-            if (
-                requested
-                or selected == "retired"
-                or (
-                    not self.active
-                    and self.clock() - self.last_used >= self.idle_seconds
-                )
+            if time.time() >= self.round_end or (
+                not self.active and self.clock() - self.last_used >= self.idle_seconds
             ):
                 self.accepting, self.draining = False, True
-            if selected != "selected":
-                self.accepting = False
             if self.draining and not self.active:
-                seal(
-                    self.state,
-                    self.scope,
-                    self.start_id,
-                    self.pod_id,
-                    self.token,
-                    "drain",
-                )
                 return True
         return False
 
@@ -268,10 +221,25 @@ class PodRuntime:
                     with self.lock:
                         if (
                             self.draining
-                            or self.selection() != "selected"
+                            or not self.accepting
                             or time.time() >= self.round_end
                         ):
                             raise RuntimeError("Pod is fenced before provider release")
+                        selected = httpx.get(
+                            self.origin.replace("wss://", "https://", 1)
+                            + f"/worker/exchanges/{call.exchange_id}/selection",
+                            headers={
+                                "Authorization": "Bearer " + token,
+                                "x-witness-hotkey": self.scope.hotkey,
+                            },
+                            timeout=10,
+                            trust_env=False,
+                        )
+                        selected.raise_for_status()
+                        if selected.json().get("selected") is not True:
+                            raise RuntimeError(
+                                "RunPod allocation is no longer selected"
+                            )
                         self.budget.reserve(
                             self.scope, invocation, call.exchange_id, body
                         )
@@ -413,10 +381,7 @@ class PodRuntime:
                                 kind = value.get("type")
                                 if kind == "activate":
                                     with self.lock:
-                                        self.accepting = (
-                                            not self.draining
-                                            and self.selection() == "selected"
-                                        )
+                                        self.accepting = not self.draining
                                 elif kind == "drain":
                                     self.drain()
                                     self._send(
@@ -492,7 +457,6 @@ def main() -> None:
     if hashlib.sha256(pricing).hexdigest() != os.environ["WITNESS_PRICING_SHA256"]:
         raise ValueError("Witness image has different frozen pricing bytes")
     runtime = PodRuntime(
-        state=state,
         evidence=R2Store(),
         records=CallRecords(state),
         budget=Budget(state, pricing),

@@ -26,6 +26,7 @@ from test_recording import PRICING
 from witness_client import ReplayMismatch, ReplayWitness, WitnessClient
 from witness_client.auth import hotkey_headers
 from witness_client.calls import Invocation, canonical
+from witness_client.pods import PodGatewayClient
 from witness_client.tunnel import WebSocketTunnel
 
 from pod_gateway.auth import Authenticator, Membership
@@ -162,6 +163,15 @@ class Fleet:
             await socket.send_json({"type": "ready", "session": session})
             value = object_dict(await socket.receive_json())
             body = string(value["fixture_body"]).encode()
+            async with self.client.get(
+                f"{self.origin}/worker/exchanges/{call.exchange_id}/selection",
+                headers={
+                    "Authorization": "Bearer "
+                    + capture_token(token, call.exchange_id, call.capture_id),
+                    "x-witness-hotkey": self.scope.hotkey,
+                },
+            ) as check:
+                assert check.status == 200 and (await check.json())["selected"] is True
             self.budget.reserve(self.scope, invocation, call.exchange_id, body)
             self.records.authorize(self.scope, invocation, call.pod_id)
             self.paid += 1
@@ -270,26 +280,19 @@ def test_https_gateway_deduplicates_inflight_requests_and_replays_without_infere
         scope = Scope("competition", "test-0", key.ss58_address)
         state, provider, registry = MemoryState(), Provider(), Registry()
         records = CallRecords(state)
-        membership = Membership(state, scope.deployment, 17, scope.round)
+        membership = Membership(scope.deployment, 17, scope.round)
         now = int(time.time() * 1000)
-        state.put(
-            membership.key,
-            canonical(
-                {
-                    "version": 1,
-                    "network": "finney",
-                    "netuid": 17,
-                    "block": 1,
-                    "block_time": now,
-                    "fetched_at": now,
-                    "hotkeys": [scope.hotkey],
-                }
-            ),
-        )
+        membership.snapshot = {
+            "version": 1,
+            "network": "finney",
+            "netuid": 17,
+            "block": 1,
+            "block_time": now,
+            "fetched_at": now,
+            "hotkeys": [scope.hotkey],
+        }
         spec = PodSpec("registry/witness@sha256:" + "a" * 64, capability_secret=SECRET)
-        allocator = Allocator(
-            state, provider, DrainControl(state, SECRET, registry), spec
-        )
+        allocator = Allocator(provider, DrainControl(registry), spec)
         image = b"frozen PNG"
         gateway = Gateway(
             allocator=allocator,
@@ -321,10 +324,16 @@ def test_https_gateway_deduplicates_inflight_requests_and_replays_without_infere
             loop = asyncio.get_running_loop()
 
             def created(pod: Pod, body: dict[str, object]) -> None:
+                async def attach() -> None:
+                    for _ in range(200):
+                        actual = provider.get(pod.id)
+                        if actual is not None and actual.lifecycle == "active":
+                            await fleet.control(actual, body)
+                            return
+                        await asyncio.sleep(0.01)
+
                 loop.call_soon_threadsafe(
-                    lambda: fleet.tasks.append(
-                        asyncio.create_task(fleet.control(pod, body))
-                    )
+                    lambda: fleet.tasks.append(asyncio.create_task(attach()))
                 )
 
             provider.on_create = created
@@ -407,14 +416,21 @@ def test_https_gateway_deduplicates_inflight_requests_and_replays_without_infere
                     with pytest.raises(ReplayMismatch):
                         replay.create(stream=True, model="fixture", input="extra")
                     assert fleet.paid == 2 and provider.creates == 1
+                    old = allocator.current(scope)
+                    assert old is not None and old.pod_id is not None
+                    provider.delete(old.pod_id)
+                    assert isinstance(witness._gateway, PodGatewayClient)
+                    renewed = witness._gateway.ensure_pod()
+                    assert renewed != old.start_id and provider.creates == 2
+                    assert fleet.paid == 2
 
             try:
                 await asyncio.wait_for(asyncio.to_thread(run), 60)
                 # Another registered identity cannot read this miner's exchange.
                 other = Keypair.create_from_mnemonic(Keypair.generate_mnemonic())
-                membership_value = json.loads(state.read(membership.key) or b"{}")
-                membership_value["hotkeys"].append(other.ss58_address)
-                state.put(membership.key, canonical(membership_value))
+                membership_value = dict(membership.snapshot or {})
+                membership_value["hotkeys"] = [scope.hotkey, other.ss58_address]
+                membership.snapshot = membership_value
                 exchange_id = next(iter(fleet.jobs))
                 path = f"/exchanges/{exchange_id}/response.sse"
                 async with http.get(

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import threading
 from collections.abc import Callable
+from dataclasses import replace
 
 from pod_gateway.models import MARKERS, Pod, object_dict, string
 from pod_gateway.state import Snapshot, StateConflict
@@ -57,7 +58,7 @@ class Provider:
         self.on_create: Callable[[Pod, dict[str, object]], None] = lambda *_: None
         self.lock = threading.RLock()
 
-    def list(self) -> list[Pod]:
+    def list(self, *, fresh: bool = False) -> list[Pod]:
         with self.lock:
             return list(self.pods.values())
 
@@ -74,7 +75,7 @@ class Provider:
                 string(body["name"]),
                 string(body["image"]),
                 "RUNNING",
-                {key: string(env[key]) for key in MARKERS},
+                {key: str(env[key]) for key in MARKERS},
                 {8443: ("8.8.8.8", 44000 + self.creates)},
                 "0.06",
             )
@@ -85,3 +86,9 @@ class Provider:
     def delete(self, pod_id: str) -> None:
         with self.lock:
             self.pods.pop(pod_id, None)
+
+    def rename(self, pod_id: str, name: str) -> Pod:
+        with self.lock:
+            pod = replace(self.pods[pod_id], name=name)
+            self.pods[pod_id] = pod
+            return pod

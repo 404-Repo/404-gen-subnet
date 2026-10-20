@@ -1,489 +1,188 @@
 from __future__ import annotations
 
-import json
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
-from typing import Callable
 
-import httpx
 import pytest
+from support import Provider
 
 from pod_gateway.lifecycle import AllocationConflict, Allocator, InventoryConflict
-from pod_gateway.models import Journal, Pod, PodSpec, Scope, object_dict, string
-from pod_gateway.runpod import CreateRejected, CreateUnknown, ProviderUnavailable, RunPodClient
-from pod_gateway.state import Snapshot, StateConflict, WriteUncertain
+from pod_gateway.models import Pod, PodSpec, Scope
+from pod_gateway.runpod import CreateUnknown, ProviderUnavailable
 
 SCOPE = Scope("competition", "test-0", "5" * 48)
-SPEC = PodSpec("registry/witness@sha256:" + "a" * 64, env={"PRIVATE_KEY": "not-public"})
+SPEC = PodSpec("registry/witness@sha256:" + "a" * 64)
 FIRST = "00000000-0000-4000-8000-000000000001"
 SECOND = "00000000-0000-4000-8000-000000000002"
-THIRD = "00000000-0000-4000-8000-000000000003"
-
-
-class MemoryStore:
-    def __init__(self) -> None:
-        self.objects: dict[str, Snapshot] = {}
-        self.writes = 0
-        self.before: Callable[[int], None] = lambda _: None
-        self.after: Callable[[int], None] = lambda _: None
-
-    def load(self, key: str) -> Snapshot | None:
-        return self.objects.get(key)
-
-    def save(self, key: str, data: bytes, expected: str | None) -> Snapshot:
-        self.writes += 1
-        self.before(self.writes)
-        current = self.objects.get(key)
-        if (None if current is None else current.etag) != expected:
-            raise StateConflict("Test conflict")
-        saved = Snapshot(str(self.writes), data)
-        self.objects[key] = saved
-        self.after(self.writes)
-        return saved
-
-
-class FakeProvider:
-    def __init__(self) -> None:
-        self.pods: dict[str, Pod] = {}
-        self.events: list[tuple[str, str]] = []
-        self.create_mode = "ok"
-        self.keep_after_delete = False
-        self.lost_delete_reply = False
-        self.during_create: Callable[[], None] = lambda: None
-
-    @property
-    def creates(self) -> int:
-        return sum(event[0] == "create" for event in self.events)
-
-    def list(self) -> list[Pod]:
-        self.events.append(("list", ""))
-        return list(self.pods.values())
-
-    def get(self, pod_id: str) -> Pod | None:
-        self.events.append(("get", pod_id))
-        return self.pods.get(pod_id)
-
-    def create(self, body: dict[str, object]) -> Pod:
-        pod_id = f"pod-{self.creates + 1}"
-        self.events.append(("create", pod_id))
-        self.during_create()
-        if self.create_mode == "reject":
-            raise CreateRejected("quota", status=429)
-        if self.create_mode == "unknown-empty":
-            raise CreateUnknown("lost reply")
-        pod = owned(pod_id, string(object_dict(body["env"])["WITNESS_START_ID"]))
-        self.pods[pod_id] = pod
-        if self.create_mode == "unknown-created":
-            raise CreateUnknown("lost reply")
-        return pod
-
-    def delete(self, pod_id: str) -> None:
-        self.events.append(("delete", pod_id))
-        if not self.keep_after_delete:
-            self.pods.pop(pod_id, None)
-        if self.lost_delete_reply:
-            raise ProviderUnavailable("lost delete reply")
 
 
 class Drain:
-    def __init__(self) -> None:
-        self.ready = True
+    def __init__(self, ready: bool = True) -> None:
+        self.ready = ready
         self.calls: list[str] = []
-        self.during_drain: Callable[[], None] = lambda: None
 
     def drain(self, pod: Pod) -> bool:
         self.calls.append(pod.id)
-        self.during_drain()
         return self.ready
 
 
-def owned(pod_id: str = "pod-1", start_id: str = FIRST, scope: Scope = SCOPE) -> Pod:
-    return Pod(
-        pod_id, scope.name(start_id), SPEC.image, "RUNNING",
-        scope.markers(start_id, SPEC.fingerprint),
-    )
-
-
-@pytest.fixture
-def setup() -> tuple[Allocator, MemoryStore, FakeProvider, Drain]:
-    store, provider, drain = MemoryStore(), FakeProvider(), Drain()
-    return Allocator(store, provider, drain, SPEC), store, provider, drain
-
-
-def test_acquire_is_durable_idempotent_and_does_not_expose_secrets(
-    setup: tuple[Allocator, MemoryStore, FakeProvider, Drain],
-) -> None:
-    allocator, store, provider, drain = setup
-    first = allocator.acquire(SCOPE, FIRST)
-    assert first.phase == "allocated" and first.pod_id == "pod-1"
-    assert allocator.acquire(SCOPE, FIRST) == first
-    restarted = Allocator(store, provider, drain, SPEC)
+def test_restart_discovers_the_current_connection_without_another_create() -> None:
+    provider, drain = Provider(), Drain()
+    first = Allocator(provider, drain, SPEC).acquire(SCOPE, FIRST)
+    restarted = Allocator(provider, drain, SPEC)
     assert restarted.acquire(SCOPE, FIRST) == first
+    assert restarted.selected(SCOPE, FIRST, first.pod_id or "")
     assert provider.creates == 1
-    assert restarted.selected(SCOPE, FIRST, "pod-1")
-    assert not restarted.selected(SCOPE, FIRST, "different")
-    assert b"not-public" not in store.objects[SCOPE.key].data
-    assert "not-public" not in repr(first)
 
 
-def test_replacement_revokes_then_drains_and_confirms_deletion(
-    setup: tuple[Allocator, MemoryStore, FakeProvider, Drain],
-) -> None:
-    allocator, _, provider, drain = setup
-    allocator.acquire(SCOPE, FIRST)
-    drain.ready = False
-    drain.during_drain = lambda: assert_revoked(allocator)
-    assert allocator.acquire(SCOPE, SECOND, replaces=FIRST).phase == "draining"
+def test_concurrent_connect_retries_submit_one_create() -> None:
+    provider = Provider()
+    allocator = Allocator(provider, Drain(), SPEC)
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        sessions = list(pool.map(lambda _: allocator.acquire(SCOPE, FIRST), range(8)))
     assert provider.creates == 1
-    assert not any(event[0] == "delete" for event in provider.events)
+    assert len({s.pod_id for s in sessions}) == 1
+
+
+def test_replacement_waits_for_capture_drain_and_exact_deletion() -> None:
+    provider, drain = Provider(), Drain(False)
+    allocator = Allocator(provider, drain, SPEC)
+    old = allocator.acquire(SCOPE, FIRST)
+    waiting = allocator.acquire(SCOPE, SECOND, replaces=FIRST)
+    assert waiting.phase == "draining" and provider.creates == 1
+    assert not allocator.selected(SCOPE, FIRST, old.pod_id or "")
+    assert old.pod_id in provider.pods
     drain.ready = True
-    provider.keep_after_delete = True
-    assert allocator.reconcile(SCOPE).phase == "draining"  # type: ignore[union-attr]
+    new = allocator.reconcile(SCOPE)
+    assert new is not None and new.phase == "allocated"
+    assert old.pod_id not in provider.pods and provider.creates == 2
+
+
+def test_lost_create_reply_adopts_the_real_pod_after_restart() -> None:
+    class LostReply(Provider):
+        def create(self, body: dict[str, object]) -> Pod:
+            super().create(body)
+            raise CreateUnknown("lost response")
+
+    provider = LostReply()
+    assert Allocator(provider, Drain(), SPEC).acquire(SCOPE, FIRST).phase == "creating"
+    recovered = Allocator(provider, Drain(), SPEC).reconcile(SCOPE)
+    assert recovered is not None and recovered.phase == "allocated"
     assert provider.creates == 1
-    provider.keep_after_delete = False
-    assert allocator.reconcile(SCOPE).phase == "allocated"  # type: ignore[union-attr]
-    assert provider.creates == 2
-    second_create = provider.events.index(("create", "pod-2"))
-    assert provider.events[second_create - 2:] == [
-        ("get", "pod-1"), ("list", ""), ("create", "pod-2"),
-    ]
-    assert allocator.acquire(SCOPE, FIRST).phase == "retired"
-    assert allocator.selected(SCOPE, SECOND, "pod-2")
 
 
-def assert_revoked(allocator: Allocator) -> None:
-    assert not allocator.selected(SCOPE, FIRST, "pod-1")
+def test_late_duplicate_stays_dormant_and_cannot_displace_active_capture() -> None:
+    provider, drain = Provider(), Drain(False)
+    allocator = Allocator(provider, drain, SPEC)
+    active = allocator.acquire(SCOPE, FIRST)
+    late = provider.create(SPEC.body(SCOPE, FIRST, epoch_ns=1))
+    selected = Allocator(provider, drain, SPEC).reconcile(SCOPE)
+    assert selected is not None and selected.pod_id == active.pod_id
+    assert provider.get(late.id).lifecycle == "draining"  # type: ignore[union-attr]
+    assert active.pod_id in provider.pods and late.id in provider.pods
+    drain.ready = True
+    allocator.reconcile(SCOPE)
+    assert late.id not in provider.pods and active.pod_id in provider.pods
 
 
-def test_lost_delete_reply_still_requires_confirmed_absence(
-    setup: tuple[Allocator, MemoryStore, FakeProvider, Drain],
-) -> None:
-    allocator, _, provider, _ = setup
+def test_late_previous_connection_cannot_replace_its_successor() -> None:
+    provider = Provider()
+    allocator = Allocator(provider, Drain(), SPEC)
     allocator.acquire(SCOPE, FIRST)
-    provider.lost_delete_reply = True
-    provider.keep_after_delete = True
+    latest = allocator.acquire(SCOPE, SECOND, replaces=FIRST)
+    old = provider.create(SPEC.body(SCOPE, FIRST, epoch_ns=1))
+    assert allocator.reconcile(SCOPE) == latest
+    assert old.id not in provider.pods
+
+
+def test_restart_can_repeat_unknown_post_but_duplicate_captures_are_never_activated() -> (
+    None
+):
+    class Delayed(Provider):
+        delayed: dict[str, object] | None = None
+
+        def create(self, body: dict[str, object]) -> Pod:
+            if self.delayed is None:
+                self.delayed = body
+                raise CreateUnknown("not visible yet")
+            return super().create(body)
+
+    provider = Delayed()
+    first = Allocator(provider, Drain(), SPEC)
+    assert first.acquire(SCOPE, FIRST).phase == "creating"
+    assert first.acquire(SCOPE, FIRST).phase == "creating"
+    restarted = Allocator(provider, Drain(), SPEC)
+    ready = restarted.acquire(SCOPE, FIRST)
+    assert ready.phase == "allocated" and provider.delayed is not None
+    late = provider.create(provider.delayed)
+    assert restarted.reconcile(SCOPE) == ready
+    assert late.id not in provider.pods and len(provider.pods) == 1
+
+
+def test_unconfirmed_delete_blocks_new_creation_and_counts_old_resource() -> None:
+    class SlowDelete(Provider):
+        hold = True
+
+        def delete(self, pod_id: str) -> None:
+            if not self.hold:
+                super().delete(pod_id)
+            raise ProviderUnavailable("reply lost")
+
+    provider = SlowDelete()
+    allocator = Allocator(provider, Drain(), SPEC)
+    old = allocator.acquire(SCOPE, FIRST)
     assert allocator.acquire(SCOPE, SECOND, replaces=FIRST).phase == "draining"
-    assert provider.creates == 1
-    provider.keep_after_delete = False
+    assert provider.creates == 1 and old.pod_id in provider.pods
+    provider.hold = False
     assert allocator.reconcile(SCOPE).phase == "allocated"  # type: ignore[union-attr]
     assert provider.creates == 2
 
 
-@pytest.mark.parametrize("mode", ["unknown-empty", "unknown-created"])
-def test_uncertain_create_is_never_repeated_even_after_restart(
-    setup: tuple[Allocator, MemoryStore, FakeProvider, Drain], mode: str,
-) -> None:
-    allocator, store, provider, drain = setup
-    provider.create_mode = mode
-    assert allocator.acquire(SCOPE, FIRST).phase == "creating"
-    restarted = Allocator(store, provider, drain, SPEC)
-    expected = "creating" if mode == "unknown-empty" else "allocated"
-    assert restarted.acquire(SCOPE, FIRST).phase == expected
-    assert restarted.reconcile(SCOPE).phase == expected  # type: ignore[union-attr]
-    assert provider.creates == 1
-    if mode == "unknown-empty":
-        with pytest.raises(AllocationConflict):
-            restarted.acquire(SCOPE, SECOND, replaces=FIRST)
-        provider.pods["late-pod"] = owned("late-pod")
-        assert restarted.reconcile(SCOPE).pod_id == "late-pod"  # type: ignore[union-attr]
-        assert provider.creates == 1
+def test_missing_provider_pod_is_missing_after_restart() -> None:
+    provider = Provider()
+    old = Allocator(provider, Drain(), SPEC).acquire(SCOPE, FIRST)
+    provider.pods.pop(old.pod_id or "")
+    restarted = Allocator(provider, Drain(), SPEC)
+    assert restarted.current(SCOPE) is None
+    assert restarted.status(SCOPE, FIRST) is None
+    assert restarted.acquire(SCOPE, SECOND).phase == "allocated"
 
 
-def test_concurrent_retry_during_post_cannot_submit_or_replace(
-    setup: tuple[Allocator, MemoryStore, FakeProvider, Drain],
-) -> None:
-    allocator, store, provider, drain = setup
-    other = Allocator(store, provider, drain, SPEC)
+def test_unknown_create_expires_as_an_attempt_without_a_phantom_live_pod() -> None:
+    class Unknown(Provider):
+        def create(self, body: dict[str, object]) -> Pod:
+            raise CreateUnknown("lost")
 
-    def concurrent() -> None:
-        assert other.acquire(SCOPE, FIRST).phase == "creating"
-        with pytest.raises(AllocationConflict):
-            other.acquire(SCOPE, SECOND, replaces=FIRST)
-
-    provider.during_create = concurrent
-    assert allocator.acquire(SCOPE, FIRST).phase == "allocated"
-    assert provider.creates == 1
-
-
-@pytest.mark.parametrize("write", [1, 2])
-def test_unconfirmed_journal_write_forbids_provider_side_effects(
-    setup: tuple[Allocator, MemoryStore, FakeProvider, Drain], write: int,
-) -> None:
-    allocator, _, provider, _ = setup
-    store = allocator.store
-    assert isinstance(store, MemoryStore)
-
-    def fail(number: int) -> None:
-        if number == write:
-            raise WriteUncertain("test timeout")
-
-    store.before = fail
-    with pytest.raises(WriteUncertain):
-        allocator.acquire(SCOPE, FIRST)
-    assert provider.creates == 0
-    assert not any(event[0] == "delete" for event in provider.events)
-
-
-def test_crash_after_create_intent_does_not_replay_post(
-    setup: tuple[Allocator, MemoryStore, FakeProvider, Drain],
-) -> None:
-    allocator, store, provider, drain = setup
-
-    def crash(number: int) -> None:
-        if number == 2:
-            raise WriteUncertain("crash after committed intent")
-
-    store.after = crash
-    with pytest.raises(WriteUncertain):
-        allocator.acquire(SCOPE, FIRST)
-    store.after = lambda _: None
-    assert Allocator(store, provider, drain, SPEC).acquire(SCOPE, FIRST).phase == "creating"
-    assert provider.creates == 0
-
-
-@pytest.mark.parametrize("committed", [False, True])
-def test_crash_after_provider_create_recovers_the_same_pod(
-    setup: tuple[Allocator, MemoryStore, FakeProvider, Drain], committed: bool,
-) -> None:
-    allocator, store, provider, drain = setup
-
-    def crash(number: int) -> None:
-        if number == 3:
-            raise WriteUncertain("lost allocation write")
-
-    if committed:
-        store.after = crash
-    else:
-        store.before = crash
-    with pytest.raises(WriteUncertain):
-        allocator.acquire(SCOPE, FIRST)
-    store.before = store.after = lambda _: None
-    session = Allocator(store, provider, drain, SPEC).acquire(SCOPE, FIRST)
-    assert session.phase == "allocated" and session.pod_id == "pod-1"
-    assert provider.creates == 1
-
-
-def test_duplicate_or_stray_owned_pods_are_never_selected_or_deleted(
-    setup: tuple[Allocator, MemoryStore, FakeProvider, Drain],
-) -> None:
-    allocator, _, provider, _ = setup
-    provider.create_mode = "unknown-empty"
+    now = [1.0]
+    allocator = Allocator(Unknown(), Drain(), SPEC, clock=lambda: now[0])
     allocator.acquire(SCOPE, FIRST)
-    provider.pods = {"one": owned("one"), "two": owned("two")}
+    now[0] = 602
+    assert allocator.status(SCOPE, FIRST).phase == "lost"  # type: ignore[union-attr]
+    assert allocator.current(SCOPE) is None
+
+
+def test_foreign_and_malformed_ownership_never_authorize_deletion() -> None:
+    provider = Provider()
+    unrelated = Pod("foreign", "w404-prefix", SPEC.image, "RUNNING", {})
+    provider.pods[unrelated.id] = unrelated
+    allocator = Allocator(provider, Drain(), SPEC)
+    first = allocator.acquire(SCOPE, FIRST)
+    assert first.pod_id is not None
     with pytest.raises(InventoryConflict):
-        allocator.reconcile(SCOPE)
-    assert not allocator.selected(SCOPE, FIRST, "one")
-    assert not allocator.selected(SCOPE, FIRST, "two")
-    assert provider.creates == 1
-    assert not any(event[0] == "delete" for event in provider.events)
-
-
-def test_missing_journal_with_owned_inventory_fails_closed(
-    setup: tuple[Allocator, MemoryStore, FakeProvider, Drain],
-) -> None:
-    allocator, _, provider, _ = setup
-    provider.pods["stray"] = owned("stray", THIRD)
-    with pytest.raises(InventoryConflict):
-        allocator.acquire(SCOPE, FIRST)
-    assert provider.creates == 0
-    assert provider.pods["stray"].id == "stray"
-
-
-def test_foreign_scope_and_name_prefix_are_never_deleted(
-    setup: tuple[Allocator, MemoryStore, FakeProvider, Drain],
-) -> None:
-    allocator, _, provider, _ = setup
-    foreign = owned("foreign", scope=replace(SCOPE, round="another-round"))
-    provider.pods[foreign.id] = replace(foreign, name=SCOPE.name(FIRST))
-    assert allocator.acquire(SCOPE, FIRST).phase == "allocated"
-    allocator.acquire(SCOPE, SECOND, replaces=FIRST)
-    assert "foreign" in provider.pods
-    assert ("delete", "foreign") not in provider.events
-
-
-def test_changed_pod_identity_blocks_deletion(
-    setup: tuple[Allocator, MemoryStore, FakeProvider, Drain],
-) -> None:
-    allocator, _, provider, drain = setup
-    allocator.acquire(SCOPE, FIRST)
-    provider.pods["pod-1"] = replace(provider.pods["pod-1"], markers={})
-    with pytest.raises(InventoryConflict):
-        allocator.acquire(SCOPE, SECOND, replaces=FIRST)
-    assert provider.creates == 1
-    assert drain.calls == []
-    assert not any(event[0] == "delete" for event in provider.events)
-
-
-def test_rejected_request_is_terminal_for_that_id(
-    setup: tuple[Allocator, MemoryStore, FakeProvider, Drain],
-) -> None:
-    allocator, _, provider, _ = setup
-    provider.create_mode = "reject"
-    session = allocator.acquire(SCOPE, FIRST)
-    assert session.phase == "rejected" and session.rejection == 429
-    assert allocator.acquire(SCOPE, FIRST) == session
-    assert provider.creates == 1
-    provider.create_mode = "ok"
-    assert allocator.acquire(SCOPE, SECOND, replaces=FIRST).phase == "allocated"
-    assert provider.creates == 2
-
-
-def test_replacement_requires_exact_current_and_same_id_parameters(
-    setup: tuple[Allocator, MemoryStore, FakeProvider, Drain],
-) -> None:
-    allocator, _, provider, _ = setup
-    allocator.acquire(SCOPE, FIRST)
-    for start_id, replaces in ((SECOND, None), (SECOND, THIRD), (FIRST, FIRST)):
-        with pytest.raises(AllocationConflict):
-            allocator.acquire(SCOPE, start_id, replaces=replaces)
-    assert provider.creates == 1
-
-
-def test_configuration_cannot_change_under_a_retry(
-    setup: tuple[Allocator, MemoryStore, FakeProvider, Drain],
-) -> None:
-    allocator, store, provider, drain = setup
-    allocator.acquire(SCOPE, FIRST)
-    different = Allocator(store, provider, drain, replace(SPEC, vcpu_count=4))
+        allocator.retire(SCOPE, FIRST, unrelated.id)
+    assert unrelated.id in provider.pods
     with pytest.raises(AllocationConflict):
-        different.acquire(SCOPE, FIRST)
-    assert provider.creates == 1
-
-
-def test_lost_pod_does_not_trigger_automatic_recreation(
-    setup: tuple[Allocator, MemoryStore, FakeProvider, Drain],
-) -> None:
-    allocator, _, provider, _ = setup
-    allocator.acquire(SCOPE, FIRST)
-    provider.pods.clear()
-    assert allocator.reconcile(SCOPE).phase == "lost"  # type: ignore[union-attr]
-    assert not allocator.selected(SCOPE, FIRST, "pod-1")
-    assert allocator.acquire(SCOPE, FIRST).phase == "lost"
-    assert provider.creates == 1
-
-
-def test_r2_cas_conflict_cannot_grant_permission_to_post(
-    setup: tuple[Allocator, MemoryStore, FakeProvider, Drain],
-) -> None:
-    allocator, store, provider, _ = setup
-
-    def conflict(number: int) -> None:
-        if number == 2:
-            raise StateConflict("another controller won")
-
-    store.before = conflict
-    with pytest.raises(StateConflict):
-        allocator.acquire(SCOPE, FIRST)
-    assert provider.creates == 0
-    assert allocator.status(SCOPE, FIRST).phase == "draining"  # type: ignore[union-attr]
-
-
-def test_history_bound_does_not_discard_idempotency_records(
-    setup: tuple[Allocator, MemoryStore, FakeProvider, Drain],
-) -> None:
-    _, store, provider, drain = setup
-    allocator = Allocator(store, provider, drain, SPEC, max_starts=1)
-    allocator.acquire(SCOPE, FIRST)
+        allocator.acquire(SCOPE, SECOND)
     with pytest.raises(AllocationConflict):
-        allocator.acquire(SCOPE, SECOND, replaces=FIRST)
-    assert allocator.acquire(SCOPE, FIRST).phase == "allocated"
-    assert provider.creates == 1
+        Allocator(provider, Drain(), replace(SPEC, vcpu_count=4)).acquire(SCOPE, FIRST)
 
 
-def test_corrupt_or_wrong_scope_journal_cannot_touch_provider(
-    setup: tuple[Allocator, MemoryStore, FakeProvider, Drain],
-) -> None:
-    allocator, store, provider, _ = setup
-    allocator.acquire(SCOPE, FIRST)
-    other = replace(SCOPE, round="different")
-    store.objects[other.key] = store.objects[SCOPE.key]
-    events = list(provider.events)
-    with pytest.raises(ValueError):
-        allocator.acquire(other, SECOND)
-    store.objects[SCOPE.key] = Snapshot("bad", b"{}")
-    with pytest.raises(ValueError):
-        allocator.reconcile(SCOPE)
-    assert provider.events == events
+def test_lost_lifecycle_patch_reply_is_confirmed_from_runpod() -> None:
+    class LostPatch(Provider):
+        def rename(self, pod_id: str, name: str) -> Pod:
+            super().rename(pod_id, name)
+            raise ProviderUnavailable("reply lost")
 
-
-def test_journal_retains_ordered_replacement_history(
-    setup: tuple[Allocator, MemoryStore, FakeProvider, Drain],
-) -> None:
-    allocator, store, _, _ = setup
-    allocator.acquire(SCOPE, FIRST)
-    allocator.acquire(SCOPE, SECOND, replaces=FIRST)
-    allocator.acquire(SCOPE, THIRD, replaces=SECOND)
-    journal = Journal.decode(store.objects[SCOPE.key].data, SCOPE)
-    assert [s.phase for s in journal.sessions] == ["retired", "retired", "allocated"]
-    assert allocator.acquire(SCOPE, SECOND, replaces=FIRST).phase == "retired"
-
-
-def test_only_one_of_two_controllers_can_commit_permission_to_create(
-    setup: tuple[Allocator, MemoryStore, FakeProvider, Drain],
-) -> None:
-    allocator, store, provider, drain = setup
-    other = Allocator(store, provider, drain, SPEC)
-
-    def interleave(number: int) -> None:
-        if number == 2:
-            assert other.reconcile(SCOPE).phase == "allocated"  # type: ignore[union-attr]
-
-    store.before = interleave
-    with pytest.raises(StateConflict):
-        allocator.acquire(SCOPE, FIRST)
-    assert allocator.acquire(SCOPE, FIRST).phase == "allocated"
-    assert provider.creates == 1
-
-
-def test_unreachable_drain_cannot_authorize_termination(
-    setup: tuple[Allocator, MemoryStore, FakeProvider, Drain],
-) -> None:
-    allocator, _, provider, drain = setup
-    allocator.acquire(SCOPE, FIRST)
-
-    def disconnected() -> None:
-        raise ProviderUnavailable("control channel unavailable")
-
-    drain.during_drain = disconnected
-    with pytest.raises(ProviderUnavailable):
-        allocator.acquire(SCOPE, SECOND, replaces=FIRST)
-    assert provider.creates == 1 and "pod-1" in provider.pods
-    assert not allocator.selected(SCOPE, FIRST, "pod-1")
-    assert not any(event[0] == "delete" for event in provider.events)
-
-
-def test_real_http_adapter_recovers_a_lost_reply_and_replaces_exactly_once() -> None:
-    inventory: dict[str, dict[str, object]] = {}
-    posts = 0
-
-    def server(request: httpx.Request) -> httpx.Response:
-        nonlocal posts
-        if request.method == "POST":
-            posts += 1
-            pod = {**json.loads(request.content), "id": f"pod-{posts}", "status": "RUNNING"}
-            inventory[f"pod-{posts}"] = pod
-            raise httpx.ReadTimeout("reply lost after creation", request=request)
-        if request.url.path == "/v2/pods":
-            return httpx.Response(200, json={
-                "pods": list(inventory.values()),
-                "pagination": {"hasNextPage": False, "nextCursor": None},
-            })
-        pod_id = request.url.path.rsplit("/", 1)[1]
-        if request.method == "DELETE":
-            inventory.pop(pod_id, None)
-            return httpx.Response(204)
-        if pod_id in inventory:
-            return httpx.Response(200, json=inventory[pod_id])
-        return httpx.Response(404)
-
-    with httpx.Client(transport=httpx.MockTransport(server)) as http:
-        provider = RunPodClient("offline", http)
-        store, drain = MemoryStore(), Drain()
-        allocator = Allocator(store, provider, drain, SPEC)
-        assert allocator.acquire(SCOPE, FIRST).phase == "creating"
-        recovered = Allocator(store, provider, drain, SPEC)
-        assert recovered.acquire(SCOPE, FIRST).pod_id == "pod-1"
-        assert posts == 1
-        assert recovered.acquire(SCOPE, SECOND, replaces=FIRST).phase == "creating"
-        assert recovered.acquire(SCOPE, SECOND, replaces=FIRST).pod_id == "pod-2"
-        assert list(inventory) == ["pod-2"] and posts == 2
-        assert drain.calls == ["pod-1"]
+    provider = LostPatch()
+    current = Allocator(provider, Drain(), SPEC).acquire(SCOPE, FIRST)
+    assert current.phase == "allocated" and provider.creates == 1

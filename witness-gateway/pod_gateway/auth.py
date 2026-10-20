@@ -15,7 +15,6 @@ import xxhash
 from bittensor_wallet import Keypair
 
 from .models import json_bytes, object_dict, string
-from .state import StateConflict, StateStore
 
 FINNEY_GENESIS = "0x2f0555cc76fc2840a25a6ea3b9637146806f1f44b090c175ffde2a7e5ab36c03"
 
@@ -46,7 +45,6 @@ def public_key(hotkey: str) -> Keypair:
 class Membership:
     def __init__(
         self,
-        store: StateStore,
         deployment: str,
         netuid: int,
         round_number: str,
@@ -56,14 +54,13 @@ class Membership:
             test_hotkey is not None and round_number != "test-0"
         ):
             raise ValueError("Invalid membership configuration")
-        self.store, self.netuid, self.test_hotkey = store, netuid, test_hotkey
-        self.key = f"pod-membership/v1/{deployment}/{netuid}.json"
+        self.netuid, self.test_hotkey = netuid, test_hotkey
+        self.snapshot: dict[str, object] | None = None
 
     def require(self, hotkey: str) -> None:
-        saved = self.store.load(self.key)
-        if saved is None:
+        value = self.snapshot
+        if value is None:
             raise AuthRejected("membership_unavailable", 503)
-        value = object_dict(json.loads(saved.data))
         now = int(time.time() * 1000)
         if (
             value.get("version") != 1
@@ -236,7 +233,6 @@ class MembershipRefresher:
                 )
         if len(set(hotkeys)) != size:
             raise ValueError("Duplicate registered hotkeys")
-        snapshot = self.membership.store.load(self.membership.key)
         data = json_bytes(
             {
                 "version": 1,
@@ -250,9 +246,4 @@ class MembershipRefresher:
                 "revision": str(time.time_ns()),
             }
         )
-        try:
-            self.membership.store.save(
-                self.membership.key, data, snapshot.etag if snapshot else None
-            )
-        except StateConflict:
-            pass  # A concurrent refresher published a complete snapshot first.
+        self.membership.snapshot = object_dict(json.loads(data))

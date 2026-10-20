@@ -1,4 +1,4 @@
-"""Allocation records contain identity and lifecycle state, never credentials."""
+"""RunPod ownership metadata and public allocation replies, never credentials."""
 
 from __future__ import annotations
 
@@ -14,15 +14,6 @@ from typing import Literal, cast
 Phase = Literal[
     "draining", "creating", "allocated", "retiring", "rejected", "lost", "retired"
 ]
-PHASES = {
-    "draining",
-    "creating",
-    "allocated",
-    "retiring",
-    "rejected",
-    "lost",
-    "retired",
-}
 MARKERS = (
     "WITNESS_DEPLOYMENT",
     "WITNESS_ROUND",
@@ -30,6 +21,8 @@ MARKERS = (
     "WITNESS_START_ID",
     "WITNESS_POD_SPEC",
     "WITNESS_BOOT_MODE",
+    "WITNESS_EPOCH_NS",
+    "WITNESS_REPLACES",
 )
 
 
@@ -69,7 +62,13 @@ class Scope:
             f"{hotkey_hash}-{uuid.UUID(identifier(start_id)).hex}"
         )
 
-    def markers(self, start_id: str, spec_hash: str) -> dict[str, str]:
+    def markers(
+        self,
+        start_id: str,
+        spec_hash: str,
+        epoch_ns: int = 0,
+        replaces: str | None = None,
+    ) -> dict[str, str]:
         return {
             "WITNESS_DEPLOYMENT": self.deployment,
             "WITNESS_ROUND": self.round,
@@ -77,6 +76,8 @@ class Scope:
             "WITNESS_START_ID": identifier(start_id),
             "WITNESS_POD_SPEC": spec_hash,
             "WITNESS_BOOT_MODE": "dormant",
+            "WITNESS_EPOCH_NS": str(epoch_ns),
+            "WITNESS_REPLACES": "" if replaces is None else identifier(replaces),
         }
 
 
@@ -148,7 +149,14 @@ class PodSpec:
         )
         return hashlib.sha256(json_bytes(self._body()) + key_hash).hexdigest()
 
-    def body(self, scope: Scope, start_id: str) -> dict[str, object]:
+    def body(
+        self,
+        scope: Scope,
+        start_id: str,
+        *,
+        epoch_ns: int = 0,
+        replaces: str | None = None,
+    ) -> dict[str, object]:
         from .security import capability
 
         private = (
@@ -162,8 +170,12 @@ class PodSpec:
         )
         return {
             **self._body(),
-            "name": scope.name(start_id),
-            "env": {**self.env, **scope.markers(start_id, self.fingerprint), **private},
+            "name": scope.name(start_id) + "-pending",
+            "env": {
+                **self.env,
+                **scope.markers(start_id, self.fingerprint, epoch_ns, replaces),
+                **private,
+            },
         }
 
 
@@ -189,9 +201,62 @@ class Pod:
 
     def matches(self, scope: Scope, session: Session) -> bool:
         return (
-            self.name == scope.name(session.start_id)
+            self.scope() == scope
+            and self.markers["WITNESS_START_ID"] == session.start_id
             and self.image == session.image
-            and dict(self.markers) == scope.markers(session.start_id, session.spec_hash)
+            and self.markers["WITNESS_POD_SPEC"] == session.spec_hash
+        )
+
+    def scope(self) -> Scope | None:
+        try:
+            scope = Scope(
+                self.markers["WITNESS_DEPLOYMENT"],
+                self.markers["WITNESS_ROUND"],
+                self.markers["WITNESS_HOTKEY"],
+            )
+            start = identifier(self.markers["WITNESS_START_ID"])
+            if (
+                set(self.markers) != set(MARKERS)
+                or self.markers["WITNESS_BOOT_MODE"] != "dormant"
+                or not re.fullmatch(r"[0-9a-f]{64}", self.markers["WITNESS_POD_SPEC"])
+                or not self.markers["WITNESS_EPOCH_NS"].isdigit()
+                or self.name
+                not in {
+                    scope.name(start) + "-" + phase
+                    for phase in ("pending", "active", "draining", "drained")
+                }
+            ):
+                return None
+            if self.markers["WITNESS_REPLACES"]:
+                identifier(self.markers["WITNESS_REPLACES"])
+            return scope
+        except (ValueError, KeyError):
+            return None
+
+    @property
+    def lifecycle(self) -> str:
+        return self.name.rsplit("-", 1)[-1]
+
+    @property
+    def epoch_ns(self) -> int:
+        return int(self.markers["WITNESS_EPOCH_NS"])
+
+    def session(self) -> Session:
+        if self.scope() is None:
+            raise ValueError("Pod has invalid ownership metadata")
+        phases: dict[str, Phase] = {
+            "pending": "creating",
+            "active": "allocated",
+            "draining": "retiring",
+            "drained": "retired",
+        }
+        return Session(
+            self.markers["WITNESS_START_ID"],
+            self.markers["WITNESS_REPLACES"] or None,
+            phases[self.lifecycle],
+            self.markers["WITNESS_POD_SPEC"],
+            self.image,
+            self.id,
         )
 
 
@@ -217,67 +282,6 @@ class Session:
         }
 
 
-@dataclass(frozen=True)
-class Journal:
-    scope: Scope
-    current: str
-    sessions: tuple[Session, ...]
-    revision: str = field(default_factory=lambda: str(uuid.uuid4()))
-
-    def session(self, start_id: str) -> Session:
-        return next(s for s in self.sessions if s.start_id == start_id)
-
-    def encode(self) -> bytes:
-        return json_bytes(
-            {
-                "version": 1,
-                "deployment": self.scope.deployment,
-                "round": self.scope.round,
-                "hotkey": self.scope.hotkey,
-                "current": self.current,
-                "revision": self.revision,
-                "sessions": [s.to_dict() for s in self.sessions],
-            }
-        )
-
-    @classmethod
-    def decode(cls, data: bytes, scope: Scope) -> Journal:
-        value = object_dict(json.loads(data))
-        if (
-            set(value)
-            != {
-                "version",
-                "deployment",
-                "round",
-                "hotkey",
-                "current",
-                "revision",
-                "sessions",
-            }
-            or type(value["version"]) is not int
-            or value["version"] != 1
-            or value["deployment"] != scope.deployment
-            or value["round"] != scope.round
-            or value["hotkey"] != scope.hotkey
-            or not isinstance(value["sessions"], list)
-        ):
-            raise ValueError("Invalid allocation journal")
-        sessions = tuple(decode_session(s) for s in value["sessions"])
-        current = identifier(string(value["current"]))
-        if (
-            not sessions
-            or len({s.start_id for s in sessions}) != len(sessions)
-            or current != sessions[-1].start_id
-            or any(s.phase != "retired" for s in sessions[:-1])
-            or any(
-                s.replaces != (sessions[i - 1].start_id if i else None)
-                for i, s in enumerate(sessions)
-            )
-        ):
-            raise ValueError("Invalid allocation history")
-        return cls(scope, current, sessions, identifier(string(value["revision"])))
-
-
 def string(value: object) -> str:
     if not isinstance(value, str) or not value:
         raise ValueError("Expected a nonempty string")
@@ -288,41 +292,3 @@ def object_dict(value: object) -> dict[str, object]:
     if not isinstance(value, dict) or any(not isinstance(k, str) for k in value):
         raise ValueError("Expected a JSON object")
     return cast(dict[str, object], value)
-
-
-def decode_session(value: object) -> Session:
-    data = object_dict(value)
-    if set(data) != {
-        "start_id",
-        "replaces",
-        "phase",
-        "spec_hash",
-        "image",
-        "pod_id",
-        "rejection",
-    }:
-        raise ValueError("Invalid allocation session")
-    start_id = identifier(string(data["start_id"]))
-    replaces = (
-        None if data["replaces"] is None else identifier(string(data["replaces"]))
-    )
-    phase = string(data["phase"])
-    spec_hash = string(data["spec_hash"])
-    image = string(data["image"])
-    pod_id = None if data["pod_id"] is None else string(data["pod_id"])
-    rejection = data["rejection"]
-    if (
-        phase not in PHASES
-        or not re.fullmatch(r"[0-9a-f]{64}", spec_hash)
-        or (phase in ("allocated", "retiring") and pod_id is None)
-        or (phase in ("draining", "creating", "rejected") and pod_id is not None)
-        or (
-            rejection is not None
-            and (type(rejection) is not int or not 400 <= rejection <= 499)
-        )
-        or (phase == "rejected" and rejection is None)
-    ):
-        raise ValueError("Invalid allocation session state")
-    return Session(
-        start_id, replaces, cast(Phase, phase), spec_hash, image, pod_id, rejection
-    )

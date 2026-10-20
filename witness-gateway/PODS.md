@@ -3,8 +3,9 @@
 The Python gateway authenticates miners, allocates one current witness Pod per
 miner, and forwards bounded WebSockets. Witness Pods perform verification and
 provider capture; they never execute miner programs. An independent revivor
-restores the gateway and cleans up exactly owned Pods. Private R2 objects retain
-allocation intents, model-call records, usage and evidence. SQL is not required.
+restores the gateway and cleans up exactly owned Pods. RunPod owns Pod identity,
+lifecycle and capacity. Private R2 objects retain model-call records, usage and
+evidence. SQL is not required.
 
 This implementation is separate from the existing TypeScript/Serverless gateway.
 Imports, installation, tests and `--help` do not create infrastructure.
@@ -88,25 +89,39 @@ prefix. Completed work is never replaced by fresh inference.
 
 Miner HTTP requests and WebSocket upgrades use `btauth/1`, canonical sr25519
 hotkeys, ten-second nonces and ownership checks. A Python refresher checks the
-Finney genesis, one finalized block, its timestamp and every subnet hotkey.
+Finney genesis, one finalized block, its timestamp and every subnet hotkey. The
+complete membership snapshot and nonce cache stay in gateway memory.
 Absent/stale membership fails closed. The optional test hotkey is restricted to
 `test-0`.
 
 A deliberate connection uses a fresh start UUID and names its predecessor.
-Repeating it joins the same operation. The old selection is revoked before
-drain. Capture and evidence uploads must finish before a permanent authenticated
-drain seal permits deletion. EXITED Pods have no running capture process; their
-unresolved calls stay unresolved. Replacement requires an exact-ID GET 404 after
-DELETE, rather than relying on its acknowledgement.
+Lifecycle states are suffixes of the RunPod name: pending, active, draining and
+drained. Immutable environment markers include ownership, the connection epoch,
+predecessor, pinned specification and dormant boot policy.
 
-The R2 transition to `creating` grants one caller permission to POST to RunPod.
-Lost replies/crashes are reconciled by exact name, full identity markers, pinned
-image and spec fingerprint. Empty inventory never authorizes another POST. An
-uncertain intent can remain parked until its exact Pod appears. There is no
-fabricated proof of non-dispatch or automatic create retry.
+Replacement marks the actual old resource as draining before asking the worker
+to stop accepting work. Capture and evidence uploads must finish before an
+authenticated worker reports permanent drain. Only then is the resource marked
+drained and deleted. EXITED Pods have no running capture process; their unresolved
+calls stay unresolved. Replacement requires an exact-ID GET 404 after DELETE.
+
+The gateway serializes worker create admission and retains only short-lived
+in-flight attempts in memory. A lost create reply is joined for up to ten minutes;
+an expired attempt reports lost rather than claiming a Pod exists. On restart,
+RunPod inventory is queried directly. The client also recovers when its previous
+Pod ID returns 404. There is no R2 Pod inventory, capacity reservation ledger,
+drain seal, health counter or cleanup journal to repair.
+
+A restarted coordinator can repeat a create whose result is still invisible.
+Physical Pod creation is therefore not claimed to be exactly once. All copies
+boot dormant. A confirmed active copy wins over a late dormant copy of the same
+connection; newer connection epochs supersede older ones. Cleanup adopts a sole
+valid late create, and drains superseded or duplicate resources before deleting
+them. Durable R2 inference claims still prevent another paid dispatch of a call.
 
 New Pods start dormant and connect outbound using a per-start capability. Only
-the selected exact Pod ID may attach. Readiness requires the expected proof-key
+the selected exact Pod ID may receive inference work; draining Pods retain control
+access to report completion. Readiness requires the expected proof-key
 and frozen-pricing hashes. RunPod credentials stay on the gateway/revivor;
 witness Pods receive a per-start control capability and private evidence-storage
 credentials. The miner's OpenAI credentials remain hidden by the existing
@@ -126,17 +141,31 @@ gateway. A new gateway gets ten minutes of boot grace; after readiness, three
 consecutive failures trigger replacement. Configuration/image changes also
 trigger replacement.
 
-Recovery revokes the old gateway's R2 serving fence, terminates it and confirms
+Recovery marks the old gateway draining in RunPod, terminates it and confirms
 absence before creating the new gateway. Witness captures continue independently
 through the gap. After the new gateway is healthy, the revivor atomically updates
 Caddy's upstream. Both public HTTPS/WSS and upstream TLS verify certificates.
 
-Deployment-wide durable admission bounds worker reservations and reserves
-configured hourly headroom for the gateway. Worker activation above its compute
-price ceiling is rejected. These controls use operator-verified quotes; they do
-not change the account spend cap or guarantee storage/network prices. No numeric
-RunPod stock or Pod-count quota is assumed. There is no fleet FIFO/priority
-queue; busy workers provide bounded local backpressure.
+Capacity admission counts actual managed RunPod workers, including pending,
+duplicate, draining and EXITED resources until deletion is confirmed. It uses
+fresh inventory at admission plus temporary headroom for unresolved creates in
+that gateway process. Configured gateway headroom is reserved in the hourly
+ceiling. No capacity slot survives as a phantom R2 reservation after Pod loss.
+
+One gateway coordinates worker creation; a host file lock allows one revivor
+process on the independent host. Multiple supervisor hosts are not supported.
+Read-only selection checks share a two-second in-memory RunPod inventory cache;
+create admission and cleanup explicitly refresh it. Mutable names are updated
+with name-only PATCH requests; worker secrets and container settings are preserved.
+
+Worker activation above its compute price ceiling is rejected. Quote ceilings
+are not account limit changes or atomic provider quotas. Creates hidden across
+a coordinator restart can temporarily exceed admission headroom before appearing
+in inventory. Cleanup drains excess resources, preferring dormant copies over
+active workers, and continues counting them until confirmed deletion. RunPod
+stock, storage/network costs and numeric Pod-count quota are not guaranteed.
+Fleet FIFO/priority queuing remains
+separate; busy workers provide bounded local backpressure.
 
 ## Build and configuration
 

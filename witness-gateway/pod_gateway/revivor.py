@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import ipaddress
 import json
 import os
@@ -20,11 +21,9 @@ import httpx
 from .admission import Admission
 from .control import DrainControl
 from .lifecycle import Allocator, InventoryConflict
-from .models import Journal, Pod, Scope, Session, json_bytes, object_dict
-from .runpod import PodProvider, ProviderUnavailable, RunPodClient
-from .security import capability, seal, sealed
+from .models import Pod, Scope, Session
+from .runpod import PodProvider, RunPodClient
 from .settings import Settings
-from .state import StateConflict, StateStore
 
 
 class Publisher(Protocol):
@@ -101,13 +100,11 @@ class Revivor:
     def __init__(
         self,
         *,
-        state: StateStore,
         provider: PodProvider,
         gateway: Allocator,
         workers: Allocator,
         scope: Scope,
         active_round: str,
-        secret: bytes,
         publisher: Publisher,
         probe: Callable[[Pod], bool],
         startup_grace: int = 600,
@@ -115,29 +112,20 @@ class Revivor:
         clock: Callable[[], float] = time.time,
         round_end: int | None = None,
     ) -> None:
-        self.state, self.provider, self.gateway, self.workers = (
-            state,
-            provider,
-            gateway,
-            workers,
-        )
-        self.scope, self.active_round, self.secret = scope, active_round, secret
+        self.provider, self.gateway, self.workers = provider, gateway, workers
+        self.health: dict[str, dict[str, object]] = {}
+        self.scope, self.active_round = scope, active_round
         self.publisher, self.probe = publisher, probe
         self.startup_grace, self.failures, self.clock = startup_grace, failures, clock
         self.round_end = round_end
 
     def _health(self, current: Session, healthy: bool) -> bool:
-        key = f"pod-revivor/v1/{self.scope.deployment}/{current.start_id}.json"
-        saved = self.state.load(key)
-        value: dict[str, object] = (
-            object_dict(json.loads(saved.data))
-            if saved
-            else {"first_seen": self.clock(), "ready_once": False, "failures": 0}
+        value = self.health.setdefault(
+            current.start_id,
+            {"first_seen": self.clock(), "ready_once": False, "failures": 0},
         )
         value["ready_once"] = value["ready_once"] is True or healthy
         value["failures"] = 0 if healthy else int(str(value["failures"])) + 1
-        value["revision"] = str(uuid.uuid4())
-        self.state.save(key, json_bytes(value), saved.etag if saved else None)
         return (
             not healthy
             and int(str(value["failures"])) >= self.failures
@@ -153,18 +141,7 @@ class Revivor:
             self.gateway.acquire(self.scope, str(uuid.uuid4()))
             return
         if current.phase in ("creating", "draining", "retiring"):
-            try:
-                self.gateway.reconcile(self.scope)
-            except InventoryConflict:
-                # Extra gateway candidates are dormant: none can pass the R2
-                # selection fence. Keep one, terminate other exact candidates.
-                candidates = [
-                    p for p in self.provider.list() if p.matches(self.scope, current)
-                ]
-                if len(candidates) < 2:
-                    raise
-                for candidate in sorted(candidates, key=lambda p: p.id)[1:]:
-                    self._delete(candidate)
+            self.gateway.reconcile(self.scope)
             return
         if current.phase in ("lost", "rejected", "retired"):
             self.gateway.acquire(
@@ -202,118 +179,36 @@ class Revivor:
                 self.scope, str(uuid.uuid4()), replaces=current.start_id
             )
 
-    def _delete(self, pod: Pod) -> bool:
-        key = f"pod-cleanup/v1/{self.scope.deployment}/{pod.id}.json"
-        saved = self.state.load(key)
-        if saved is None:
-            try:
-                self.state.save(
-                    key,
-                    json_bytes(
-                        {
-                            "pod_id": pod.id,
-                            "name": pod.name,
-                            "markers": dict(pod.markers),
-                            "revision": str(uuid.uuid4()),
-                        }
-                    ),
-                    None,
-                )
-            except StateConflict:
-                return False
-        else:
-            value = object_dict(json.loads(saved.data))
-            if (
-                value.get("pod_id") != pod.id
-                or value.get("name") != pod.name
-                or value.get("markers") != dict(pod.markers)
-            ):
-                raise InventoryConflict("Cleanup identity changed")
-        actual = self.provider.get(pod.id)
-        if actual is not None:
-            if (
-                actual.name != pod.name
-                or actual.image != pod.image
-                or dict(actual.markers) != dict(pod.markers)
-            ):
-                raise InventoryConflict("Cleanup Pod no longer matches")
-            try:
-                self.provider.delete(pod.id)
-            except ProviderUnavailable:
-                pass
-        return self.provider.get(pod.id) is None
-
     def cleanup_workers(self) -> None:
-        inventory = self.provider.list()
-        for pod in inventory:
+        inventory = self.provider.list(fresh=True)
+        if self.workers.admission is not None:
+            for pod in self.workers.admission.excess(inventory, self.scope.deployment):
+                scope = pod.scope()
+                assert scope is not None
+                self.workers.retire(scope, pod.markers["WITNESS_START_ID"], pod.id)
+            inventory = self.provider.list(fresh=True)
+        scopes = {p.scope() for p in inventory}
+        for scope in scopes:
             if (
-                pod.markers.get("WITNESS_DEPLOYMENT") != self.scope.deployment
-                or pod.markers.get("WITNESS_ROUND") == "gateway"
+                scope is None
+                or scope.deployment != self.scope.deployment
+                or scope.round == "gateway"
             ):
                 continue
             try:
-                scope = Scope(
-                    self.scope.deployment,
-                    pod.markers["WITNESS_ROUND"],
-                    pod.markers["WITNESS_HOTKEY"],
-                )
-                start_id = pod.markers["WITNESS_START_ID"]
-                saved = self.state.load(scope.key)
-                journal = None if saved is None else Journal.decode(saved.data, scope)
-                session = (
-                    None
-                    if journal is None
-                    else next(
-                        (s for s in journal.sessions if s.start_id == start_id), None
-                    )
-                )
-                if session is None:
-                    session = Session(
-                        start_id,
-                        None,
-                        "creating",
-                        self.workers.spec.fingerprint,
-                        self.workers.spec.image,
-                    )
-                if not pod.matches(scope, session):
-                    continue
-                selected = (
-                    journal is not None
-                    and journal.current == start_id
-                    and session.pod_id == pod.id
-                    and session.phase == "allocated"
-                )
-                token = capability(self.secret, scope, start_id)
-                if pod.status != "EXITED" and not sealed(
-                    self.state, scope, start_id, pod.id, token
+                pods = self.workers.owned(inventory, scope)
+                if scope.round != self.active_round or (
+                    self.round_end is not None and self.clock() >= self.round_end
                 ):
-                    if (
-                        not selected
-                        or scope.round != self.active_round
-                        or (
-                            self.round_end is not None
-                            and self.clock() >= self.round_end
+                    for pod in pods:
+                        self.workers.retire(
+                            scope, pod.markers["WITNESS_START_ID"], pod.id
                         )
-                    ):
-                        seal(
-                            self.state, scope, start_id, pod.id, token, "request-drain"
-                        )
-                    continue
-                if selected:
-                    self.workers.retire(scope, start_id, pod.id)
-                elif self._delete(pod) and self.workers.admission is not None:
-                    # A duplicate of the current start shares its reservation.
-                    current_start = journal is not None and journal.current == start_id
-                    siblings = any(
-                        p.id != pod.id
-                        and p.in_scope(scope)
-                        and p.markers.get("WITNESS_START_ID") == start_id
-                        for p in inventory
-                    )
-                    if not current_start and not siblings:
-                        self.workers.admission.release(scope, start_id)
-            except (ValueError, KeyError, StateConflict, InventoryConflict):
-                # Preserve resources with ambiguous ownership; retry next tick.
+                else:
+                    # Adopt the sole valid late create, retain an active winner,
+                    # and retire only actual superseded/duplicate RunPod Pods.
+                    self.workers.reconcile(scope)
+            except (ValueError, KeyError, InventoryConflict):
                 continue
 
     def tick(self) -> None:
@@ -324,7 +219,18 @@ class Revivor:
 
 
 def run(settings: Settings) -> None:
-    state = settings.state()
+    lock = Path(
+        settings.env.get(
+            "WITNESS_REVIVOR_LOCK",
+            str(Path(settings.env["CADDY_CONFIG_FILE"]).parent / "revivor.lock"),
+        )
+    )
+    with lock.open("a") as file:
+        fcntl.flock(file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        _run(settings)
+
+
+def _run(settings: Settings) -> None:
     with (
         RunPodClient.http_client() as http,
         httpx.Client(
@@ -339,23 +245,21 @@ def run(settings: Settings) -> None:
             settings.env["GATEWAY_RUNPOD_API_KEY"],
             http,
             min_interval=float(settings.env.get("RUNPOD_MIN_REQUEST_INTERVAL", "1.1")),
+            cache_seconds=2,
         )
         gateway = Allocator(
-            state,
             provider,
             GatewayDrain(settings.gateway_scope),
             settings.gateway_spec(),
         )
         admission = Admission(
-            state,
             max_pods=int(settings.env.get("WITNESS_MAX_PODS", "250")),
             hourly_ceiling=str(settings.worker_budget),
             per_pod_ceiling=str(settings.pod_ceiling),
         )
         workers = Allocator(
-            state,
             provider,
-            DrainControl(state, settings.secret),
+            DrainControl(),
             settings.worker_spec(),
             admission=admission,
         )
@@ -370,13 +274,11 @@ def run(settings: Settings) -> None:
             )
 
         revivor = Revivor(
-            state=state,
             provider=provider,
             gateway=gateway,
             workers=workers,
             scope=settings.gateway_scope,
             active_round=settings.round,
-            secret=settings.secret,
             round_end=settings.round_end,
             publisher=CaddyPublisher(
                 origin=settings.env["WITNESS_GATEWAY_URL"],

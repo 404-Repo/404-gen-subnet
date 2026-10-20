@@ -5,15 +5,16 @@ from pathlib import Path
 
 from pod import PodRuntime
 from support import MemoryState, Provider
+from test_lifecycle import Drain
 from witness_client.calls import canonical
 
+from pod_gateway.admission import Admission
 from pod_gateway.budget import Budget
-from pod_gateway.control import DrainControl
 from pod_gateway.lifecycle import Allocator
 from pod_gateway.models import Pod, PodSpec, Scope
 from pod_gateway.records import CallRecords
 from pod_gateway.revivor import GatewayDrain, Revivor
-from pod_gateway.security import capability, sealed
+from pod_gateway.security import capability
 
 SECRET = b"x" * 32
 SCOPE = Scope("competition", "test-0", "5" * 48)
@@ -30,22 +31,20 @@ class Published:
 
 
 def test_revivor_replaces_failed_gateway_and_preserves_unrelated_pods() -> None:
-    state, provider, published = MemoryState(), Provider(), Published()
-    gateway = Allocator(state, provider, GatewayDrain(GATEWAY), SPEC)
-    workers = Allocator(state, provider, DrainControl(state, SECRET), SPEC)
+    provider, published = Provider(), Published()
+    gateway = Allocator(provider, GatewayDrain(GATEWAY), SPEC)
+    workers = Allocator(provider, Drain(), SPEC)
     old = gateway.acquire(GATEWAY, "00000000-0000-4000-8000-000000000001")
     provider.pods["unrelated"] = Pod(
         "unrelated", "someone-else", SPEC.image, "RUNNING", {}
     )
     healthy = [True]
     revivor = Revivor(
-        state=state,
         provider=provider,
         gateway=gateway,
         workers=workers,
         scope=GATEWAY,
         active_round="test-0",
-        secret=SECRET,
         publisher=published,
         probe=lambda _: healthy[0],
         startup_grace=600,
@@ -65,19 +64,17 @@ def test_revivor_replaces_failed_gateway_and_preserves_unrelated_pods() -> None:
 
 
 def test_new_gateway_gets_boot_grace_and_config_changes_replace_it() -> None:
-    state, provider = MemoryState(), Provider()
-    gateway = Allocator(state, provider, GatewayDrain(GATEWAY), SPEC)
-    workers = Allocator(state, provider, DrainControl(state, SECRET), SPEC)
+    provider = Provider()
+    gateway = Allocator(provider, GatewayDrain(GATEWAY), SPEC)
+    workers = Allocator(provider, Drain(), SPEC)
     old = gateway.acquire(GATEWAY, "00000000-0000-4000-8000-000000000001")
     now = [0.0]
     revivor = Revivor(
-        state=state,
         provider=provider,
         gateway=gateway,
         workers=workers,
         scope=GATEWAY,
         active_round="test-0",
-        secret=SECRET,
         publisher=Published(),
         probe=lambda _: False,
         clock=lambda: now[0],
@@ -98,7 +95,7 @@ def test_new_gateway_gets_boot_grace_and_config_changes_replace_it() -> None:
 
 def test_idle_expiry_waits_for_capture_and_upload_completion(tmp_path: Path) -> None:
     state, provider = MemoryState(), Provider()
-    allocator = Allocator(state, provider, DrainControl(state, SECRET), SPEC)
+    allocator = Allocator(provider, Drain(), SPEC)
     session = allocator.acquire(SCOPE, "00000000-0000-4000-8000-000000000001")
     assert session.pod_id is not None
     now = [0.0]
@@ -106,7 +103,6 @@ def test_idle_expiry_waits_for_capture_and_upload_completion(tmp_path: Path) -> 
         {"calls_per_prompt": 60, "credits_per_prompt": 5_000_000, "models": {}}
     )
     runtime = PodRuntime(
-        state=state,
         evidence=state,
         records=CallRecords(state),
         budget=Budget(state, pricing),
@@ -124,9 +120,91 @@ def test_idle_expiry_waits_for_capture_and_upload_completion(tmp_path: Path) -> 
     now[0] = 1801
     runtime.drain()
     assert not runtime.tick()
-    assert not sealed(state, SCOPE, session.start_id, session.pod_id, runtime.token)
     runtime.active.clear()
     assert runtime.tick()
+    provider.pods[session.pod_id] = replace(
+        provider.pods[session.pod_id], status="EXITED"
+    )
     retired = allocator.retire(SCOPE, session.start_id, session.pod_id)
     assert retired.phase == "retired" and session.pod_id not in provider.pods
     runtime.executor.shutdown(wait=True)
+
+
+def test_cleanup_adopts_a_late_worker_instead_of_deleting_it() -> None:
+    provider = Provider()
+    pending = provider.create(
+        SPEC.body(SCOPE, "00000000-0000-4000-8000-000000000001", epoch_ns=1)
+    )
+    workers = Allocator(provider, Drain(), SPEC)
+    supervisor = Revivor(
+        provider=provider,
+        gateway=Allocator(provider, GatewayDrain(GATEWAY), SPEC),
+        workers=workers,
+        scope=GATEWAY,
+        active_round="test-0",
+        publisher=Published(),
+        probe=lambda _: True,
+    )
+    supervisor.cleanup_workers()
+    selected = workers.current(SCOPE)
+    assert (
+        selected is not None
+        and selected.pod_id == pending.id
+        and selected.phase == "allocated"
+    )
+    assert provider.creates == 1
+
+
+def test_cleanup_removes_only_drained_duplicates_and_old_round_workers() -> None:
+    provider = Provider()
+    workers = Allocator(provider, Drain(), SPEC)
+    active = workers.acquire(SCOPE, "00000000-0000-4000-8000-000000000001")
+    duplicate = provider.create(SPEC.body(SCOPE, active.start_id, epoch_ns=1))
+    old_scope = replace(SCOPE, round="test-old")
+    old = provider.create(
+        SPEC.body(old_scope, "00000000-0000-4000-8000-000000000002", epoch_ns=1)
+    )
+    unrelated = Pod("unrelated", "w404-prefix", SPEC.image, "RUNNING", {})
+    provider.pods[unrelated.id] = unrelated
+    supervisor = Revivor(
+        provider=provider,
+        gateway=Allocator(provider, GatewayDrain(GATEWAY), SPEC),
+        workers=workers,
+        scope=GATEWAY,
+        active_round="test-0",
+        publisher=Published(),
+        probe=lambda _: True,
+    )
+    supervisor.cleanup_workers()
+    assert active.pod_id in provider.pods and unrelated.id in provider.pods
+    assert duplicate.id not in provider.pods and old.id not in provider.pods
+
+
+def test_cleanup_drains_a_unique_late_create_that_exceeds_actual_capacity() -> None:
+    provider, drain = Provider(), Drain(False)
+    workers = Allocator(
+        provider,
+        drain,
+        SPEC,
+        admission=Admission(max_pods=1, hourly_ceiling="0.07", per_pod_ceiling="0.07"),
+    )
+    active = workers.acquire(SCOPE, "00000000-0000-4000-8000-000000000001")
+    other = replace(SCOPE, hotkey="6" * 48)
+    late = provider.create(
+        SPEC.body(other, "00000000-0000-4000-8000-000000000002", epoch_ns=1)
+    )
+    supervisor = Revivor(
+        provider=provider,
+        gateway=Allocator(provider, GatewayDrain(GATEWAY), SPEC),
+        workers=workers,
+        scope=GATEWAY,
+        active_round="test-0",
+        publisher=Published(),
+        probe=lambda _: True,
+    )
+    supervisor.cleanup_workers()
+    assert provider.get(late.id).lifecycle == "draining"  # type: ignore[union-attr]
+    assert active.pod_id in provider.pods and late.id in provider.pods
+    drain.ready = True
+    supervisor.cleanup_workers()
+    assert late.id not in provider.pods and active.pod_id in provider.pods

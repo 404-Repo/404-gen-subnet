@@ -24,7 +24,7 @@ from .lifecycle import AllocationConflict, Allocator, InventoryConflict
 from .models import Scope, identifier, object_dict
 from .records import Call, CallRecords, RecordingConflict
 from .runpod import ProviderUnavailable
-from .security import capability, capture_token, sealed
+from .security import capability, capture_token
 from .state import StateConflict, WriteUncertain
 
 
@@ -428,34 +428,26 @@ class Gateway:
             request.headers.get("Authorization", ""), "Bearer " + token
         ):
             raise AuthRejected("invalid_pod_capability")
-        if not await asyncio.to_thread(
-            self.allocator.selected, scope, start_id, pod_id
-        ):
-            raise AuthRejected("pod_not_selected", 409)
         pod = await asyncio.to_thread(self.allocator.provider.get, pod_id)
-        current = await asyncio.to_thread(self.allocator.status, scope, start_id)
-        if pod is None or current is None or not pod.matches(scope, current):
+        if (
+            pod is None
+            or pod.scope() != scope
+            or pod.markers["WITNESS_START_ID"] != start_id
+        ):
             raise AuthRejected("pod_identity_changed", 409)
+        if pod.lifecycle == "pending" or (
+            pod.lifecycle == "active" and pod.status != "RUNNING"
+        ):
+            raise AuthRejected("pod_starting", 503)
         if self.allocator.admission is not None and (
             pod.hourly_cost is None
             or not Decimal(pod.hourly_cost).is_finite()
             or Decimal(pod.hourly_cost) > self.allocator.admission.per_pod
         ):
-            from .security import seal
-
-            await asyncio.to_thread(
-                seal,
-                self.records.store,
-                scope,
-                start_id,
-                pod_id,
-                token,
-                "request-drain",
-            )
-            raise AuthRejected("pod_price_above_ceiling", 409)
-        if await asyncio.to_thread(
-            sealed, self.records.store, scope, start_id, pod_id, token
-        ):
+            await asyncio.to_thread(self.allocator.retire, scope, start_id, pod_id)
+            # Permit the control socket to deliver drain and its acknowledgement;
+            # a rejected upgrade would leave an expensive dormant Pod retrying.
+        if pod.lifecycle == "drained":
             raise AuthRejected("pod_drained", 409)
         if pod_id in self.registry.peers:
             raise AuthRejected("pod_already_connected", 409)
@@ -464,34 +456,43 @@ class Gateway:
         peer = Peer(socket, scope, start_id, pod_id)
         self.registry.peers[pod_id] = peer
         try:
-            await socket.send_json({"type": "activate", "pod_id": pod_id})
+            selected = await asyncio.to_thread(
+                self.allocator.selected, scope, start_id, pod_id
+            )
+            await socket.send_json(
+                {
+                    "type": "activate" if selected else "drain",
+                    "pod_id": pod_id,
+                    "id": "selection",
+                }
+            )
             async for message in socket:
                 if message.type != WSMsgType.TEXT:
                     break
                 data = object_dict(json.loads(message.data))
                 peer.seen = time.monotonic()
                 if data.get("type") in ("ready", "heartbeat"):
+                    selected = await asyncio.to_thread(
+                        self.allocator.selected, scope, start_id, pod_id
+                    )
                     peer.ready = (
-                        data.get("ready") is True
+                        selected
+                        and data.get("ready") is True
                         and data.get("proof_key_sha256") == self.proof_hash
                         and data.get("pricing_sha256") == self.pricing_hash
                     )
+                    if not selected:
+                        await socket.send_json({"type": "drain", "id": "selection"})
                 elif data.get("type") == "reply":
                     pending = peer.replies.get(str(data.get("id")))
                     if pending is not None and not pending.done():
                         pending.set_result(data)
                 elif data.get("type") == "drained":
                     peer.ready = False
-                    current = await asyncio.to_thread(self.allocator.current, scope)
-                    if (
-                        current is not None
-                        and current.start_id == start_id
-                        and current.pod_id == pod_id
-                        and current.phase in ("allocated", "retiring")
-                    ):
-                        await asyncio.to_thread(
-                            self.allocator.retire, scope, start_id, pod_id
-                        )
+                    peer.drained = True
+                    await asyncio.to_thread(
+                        self.allocator.retire, scope, start_id, pod_id
+                    )
                 else:
                     break
         finally:
@@ -503,6 +504,34 @@ class Gateway:
                     future.set_result({})
             await socket.close()
         return socket
+
+    async def worker_selection(self, request: web.Request) -> web.Response:
+        scope = self.scope(request.headers.get("x-witness-hotkey", ""))
+        located = await asyncio.to_thread(
+            self.records.locate, scope, identifier(request.match_info["exchange_id"])
+        )
+        if located is None:
+            raise AuthRejected("exchange_not_found", 404)
+        _, call = located
+        if call.start_id is None or call.capture_id is None or call.pod_id is None:
+            raise AuthRejected("capture_not_assigned", 409)
+        token = capture_token(
+            capability(self.secret, scope, call.start_id),
+            call.exchange_id,
+            call.capture_id,
+        )
+        if not hmac.compare_digest(
+            request.headers.get("Authorization", ""), "Bearer " + token
+        ):
+            raise AuthRejected("invalid_capture_capability")
+        selected = (
+            call.phase == "capturing"
+            and time.time() < self.round_end
+            and await asyncio.to_thread(
+                self.allocator.selected, scope, call.start_id, call.pod_id
+            )
+        )
+        return web.json_response({"selected": selected})
 
     async def worker_exchange(self, request: web.Request) -> web.WebSocketResponse:
         scope = self.scope(request.headers.get("x-witness-hotkey", ""))
@@ -647,6 +676,9 @@ class Gateway:
                 web.get("/exchanges/{exchange_id}/{name}", self.artifact),
                 web.get("/control/{hotkey}/{start_id}", self.pod_control),
                 web.get("/worker/exchanges/{exchange_id}", self.worker_exchange),
+                web.get(
+                    "/worker/exchanges/{exchange_id}/selection", self.worker_selection
+                ),
             ]
         )
         return app

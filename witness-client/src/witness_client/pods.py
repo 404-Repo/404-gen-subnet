@@ -123,7 +123,12 @@ class PodGatewayClient(GatewayClient):
     def ensure_pod(self) -> str:
         with self._pod_lock:
             if self._start_id is not None:
-                reply = self._json("GET", f"/pods/{self._start_id}")
+                try:
+                    reply = self._json("GET", f"/pods/{self._start_id}")
+                except WitnessError as error:
+                    if error.status_code != 404:
+                        raise
+                    reply = {}
                 session = reply.get("session")
                 if isinstance(session, dict) and session.get("phase") == "allocated":
                     return self._start_id

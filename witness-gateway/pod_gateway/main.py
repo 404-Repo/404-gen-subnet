@@ -15,7 +15,6 @@ from .admission import Admission
 from .auth import Authenticator, Membership, MembershipRefresher
 from .control import DrainControl, Registry
 from .lifecycle import Allocator
-from .models import Journal
 from .records import CallRecords
 from .runpod import RunPodClient
 from .server import Gateway
@@ -30,22 +29,20 @@ async def application(settings: Settings) -> web.Application:
         settings.env["GATEWAY_RUNPOD_API_KEY"],
         http,
         min_interval=float(settings.env.get("GATEWAY_MIN_REQUEST_INTERVAL", "1.1")),
+        cache_seconds=2,
     )
     admission = Admission(
-        state,
         max_pods=int(settings.env.get("WITNESS_MAX_PODS", "250")),
         hourly_ceiling=str(settings.worker_budget),
         per_pod_ceiling=str(settings.pod_ceiling),
     )
     allocator = Allocator(
-        state,
         provider,
-        DrainControl(state, settings.secret, registry),
+        DrainControl(registry),
         settings.worker_spec(),
         admission=admission,
     )
     membership = Membership(
-        state,
         settings.deployment,
         int(settings.env.get("WITNESS_NETUID", "17")),
         settings.round,
@@ -55,15 +52,10 @@ async def application(settings: Settings) -> web.Application:
     refresher = MembershipRefresher(membership, rpc, settings.env["SUBTENSOR_RPC_URL"])
 
     def fence() -> bool:
-        saved = state.load(settings.gateway_scope.key)
-        if saved is None:
-            return False
-        journal = Journal.decode(saved.data, settings.gateway_scope)
-        current = journal.session(journal.current)
-        return (
-            current.phase == "allocated"
-            and current.start_id == settings.env["WITNESS_START_ID"]
-            and current.pod_id == settings.env["RUNPOD_POD_ID"]
+        return allocator.selected(
+            settings.gateway_scope,
+            settings.env["WITNESS_START_ID"],
+            settings.env["RUNPOD_POD_ID"],
         )
 
     parameters = settings.env.get(

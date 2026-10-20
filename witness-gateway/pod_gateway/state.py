@@ -1,4 +1,4 @@
-"""One bounded R2 journal per miner, updated with atomic ETag preconditions."""
+"""Bounded R2 inference/replay records with atomic ETag preconditions."""
 
 from __future__ import annotations
 

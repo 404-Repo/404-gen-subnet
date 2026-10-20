@@ -1,13 +1,10 @@
-"""Deployment-wide capacity reservations survive gateway and Pod replacement."""
+"""Admission from RunPod inventory, including pending and duplicate real Pods."""
 
 from __future__ import annotations
 
-import json
-import uuid
 from decimal import Decimal
 
-from .models import Scope, json_bytes, object_dict
-from .state import StateConflict, StateStore
+from .models import Pod
 
 
 class CapacityReached(RuntimeError):
@@ -16,44 +13,54 @@ class CapacityReached(RuntimeError):
 
 class Admission:
     def __init__(
-        self,
-        store: StateStore,
-        *,
-        max_pods: int,
-        hourly_ceiling: str,
-        per_pod_ceiling: str,
+        self, *, max_pods: int, hourly_ceiling: str, per_pod_ceiling: str
     ) -> None:
-        self.store, self.max_pods = store, max_pods
+        self.max_pods = max_pods
         self.hourly, self.per_pod = Decimal(hourly_ceiling), Decimal(per_pod_ceiling)
         if not 1 <= max_pods <= 1000 or not all(
             v.is_finite() and v > 0 for v in (self.hourly, self.per_pod)
         ):
             raise ValueError("Invalid fleet admission bounds")
 
-    def _change(self, scope: Scope, start_id: str, *, remove: bool) -> None:
-        key = f"pod-capacity/v1/{scope.deployment}.json"
-        slot = f"{scope.key}/{start_id}"
-        for _ in range(16):
-            saved = self.store.load(key)
-            value = object_dict(json.loads(saved.data)) if saved else {"slots": {}}
-            slots = object_dict(value["slots"])
-            if remove:
-                slots.pop(slot, None)
-            elif slot not in slots:
-                total = sum((Decimal(str(cost)) for cost in slots.values()), Decimal(0))
-                if len(slots) >= self.max_pods or total + self.per_pod > self.hourly:
-                    raise CapacityReached("Witness fleet capacity reached")
-                slots[slot] = str(self.per_pod)
-            value["revision"] = str(uuid.uuid4())
-            try:
-                self.store.save(key, json_bytes(value), saved.etag if saved else None)
-                return
-            except StateConflict:
-                continue
-        raise StateConflict("Fleet admission is busy")
+    def check(self, inventory: list[Pod], deployment: str, *, pending: int = 0) -> None:
+        pods = [
+            p
+            for p in inventory
+            if p.scope() is not None
+            and p.markers["WITNESS_DEPLOYMENT"] == deployment
+            and p.markers["WITNESS_ROUND"] != "gateway"
+        ]
+        total = self.per_pod * pending
+        for pod in pods:
+            cost = self.per_pod if pod.hourly_cost is None else Decimal(pod.hourly_cost)
+            if not cost.is_finite() or cost < 0:
+                raise CapacityReached("RunPod returned an invalid hourly cost")
+            total += max(cost, self.per_pod)
+        if len(pods) + pending >= self.max_pods or total + self.per_pod > self.hourly:
+            raise CapacityReached("Witness fleet capacity reached")
 
-    def reserve(self, scope: Scope, start_id: str) -> None:
-        self._change(scope, start_id, remove=False)
-
-    def release(self, scope: Scope, start_id: str) -> None:
-        self._change(scope, start_id, remove=True)
+    def excess(self, inventory: list[Pod], deployment: str) -> list[Pod]:
+        """Drain resources that appeared late beyond current provider headroom."""
+        pods = [
+            p
+            for p in inventory
+            if p.scope() is not None
+            and p.markers["WITNESS_DEPLOYMENT"] == deployment
+            and p.markers["WITNESS_ROUND"] != "gateway"
+        ]
+        costs: dict[str, Decimal] = {}
+        for pod in pods:
+            cost = self.per_pod if pod.hourly_cost is None else Decimal(pod.hourly_cost)
+            if not cost.is_finite() or cost < 0:
+                raise CapacityReached("RunPod returned an invalid hourly cost")
+            costs[pod.id] = max(cost, self.per_pod)
+        count, total = len(pods), sum(costs.values(), Decimal(0))
+        victims: list[Pod] = []
+        for pod in sorted(
+            pods, key=lambda p: (p.lifecycle == "active", -p.epoch_ns, p.id)
+        ):
+            if count <= self.max_pods and total <= self.hourly:
+                break
+            victims.append(pod)
+            count, total = count - 1, total - costs[pod.id]
+        return victims

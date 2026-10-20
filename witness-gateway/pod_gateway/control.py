@@ -11,8 +11,6 @@ from dataclasses import dataclass, field
 from aiohttp import web
 
 from .models import Pod, Scope
-from .security import capability, sealed
-from .state import StateStore
 
 
 @dataclass
@@ -22,6 +20,7 @@ class Peer:
     start_id: str
     pod_id: str
     ready: bool = False
+    drained: bool = False
     seen: float = field(default_factory=time.monotonic)
     replies: dict[str, asyncio.Future[dict[str, object]]] = field(default_factory=dict)
 
@@ -63,27 +62,17 @@ class Registry:
 
 
 class DrainControl:
-    def __init__(
-        self, store: StateStore, secret: bytes, registry: Registry | None = None
-    ) -> None:
-        self.store, self.secret, self.registry = store, secret, registry
+    def __init__(self, registry: Registry | None = None) -> None:
+        self.registry = registry
 
     def drain(self, pod: Pod) -> bool:
-        if pod.status == "EXITED":
-            # The allocation was already revoked before this check. No process
-            # remains to capture/upload; any unresolved call stays unresolved.
-            return True
-        scope = Scope(
-            pod.markers["WITNESS_DEPLOYMENT"],
-            pod.markers["WITNESS_ROUND"],
-            pod.markers["WITNESS_HOTKEY"],
-        )
-        start_id = pod.markers["WITNESS_START_ID"]
-        token = capability(self.secret, scope, start_id)
-        if sealed(self.store, scope, start_id, pod.id, token):
+        if pod.status == "EXITED" or pod.lifecycle == "drained":
             return True
         if self.registry is None:
             return False
+        peer = self.registry.peers.get(pod.id)
+        if peer is not None and peer.drained:
+            return True
         future = asyncio.run_coroutine_threadsafe(
             self.registry.command(pod.id, "drain"), self.registry.loop
         )
@@ -91,5 +80,4 @@ class DrainControl:
             future.result(timeout=12)
         except (TimeoutError, concurrent.futures.CancelledError):
             future.cancel()
-        # Only the durable, permanently fenced seal authorizes deletion.
-        return sealed(self.store, scope, start_id, pod.id, token)
+        return peer is not None and peer.drained

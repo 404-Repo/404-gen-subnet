@@ -1,47 +1,67 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 
 import pytest
-from support import MemoryState, Provider
+from support import Provider
+from test_lifecycle import FIRST, SCOPE, SECOND, SPEC, Drain
 
 from pod_gateway.admission import Admission, CapacityReached
-from pod_gateway.control import DrainControl
 from pod_gateway.lifecycle import Allocator
-from pod_gateway.models import PodSpec, Scope
-from pod_gateway.security import capability, seal
 
 
-def test_capacity_reservation_survives_restart_and_is_released_only_after_retirement() -> (
-    None
-):
-    state, provider = MemoryState(), Provider()
-    secret = b"x" * 32
-    scope = Scope("competition", "test-0", "5" * 48)
-    spec = PodSpec("registry/witness@sha256:" + "a" * 64)
-    admission = Admission(
-        state, max_pods=1, hourly_ceiling="0.07", per_pod_ceiling="0.07"
-    )
-    first = Allocator(
-        state, provider, DrainControl(state, secret), spec, admission=admission
-    )
-    current = first.acquire(scope, "00000000-0000-4000-8000-000000000001")
-    other_scope = replace(scope, hotkey="6" * 48)
-    restarted = Allocator(
-        state, provider, DrainControl(state, secret), spec, admission=admission
-    )
+def test_capacity_uses_actual_inventory_and_frees_when_the_pod_disappears() -> None:
+    provider = Provider()
+    policy = Admission(max_pods=1, hourly_ceiling="0.07", per_pod_ceiling="0.07")
+    old = Allocator(provider, Drain(), SPEC, admission=policy).acquire(SCOPE, FIRST)
+    other = replace(SCOPE, hotkey="6" * 48)
+    restarted = Allocator(provider, Drain(), SPEC, admission=policy)
     with pytest.raises(CapacityReached):
-        restarted.acquire(other_scope, "00000000-0000-4000-8000-000000000002")
-    assert provider.creates == 1
-    assert current.pod_id is not None
-    seal(
-        state,
-        scope,
-        current.start_id,
-        current.pod_id,
-        capability(secret, scope, current.start_id),
-        "drain",
+        restarted.acquire(other, SECOND)
+    provider.pods.pop(old.pod_id or "")
+    assert restarted.acquire(other, SECOND).phase == "allocated"
+
+
+def test_duplicate_pending_and_exited_pods_count_until_confirmed_deleted() -> None:
+    provider = Provider()
+    first = provider.create(SPEC.body(SCOPE, FIRST))
+    second = provider.create(SPEC.body(SCOPE, FIRST))
+    provider.pods[second.id] = replace(second, status="EXITED")
+    policy = Admission(max_pods=2, hourly_ceiling="0.14", per_pod_ceiling="0.07")
+    with pytest.raises(CapacityReached):
+        policy.check(provider.list(), SCOPE.deployment)
+    provider.delete(first.id)
+    policy.check(provider.list(), SCOPE.deployment)
+
+
+def test_inventory_cost_above_quote_and_inflight_attempts_consume_headroom() -> None:
+    provider = Provider()
+    pod = provider.create(SPEC.body(SCOPE, FIRST))
+    provider.pods[pod.id] = replace(pod, hourly_cost="0.11")
+    policy = Admission(max_pods=250, hourly_ceiling="0.15", per_pod_ceiling="0.07")
+    with pytest.raises(CapacityReached):
+        policy.check(provider.list(), SCOPE.deployment)
+    with pytest.raises(CapacityReached):
+        policy.check([], SCOPE.deployment, pending=2)
+
+
+def test_concurrent_miners_share_serialized_provider_capacity_admission() -> None:
+    provider = Provider()
+    allocator = Allocator(
+        provider,
+        Drain(),
+        SPEC,
+        admission=Admission(max_pods=1, hourly_ceiling="0.07", per_pod_ceiling="0.07"),
     )
-    assert first.retire(scope, current.start_id, current.pod_id).phase == "retired"
-    second = restarted.reconcile(other_scope)
-    assert second is not None and second.phase == "allocated" and provider.creates == 2
+
+    def connect(character: str) -> bool:
+        try:
+            allocator.acquire(replace(SCOPE, hotkey=character * 48), FIRST)
+            return True
+        except CapacityReached:
+            return False
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        accepted = list(pool.map(connect, "ABCDEFGH"))
+    assert sum(accepted) == 1 and len(provider.pods) == 1

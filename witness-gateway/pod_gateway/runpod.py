@@ -14,6 +14,7 @@ import httpx
 from .models import MARKERS, Pod, object_dict, string
 
 API = "https://api.runpod.io/v2"
+PodList = list[Pod]
 
 
 class ProviderUnavailable(RuntimeError):
@@ -26,7 +27,7 @@ class ProviderUnavailable(RuntimeError):
 
 
 class CreateUnknown(ProviderUnavailable):
-    """The create may have reached RunPod; reconcile instead of POSTing again."""
+    """The create may have reached RunPod; this request is never auto-replayed."""
 
 
 class CreateRejected(ProviderUnavailable):
@@ -34,15 +35,21 @@ class CreateRejected(ProviderUnavailable):
 
 
 class PodProvider(Protocol):
-    def list(self) -> list[Pod]: ...
+    def list(self, *, fresh: bool = False) -> list[Pod]: ...
     def get(self, pod_id: str) -> Pod | None: ...
     def create(self, body: dict[str, object]) -> Pod: ...
     def delete(self, pod_id: str) -> None: ...
+    def rename(self, pod_id: str, name: str) -> Pod: ...
 
 
 class RunPodClient:
     def __init__(
-        self, api_key: str, client: httpx.Client, *, min_interval: float = 0
+        self,
+        api_key: str,
+        client: httpx.Client,
+        *,
+        min_interval: float = 0,
+        cache_seconds: float = 0,
     ) -> None:
         if not 0 <= min_interval <= 60:
             raise ValueError("Invalid RunPod request interval")
@@ -50,6 +57,9 @@ class RunPodClient:
         self._client = client
         self._interval, self._next = min_interval, 0.0
         self._rate = threading.Lock()
+        self._cache_seconds = cache_seconds
+        self._cache_lock = threading.Lock()
+        self._cached: tuple[float, list[Pod]] | None = None
 
     @staticmethod
     def http_client() -> httpx.Client:
@@ -129,7 +139,7 @@ class RunPodClient:
             environment = object_dict({} if value.get("env") is None else value["env"])
             # Discard all secrets before returning provider data to the core.
             markers = {
-                key: string(environment[key]) for key in MARKERS if key in environment
+                key: str(environment[key]) for key in MARKERS if key in environment
             }
             tcp: dict[int, tuple[str, int]] = {}
             runtime = value.get("runtime")
@@ -165,7 +175,19 @@ class RunPodClient:
         except (KeyError, ValueError):
             raise ProviderUnavailable("Malformed RunPod Pod") from None
 
-    def list(self) -> list[Pod]:
+    def list(self, *, fresh: bool = False) -> list[Pod]:
+        with self._cache_lock:
+            if (
+                not fresh
+                and self._cached is not None
+                and time.monotonic() - self._cached[0] < self._cache_seconds
+            ):
+                return list(self._cached[1])
+            pods = self._list()
+            self._cached = (time.monotonic(), pods)
+            return list(pods)
+
+    def _list(self) -> PodList:
         pods: dict[str, Pod] = {}
         cursor: str | None = None
         cursors: set[str] = set()
@@ -211,6 +233,7 @@ class RunPodClient:
         return pod
 
     def create(self, body: dict[str, object]) -> Pod:
+        self._cached = None
         try:
             response = self._request("POST", "/pods", body=body)
         except CreateRejected:
@@ -235,7 +258,20 @@ class RunPodClient:
             raise CreateUnknown("RunPod creation reply is incomplete") from None
 
     def delete(self, pod_id: str) -> None:
+        self._cached = None
         response = self._request("DELETE", f"/pods/{quote(pod_id, safe='')}")
         if response.status_code not in (204, 404):
             raise self._error(response)
         # This acknowledgement alone does not establish absence. The core GETs.
+
+    def rename(self, pod_id: str, name: str) -> Pod:
+        self._cached = None
+        response = self._request(
+            "PATCH", f"/pods/{quote(pod_id, safe='')}", body={"name": name}
+        )
+        if response.status_code != 200:
+            raise self._error(response)
+        pod = self._pod(self._object(response))
+        if pod.id != pod_id or pod.name != name:
+            raise ProviderUnavailable("RunPod lifecycle update differs")
+        return pod

@@ -1,14 +1,19 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from dataclasses import replace
-from typing import Callable
 
 import httpx
 import pytest
 
 from pod_gateway.models import MARKERS, PodSpec, Scope
-from pod_gateway.runpod import CreateRejected, CreateUnknown, ProviderUnavailable, RunPodClient
+from pod_gateway.runpod import (
+    CreateRejected,
+    CreateUnknown,
+    ProviderUnavailable,
+    RunPodClient,
+)
 
 SCOPE = Scope("competition", "test-0", "5" * 48)
 SPEC = PodSpec("registry/witness@sha256:" + "a" * 64, env={"PRIVATE_KEY": "hidden-operator-key"})
@@ -192,3 +197,17 @@ def test_spec_is_pinned_and_caller_environment_cannot_mutate_it() -> None:
     ):
         with pytest.raises(ValueError):
             replace(SPEC, **values)
+
+
+
+def test_lifecycle_patch_changes_only_the_exact_pods_name() -> None:
+    name = SCOPE.name(START) + "-active"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "PATCH"
+        assert str(request.url) == "https://api.runpod.io/v2/pods/cpu-pod"
+        assert json.loads(request.content) == {"name": name}
+        return httpx.Response(200, json={**pod_json(), "name": name})
+
+    pod = client(handler).rename("cpu-pod", name)
+    assert pod.lifecycle == "active" and pod.scope() == SCOPE
