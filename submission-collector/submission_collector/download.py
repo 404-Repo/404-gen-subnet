@@ -7,7 +7,6 @@ from loguru import logger
 from subnet_common.competition.generations import (
     GenerationResult,
     GenerationsMap,
-    GenerationSource,
     get_generations,
     save_generations,
 )
@@ -117,7 +116,6 @@ class DownloadPipeline:
             git=self.git_batcher.git,
             round_num=round_num,
             hotkey=hotkey,
-            source=GenerationSource.SUBMITTED,
             ref=ref,
         )
 
@@ -185,7 +183,6 @@ class DownloadPipeline:
                 git_batcher=self.git_batcher,
                 round_num=round_num,
                 hotkey=hotkey,
-                source=GenerationSource.SUBMITTED,
                 generations=generations,
             )
 
