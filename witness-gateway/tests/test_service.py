@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import json
 import ssl
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
@@ -211,6 +212,8 @@ class Fleet:
                 "hotkey": self.scope.hotkey,
                 "round": self.scope.round,
                 "exchange_id": call.exchange_id,
+                "pod_id": call.pod_id,
+                "pod_start_id": call.start_id,
                 "proof_key_sha256": PROOF,
                 "pricing_sha256": self.budget.pricing_hash,
             }
@@ -242,8 +245,9 @@ class Fleet:
             await socket.send_json({"type": "finished"})
 
 
+@pytest.mark.parametrize("call_limit", [1, 2])
 def test_https_gateway_deduplicates_inflight_requests_and_replays_without_inference(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, call_limit: int
 ) -> None:
     async def scenario() -> None:
         server_tls, client_tls = tls(tmp_path)
@@ -352,7 +356,9 @@ def test_https_gateway_deduplicates_inflight_requests_and_replays_without_infere
                     openai_api_key="fixture-" + "a" * 80,
                     delivery_timeout=20,
                 ) as witness:
-                    bound = witness.for_generation(image, 42, "a" * 64)
+                    bound = witness.for_generation(
+                        image, 42, "a" * 64, call_slots=threading.BoundedSemaphore(call_limit)
+                    )
                     with ThreadPoolExecutor(max_workers=2) as pool:
                         futures = [
                             pool.submit(

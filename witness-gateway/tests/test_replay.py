@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeout
 from pathlib import Path
@@ -149,12 +150,17 @@ def test_replay_rejects_response_tampering_after_verification(bundle: Path) -> N
         replay.create(stream=True, model="fixture", input="image")
 
 
-def resumed_generation(bundle: Path, timeout: float = 5) -> GenerationWitness:
+def resumed_generation(
+    bundle: Path, timeout: float = 5, call_slots: threading.Semaphore | None = None
+) -> GenerationWitness:
     recording = RecordingView.model_validate_json((bundle / "recording.json").read_bytes())
 
     class CachedGateway(PodGatewayClient):
         def __init__(self) -> None:
             self.delivery_timeout = timeout
+
+        def recording(self, generation: Generation) -> RecordingView:
+            return recording
 
         def reserve(self, invocation: Invocation) -> Snapshot:
             call = recording.calls[recording.entries[invocation.ordinal].call_id]
@@ -183,7 +189,19 @@ def resumed_generation(bundle: Path, timeout: float = 5) -> GenerationWitness:
             _hotkey=SimpleNamespace(ss58_address="5" * 48), _http=None, _gateway=CachedGateway(),
         ),
     )
-    return GenerationWitness(parent, recording.generation)
+    return GenerationWitness(parent, recording.generation, call_slots=call_slots)
+
+
+def test_resumed_generation_restores_reservation_order_without_occupying_capture_slots(bundle: Path) -> None:
+    slots = threading.BoundedSemaphore(1)
+    resumed = resumed_generation(bundle, call_slots=slots)
+    with slots, ThreadPoolExecutor(max_workers=2) as pool:
+        second = pool.submit(resumed.create, stream=True, model="fixture", input="image", witness_seed=1)
+        with pytest.raises(FutureTimeout):
+            second.result(timeout=0.1)
+        first = pool.submit(resumed.create, stream=True, model="fixture", input="image")
+        assert second.result(timeout=5).output_text == "second"
+        assert first.result(timeout=5).output_text == "first"
 
 
 def test_resumed_generation_honors_saved_delivery_order(bundle: Path) -> None:

@@ -5,6 +5,8 @@ from __future__ import annotations
 import hashlib
 import random
 import re
+from collections.abc import Iterable
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, Unpack, cast
@@ -48,13 +50,12 @@ class Choice(BaseModel):
 def candidate(
     image: bytes,
     calls: ModelCalls,
-    renderer: Renderer,
     model: str,
     position: int,
     *,
     parent: Candidate | None = None,
     feedback: str = "",
-) -> Candidate | None:
+) -> str | None:
     content = [
         {"type": "input_text", "text": "Reconstruct this target as the specified Three.js module."},
         {"type": "input_image", "image_url": png_data_url(image), "detail": "auto"},
@@ -93,13 +94,19 @@ def candidate(
     fenced = re.fullmatch(r"```(?:javascript|js)?\s*\n([\s\S]*?)\n```", source)
     if fenced:
         source = fenced[1]
-    if not source:
-        return None
-    try:
-        grid = renderer.render(source, GRID)
-    except RenderRejected:
-        return None
-    return Candidate(source, grid)
+    return source or None
+
+
+def render_candidates(futures: Iterable[Future[str | None]], renderer: Renderer) -> list[Candidate]:
+    candidates = []
+    for future in futures:
+        source = future.result()
+        if source is not None:
+            try:
+                candidates.append(Candidate(source, renderer.render(source, GRID)))
+            except RenderRejected:
+                pass
+    return candidates
 
 
 def choose(
@@ -172,27 +179,26 @@ def choose(
 
 
 def run(image: bytes, seed: int, calls: ModelCalls, renderer: Renderer) -> str | None:
-    initial = []
-    for position, model in enumerate(("gpt-6-astra", SOL, SOL), start=1):
-        value = candidate(image, calls, renderer, model, position)
-        if value is not None:
-            initial.append(value)
-    selected = choose(image, seed, calls, initial, 4)
-    if selected is None:
-        return None
-    winner, choice = selected
-    final = [winner]
-    for position in (5, 6):
-        value = candidate(
-            image,
-            calls,
-            renderer,
-            SOL,
-            position,
-            parent=winner,
-            feedback=choice.reason + "\n" + choice.improvements,
-        )
-        if value is not None:
-            final.append(value)
-    selected = choose(image, seed, calls, final, 7)
-    return None if selected is None else selected[0].source
+    with ThreadPoolExecutor(max_workers=3, thread_name_prefix="miner-candidate") as pool:
+        initial = [
+            pool.submit(candidate, image, calls, model, position)
+            for position, model in enumerate(("gpt-6-astra", SOL, SOL), start=1)
+        ]
+        selected = choose(image, seed, calls, render_candidates(initial, renderer), 4)
+        if selected is None:
+            return None
+        winner, choice = selected
+        refinements = [
+            pool.submit(
+                candidate,
+                image,
+                calls,
+                SOL,
+                position,
+                parent=winner,
+                feedback=choice.reason + "\n" + choice.improvements,
+            )
+            for position in (5, 6)
+        ]
+        selected = choose(image, seed, calls, [winner, *render_candidates(refinements, renderer)], 7)
+        return None if selected is None else selected[0].source

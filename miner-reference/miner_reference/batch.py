@@ -74,38 +74,35 @@ class LimitedCalls:
     def __init__(
         self,
         calls: ModelCalls,
-        slots: threading.Semaphore,
         directory: Path,
         progress: Callable[[str], None],
     ) -> None:
-        self.calls, self.slots, self.directory, self.progress = calls, slots, directory, progress
+        self.calls, self.directory, self.progress = calls, directory, progress
         directory.mkdir(mode=0o700, exist_ok=True)
 
     def create(self, *, witness_seed: int = 0, **params: Unpack[ResponseCreateParamsStreaming]) -> WitnessResult:
-        self.progress(f"call {witness_seed}/7 {params.get('model')}: waiting")
-        with self.slots:
-            self.progress(f"call {witness_seed}/7 {params.get('model')}: running")
-            try:
-                result = self.calls.create(witness_seed=witness_seed, **params)
-            except WitnessError as error:
-                if error.source == "provider":
-                    usage = error.response.usage if error.response is not None else None
+        self.progress(f"call {witness_seed}/7 {params.get('model')}: running")
+        try:
+            result = self.calls.create(witness_seed=witness_seed, **params)
+        except WitnessError as error:
+            if error.source == "provider":
+                usage = error.response.usage if error.response is not None else None
+                save(
+                    self.directory / f"{witness_seed:02}.json",
+                    canonical(
+                        {
+                            "model": params.get("model"),
+                            "error": error.code,
+                            "usage": None if usage is None else usage.model_dump(),
+                        }
+                    ),
+                )
+                if error.response is not None:
                     save(
-                        self.directory / f"{witness_seed:02}.json",
-                        canonical(
-                            {
-                                "model": params.get("model"),
-                                "error": error.code,
-                                "usage": None if usage is None else usage.model_dump(),
-                            }
-                        ),
+                        self.directory / f"{witness_seed:02}.response.json",
+                        error.response.model_dump_json().encode(),
                     )
-                    if error.response is not None:
-                        save(
-                            self.directory / f"{witness_seed:02}.response.json",
-                            error.response.model_dump_json().encode(),
-                        )
-                raise
+            raise
         # A fixed stage file replaces its replayed observation; totals do not grow
         # when a restart consumes the same response again.
         save(self.directory / f"{witness_seed:02}.response.json", result.response.model_dump_json().encode())
@@ -158,7 +155,9 @@ def run_batch(
 
     def generate(prompt: Prompt) -> str:
         image = prompt.read()
-        bound = witness.for_generation(image, settings.seed, settings.source_sha256, prompt_url=prompt.url)
+        bound = witness.for_generation(
+            image, settings.seed, settings.source_sha256, prompt_url=prompt.url, call_slots=model_slots
+        )
         directory = root / prompt.id
         directory.mkdir(mode=0o700, exist_ok=True)
         checkpoint, selected = directory / "result.json", directory / "selected.js"
@@ -173,9 +172,7 @@ def run_batch(
                 ):
                     raise ValueError("Selected output changed")
                 return str(result["status"])
-        calls = LimitedCalls(
-            bound.responses, model_slots, directory / "calls", lambda text: notify(prompt.id + " | " + text)
-        )
+        calls = LimitedCalls(bound.responses, directory / "calls", lambda text: notify(prompt.id + " | " + text))
         previews = SavedRenderer(renderer, directory / "renders", render_slots)
         try:
             source = pipeline.run(image, settings.seed, calls, previews)

@@ -5,10 +5,10 @@ The sandbox calls it for each prompt image and receives a Three.js module.
 
 Copy [main.py](main.py), [output_specifications.md](output_specifications.md) and
 the [miner_reference package](miner_reference/) into your repository root.
-For each image, the example generates one Astra and two Sol candidates, renders
-their grids, and asks Sol to select a winner and improvements. Two independent
-Sol calls refine that same winner. Sol then selects from the incumbent and the
-valid refinements. The selected JavaScript is returned.
+For each image, the example generates one Astra and two Sol candidates concurrently,
+renders their grids, and asks Sol to select a winner and improvements. Two concurrent
+Sol calls independently refine that same winner. Sol then selects from the incumbent
+and the valid refinements. The selected JavaScript is returned.
 
 The sandbox runner, automatic recording/replay and receipt submission described
 here still need implementation.
@@ -98,10 +98,20 @@ prompt count is a round setting.
 
 The [batch runner](miner_reference/batch.py) runs independent prompt pipelines
 against the Python CPU Pod witness. Each prompt has a separate generation
-recording; its model calls remain ordered. Model requests from different prompts
-can overlap each other and rendering. Defaults are four active prompts, two
-simultaneous model calls, and one render. Match `--parallel-calls` to the witness
-Pod's configured capture concurrency, and `--parallel-renders` to renderer capacity.
+recording. The three initial calls and two refinements run concurrently within
+their stages; each selection waits for all its candidates. Model requests from
+different prompts can overlap each other and rendering. Renders within a prompt
+follow candidate order, independently of model completion order.
+
+A batch may contain all 128 prompts or a larger manifest. `--parallel-prompts`
+bounds active prompt pipelines and `--parallel-calls` bounds active inference
+captures across them. Each pipeline can use up to three simultaneous model calls,
+so eight active prompts can offer up to 24 calls, subject to the shared call limit.
+Defaults remain four active prompts, two simultaneous model calls, and one render.
+All concurrency settings accept 1 through 32. Match `--parallel-calls` to the witness
+Pod's configured `WITNESS_MAX_CAPTURES`, and `--parallel-renders` to renderer capacity.
+For example, eight prompt pipelines with a 12-call limit require a witness Pod
+configured and sized for 12 concurrent captures. The Pod default is two.
 
 Use the pinned `witness_client` and `renderer_client` packages supplied by your
 runtime. From this checkout, put `miner-reference` on `PYTHONPATH`. The witness
@@ -154,6 +164,8 @@ usage under `calls/`, source/PNG/rejection checkpoints under `renders/`, and the
 final `selected.js` and `result.json`. The source, seed, inputs, witness
 configuration, wallet identity and renderer identity must stay fixed on resume.
 Concurrency settings may change between runs.
+Recovery restores recorded invocation and delivery order before returning saved
+responses; those waits do not occupy inference capture slots.
 
 An infrastructure failure leaves that prompt `pending` while other prompts
 continue. Repeat the same command to resume saved model responses and render

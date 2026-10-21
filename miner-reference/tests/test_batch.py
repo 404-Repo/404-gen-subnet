@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import threading
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Unpack
 
@@ -124,6 +125,7 @@ class Witness(WitnessClient):
         source_sha256: str,
         *,
         prompt_url: str | None = None,
+        call_slots: threading.Semaphore | None = None,
     ) -> GenerationWitness:
         generation = Generation.from_prompt(image, seed, source_sha256, round_number="test-0", prompt_url=prompt_url)
         parent = self
@@ -133,38 +135,48 @@ class Witness(WitnessClient):
                 self.generation = generation
                 self.responses = self
                 self.position = 0
+                self.condition = threading.Condition()
+                with parent.lock:
+                    self.prefix = list(parent.requests.get(generation.id, []))
 
             def create(
                 self, *, witness_seed: int = 0, **params: Unpack[ResponseCreateParamsStreaming]
             ) -> WitnessResult:
                 key = RequestKey.from_body("api", serialize_body(params, "api"), witness_seed)
-                with parent.lock:
-                    requests = parent.requests.setdefault(generation.id, [])
-                    if self.position < len(requests):
-                        assert requests[self.position] == key, "Generation request order changed on resume"
-                    else:
-                        requests.append(key)
+                with self.condition:
+                    while self.position < len(self.prefix) and self.prefix[self.position] != key:
+                        assert self.condition.wait(timeout=5), "Generation request order changed on resume"
+                    with parent.lock:
+                        requests = parent.requests.setdefault(generation.id, [])
+                        if self.position == len(requests):
+                            requests.append(key)
                     self.position += 1
+                    self.condition.notify_all()
+                with parent.lock:
                     saved = parent.recorded.get((generation.id, key.id))
                     if saved is not None:
                         return saved
-                    parent.active += 1
-                    parent.peak = max(parent.peak, parent.active)
-                    parent.paid += 1
-                    barrier = parent.first_pair if parent.paid <= 2 else None
-                try:
-                    if barrier is not None:
-                        barrier.wait(timeout=5)
-                    value = Calls().create(witness_seed=witness_seed, **params)
+                with call_slots if call_slots is not None else nullcontext():
                     with parent.lock:
-                        parent.recorded[generation.id, key.id] = value
-                        if parent.lose_reply_once:
-                            parent.lose_reply_once = False
-                            raise WitnessError("Lost delivery", source="gateway", code="connection_lost")
-                    return value
-                finally:
-                    with parent.lock:
-                        parent.active -= 1
+                        parent.active += 1
+                        parent.peak = max(parent.peak, parent.active)
+                        parent.paid += 1
+                        barrier = parent.first_pair
+                        if barrier is not None and parent.paid > barrier.parties:
+                            barrier = None
+                    try:
+                        if barrier is not None:
+                            barrier.wait(timeout=5)
+                        value = Calls().create(witness_seed=witness_seed, **params)
+                        with parent.lock:
+                            parent.recorded[generation.id, key.id] = value
+                            if parent.lose_reply_once:
+                                parent.lose_reply_once = False
+                                raise WitnessError("Lost delivery", source="gateway", code="connection_lost")
+                        return value
+                    finally:
+                        with parent.lock:
+                            parent.active -= 1
 
             def finish(self, output: str | None) -> None:
                 with parent.lock:
@@ -192,15 +204,40 @@ def test_five_candidates_refine_the_same_first_winner() -> None:
     calls, renderer = Calls(), Renderer()
     source = run(PNG, 42, calls, renderer)
     assert source in renderer.sources and len(renderer.sources) == 5
-    assert [params["model"] for _, params in calls.requests] == ["gpt-6-astra"] + ["gpt-6.1-sol"] * 6
+    requests = dict(calls.requests)
+    assert [requests[i]["model"] for i in range(1, 8)] == ["gpt-6-astra"] + ["gpt-6.1-sol"] * 6
     assert len({seed for seed, _ in calls.requests}) == 7
-    refinements = [
-        json.loads(serialize_body(params, "api"))["input"][0]["content"] for _, params in calls.requests[4:6]
-    ]
+    refinements = [json.loads(serialize_body(requests[i], "api"))["input"][0]["content"] for i in (5, 6)]
     assert refinements[0] == refinements[1]
     assert "widen the base" in refinements[0][2]["text"]
     assert any(value in refinements[0][2]["text"] for value in renderer.sources[:3])
     assert renderer.sources[3] not in refinements[1][2]["text"]
+
+
+def test_initial_candidates_and_refinements_overlap_but_render_in_stable_order() -> None:
+    initial, refinements = threading.Barrier(3), threading.Barrier(2)
+    completed: set[int] = set()
+    lock = threading.Lock()
+
+    class ParallelCalls(Calls):
+        def create(self, *, witness_seed: int = 0, **params: Unpack[ResponseCreateParamsStreaming]) -> WitnessResult:
+            if witness_seed in (1, 2, 3):
+                initial.wait(timeout=5)
+            elif witness_seed in (5, 6):
+                refinements.wait(timeout=5)
+            with lock:
+                if witness_seed == 4:
+                    assert {1, 2, 3} <= completed
+                elif witness_seed == 7:
+                    assert {5, 6} <= completed
+                completed.add(witness_seed)
+            return super().create(witness_seed=witness_seed, **params)
+
+    renderer = Renderer()
+    assert run(PNG, 42, ParallelCalls(), renderer) is not None
+    assert renderer.sources == [
+        Calls().create(witness_seed=i, stream=True, model="gpt-6.1-sol").output_text for i in (1, 2, 3, 5, 6)
+    ]
 
 
 def test_invalid_candidates_and_selections_do_not_trigger_repairs() -> None:
@@ -245,7 +282,7 @@ def test_render_outage_does_not_block_other_prompts_or_repeat_paid_results(
     config = settings(tmp_path, parallel_prompts=1)
     first = run_batch(prompts[:2], config, witness, renderer, progress=lambda _: None)
     assert first == {"0": "pending", "1": "selected"}
-    assert witness.paid == 8
+    assert witness.paid == 10
     second = run_batch(prompts[:2], config, witness, renderer, progress=lambda _: None)
     assert second == {"0": "selected", "1": "selected"}
     assert witness.paid == 14
@@ -275,7 +312,7 @@ def test_lost_model_reply_recovers_the_exact_prompt_and_request(tmp_path: Path, 
         "0": "pending",
         "1": "selected",
     }
-    assert witness.paid == 8
+    assert witness.paid == 10
     assert run_batch(prompts[:2], config, witness, renderer, progress=lambda _: None) == {
         "0": "selected",
         "1": "selected",
@@ -302,10 +339,11 @@ def test_128_prompt_batch_finishes_896_calls_and_640_renders(tmp_path: Path) -> 
         path.write_bytes(image)
         prompts.append(Prompt(str(i), path, hashlib.sha256(image).hexdigest()))
     witness, renderer = Witness(), Renderer()
-    witness.first_pair = threading.Barrier(2)
-    statuses = run_batch(prompts, settings(tmp_path), witness, renderer, progress=lambda _: None)
+    witness.first_pair = threading.Barrier(12)
+    config = settings(tmp_path, parallel_prompts=8, parallel_calls=12, parallel_renders=2)
+    statuses = run_batch(prompts, config, witness, renderer, progress=lambda _: None)
     assert len(statuses) == 128 and set(statuses.values()) == {"selected"}
-    assert witness.paid == 896 and witness.peak == 2
+    assert witness.paid == 896 and witness.peak == 12
     assert len(renderer.sources) == 640 and len(witness.finished) == 128
 
 
