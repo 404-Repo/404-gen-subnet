@@ -62,6 +62,24 @@ def test_equal_requests_share_one_capture_but_keep_both_invocations() -> None:
         records.reserve(SCOPE, changed)
 
 
+def test_expired_unstarted_reservation_can_resume_without_extending_an_active_capture(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = [1000.0]
+    monkeypatch.setattr("pod_gateway.records.time.time", lambda: clock[0])
+    records, item = CallRecords(MemoryState(), exchange_seconds=60), invocation()
+    first = records.reserve(SCOPE, item)
+    clock[0] += 61
+    resumed = records.reserve(SCOPE, item)
+    assert resumed.exchange_id == first.exchange_id and resumed.deadline > clock[0]
+    assigned = records.assign(SCOPE, item, "00000000-0000-4000-8000-000000000001", "pod-one")
+    assert records.claim(SCOPE, item, "pod-one", assigned.capture_id or "")
+    clock[0] += 61
+    assert records.reserve(SCOPE, item).deadline == resumed.deadline
+    recording = records.load(SCOPE, item.generation.id)
+    assert recording is not None and len(recording.entries) == 1
+
+
 def test_concurrent_retries_grant_exactly_one_capture_claim() -> None:
     records = CallRecords(MemoryState())
     with ThreadPoolExecutor(max_workers=8) as pool:

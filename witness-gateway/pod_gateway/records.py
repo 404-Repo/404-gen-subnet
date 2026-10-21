@@ -125,7 +125,10 @@ class CallRecords:
             if index < len(recording.entries):
                 if recording.entries[index].call_id != key:
                     raise RecordingConflict("Replay request or call order differs")
-                return recording.calls[key].model_copy(deep=True)
+                current = recording.calls[key]
+                if current.phase == "reserved" and current.deadline <= time.time():
+                    current.deadline = int(time.time()) + self.exchange_seconds
+                return current.model_copy(deep=True)
             if recording.finished or index != len(recording.entries):
                 raise RecordingConflict("Missing, extra or out-of-order invocation")
             if key not in recording.calls:
