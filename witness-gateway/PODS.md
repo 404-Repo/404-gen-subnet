@@ -98,7 +98,8 @@ the generation pending; restarting consumes its saved prefix and completed work.
 `WITNESS_TIMINGS=1` enables connection diagnostics across the client, gateway and
 worker. Records include call IDs, message kinds, byte counts, send/receive times,
 close codes and fixed failure stages. Message contents, credentials and exception
-messages are not logged.
+messages are not logged. Worker diagnostics use a bounded queue so a stalled log
+sink cannot block TLS capture; diagnostic lines are dropped when the queue fills.
 
 ## Provisioning and lifecycle
 

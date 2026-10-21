@@ -11,7 +11,39 @@ from contextlib import contextmanager, suppress
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from functools import wraps
-from typing import Literal, ParamSpec, TypedDict, TypeVar
+from queue import Full, Queue
+from threading import Lock, Thread
+from typing import Literal, ParamSpec, TextIO, TypedDict, TypeVar
+
+
+class _DiagnosticOutput:
+    """Bound diagnostic memory and keep a stalled log sink off capture threads."""
+
+    def __init__(self) -> None:
+        self.queue: Queue[tuple[TextIO, str]] = Queue(maxsize=1024)
+        self.lock = Lock()
+        self.thread: Thread | None = None
+
+    def write(self, value: object) -> None:
+        line = json.dumps(value, separators=(",", ":"))
+        with self.lock:
+            if self.thread is None:
+                self.thread = Thread(target=self._run, name="witness-diagnostics", daemon=True)
+                self.thread.start()
+        with suppress(Full):
+            self.queue.put_nowait((sys.stderr, line))
+
+    def _run(self) -> None:
+        while True:
+            stream, line = self.queue.get()
+            try:
+                with suppress(Exception):
+                    print(line, file=stream, flush=True)
+            finally:
+                self.queue.task_done()
+
+
+_output = _DiagnosticOutput()
 
 
 class TimingRecord(TypedDict):
@@ -59,14 +91,14 @@ def transport(
     if os.environ.get("WITNESS_TIMINGS") != "1":
         return
     with suppress(Exception):
-        print(json.dumps({
+        _output.write({
             "event": "witness_transport", "host": host, "exchange_id": identifier,
             "phase": phase, "timestamp_ns": time.time_ns(),
             "monotonic_ns": time.monotonic_ns(), "kind": kind, "bytes": size,
             "sequence": sequence, "reason": reason, "error_type": error_type,
             "close_code": close_code,
             "expected_bytes": expected_bytes,
-        }, separators=(",", ":")), file=sys.stderr, flush=True)
+        })
 
 
 def identify_exchange(identifier: str) -> None:
@@ -114,7 +146,7 @@ def emit(
             "parameters_cached": parameters_cached,
         }
         trace.records.append(record)
-        print(json.dumps(record, separators=(",", ":")), file=sys.stderr, flush=True)
+        _output.write(record)
 
 
 def snapshot() -> list[TimingRecord]:
@@ -197,11 +229,7 @@ def forward(stderr: bytes) -> None:
                     "parameters_cached": None,
                 }
                 trace.records.append(record)
-                print(
-                    json.dumps(record, separators=(",", ":")),
-                    file=sys.stderr,
-                    flush=True,
-                )
+                _output.write(record)
             except (ValueError, KeyError, TypeError):
                 continue
 
