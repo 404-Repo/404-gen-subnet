@@ -407,6 +407,14 @@ class PodRuntime:
         else:
 
             def failed() -> None:
+                located = self.records.locate(self.scope, call.exchange_id)
+                if located is None:
+                    raise RuntimeError("Capture record is missing")
+                recovered = recover_issued(
+                    self.records, self.budget, self.evidence.get, self.scope, invocation, located[1], self.proof_hash
+                )
+                if recovered.phase == "issued":
+                    return
                 for file in directory.iterdir():
                     if file.name in {
                         "client.bin",

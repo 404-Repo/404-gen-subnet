@@ -234,3 +234,28 @@ def test_unclaimed_capture_spool_is_retained(tmp_path: Path) -> None:
     assert directory.is_dir() and (directory / "client.bin").read_bytes() == b"partial"
     located = records.locate(SCOPE, call.exchange_id)
     assert located is not None and located[1].phase == "assigned"
+
+
+@pytest.mark.parametrize("already_issued", [False, True])
+def test_failed_finalization_preserves_a_durable_response(tmp_path: Path, already_issued: bool) -> None:
+    state = MemoryState()
+    records, budget, item, call = capture(state)
+    worker = runtime(state, records, budget, tmp_path / "spool")
+    files = evidence(budget, item, call)
+    directory = worker.spool / call.exchange_id
+    directory.mkdir(mode=0o700)
+    for name, content in files.items():
+        (directory / name).write_bytes(content)
+        state.put(prefix(call) + name, content)
+    if already_issued:
+        budget.settle(SCOPE, item, USAGE)
+        records.issued(SCOPE, item, "pod-one", files["manifest.json"])
+    try:
+        worker._finalize(item, call, None, "ConnectionClosed")
+        located = records.locate(SCOPE, call.exchange_id)
+        assert located is not None and located[1].phase == "issued"
+        assert located[1].manifest_sha256 == hashlib.sha256(files["manifest.json"]).hexdigest()
+        assert budget.summary(SCOPE, item)["pending_usage"] == 0
+        assert not directory.exists()
+    finally:
+        worker.executor.shutdown(wait=True)
