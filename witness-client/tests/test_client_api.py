@@ -1,10 +1,13 @@
 """Public generation and recovery preserve the same OpenAI result and errors."""
 
 import json
+import time
 import uuid
 from collections.abc import Callable, Iterator, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from pathlib import Path
+from threading import Barrier, Event, Lock
 from typing import Literal, cast
 from unittest.mock import MagicMock
 
@@ -14,7 +17,9 @@ from openai.types.responses import Response, ToolParam
 from openai.types.responses.response_create_params import ResponseCreateParamsStreaming
 
 from witness_client import WitnessClient, WitnessConfig, WitnessError
+from witness_client.calls import Generation, Invocation
 from witness_client.delivery import Phase
+from witness_client.pods import CallView, Snapshot
 from witness_client.tunnel import WebSocketTunnel
 from witness_client.types import (
     CredentialProof,
@@ -130,6 +135,136 @@ def event(response: dict[str, object]) -> bytes:
         ).encode()
         + b"\n\n"
     )
+
+
+def test_pod_calls_prepare_serially_and_generate_concurrently(
+    config: WitnessConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    key = Keypair.create_from_mnemonic(Keypair.generate_mnemonic())
+    config = {**config, "transport": "pods-v1", "round": "test-0"}
+    first_dispatched, second_reserved, second_dispatched, allow_authorization = (
+        Event() for _ in range(4)
+    )
+    models = Barrier(2)
+    lock = Lock()
+    preparing = generating = maximum_preparing = maximum_generating = 0
+    calls: dict[str, Snapshot] = {}
+
+    def session(identifier: str) -> Session:
+        return {
+            "id": identifier,
+            "protocol": 2,
+            "provider": "https://api.openai.com/v1/responses",
+            "proof_key_sha256": "a" * 64,
+            "round": "test-0",
+            "miner": key.ss58_address,
+        }
+
+    def missing(_: Generation) -> None:
+        raise WitnessError("No recording", status_code=404)
+
+    def reserve(invocation: Invocation) -> Snapshot:
+        identifier = str(uuid.uuid5(uuid.NAMESPACE_URL, invocation.generation.id))
+        calls[identifier] = Snapshot(
+            call=CallView(
+                request=invocation.request,
+                exchange_id=identifier,
+                owner_ordinal=0,
+                deadline=int(time.time()) + 60,
+                phase="reserved",
+            ),
+            round="test-0",
+            hotkey=key.ss58_address,
+            session=None,
+        )
+        if len(calls) == 2:
+            second_reserved.set()
+        return calls[identifier]
+
+    def dispatch(invocation: Invocation, _: str) -> Snapshot:
+        nonlocal preparing, maximum_preparing
+        identifier = str(uuid.uuid5(uuid.NAMESPACE_URL, invocation.generation.id))
+        with lock:
+            preparing += 1
+            maximum_preparing = max(maximum_preparing, preparing)
+            (second_dispatched if first_dispatched.is_set() else first_dispatched).set()
+        current = calls[identifier]
+        current.call.phase = "capturing"
+        current.session = dict(session(identifier))
+        return current
+
+    @contextmanager
+    def tunnel(identifier: str) -> Iterator[WebSocketTunnel]:
+        yield WebSocketTunnel(MagicMock(), identifier)
+
+    def authorize(
+        _: WitnessClient, tunnel: WebSocketTunnel, disclosure: EarlyDisclosure
+    ) -> None:
+        nonlocal preparing, generating, maximum_generating
+        with lock:
+            preparing -= 1
+            generating += 1
+            maximum_generating = max(maximum_generating, generating)
+
+    def exchange(tunnel: WebSocketTunnel, *args: object, **kwargs: object) -> bytes:
+        nonlocal generating
+        assert allow_authorization.wait(3)
+        cast(Callable[[EarlyDisclosure], None], kwargs["authorize"])(
+            cast(EarlyDisclosure, {})
+        )
+        models.wait(timeout=3)
+        calls[tunnel.identifier].call.phase = "issued"
+        with lock:
+            generating -= 1
+        return b""
+
+    def recorded(
+        invocation: Invocation, call: CallView, proof_hash: str
+    ) -> tuple[Session, int, bytes]:
+        return (
+            session(call.exchange_id),
+            200,
+            event(
+                {"id": "resp_" + call.exchange_id, "status": "completed", "output": []}
+            ),
+        )
+
+    with WitnessClient(config, hotkey=key, openai_api_key="x" * 80) as witness:
+        gateway = witness._gateway
+        for name, value in {
+            "recording": missing,
+            "reserve": reserve,
+            "dispatch": dispatch,
+            "ensure_pod": lambda: str(uuid.uuid4()),
+            "tunnel": tunnel,
+            "snapshot": lambda identifier: calls[identifier],
+            "recorded": recorded,
+            "delivered": lambda invocation: 0,
+        }.items():
+            monkeypatch.setattr(gateway, name, value, raising=False)
+        monkeypatch.setattr(WitnessClient, "_authorize", authorize)
+        monkeypatch.setattr("witness_client.client.exchange", exchange)
+        bound = [
+            witness.for_generation(bytes([index]), 42, "a" * 64) for index in range(2)
+        ]
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            first = pool.submit(
+                bound[0].create, stream=True, model="fixture", input="one"
+            )
+            assert first_dispatched.wait(3)
+            second = pool.submit(
+                bound[1].create, stream=True, model="fixture", input="two"
+            )
+            try:
+                assert second_reserved.wait(3)
+                assert not second_dispatched.wait(0.05)
+            finally:
+                allow_authorization.set()
+            assert (
+                first.result(timeout=5).response.id
+                != second.result(timeout=5).response.id
+            )
+    assert maximum_preparing == 1 and maximum_generating == 2
 
 
 @pytest.mark.parametrize("round_remaining", [10.0, 1000.0])

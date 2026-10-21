@@ -186,6 +186,7 @@ def resumed_generation(
         SimpleNamespace(
             _config={}, _mode="api", _api_key="fixture", _state=state,
             _prover=SimpleNamespace(verifying_key_sha256="c" * 64),
+            _preparation=threading.Lock(),
             _hotkey=SimpleNamespace(ss58_address="5" * 48), _http=None, _gateway=CachedGateway(),
         ),
     )

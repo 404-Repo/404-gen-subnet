@@ -12,7 +12,7 @@ import threading
 import time
 import uuid
 import zlib
-from contextlib import nullcontext, suppress
+from contextlib import ExitStack, nullcontext, suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import TracebackType
@@ -143,6 +143,7 @@ class WitnessClient:
             raise ValueError("Witness state directory must be private (chmod 700)")
         with measure("prover_initialize"):
             self._prover = Prover(parameters)
+        self._preparation = threading.Lock()
         self._hotkey = hotkey
         with measure("http_initialize"):
             context = ssl.create_default_context()
@@ -499,6 +500,7 @@ class GenerationWitness(WitnessClient):
             parent._prover,
             parent._hotkey,
         )
+        self._preparation = parent._preparation
         self._http, self._gateway = parent._http, parent._gateway
         self.generation = generation
         self.responses = self
@@ -588,8 +590,16 @@ class GenerationWitness(WitnessClient):
                 if self._call_slots is not None
                 and invocation.ordinal == snapshot.call.owner_ordinal
                 and snapshot.call.phase not in ("issued", "failed")
-                else nullcontext()
+                else nullcontext(),
+                ExitStack() as preparation,
             ):
+                # The native prover is serial. Queue before opening the provider
+                # connection, then allow inference to overlap after authorization.
+                if (
+                    invocation.ordinal == snapshot.call.owner_ordinal
+                    and snapshot.call.phase in ("reserved", "assigned")
+                ):
+                    preparation.enter_context(self._preparation)
                 while snapshot.call.phase not in ("issued", "failed"):
                     if (
                         invocation.ordinal == snapshot.call.owner_ordinal
@@ -628,6 +638,10 @@ class GenerationWitness(WitnessClient):
                             _save(directory / "request.json", body)
                             try:
                                 with self._gateway.tunnel(identifier) as tunnel:
+                                    def authorize(disclosure: EarlyDisclosure) -> None:
+                                        self._authorize(tunnel, disclosure)
+                                        preparation.close()
+
                                     exchange(
                                         tunnel,
                                         request.host,
@@ -635,9 +649,7 @@ class GenerationWitness(WitnessClient):
                                         handshake=lambda disclosure: self._handshake(
                                             tunnel, disclosure
                                         ),
-                                        authorize=lambda disclosure: self._authorize(
-                                            tunnel, disclosure
-                                        ),
+                                        authorize=authorize,
                                         timeout=max(0, deadline - time.monotonic()),
                                     )
                             except (

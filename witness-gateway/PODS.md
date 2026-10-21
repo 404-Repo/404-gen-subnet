@@ -64,6 +64,9 @@ authorization and reserves the dispatch allowance. A supplied hash alone cannot
 authorize a different request. Only default/Standard and priority tiers are
 admitted; Flex and unknown models are rejected.
 
+Clients queue TLS setup and credential proofs locally. Once authorized, model
+calls can run in parallel while later requests prepare their proofs.
+
 After release, capture is independent of the miner or gateway connection. The
 full response, verified usage and manifest become durable before delivery. A
 local spool supports upload/finalization retries without another provider
