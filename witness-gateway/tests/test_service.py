@@ -12,11 +12,13 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import cast
 
 import aiohttp
 import pytest
 from aiohttp import WSMsgType, web
+from aiohttp.test_utils import make_mocked_request
 from bittensor_wallet import Keypair
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
@@ -42,6 +44,43 @@ from pod_gateway.server import Gateway
 
 SECRET = b"s" * 32
 PROOF = "c" * 64
+
+
+@pytest.mark.parametrize("selected", [True, False])
+@pytest.mark.filterwarnings("ignore:It is recommended to use web.RequestKey instances")
+def test_fresh_signature_does_not_expire_while_waiting_for_runpod(
+    monkeypatch: pytest.MonkeyPatch, selected: bool
+) -> None:
+    key = Keypair.create_from_mnemonic(Keypair.generate_mnemonic())
+    headers = hotkey_headers(key, b"", method="GET", path="/pods/current")
+    clock = [int(headers["x-bittensor-nonce"])]
+    monkeypatch.setattr("pod_gateway.auth.time.time_ns", lambda: clock[0])
+    membership = Membership("test", 17, "test-1", key.ss58_address)
+    now = int(time.time() * 1000)
+    membership.snapshot = {
+        "version": 1, "network": "finney", "netuid": 17, "block": 1,
+        "fetched_at": now, "block_time": now, "hotkeys": [],
+    }
+    handled: list[str] = []
+
+    def fence() -> bool:
+        clock[0] += 11_000_000_000
+        return selected
+
+    async def handler(request: web.Request) -> web.Response:
+        handled.append(request["hotkey"])
+        return web.Response()
+
+    async def scenario() -> None:
+        request = make_mocked_request(
+            "GET", "/pods/current", headers=headers, client_max_size=0,
+        )
+        gateway = cast(Gateway, SimpleNamespace(auth=Authenticator(membership), fence=fence))
+        response = await Gateway.middleware(gateway, request, handler)
+        assert response.status == (200 if selected else 503), response.text
+
+    asyncio.run(scenario())
+    assert handled == ([key.ss58_address] if selected else [])
 
 
 def tls(directory: Path) -> tuple[ssl.SSLContext, ssl.SSLContext]:

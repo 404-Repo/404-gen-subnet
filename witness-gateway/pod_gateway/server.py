@@ -111,8 +111,6 @@ class Gateway:
         handler: Callable[[web.Request], Awaitable[web.StreamResponse]],
     ) -> web.StreamResponse:
         try:
-            if not await asyncio.to_thread(self.fence):
-                raise AuthRejected("gateway_fenced", 503)
             if request.query_string or request.raw_path != request.path:
                 raise AuthRejected("unknown_route", 404)
             if request.path != "/health" and not request.path.startswith(
@@ -130,13 +128,14 @@ class Gateway:
                 ):
                     if len(request.headers.getall(name, [])) != 1:
                         raise AuthRejected("invalid_hotkey_auth")
-                request["hotkey"] = await asyncio.to_thread(
-                    self.auth.verify,
+                request["hotkey"] = self.auth.verify(
                     request.method,
                     request.path,
                     body,
                     request.headers,
                 )
+            if not await asyncio.to_thread(self.fence):
+                raise AuthRejected("gateway_fenced", 503)
             return await handler(request)
         except AuthRejected as error:
             return web.json_response(
