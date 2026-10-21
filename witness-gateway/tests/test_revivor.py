@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ssl
 from dataclasses import replace
 from pathlib import Path
 
@@ -10,6 +11,7 @@ from witness_client.calls import canonical
 
 from pod_gateway.admission import Admission
 from pod_gateway.budget import Budget
+from pod_gateway.certs import create
 from pod_gateway.lifecycle import Allocator
 from pod_gateway.models import Pod, PodSpec, Scope
 from pod_gateway.records import CallRecords
@@ -20,6 +22,32 @@ SECRET = b"x" * 32
 SCOPE = Scope("competition", "test-0", "5" * 48)
 GATEWAY = replace(SCOPE, round="gateway")
 SPEC = PodSpec("registry/witness@sha256:" + "a" * 64)
+
+
+def test_generated_upstream_certificates_pass_strict_tls_verification(tmp_path: Path) -> None:
+    directory = tmp_path / "tls"
+    create(directory)
+    server_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    server_context.load_cert_chain(directory / "gateway.pem", directory / "gateway.key")
+    client_context = ssl.create_default_context(cafile=str(directory / "ca.pem"))
+    client_context.verify_flags |= ssl.VERIFY_X509_STRICT
+    server_in, server_out, client_in, client_out = (ssl.MemoryBIO() for _ in range(4))
+    server = server_context.wrap_bio(server_in, server_out, server_side=True)
+    client = client_context.wrap_bio(client_in, client_out, server_hostname="gateway.internal")
+    completed: set[ssl.SSLObject] = set()
+    for _ in range(10):
+        for connection in (client, server):
+            try:
+                connection.do_handshake()
+                completed.add(connection)
+            except ssl.SSLWantReadError:
+                pass
+        for outgoing, incoming in ((client_out, server_in), (server_out, client_in)):
+            if outgoing.pending:
+                incoming.write(outgoing.read())
+        if len(completed) == 2:
+            break
+    assert completed == {client, server}
 
 
 def test_published_config_stays_readable_by_caddy_group(tmp_path: Path) -> None:

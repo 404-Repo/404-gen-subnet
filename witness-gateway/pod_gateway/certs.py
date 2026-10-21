@@ -30,6 +30,7 @@ def create(directory: Path) -> None:
         .not_valid_before(now - timedelta(minutes=5))
         .not_valid_after(now + timedelta(days=365))
         .add_extension(x509.BasicConstraints(ca=True, path_length=0), critical=True)
+        .add_extension(x509.SubjectKeyIdentifier.from_public_key(ca_key.public_key()), critical=False)
         .add_extension(
             x509.KeyUsage(True, False, False, False, False, True, True, False, False),
             critical=True,
@@ -47,6 +48,7 @@ def create(directory: Path) -> None:
         .not_valid_before(now - timedelta(minutes=5))
         .not_valid_after(now + timedelta(days=30))
         .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
+        .add_extension(x509.AuthorityKeyIdentifier.from_issuer_public_key(ca_key.public_key()), critical=False)
         .add_extension(
             x509.SubjectAlternativeName([x509.DNSName("gateway.internal")]),
             critical=False,
