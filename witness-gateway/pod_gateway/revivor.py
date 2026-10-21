@@ -40,15 +40,16 @@ def endpoint(pod: Pod) -> str:
 
 class CaddyPublisher:
     def __init__(
-        self, *, origin: str, ca_file: Path, config: Path, executable: str = "caddy"
+        self, *, origin: str, ca_file: Path, config: Path, executable: str = "caddy", listen: str | None = None
     ) -> None:
         self.hostname = urlsplit(origin).hostname
         self.ca_file, self.config, self.executable = ca_file, config, executable
+        self.listen = listen
         self.published: bytes | None = None
 
     def publish(self, pod: Pod) -> None:
         data = (
-            f"{json.dumps(self.hostname)} {{\n"
+            f"{json.dumps(self.listen or self.hostname)} {{\n"
             f"  reverse_proxy https://{endpoint(pod)} {{\n"
             "    transport http {\n"
             "      tls_server_name gateway.internal\n"
@@ -277,6 +278,7 @@ def _run(settings: RevivorSettings, worker_spec: PodSpec, gateway_spec: PodSpec)
                 origin=settings.gateway_url,
                 ca_file=settings.ca_file,
                 config=settings.caddy_config,
+                listen=settings.caddy_listen,
             ),
             probe=probe,
         )

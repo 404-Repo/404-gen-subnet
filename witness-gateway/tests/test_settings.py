@@ -1,3 +1,4 @@
+import time
 from decimal import Decimal
 from pathlib import Path
 
@@ -5,8 +6,44 @@ import pytest
 from bittensor_wallet import Keypair
 from pydantic import SecretStr
 
+from pod_gateway.auth import AuthRejected, Membership
 from pod_gateway.dependencies import gateway_spec, worker_spec
+from pod_gateway.models import Scope
 from pod_gateway.settings import Settings
+
+
+@pytest.mark.parametrize("round_number", ["test-0", "test-1"])
+def test_test_hotkey_can_authenticate_without_registration(round_number: str) -> None:
+    hotkey = Keypair.create_from_mnemonic(Keypair.generate_mnemonic()).ss58_address
+    membership = Membership("test", 17, round_number, hotkey)
+    now = int(time.time() * 1000)
+    membership.snapshot = {
+        "version": 1,
+        "network": "finney",
+        "netuid": 17,
+        "block": 1,
+        "fetched_at": now,
+        "block_time": now,
+        "hotkeys": [],
+    }
+    membership.require(hotkey)
+    with pytest.raises(AuthRejected, match="hotkey_not_registered"):
+        membership.require("5" * 48)
+
+
+def test_test_hotkey_is_rejected_for_competition_rounds() -> None:
+    with pytest.raises(ValueError, match="Invalid membership configuration"):
+        Membership("test", 17, "56", "5" * 48)
+
+
+def test_private_registry_can_launch_both_pod_roles(values: dict[str, object]) -> None:
+    values["WITNESS_REGISTRY"] = "private-registry-id"
+    settings = Settings.model_validate(values)
+    scope = Scope("test", "test-1", settings.gateway_owner_hotkey)
+    for build in (worker_spec, gateway_spec):
+        body = build(settings).body(scope, "00000000-0000-4000-8000-000000000001")
+        assert body["registry"] == "private-registry-id"
+    assert gateway_spec(settings).env["WITNESS_REGISTRY"] == "private-registry-id"
 
 
 @pytest.fixture

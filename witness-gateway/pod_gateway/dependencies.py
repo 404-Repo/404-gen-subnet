@@ -39,6 +39,7 @@ def worker_spec(settings: Settings) -> PodSpec:
         env=environment,
         capability_secret=settings.secret,
         data_centers=settings.data_centers,
+        registry=settings.registry,
     )
 
 
@@ -76,6 +77,7 @@ def gateway_spec(settings: Settings) -> PodSpec:
         "WITNESS_IDLE_SECONDS",
         "WITNESS_NETUID",
         "WITNESS_TEST_HOTKEY",
+        "WITNESS_REGISTRY",
         "RUNPOD_MIN_REQUEST_INTERVAL",
     ):
         if name in settings.pod_environment:
@@ -92,6 +94,7 @@ def gateway_spec(settings: Settings) -> PodSpec:
         disk_gb=10,
         port=8443,
         env=environment,
+        registry=settings.registry,
     )
 
 

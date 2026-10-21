@@ -91,6 +91,7 @@ class PodSpec:
     data_centers: tuple[str, ...] = ()
     env: Mapping[str, str] = field(default_factory=dict, repr=False)
     capability_secret: bytes | None = field(default=None, repr=False)
+    registry: str | None = None
 
     def __post_init__(self) -> None:
         if not re.fullmatch(r"[A-Za-z0-9_./:-]+@sha256:[0-9a-f]{64}", self.image):
@@ -118,6 +119,10 @@ class PodSpec:
             raise ValueError("Reserved environment variable")
         if self.capability_secret is not None and len(self.capability_secret) < 32:
             raise ValueError("Pod capability master key is too short")
+        if self.registry is not None and (
+            not isinstance(self.registry, str) or not self.registry or len(self.registry) > 128
+        ):
+            raise ValueError("Invalid container registry credential ID")
         # Copy caller-owned containers so the fingerprint cannot change in flight.
         if any(
             not isinstance(site, str) or not re.fullmatch(r"[A-Z0-9-]+", site)
@@ -138,6 +143,8 @@ class PodSpec:
         }
         if self.data_centers:
             body["dataCenterIds"] = list(self.data_centers)
+        if self.registry is not None:
+            body["registry"] = self.registry
         return body
 
     @property

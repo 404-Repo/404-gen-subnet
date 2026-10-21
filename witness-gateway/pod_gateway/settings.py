@@ -44,6 +44,7 @@ class Settings(BaseSettings):
     idle_seconds: int = Field(default=1800, alias="WITNESS_IDLE_SECONDS", ge=1800)
 
     image: str = Field(..., alias="WITNESS_IMAGE")
+    registry: str | None = Field(default=None, alias="WITNESS_REGISTRY")
     worker_cpu_id: str = Field(default="cpu3c", alias="WITNESS_CPU_ID")
     worker_vcpu_count: int = Field(default=2, alias="WITNESS_VCPU")
     worker_disk_gb: int = Field(default=10, alias="WITNESS_DISK_GB")
@@ -190,6 +191,7 @@ class GatewaySettings(Settings):
 class RevivorSettings(Settings):
     ca_file: Path = Field(..., alias="GATEWAY_TLS_CA_FILE")
     caddy_config: Path = Field(..., alias="CADDY_CONFIG_FILE")
+    caddy_listen: str | None = Field(default=None, alias="CADDY_LISTEN")
     revivor_lock: Path | None = Field(default=None, alias="WITNESS_REVIVOR_LOCK")
 
     @property

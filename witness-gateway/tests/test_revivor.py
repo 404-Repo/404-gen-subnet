@@ -37,6 +37,20 @@ def test_published_config_stays_readable_by_caddy_group(tmp_path: Path) -> None:
     assert "https://8.8.4.4:44002" in config.read_text()
 
 
+def test_publisher_can_bind_a_loopback_frontend_for_a_test_tunnel(tmp_path: Path) -> None:
+    provider = Provider()
+    pod = provider.create(SPEC.body(GATEWAY, "00000000-0000-4000-8000-000000000001"))
+    config = tmp_path / "Caddyfile"
+    publisher = CaddyPublisher(
+        origin="https://witness.test", ca_file=tmp_path / "ca.pem", config=config,
+        executable="/usr/bin/true", listen="http://127.0.0.1:18051",
+    )
+    publisher.publish(pod)
+    assert config.read_text().startswith('"http://127.0.0.1:18051" {')
+    assert "https://8.8.8.8:44001" in config.read_text()
+    assert "tls_server_name gateway.internal" in config.read_text()
+
+
 class Published:
     def __init__(self) -> None:
         self.pods: list[str] = []

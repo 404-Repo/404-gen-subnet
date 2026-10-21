@@ -92,7 +92,7 @@ hotkeys, ten-second nonces and ownership checks. A Python refresher checks the
 Finney genesis, one finalized block, its timestamp and every subnet hotkey. The
 complete membership snapshot and nonce cache stay in gateway memory.
 Absent/stale membership fails closed. The optional test hotkey is restricted to
-`test-0`.
+`test-0` and `test-1`.
 
 A deliberate connection uses a fresh start UUID and names its predecessor.
 Lifecycle states are suffixes of the RunPod name: pending, active, draining and

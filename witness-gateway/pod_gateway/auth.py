@@ -51,7 +51,7 @@ class Membership:
         test_hotkey: str | None = None,
     ) -> None:
         if not 0 <= netuid <= 65535 or (
-            test_hotkey is not None and round_number != "test-0"
+            test_hotkey is not None and round_number not in {"test-0", "test-1"}
         ):
             raise ValueError("Invalid membership configuration")
         self.netuid, self.test_hotkey = netuid, test_hotkey
