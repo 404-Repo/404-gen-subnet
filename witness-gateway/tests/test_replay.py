@@ -5,12 +5,17 @@ import json
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeout
 from pathlib import Path
+from types import SimpleNamespace
+from typing import cast
 
 import pytest
 from support import MemoryState
-from witness_client import ReplayMismatch, ReplayWitness
+from witness_client import ReplayMismatch, ReplayWitness, WitnessClient, WitnessError
 from witness_client.calls import Generation, Invocation, RequestKey, canonical
+from witness_client.client import GenerationWitness
+from witness_client.pods import CallView, PodGatewayClient, RecordingView, Snapshot
 from witness_client.request import serialize_body
+from witness_client.types import Session
 
 from pod_gateway.models import Scope, object_dict
 from pod_gateway.records import CallRecords
@@ -142,3 +147,59 @@ def test_replay_rejects_response_tampering_after_verification(bundle: Path) -> N
     (bundle / first.exchange_id / "response.sse").write_bytes(b"altered")
     with pytest.raises(ReplayMismatch):
         replay.create(stream=True, model="fixture", input="image")
+
+
+def resumed_generation(bundle: Path, timeout: float = 5) -> GenerationWitness:
+    recording = RecordingView.model_validate_json((bundle / "recording.json").read_bytes())
+
+    class CachedGateway(PodGatewayClient):
+        def __init__(self) -> None:
+            self.delivery_timeout = timeout
+
+        def reserve(self, invocation: Invocation) -> Snapshot:
+            call = recording.calls[recording.entries[invocation.ordinal].call_id]
+            # Completed captures remain reusable after their original deadline.
+            return Snapshot(call=call.model_copy(update={"deadline": 1}), round="test-0", hotkey="5" * 48, session=None)
+
+        def recorded(self, invocation: Invocation, call: CallView, proof_hash: str) -> tuple[Session, int, bytes]:
+            session: Session = {
+                "id": call.exchange_id, "miner": "5" * 48, "round": "test-0", "protocol": 2,
+                "proof_key_sha256": proof_hash, "provider": "https://api.openai.com/v1/responses",
+            }
+            return session, 200, (bundle / call.exchange_id / "response.sse").read_bytes()
+
+        def delivered(self, invocation: Invocation) -> int:
+            delivery = recording.entries[invocation.ordinal].delivery
+            assert delivery is not None
+            return delivery
+
+    state = bundle.parent / "resumed"
+    state.mkdir(mode=0o700)
+    parent = cast(
+        WitnessClient,
+        SimpleNamespace(
+            _config={}, _mode="api", _api_key="fixture", _state=state,
+            _prover=SimpleNamespace(verifying_key_sha256="c" * 64),
+            _hotkey=SimpleNamespace(ss58_address="5" * 48), _http=None, _gateway=CachedGateway(),
+        ),
+    )
+    return GenerationWitness(parent, recording.generation)
+
+
+def test_resumed_generation_honors_saved_delivery_order(bundle: Path) -> None:
+    resumed = resumed_generation(bundle)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(resumed.create, stream=True, model="fixture", input="image")
+        with pytest.raises(FutureTimeout):
+            first.result(timeout=0.1)
+        second = pool.submit(resumed.create, stream=True, model="fixture", input="image", witness_seed=1)
+        assert second.result(timeout=5).output_text == "second"
+        assert first.result(timeout=5).output_text == "first"
+
+
+def test_resumed_generation_fails_if_preceding_delivery_is_never_consumed(bundle: Path) -> None:
+    resumed = resumed_generation(bundle, timeout=0.05)
+    with pytest.raises(WitnessError, match="delivery order"):
+        resumed.create(stream=True, model="fixture", input="image")
+    with pytest.raises(WitnessError, match="unresolved"):
+        resumed.finish("source")

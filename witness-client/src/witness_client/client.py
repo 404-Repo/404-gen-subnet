@@ -494,7 +494,8 @@ class GenerationWitness(WitnessClient):
         self.responses = self
         self._cursor = 0
         self._invocations = threading.Lock()
-        self._deliveries = threading.Lock()
+        self._deliveries = threading.Condition()
+        self._delivery_cursor = 0
         self._unresolved = False
 
     def create(
@@ -624,18 +625,35 @@ class GenerationWitness(WitnessClient):
             except WitnessError as error:
                 failure = error
             with self._deliveries:
-                self._gateway.delivered(invocation)
+                delivery = self._gateway.delivered(invocation)
+                delivery_deadline = time.monotonic() + self._gateway.delivery_timeout
+                while delivery != self._delivery_cursor:
+                    remaining = delivery_deadline - time.monotonic()
+                    if self._unresolved or remaining <= 0:
+                        raise WitnessError(
+                            "Recorded delivery order could not be restored",
+                            identifier,
+                            code="recording_unresolved",
+                            source="gateway",
+                        )
+                    self._deliveries.wait(remaining)
+                self._delivery_cursor += 1
+                self._deliveries.notify_all()
             if failure is not None:
                 raise failure
             assert result is not None
             return result
         except WitnessError as error:
             if error.source != "provider":
-                self._unresolved = True
+                with self._deliveries:
+                    self._unresolved = True
+                    self._deliveries.notify_all()
             error.exchange_id = error.exchange_id or identifier
             raise
         except Exception as error:
-            self._unresolved = True
+            with self._deliveries:
+                self._unresolved = True
+                self._deliveries.notify_all()
             raise WitnessError(
                 "Generation recording did not complete",
                 identifier,
