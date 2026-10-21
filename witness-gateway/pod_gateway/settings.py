@@ -71,14 +71,28 @@ class Settings(BaseSettings):
 
     @model_validator(mode="wrap")
     @classmethod
-    def preserve_pod_environment(cls, data: dict[str, object], handler: ModelWrapValidatorHandler[Self]) -> Self:
+    def preserve_pod_environment(cls, data: object, handler: ModelWrapValidatorHandler[Self]) -> Self:
         settings = handler(data)
         # Pod fingerprints include literal launch values and whether optional values
         # were supplied. Keep those bytes for serialization; runtime code uses fields.
-        aliases = {field.alias for field in cls.model_fields.values()}
-        settings._pod_environment = MappingProxyType(
-            {name: value for name, value in data.items() if name in aliases and isinstance(value, str)}
-        )
+        if isinstance(data, Mapping):
+            environment: dict[str, str] = {}
+            for name, field in cls.model_fields.items():
+                alias = field.alias
+                if alias is None or alias not in data or data[alias] is None:
+                    continue
+                value = getattr(settings, name)
+                if isinstance(data[alias], str):
+                    environment[alias] = data[alias]
+                elif isinstance(value, SecretStr):
+                    environment[alias] = value.get_secret_value()
+                elif name == "prompts":
+                    environment[alias] = json.dumps(sorted(value))
+                elif name == "data_centers":
+                    environment[alias] = ",".join(value)
+                else:
+                    environment[alias] = str(value)
+            settings._pod_environment = MappingProxyType(environment)
         return settings
 
     @field_validator(
@@ -101,7 +115,7 @@ class Settings(BaseSettings):
     def parse_prompts(cls, value: object) -> frozenset[str]:
         values = json.loads(value) if isinstance(value, str) else value
         if (
-            not isinstance(values, list)
+            not isinstance(values, (list, tuple, set, frozenset))
             or not values
             or len(values) > 4096
             or any(
@@ -156,7 +170,7 @@ class Settings(BaseSettings):
 
     @property
     def pod_environment(self) -> Mapping[str, str]:
-        """Original strings for Pod launch serialization, including explicit defaults."""
+        """Launch values, preserving original strings and explicit defaults."""
         return self._pod_environment
 
 
