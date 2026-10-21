@@ -13,7 +13,7 @@ from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 import aiohttp
 import pytest
@@ -41,6 +41,11 @@ from pod_gateway.records import Call, CallRecords
 from pod_gateway.replay import export_bundle
 from pod_gateway.security import capture_token
 from pod_gateway.server import Gateway
+
+if TYPE_CHECKING:
+    from witness_client._tls import TLSAbruptCloseError
+else:
+    from tlslite.errors import TLSAbruptCloseError
 
 SECRET = b"s" * 32
 PROOF = "c" * 64
@@ -207,7 +212,7 @@ class Fleet:
             if self.failures_remaining:
                 self.failures_remaining -= 1
                 self.records.failed(self.scope, invocation, call.pod_id, "TimeoutError", exchange_id=call.exchange_id)
-                await socket.send_json({"type": "end"})
+                await socket.send_json({"type": "end", "fixture_failure": True})
                 await socket.send_json({"type": "finished"})
                 return
             async with self.client.get(
@@ -324,6 +329,8 @@ def test_https_gateway_deduplicates_inflight_requests_and_replays_without_infere
                     isinstance(message, str)
                     and json.loads(message).get("type") == "end"
                 ):
+                    if json.loads(message).get("fixture_failure") is True:
+                        raise TLSAbruptCloseError()
                     return b""
 
         monkeypatch.setattr("witness_client.client.exchange", exchange)

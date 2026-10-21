@@ -16,7 +16,7 @@ from contextlib import ExitStack, nullcontext, suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import TracebackType
-from typing import Literal, Self, Unpack, cast
+from typing import TYPE_CHECKING, Literal, Self, Unpack, cast
 from urllib.parse import urlsplit
 
 import httpx
@@ -45,6 +45,11 @@ from .types import (
     Usage,
     WitnessConfig,
 )
+
+if TYPE_CHECKING:
+    from ._tls import TLSAbruptCloseError
+else:
+    from tlslite.errors import TLSAbruptCloseError
 
 
 @dataclass(frozen=True)
@@ -684,6 +689,7 @@ class GenerationWitness(WitnessClient):
                                 TimeoutError,
                                 WebSocketException,
                                 WitnessError,
+                                TLSAbruptCloseError,
                             ):
                                 # The worker may already be paying/capturing. Recover
                                 # this exact exchange, without another TLS connection.
