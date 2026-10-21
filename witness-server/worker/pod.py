@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import signal
 import threading
 import time
@@ -196,7 +197,10 @@ class PodRuntime:
             call = recover_issued(
                 self.records, self.budget, self.evidence.get, self.scope, invocation, call, self.proof_hash
             )
-            if call.phase in ("issued", "failed", "assigned"):
+            if call.phase in ("issued", "failed"):
+                self._cleanup(exchange_id)
+                return
+            if call.phase == "assigned":
                 return
             if call.phase != "capturing":
                 raise RuntimeError("Spool has no claimed capture")
@@ -224,6 +228,13 @@ class PodRuntime:
             self._finalize(invocation, call, metadata, failure)
 
         self._retry_upload(recover)
+
+    def _cleanup(self, exchange_id: str) -> None:
+        def remove() -> None:
+            with suppress(FileNotFoundError):
+                shutil.rmtree(self.spool / identifier(exchange_id))
+
+        self._retry_upload(remove)
 
     def _capture(self, invocation: Invocation, call: Call) -> None:
         assert call.capture_id is not None
@@ -417,6 +428,7 @@ class PodRuntime:
                 )
 
             self._retry_upload(failed)
+        self._cleanup(call.exchange_id)
 
     def _send(self, socket: Connection, data: dict[str, object]) -> None:
         socket.send(json_bytes(data).decode())

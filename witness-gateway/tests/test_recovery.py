@@ -128,7 +128,8 @@ def test_recovery_rejects_mismatched_capture_evidence(changed: str) -> None:
     assert budget.summary(SCOPE, item)["pending_usage"] == 1
 
 
-def test_restarted_worker_finishes_durable_capture(tmp_path: Path) -> None:
+@pytest.mark.parametrize("completed", [False, True])
+def test_restarted_worker_finishes_durable_capture(tmp_path: Path, completed: bool) -> None:
     state = MemoryState()
     records, budget, item, call = capture(state)
     directory = tmp_path / "spool" / call.exchange_id
@@ -137,11 +138,15 @@ def test_restarted_worker_finishes_durable_capture(tmp_path: Path) -> None:
     for name, content in evidence(budget, item, call).items():
         state.put(prefix(call) + name, content)
         (directory / name).write_bytes(content)
+    if completed:
+        budget.settle(SCOPE, item, USAGE)
+        records.issued(SCOPE, item, "pod-one", (directory / "manifest.json").read_bytes())
     restarted = runtime(state, records, budget, directory.parent)
     restarted.executor.shutdown(wait=True)
     located = records.locate(SCOPE, call.exchange_id)
     assert located is not None and located[1].phase == "issued"
     assert budget.summary(SCOPE, item)["pending_usage"] == 0
+    assert not directory.exists()
 
 
 @pytest.mark.parametrize("manifest_saved", [False, True])
@@ -189,4 +194,43 @@ def test_restarted_worker_retains_pending_upload_until_durable(
     if manifest_saved:
         assert located[1].manifest_sha256 == hashlib.sha256(files["manifest.json"]).hexdigest()
     assert budget.summary(SCOPE, item)["pending_usage"] == 0
+    assert not directory.exists()
     assert restarted.tick()
+
+
+@pytest.mark.parametrize("issued", [False, True])
+def test_completed_capture_releases_its_local_spool(tmp_path: Path, issued: bool) -> None:
+    state = MemoryState()
+    records, budget, item, call = capture(state)
+    worker = runtime(state, records, budget, tmp_path / "spool")
+    files = evidence(budget, item, call)
+    directory = worker.spool / call.exchange_id
+    directory.mkdir(mode=0o700)
+    for name, content in files.items():
+        (directory / name).write_bytes(content)
+    state.put(prefix(call) + "session.json", files["session.json"])
+    try:
+        metadata = json.loads(files["manifest.json"]) if issued else None
+        worker._finalize(item, call, metadata, "CaptureInterrupted")
+        assert not directory.exists()
+        located = records.locate(SCOPE, call.exchange_id)
+        assert located is not None and located[1].phase == ("issued" if issued else "failed")
+        assert state.get(prefix(call) + "server.bin") == files["server.bin"]
+    finally:
+        worker.executor.shutdown(wait=True)
+
+
+def test_unclaimed_capture_spool_is_retained(tmp_path: Path) -> None:
+    state = MemoryState()
+    records, budget, item = CallRecords(state), Budget(state, PRICING), invocation()
+    call = records.reserve(SCOPE, item)
+    records.assign(SCOPE, item, START, "pod-one")
+    directory = tmp_path / "spool" / call.exchange_id
+    directory.mkdir(parents=True, mode=0o700)
+    directory.parent.chmod(0o700)
+    (directory / "client.bin").write_bytes(b"partial")
+    worker = runtime(state, records, budget, directory.parent)
+    worker.executor.shutdown(wait=True)
+    assert directory.is_dir() and (directory / "client.bin").read_bytes() == b"partial"
+    located = records.locate(SCOPE, call.exchange_id)
+    assert located is not None and located[1].phase == "assigned"
