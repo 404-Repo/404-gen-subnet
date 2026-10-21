@@ -62,6 +62,7 @@ class CaddyPublisher:
             try:
                 with os.fdopen(fd, "wb") as file:
                     file.write(data)
+                    os.fchmod(file.fileno(), 0o640)
                     file.flush()
                     os.fsync(file.fileno())
                 os.replace(temporary, self.config)

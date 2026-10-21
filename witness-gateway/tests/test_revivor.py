@@ -13,13 +13,28 @@ from pod_gateway.budget import Budget
 from pod_gateway.lifecycle import Allocator
 from pod_gateway.models import Pod, PodSpec, Scope
 from pod_gateway.records import CallRecords
-from pod_gateway.revivor import GatewayDrain, Revivor
+from pod_gateway.revivor import CaddyPublisher, GatewayDrain, Revivor
 from pod_gateway.security import capability
 
 SECRET = b"x" * 32
 SCOPE = Scope("competition", "test-0", "5" * 48)
 GATEWAY = replace(SCOPE, round="gateway")
 SPEC = PodSpec("registry/witness@sha256:" + "a" * 64)
+
+
+def test_published_config_stays_readable_by_caddy_group(tmp_path: Path) -> None:
+    provider = Provider()
+    pod = provider.create(SPEC.body(GATEWAY, "00000000-0000-4000-8000-000000000001"))
+    config = tmp_path / "Caddyfile"
+    publisher = CaddyPublisher(
+        origin="https://witness.test", ca_file=tmp_path / "ca.pem", config=config, executable="/usr/bin/true"
+    )
+    publisher.publish(pod)
+    assert config.stat().st_mode & 0o777 == 0o640
+    assert "https://8.8.8.8:44001" in config.read_text()
+    publisher.publish(replace(pod, tcp={8443: ("8.8.4.4", 44002)}))
+    assert config.stat().st_mode & 0o777 == 0o640
+    assert "https://8.8.4.4:44002" in config.read_text()
 
 
 class Published:
