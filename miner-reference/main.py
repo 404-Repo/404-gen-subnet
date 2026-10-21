@@ -12,4 +12,4 @@ if TYPE_CHECKING:
 
 
 def generate(image: bytes, seed: int, witness: WitnessClient, renderer: Renderer) -> str | None:
-    return run(image, seed, witness, renderer)
+    return run(image, seed, witness.responses, renderer)
