@@ -27,7 +27,7 @@ from identity import (
     worker_connection,
 )
 from storage import MAX_BYTES, R2Store, Store, json_bytes
-from timing import emit, identify_exchange, measure, snapshot, timed
+from timing import emit, identify_exchange, measure, snapshot, timed, transport
 from timing import exchange_id as _exchange_id
 from timing import forward as _verifier_timings
 from timing import started as timing_started
@@ -116,12 +116,14 @@ def relay(
     issued = False
     handshake = False
     handshake_bytes = 0
+    stage = "provider_connect"
     try:
         with measure("provider_tcp_connect"):
             connection = socket.create_connection((host, port), timeout=10)
         with connection as provider:
             # Read one whole TLS record, then let the shared gate validate it.
             with measure("client_hello_wait"):
+                stage = "client_hello_wait"
                 while len(client) < 5 or len(client) < 5 + int.from_bytes(
                     client[3:5], "big"
                 ):
@@ -138,6 +140,7 @@ def relay(
                         raise ValueError("Oversized ClientHello")
             (directory / "client.bin").write_bytes(client)
             with measure("verify_hello"):
+                stage = "hello_verify"
                 gate = verifier("hello", directory)
             released = int(str(gate["released"]))
             provider.sendall(client[:released])
@@ -148,8 +151,10 @@ def relay(
             # release Finished first, then verify and release the HTTP request.
             while time.monotonic() < authorization_deadline:
                 if select.select([provider], [], [], 0)[0]:
+                    stage = "provider_handshake_read"
                     chunk = provider.recv(65536)
                     if not chunk:
+                        transport("capture_failed", _exchange_id(), reason="provider_closed_before_authorization")
                         raise ValueError("Provider closed before authorization")
                     server.extend(chunk)
                     if len(server) > 128 * 1024:
@@ -158,6 +163,7 @@ def relay(
                     # only TLS setup and its fixed, unauthenticated HEAD probe.
                     channel.send(chunk)
                 try:
+                    stage = "miner_message_wait"
                     chunk = channel.recv(
                         min(authorization_deadline, time.monotonic() + 0.05)
                     )
@@ -173,6 +179,7 @@ def relay(
                 if raw_claim is None:
                     continue
                 claim = json.loads(raw_claim)
+                stage = "handshake_claim" if not handshake else "authorization_claim"
                 size = claim.get("client_bytes")
                 if (
                     not isinstance(size, int)
@@ -190,8 +197,10 @@ def relay(
                 if not handshake:
                     emit("handshake_capture_wait", handshake_started)
                     with measure("verify_handshake"):
+                        stage = "handshake_verify"
                         verifier("handshake", directory)
                     with measure("handshake_persistence"):
+                        stage = "handshake_persist"
                         store.put(
                             prefix + "/handshake.json",
                             (directory / "handshake.json").read_bytes(),
@@ -201,15 +210,18 @@ def relay(
                     channel.notify(
                         {"status": "running", "handshook": True, "authorized": False}
                     )
+                    stage = "provider_probe_release"
                     provider.sendall(client[released:])
                     released = len(client)
                     authorization_started = timing_started()
                     continue
                 emit("authorization_claim_wait", authorization_started)
                 with measure("verify_authorize"):
+                    stage = "authorization_verify"
                     verifier("authorize", directory)
                 # These writes complete before any billable HTTP bytes leave.
                 with measure("authorization_persistence"):
+                    stage = "authorization_persist"
                     for name in (
                         "client.bin",
                         "server.bin",
@@ -227,6 +239,7 @@ def relay(
                 if time.monotonic() >= authorization_deadline:
                     raise TimeoutError("Request authorization deadline reached")
                 if before_release is not None:
+                    stage = "dispatch_reservation"
                     (directory / "authorization-server.bin").write_bytes(server)
                     store.put(prefix + "/authorization-server.bin", bytes(server))
                     before_release((directory / "request.json").read_bytes())
@@ -237,6 +250,7 @@ def relay(
                 )
                 handshake_bytes = len(server)
                 with measure("provider_request_release"):
+                    stage = "provider_request_release"
                     provider.sendall(client[released:])
                     break
             else:
@@ -246,6 +260,7 @@ def relay(
             first_response = True
             # Do not consume client messages or let its disconnect cancel GPT.
             with measure("provider_response_capture"):
+                stage = "provider_response_capture"
                 while time.monotonic() < deadline:
                     if not select.select([provider], [], [], 0.2)[0]:
                         continue
@@ -264,6 +279,7 @@ def relay(
         with measure("final_transcript_persistence"):
             store.put(prefix + "/server.bin", bytes(server))
         with measure("verify_finish"):
+            stage = "response_verify"
             metadata = verifier("finish", directory)
         metadata.update(
             {
@@ -279,6 +295,7 @@ def relay(
         if extra_metadata is not None:
             metadata.update(extra_metadata)
         with measure("evidence_persistence"):
+            stage = "evidence_persist"
             for name in ("request.json", "response.sse"):
                 store.put(prefix + "/" + name, (directory / name).read_bytes())
             with measure("manifest_persistence"):
@@ -311,6 +328,9 @@ def relay(
             channel.send(bytes(server[handshake_bytes:]))
             channel.finish()
         return metadata
+    except Exception as error:
+        transport("capture_failed", _exchange_id(), reason=stage, error_type=type(error).__name__)
+        raise
     finally:
         # Ordinary Pods retain the spool for upload/finalization recovery. This
         # never opens another provider connection or repeats a paid request.

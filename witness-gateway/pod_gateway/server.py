@@ -15,6 +15,7 @@ from aiohttp import WSMsgType, web
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from witness_client.calls import Digest, Generation, Invocation
 from witness_client.request import PROVIDERS
+from witness_client.timing import transport
 
 from .admission import CapacityReached
 from .auth import Authenticator, AuthRejected
@@ -569,9 +570,14 @@ class Gateway:
         await socket.prepare(request)
         bridge = Bridge(socket)
         self.bridges[call.exchange_id] = bridge
-        received = 0
+        received = messages = 0
         try:
             async for message in socket:
+                messages += 1
+                transport("worker_receive", call.exchange_id, host="gateway",
+                          kind="binary" if message.type == WSMsgType.BINARY else "control",
+                          size=len(message.data) if message.type in (WSMsgType.TEXT, WSMsgType.BINARY) else 0,
+                          sequence=messages)
                 if message.type == WSMsgType.TEXT:
                     data = object_dict(json.loads(message.data))
                     if data.get("type") == "ready":
@@ -612,7 +618,14 @@ class Gateway:
                         await bridge.miner.send_bytes(message.data)
                 else:
                     break
+                transport("miner_forward", call.exchange_id, host="gateway", sequence=messages)
+        except Exception as error:
+            transport("bridge_failed", call.exchange_id, host="gateway", reason="worker_bridge",
+                      error_type=type(error).__name__)
+            raise
         finally:
+            transport("bridge_closed", call.exchange_id, host="gateway", reason="worker_bridge",
+                      close_code=socket.close_code)
             self.bridges.pop(call.exchange_id, None)
             if bridge.miner is not None:
                 await bridge.miner.close()
@@ -641,6 +654,10 @@ class Gateway:
         try:
             async for message in miner:
                 messages += 1
+                transport("miner_receive", exchange_id, host="gateway",
+                          kind="binary" if message.type == WSMsgType.BINARY else "control",
+                          size=len(message.data) if message.type in (WSMsgType.TEXT, WSMsgType.BINARY) else 0,
+                          sequence=messages)
                 if messages > 4096:
                     raise ValueError("Too many transport messages")
                 if message.type == WSMsgType.BINARY:
@@ -656,7 +673,14 @@ class Gateway:
                     await bridge.worker.send_str(message.data)
                 else:
                     break
+                transport("worker_forward", exchange_id, host="gateway", sequence=messages)
+        except Exception as error:
+            transport("bridge_failed", exchange_id, host="gateway", reason="miner_bridge",
+                      error_type=type(error).__name__)
+            raise
         finally:
+            transport("bridge_closed", exchange_id, host="gateway", reason="miner_bridge",
+                      close_code=miner.close_code)
             bridge.miner = None
             await bridge.worker.close()
             await miner.close()

@@ -41,6 +41,31 @@ T = TypeVar("T")
 HOST = "client"
 
 
+def transport(
+    phase: str,
+    identifier: str,
+    *,
+    host: str = HOST,
+    kind: str = "",
+    size: int = 0,
+    sequence: int = 0,
+    reason: str = "",
+    error_type: str | None = None,
+    close_code: int | None = None,
+) -> None:
+    """Record message timing and fixed reason codes without message contents."""
+    if os.environ.get("WITNESS_TIMINGS") != "1":
+        return
+    with suppress(Exception):
+        print(json.dumps({
+            "event": "witness_transport", "host": host, "exchange_id": identifier,
+            "phase": phase, "timestamp_ns": time.time_ns(),
+            "monotonic_ns": time.monotonic_ns(), "kind": kind, "bytes": size,
+            "sequence": sequence, "reason": reason, "error_type": error_type,
+            "close_code": close_code,
+        }, separators=(",", ":")), file=sys.stderr, flush=True)
+
+
 def identify_exchange(identifier: str) -> None:
     """Correlate subsequent and enclosing spans with the allocation UUID."""
     trace = _trace.get()

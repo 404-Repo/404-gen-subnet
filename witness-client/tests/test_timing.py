@@ -23,7 +23,21 @@ def test_timings_are_opt_in(
     monkeypatch.delenv("WITNESS_TIMINGS", raising=False)
     with timing.measure("disabled"):
         timing.identify_exchange("test-exchange")
+    timing.transport("send_start", "test-exchange", kind="binary", size=42)
     assert records(capsys) == []
+
+
+def test_transport_records_only_message_metadata(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("WITNESS_TIMINGS", "1")
+    timing.transport("send_end", "test-exchange", kind="handshake", size=42, sequence=3)
+    event = json.loads(capsys.readouterr().err)
+    assert event["event"] == "witness_transport"
+    assert (event["host"], event["exchange_id"], event["kind"]) == ("client", "test-exchange", "handshake")
+    assert (event["bytes"], event["sequence"]) == (42, 3)
+    assert event["timestamp_ns"] > 0 and event["monotonic_ns"] > 0
+    assert event["error_type"] is None
 
 
 def test_monotonic_nested_spans_and_failure_privacy(
@@ -65,6 +79,7 @@ def test_broken_sink_preserves_result_and_original_error(
 ) -> None:
     monkeypatch.setenv("WITNESS_TIMINGS", "1")
     monkeypatch.setattr("witness_client.timing.sys.stderr", BrokenSink())
+    timing.transport("send_end", "test-exchange")
 
     @timing.timed("operation")
     def operation(value: int) -> int:

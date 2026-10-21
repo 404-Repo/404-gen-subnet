@@ -9,6 +9,7 @@ from typing import Protocol
 
 from .delivery import Phase
 from .errors import WitnessError
+from .timing import transport
 from .types import ExchangeStatus
 
 MAX_BYTES = 16 * 1024 * 1024
@@ -34,6 +35,7 @@ class WebSocketTunnel:
         self.pending: deque[bytes] = deque()
         self.upload_bytes = self.download_bytes = 0
         self.received_messages = 0
+        self.sent_messages = 0
         self.ended = False
 
     def send(self, data: bytes) -> None:
@@ -46,8 +48,14 @@ class WebSocketTunnel:
 
     def flush(self) -> None:
         while self.buffer:
-            self.socket.send(bytes(self.buffer[:CHUNK_BYTES]))
+            self._send(bytes(self.buffer[:CHUNK_BYTES]), "binary")
             del self.buffer[:CHUNK_BYTES]
+
+    def _send(self, message: str | bytes, kind: str) -> None:
+        self.sent_messages += 1
+        transport("send_start", self.identifier, kind=kind, size=len(message), sequence=self.sent_messages)
+        self.socket.send(message)
+        transport("send_end", self.identifier, kind=kind, size=len(message), sequence=self.sent_messages)
 
     def recv(self, timeout: float | None = None) -> bytes:
         self.flush()
@@ -65,10 +73,10 @@ class WebSocketTunnel:
         if phase not in ("handshake", "authorize"):
             raise WitnessError("Unsupported authorization phase", self.identifier)
         self.flush()
-        self.socket.send(
+        self._send(
             json.dumps(
                 {"type": phase, "claim": json.loads(claim)}, separators=(",", ":")
-            )
+            ), phase,
         )
         deadline = time.monotonic() + timeout
         while not self.ended:
@@ -83,8 +91,14 @@ class WebSocketTunnel:
         raise WitnessError("Witness closed before proof acceptance", self.identifier)
 
     def _receive(self, timeout: float) -> bytes | ExchangeStatus:
-        message = self.socket.recv(timeout=timeout)
+        try:
+            message = self.socket.recv(timeout=timeout)
+        except Exception as error:
+            transport("receive_failed", self.identifier, error_type=type(error).__name__)
+            raise
         self.received_messages += 1
+        transport("receive", self.identifier, kind="binary" if isinstance(message, bytes) else "control",
+                  size=len(message), sequence=self.received_messages)
         if self.received_messages > 4096:
             raise WitnessError("Too many transport messages", self.identifier)
         if isinstance(message, bytes):
