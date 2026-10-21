@@ -187,13 +187,20 @@ def relay(
                     or len(client) > size
                 ):
                     raise ValueError("Invalid authorized request size")
-                if len(client) < size or not complete_records(server):
+                if len(client) < size:
+                    transport("claim_wait", _exchange_id(), kind="client", size=len(client), expected_bytes=size)
+                    continue
+                if not complete_records(server):
+                    transport("claim_wait", _exchange_id(), kind="server", size=len(server), reason="partial_tls_record")
                     continue
                 if handshake and len(server) == handshake_bytes:
+                    transport("claim_wait", _exchange_id(), kind="server", reason="session_ticket")
                     continue  # Wait for a ticket to confirm the committed key.
-                (directory / "client.bin").write_bytes(client)
-                (directory / "server.bin").write_bytes(server)
-                (directory / claim_name).write_bytes(raw_claim)
+                transport("claim_ready", _exchange_id(), kind=claim_name, size=len(client), expected_bytes=size)
+                with measure("claim_spool_persistence"):
+                    (directory / "client.bin").write_bytes(client)
+                    (directory / "server.bin").write_bytes(server)
+                    (directory / claim_name).write_bytes(raw_claim)
                 if not handshake:
                     emit("handshake_capture_wait", handshake_started)
                     with measure("verify_handshake"):

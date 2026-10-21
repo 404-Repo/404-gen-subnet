@@ -52,6 +52,7 @@ def transport(
     reason: str = "",
     error_type: str | None = None,
     close_code: int | None = None,
+    expected_bytes: int | None = None,
 ) -> None:
     """Record message timing and fixed reason codes without message contents."""
     if os.environ.get("WITNESS_TIMINGS") != "1":
@@ -63,6 +64,7 @@ def transport(
             "monotonic_ns": time.monotonic_ns(), "kind": kind, "bytes": size,
             "sequence": sequence, "reason": reason, "error_type": error_type,
             "close_code": close_code,
+            "expected_bytes": expected_bytes,
         }, separators=(",", ":")), file=sys.stderr, flush=True)
 
 
