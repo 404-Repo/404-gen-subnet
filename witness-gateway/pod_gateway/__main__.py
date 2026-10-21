@@ -78,14 +78,23 @@ def main() -> None:
 
         worker_main()
     elif role in ("gateway", "revivor"):
-        from .settings import Settings
+        from .dependencies import create_tls_context, gateway_spec, worker_spec
+        from .settings import GatewaySettings, RevivorSettings
 
-        settings = Settings(dict(os.environ))
-        if role == "gateway":
-            from .main import run
+        settings = GatewaySettings() if role == "gateway" else RevivorSettings()  # type: ignore[call-arg]
+        # Both roles have always validated both Pod shapes and upstream TLS before
+        # starting. Keep that startup contract while moving construction out of settings.
+        worker = worker_spec(settings)
+        gateway = gateway_spec(settings)
+        tls = create_tls_context(settings)
+        if isinstance(settings, GatewaySettings):
+            from .main import run as run_gateway
+
+            run_gateway(settings, worker, tls)
         else:
-            from .revivor import run
-        run(settings)
+            from .revivor import run as run_revivor
+
+            run_revivor(settings, worker, gateway)
     else:
         parser.error("Unknown WITNESS_ROLE")
 

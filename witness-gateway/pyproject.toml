@@ -3,6 +3,10 @@ testpaths = ["tests"]
 pythonpath = ["."]
 filterwarnings = ["error"]
 
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+
 [tool.mypy]
 python_version = "3.11"
 files = ["pod_gateway", "tests"]

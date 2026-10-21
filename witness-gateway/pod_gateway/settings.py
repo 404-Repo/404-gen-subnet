@@ -1,33 +1,126 @@
-"""Explicit runtime configuration. Importing this module performs no live reads."""
+"""Typed runtime configuration; importing this module does not read the environment."""
 
-from __future__ import annotations
-
-import base64
-import hashlib
 import json
-import ssl
-import tempfile
 from collections.abc import Mapping
-from dataclasses import dataclass, field
 from decimal import Decimal
+from functools import cached_property
 from pathlib import Path
+from types import MappingProxyType
+from typing import Annotated, Self
 from urllib.parse import urlsplit
 
+from pydantic import (
+    Field,
+    ModelWrapValidatorHandler,
+    PrivateAttr,
+    SecretStr,
+    field_validator,
+    model_validator,
+)
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+
 from .auth import public_key
-from .models import PodSpec, Scope
-from .state import R2StateStore
+from .models import Scope
 
 
-@dataclass(frozen=True)
-class Settings:
-    env: Mapping[str, str] = field(repr=False)
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(case_sensitive=True, extra="ignore", frozen=True, hide_input_in_errors=True)
 
-    def __post_init__(self) -> None:
-        Scope(self.deployment, self.round, self.env["WITNESS_GATEWAY_OWNER_HOTKEY"])
-        public_key(self.env["WITNESS_GATEWAY_OWNER_HOTKEY"])
-        if len(self.secret) < 32 or self.round_end <= 0 or self.round == "gateway":
-            raise ValueError("Invalid master key or round deadline")
-        origin = urlsplit(self.env["WITNESS_GATEWAY_URL"])
+    deployment: str = Field(..., alias="WITNESS_DEPLOYMENT")
+    round: str = Field(..., alias="WITNESS_ACTIVE_ROUND")
+    round_end: int = Field(..., alias="WITNESS_ROUND_END", gt=0)
+    gateway_owner_hotkey: str = Field(..., alias="WITNESS_GATEWAY_OWNER_HOTKEY")
+    gateway_url: str = Field(..., alias="WITNESS_GATEWAY_URL")
+    master_key: SecretStr = Field(..., alias="WITNESS_MASTER_KEY")
+    prompts: Annotated[frozenset[str], NoDecode] = Field(..., alias="WITNESS_PROMPT_HASHES")
+
+    runpod_api_key: SecretStr = Field(..., alias="GATEWAY_RUNPOD_API_KEY")
+    runpod_min_request_interval: float = Field(default=1.1, alias="RUNPOD_MIN_REQUEST_INTERVAL")
+    max_fleet_hourly: Decimal = Field(..., alias="WITNESS_MAX_FLEET_HOURLY")
+    gateway_hourly_ceiling: Decimal = Field(..., alias="GATEWAY_HOURLY_CEILING", gt=0)
+    pod_ceiling: Decimal = Field(..., alias="WITNESS_POD_HOURLY_CEILING", gt=0)
+    max_pods: int = Field(default=250, alias="WITNESS_MAX_PODS", ge=1, le=1000)
+    max_captures: int = Field(default=2, alias="WITNESS_MAX_CAPTURES", ge=1, le=32)
+    idle_seconds: int = Field(default=1800, alias="WITNESS_IDLE_SECONDS", ge=1800)
+
+    image: str = Field(..., alias="WITNESS_IMAGE")
+    worker_cpu_id: str = Field(default="cpu3c", alias="WITNESS_CPU_ID")
+    worker_vcpu_count: int = Field(default=2, alias="WITNESS_VCPU")
+    worker_disk_gb: int = Field(default=10, alias="WITNESS_DISK_GB")
+    data_centers: Annotated[tuple[str, ...], NoDecode] = Field(default=(), alias="WITNESS_DATA_CENTERS")
+    gateway_image: str | None = Field(default=None, alias="WITNESS_GATEWAY_IMAGE")
+    gateway_cpu_id: str = Field(default="cpu3c", alias="GATEWAY_CPU_ID")
+    gateway_vcpu_count: int = Field(default=2, alias="GATEWAY_VCPU")
+
+    r2_endpoint: SecretStr = Field(..., alias="R2_ENDPOINT")
+    r2_access_key_id: SecretStr = Field(..., alias="R2_ACCESS_KEY_ID")
+    r2_secret_access_key: SecretStr = Field(..., alias="R2_SECRET_ACCESS_KEY")
+    r2_bucket: str = Field(..., alias="R2_BUCKET")
+    subtensor_rpc_url: str = Field(..., alias="SUBTENSOR_RPC_URL")
+    netuid: int = Field(default=17, alias="WITNESS_NETUID")
+    test_hotkey: str | None = Field(default=None, alias="WITNESS_TEST_HOTKEY")
+
+    pricing_path: Path = Field(
+        default=Path(__file__).resolve().parents[2] / "miner-reference/budgets/pricing.json",
+        alias="WITNESS_PRICING_FILE",
+    )
+    tls_certificate: SecretStr = Field(..., alias="GATEWAY_TLS_CERT_B64")
+    tls_key: SecretStr = Field(..., alias="GATEWAY_TLS_KEY_B64")
+
+    _pod_environment: Mapping[str, str] = PrivateAttr(default_factory=dict)
+
+    @model_validator(mode="wrap")
+    @classmethod
+    def preserve_pod_environment(cls, data: dict[str, object], handler: ModelWrapValidatorHandler[Self]) -> Self:
+        settings = handler(data)
+        # Pod fingerprints include literal launch values and whether optional values
+        # were supplied. Keep those bytes for serialization; runtime code uses fields.
+        aliases = {field.alias for field in cls.model_fields.values()}
+        settings._pod_environment = MappingProxyType(
+            {name: value for name, value in data.items() if name in aliases and isinstance(value, str)}
+        )
+        return settings
+
+    @field_validator(
+        "round_end",
+        "max_pods",
+        "max_captures",
+        "idle_seconds",
+        "worker_vcpu_count",
+        "worker_disk_gb",
+        "gateway_vcpu_count",
+        "netuid",
+        mode="before",
+    )
+    @classmethod
+    def parse_integer(cls, value: object) -> object:
+        return int(value) if isinstance(value, str) else value
+
+    @field_validator("prompts", mode="before")
+    @classmethod
+    def parse_prompts(cls, value: object) -> frozenset[str]:
+        values = json.loads(value) if isinstance(value, str) else value
+        if (
+            not isinstance(values, list)
+            or not values
+            or len(values) > 4096
+            or any(
+                not isinstance(item, str) or len(item) != 64 or any(c not in "0123456789abcdef" for c in item)
+                for item in values
+            )
+        ):
+            raise ValueError("Expected frozen prompt SHA256 hashes")
+        return frozenset(values)
+
+    @field_validator("data_centers", mode="before")
+    @classmethod
+    def parse_data_centers(cls, value: object) -> object:
+        return tuple(filter(None, value.split(","))) if isinstance(value, str) else value
+
+    @field_validator("gateway_url")
+    @classmethod
+    def validate_gateway_url(cls, value: str) -> str:
+        origin = urlsplit(value)
         if (
             origin.scheme != "https"
             or not origin.hostname
@@ -37,197 +130,54 @@ class Settings:
             or origin.username
         ):
             raise ValueError("Gateway origin must be HTTPS")
-        if self.worker_budget <= 0 or self.pod_ceiling <= 0:
+        return value
+
+    @model_validator(mode="after")
+    def validate_round(self) -> Self:
+        Scope(self.deployment, self.round, self.gateway_owner_hotkey)
+        public_key(self.gateway_owner_hotkey)
+        if len(self.secret) < 32 or self.round == "gateway":
+            raise ValueError("Invalid master key or round deadline")
+        if self.worker_budget <= 0:
             raise ValueError("Invalid hourly fleet budget")
-        if (
-            int(self.env.get("WITNESS_IDLE_SECONDS", "1800")) < 1800
-            or not 1 <= int(self.env.get("WITNESS_MAX_CAPTURES", "2")) <= 32
-            or not 1 <= int(self.env.get("WITNESS_MAX_PODS", "250")) <= 1000
-        ):
-            raise ValueError("Invalid worker capacity or idle expiry")
-        self.worker_spec()
-        self.gateway_spec()
-        _ = self.prompts
-        self.tls()
+        return self
 
-    @property
-    def deployment(self) -> str:
-        return self.env["WITNESS_DEPLOYMENT"]
-
-    @property
-    def round(self) -> str:
-        return self.env["WITNESS_ACTIVE_ROUND"]
-
-    @property
-    def round_end(self) -> int:
-        return int(self.env["WITNESS_ROUND_END"])
-
-    @property
+    @cached_property
     def secret(self) -> bytes:
-        return bytes.fromhex(self.env["WITNESS_MASTER_KEY"])
+        return bytes.fromhex(self.master_key.get_secret_value())
 
     @property
     def gateway_scope(self) -> Scope:
-        return Scope(
-            self.deployment, "gateway", self.env["WITNESS_GATEWAY_OWNER_HOTKEY"]
-        )
+        return Scope(self.deployment, "gateway", self.gateway_owner_hotkey)
 
     @property
     def worker_budget(self) -> Decimal:
-        total = Decimal(self.env["WITNESS_MAX_FLEET_HOURLY"])
-        gateway = Decimal(self.env["GATEWAY_HOURLY_CEILING"])
-        if not total.is_finite() or not gateway.is_finite() or gateway <= 0:
-            raise ValueError("Invalid hourly budget")
-        return total - gateway
+        return self.max_fleet_hourly - self.gateway_hourly_ceiling
 
     @property
-    def pod_ceiling(self) -> Decimal:
-        value = Decimal(self.env["WITNESS_POD_HOURLY_CEILING"])
-        if not value.is_finite():
-            raise ValueError("Invalid Pod hourly ceiling")
-        return value
+    def pod_environment(self) -> Mapping[str, str]:
+        """Original strings for Pod launch serialization, including explicit defaults."""
+        return self._pod_environment
+
+
+class GatewaySettings(Settings):
+    start_id: str = Field(..., alias="WITNESS_START_ID")
+    pod_id: str = Field(..., alias="RUNPOD_POD_ID")
+    port: int = Field(default=8443, alias="GATEWAY_PORT")
+    min_request_interval: float = Field(default=1.1, alias="GATEWAY_MIN_REQUEST_INTERVAL")
+    parameters: Path = Field(default=Path("/app/witness-server/verifier/params"), alias="WITNESS_PARAMETERS")
+
+    @field_validator("port", mode="before")
+    @classmethod
+    def parse_port(cls, value: object) -> object:
+        return cls.parse_integer(value)
+
+
+class RevivorSettings(Settings):
+    ca_file: Path = Field(..., alias="GATEWAY_TLS_CA_FILE")
+    caddy_config: Path = Field(..., alias="CADDY_CONFIG_FILE")
+    revivor_lock: Path | None = Field(default=None, alias="WITNESS_REVIVOR_LOCK")
 
     @property
-    def prompts(self) -> frozenset[str]:
-        values = json.loads(self.env["WITNESS_PROMPT_HASHES"])
-        if (
-            not isinstance(values, list)
-            or not values
-            or len(values) > 4096
-            or any(
-                not isinstance(v, str)
-                or len(v) != 64
-                or any(c not in "0123456789abcdef" for c in v)
-                for v in values
-            )
-        ):
-            raise ValueError("Expected frozen prompt SHA256 hashes")
-        return frozenset(values)
-
-    @property
-    def pricing_path(self) -> Path:
-        return Path(
-            self.env.get(
-                "WITNESS_PRICING_FILE",
-                str(
-                    Path(__file__).resolve().parents[2]
-                    / "miner-reference/budgets/pricing.json"
-                ),
-            )
-        )
-
-    def state(self) -> R2StateStore:
-        return R2StateStore.connect(
-            endpoint=self.env["R2_ENDPOINT"],
-            access_key=self.env["R2_ACCESS_KEY_ID"],
-            secret_key=self.env["R2_SECRET_ACCESS_KEY"],
-            bucket=self.env["R2_BUCKET"],
-        )
-
-    def worker_spec(self) -> PodSpec:
-        environment = {
-            k: self.env[k]
-            for k in (
-                "R2_ENDPOINT",
-                "R2_ACCESS_KEY_ID",
-                "R2_SECRET_ACCESS_KEY",
-                "R2_BUCKET",
-                "WITNESS_GATEWAY_URL",
-                "WITNESS_ROUND_END",
-            )
-        }
-        environment.update(
-            {
-                "WITNESS_ROLE": "worker",
-                "WITNESS_PRICING_FILE": "/app/config/pricing.json",
-                "WITNESS_PRICING_SHA256": hashlib.sha256(
-                    self.pricing_path.read_bytes()
-                ).hexdigest(),
-                "WITNESS_IDLE_SECONDS": self.env.get("WITNESS_IDLE_SECONDS", "1800"),
-                "WITNESS_MAX_CAPTURES": self.env.get("WITNESS_MAX_CAPTURES", "2"),
-            }
-        )
-        return PodSpec(
-            self.env["WITNESS_IMAGE"],
-            cpu_id=self.env.get("WITNESS_CPU_ID", "cpu3c"),
-            vcpu_count=int(self.env.get("WITNESS_VCPU", "2")),
-            disk_gb=int(self.env.get("WITNESS_DISK_GB", "10")),
-            env=environment,
-            capability_secret=self.secret,
-            data_centers=tuple(
-                filter(None, self.env.get("WITNESS_DATA_CENTERS", "").split(","))
-            ),
-        )
-
-    def gateway_spec(self) -> PodSpec:
-        names = (
-            "WITNESS_ACTIVE_ROUND",
-            "WITNESS_GATEWAY_OWNER_HOTKEY",
-            "WITNESS_GATEWAY_URL",
-            "WITNESS_MASTER_KEY",
-            "WITNESS_ROUND_END",
-            "WITNESS_PROMPT_HASHES",
-            "WITNESS_IMAGE",
-            "GATEWAY_RUNPOD_API_KEY",
-            "WITNESS_MAX_FLEET_HOURLY",
-            "WITNESS_POD_HOURLY_CEILING",
-            "GATEWAY_HOURLY_CEILING",
-            "R2_ENDPOINT",
-            "R2_ACCESS_KEY_ID",
-            "R2_SECRET_ACCESS_KEY",
-            "R2_BUCKET",
-            "SUBTENSOR_RPC_URL",
-            "GATEWAY_TLS_CERT_B64",
-            "GATEWAY_TLS_KEY_B64",
-        )
-        environment = {name: self.env[name] for name in names}
-        for name in (
-            "WITNESS_CPU_ID",
-            "WITNESS_VCPU",
-            "WITNESS_DISK_GB",
-            "WITNESS_DATA_CENTERS",
-            "WITNESS_MAX_PODS",
-            "WITNESS_MAX_CAPTURES",
-            "WITNESS_IDLE_SECONDS",
-            "WITNESS_NETUID",
-            "WITNESS_TEST_HOTKEY",
-            "RUNPOD_MIN_REQUEST_INTERVAL",
-        ):
-            if name in self.env:
-                # Use a gateway-specific name for this rate limiter configuration;
-                # provider API credentials are never part of a worker PodSpec.
-                environment[
-                    "GATEWAY_MIN_REQUEST_INTERVAL"
-                    if name == "RUNPOD_MIN_REQUEST_INTERVAL"
-                    else name
-                ] = self.env[name]
-        environment.update(
-            {
-                "WITNESS_ROLE": "gateway",
-                "WITNESS_PRICING_FILE": "/app/config/pricing.json",
-                "GATEWAY_PORT": "8443",
-            }
-        )
-        return PodSpec(
-            self.env.get("WITNESS_GATEWAY_IMAGE", self.env["WITNESS_IMAGE"]),
-            cpu_id=self.env.get("GATEWAY_CPU_ID", "cpu3c"),
-            vcpu_count=int(self.env.get("GATEWAY_VCPU", "2")),
-            disk_gb=10,
-            port=8443,
-            env=environment,
-        )
-
-    def tls(self) -> ssl.SSLContext:
-        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-        context.minimum_version = ssl.TLSVersion.TLSv1_2
-        with tempfile.TemporaryDirectory(prefix="witness-tls-") as temporary:
-            certificate, key = Path(temporary) / "cert.pem", Path(temporary) / "key.pem"
-            certificate.write_bytes(
-                base64.b64decode(self.env["GATEWAY_TLS_CERT_B64"], validate=True)
-            )
-            key.write_bytes(
-                base64.b64decode(self.env["GATEWAY_TLS_KEY_B64"], validate=True)
-            )
-            key.chmod(0o600)
-            context.load_cert_chain(certificate, key)
-        return context
+    def lock_path(self) -> Path:
+        return self.revivor_lock if self.revivor_lock is not None else self.caddy_config.parent / "revivor.lock"

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import ssl
 from collections.abc import AsyncIterator
 from contextlib import suppress
 
@@ -15,53 +16,55 @@ from .admission import Admission
 from .auth import Authenticator, Membership, MembershipRefresher
 from .control import DrainControl, Registry
 from .lifecycle import Allocator
+from .models import PodSpec
 from .records import CallRecords
 from .runpod import RunPodClient
 from .server import Gateway
-from .settings import Settings
+from .settings import GatewaySettings
+from .state import R2StateStore
 
 
-async def application(settings: Settings) -> web.Application:
-    state = settings.state()
+async def application(settings: GatewaySettings, worker_spec: PodSpec) -> web.Application:
+    state = R2StateStore.connect(
+        endpoint=settings.r2_endpoint.get_secret_value(),
+        access_key=settings.r2_access_key_id.get_secret_value(),
+        secret_key=settings.r2_secret_access_key.get_secret_value(),
+        bucket=settings.r2_bucket,
+    )
     registry = Registry()
     http = RunPodClient.http_client()
     provider = RunPodClient(
-        settings.env["GATEWAY_RUNPOD_API_KEY"],
+        settings.runpod_api_key.get_secret_value(),
         http,
-        min_interval=float(settings.env.get("GATEWAY_MIN_REQUEST_INTERVAL", "1.1")),
+        min_interval=settings.min_request_interval,
         cache_seconds=2,
     )
     admission = Admission(
-        max_pods=int(settings.env.get("WITNESS_MAX_PODS", "250")),
+        max_pods=settings.max_pods,
         hourly_ceiling=str(settings.worker_budget),
         per_pod_ceiling=str(settings.pod_ceiling),
     )
     allocator = Allocator(
         provider,
         DrainControl(registry),
-        settings.worker_spec(),
+        worker_spec,
         admission=admission,
     )
     membership = Membership(
         settings.deployment,
-        int(settings.env.get("WITNESS_NETUID", "17")),
+        settings.netuid,
         settings.round,
-        settings.env.get("WITNESS_TEST_HOTKEY"),
+        settings.test_hotkey,
     )
     rpc = httpx.Client(timeout=45, follow_redirects=False)
-    refresher = MembershipRefresher(membership, rpc, settings.env["SUBTENSOR_RPC_URL"])
+    refresher = MembershipRefresher(membership, rpc, settings.subtensor_rpc_url)
 
     def fence() -> bool:
         return allocator.selected(
             settings.gateway_scope,
-            settings.env["WITNESS_START_ID"],
-            settings.env["RUNPOD_POD_ID"],
+            settings.start_id,
+            settings.pod_id,
         )
-
-    parameters = settings.env.get(
-        "WITNESS_PARAMETERS", "/app/witness-server/verifier/params"
-    )
-    from pathlib import Path
 
     gateway = Gateway(
         allocator=allocator,
@@ -73,9 +76,7 @@ async def application(settings: Settings) -> web.Application:
         round_number=settings.round,
         round_end=settings.round_end,
         secret=settings.secret,
-        proof_hash=hashlib.sha256(
-            (Path(parameters) / "verifying.bin").read_bytes()
-        ).hexdigest(),
+        proof_hash=hashlib.sha256((settings.parameters / "verifying.bin").read_bytes()).hexdigest(),
         prompts=settings.prompts,
         fence=fence,
         pricing_hash=hashlib.sha256(settings.pricing_path.read_bytes()).hexdigest(),
@@ -116,11 +117,11 @@ async def application(settings: Settings) -> web.Application:
     return app
 
 
-def run(settings: Settings) -> None:
+def run(settings: GatewaySettings, worker_spec: PodSpec, tls: ssl.SSLContext) -> None:
     web.run_app(
-        application(settings),
+        application(settings, worker_spec),
         host="0.0.0.0",
-        port=int(settings.env.get("GATEWAY_PORT", "8443")),
-        ssl_context=settings.tls(),
+        port=settings.port,
+        ssl_context=tls,
         handler_cancellation=False,
     )

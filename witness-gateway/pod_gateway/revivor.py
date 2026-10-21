@@ -21,9 +21,9 @@ import httpx
 from .admission import Admission
 from .control import DrainControl
 from .lifecycle import Allocator, InventoryConflict
-from .models import Pod, Scope, Session
+from .models import Pod, PodSpec, Scope, Session
 from .runpod import PodProvider, RunPodClient
-from .settings import Settings
+from .settings import RevivorSettings
 
 
 class Publisher(Protocol):
@@ -218,49 +218,41 @@ class Revivor:
             self.cleanup_workers()
 
 
-def run(settings: Settings) -> None:
-    lock = Path(
-        settings.env.get(
-            "WITNESS_REVIVOR_LOCK",
-            str(Path(settings.env["CADDY_CONFIG_FILE"]).parent / "revivor.lock"),
-        )
-    )
-    with lock.open("a") as file:
+def run(settings: RevivorSettings, worker_spec: PodSpec, gateway_spec: PodSpec) -> None:
+    with settings.lock_path.open("a") as file:
         fcntl.flock(file, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        _run(settings)
+        _run(settings, worker_spec, gateway_spec)
 
 
-def _run(settings: Settings) -> None:
+def _run(settings: RevivorSettings, worker_spec: PodSpec, gateway_spec: PodSpec) -> None:
     with (
         RunPodClient.http_client() as http,
         httpx.Client(
-            verify=ssl.create_default_context(
-                cafile=settings.env["GATEWAY_TLS_CA_FILE"]
-            ),
+            verify=ssl.create_default_context(cafile=settings.ca_file),
             timeout=10,
             follow_redirects=False,
         ) as health,
     ):
         provider = RunPodClient(
-            settings.env["GATEWAY_RUNPOD_API_KEY"],
+            settings.runpod_api_key.get_secret_value(),
             http,
-            min_interval=float(settings.env.get("RUNPOD_MIN_REQUEST_INTERVAL", "1.1")),
+            min_interval=settings.runpod_min_request_interval,
             cache_seconds=2,
         )
         gateway = Allocator(
             provider,
             GatewayDrain(settings.gateway_scope),
-            settings.gateway_spec(),
+            gateway_spec,
         )
         admission = Admission(
-            max_pods=int(settings.env.get("WITNESS_MAX_PODS", "250")),
+            max_pods=settings.max_pods,
             hourly_ceiling=str(settings.worker_budget),
             per_pod_ceiling=str(settings.pod_ceiling),
         )
         workers = Allocator(
             provider,
             DrainControl(),
-            settings.worker_spec(),
+            worker_spec,
             admission=admission,
         )
 
@@ -281,9 +273,9 @@ def _run(settings: Settings) -> None:
             active_round=settings.round,
             round_end=settings.round_end,
             publisher=CaddyPublisher(
-                origin=settings.env["WITNESS_GATEWAY_URL"],
-                ca_file=Path(settings.env["GATEWAY_TLS_CA_FILE"]),
-                config=Path(settings.env["CADDY_CONFIG_FILE"]),
+                origin=settings.gateway_url,
+                ca_file=settings.ca_file,
+                config=settings.caddy_config,
             ),
             probe=probe,
         )
