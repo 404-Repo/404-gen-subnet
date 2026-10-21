@@ -19,6 +19,7 @@ from urllib.parse import urlsplit
 import httpx
 from channel import WorkerChannel
 from storage import Store
+from timing import identify_exchange, measure, timed
 from websockets.sync.client import connect
 from websockets.sync.connection import Connection
 from witness_client.calls import Invocation
@@ -137,7 +138,9 @@ class PodRuntime:
             )
             return True
 
+    @timed("pod_capture_done")
     def _done(self, exchange_id: str, result: Future[None]) -> None:
+        identify_exchange(exchange_id)
         # Failure before a WS claim has no result to upload. After a claim,
         # _capture does not return until its outcome/partial evidence is durable.
         with self.lock:
@@ -183,10 +186,13 @@ class PodRuntime:
                     ),
                     flush=True,
                 )
-                time.sleep(delay)
+                with measure("evidence_retry_wait"):
+                    time.sleep(delay)
                 delay = min(30, delay * 2)
 
+    @timed("pod_recovery")
     def _recover(self, exchange_id: str) -> None:
+        identify_exchange(exchange_id)
         def recover() -> None:
             located = self.records.locate(self.scope, exchange_id)
             if located is None:
@@ -236,7 +242,9 @@ class PodRuntime:
 
         self._retry_upload(remove)
 
+    @timed("pod_capture")
     def _capture(self, invocation: Invocation, call: Call) -> None:
+        identify_exchange(call.exchange_id)
         assert call.capture_id is not None
         directory = self.spool / identifier(call.exchange_id)
         directory.mkdir(mode=0o700, exist_ok=True)

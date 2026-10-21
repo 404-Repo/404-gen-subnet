@@ -101,6 +101,18 @@ close codes and fixed failure stages. Message contents, credentials and exceptio
 messages are not logged. Worker diagnostics use a bounded queue so a stalled log
 sink cannot block TLS capture; diagnostic lines are dropped when the queue fills.
 
+During capture and recovery, after five seconds without worker progress,
+`witness_worker_stall` records the active phase, Pod, exchange and thread IDs, and
+up to 32 stack frames, starting at the current operation. Frames contain file
+names, function names and line numbers; locals, arguments, source lines and
+exception contents are excluded. Linux also reports the thread's kernel wait
+function when available. A separate bounded
+output queue retains up to 128 stack reports during routine log backpressure.
+Sampling is limited to three reports per pause, five seconds apart. Connection
+polling resets the timer; intentional upload retry sleeps have a 60-second
+threshold. The watchdog requires the process to be able to schedule its Python
+sampling thread.
+
 ## Provisioning and lifecycle
 
 Miner HTTP requests and WebSocket upgrades use `btauth/1`, canonical sr25519

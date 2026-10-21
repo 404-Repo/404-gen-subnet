@@ -27,7 +27,7 @@ from identity import (
     worker_connection,
 )
 from storage import MAX_BYTES, R2Store, Store, json_bytes
-from timing import emit, identify_exchange, measure, snapshot, timed, transport
+from timing import emit, identify_exchange, measure, progress, snapshot, timed, transport
 from timing import exchange_id as _exchange_id
 from timing import forward as _verifier_timings
 from timing import started as timing_started
@@ -269,6 +269,7 @@ def relay(
             with measure("provider_response_capture"):
                 stage = "provider_response_capture"
                 while time.monotonic() < deadline:
+                    progress()
                     if not select.select([provider], [], [], 0.2)[0]:
                         continue
                     chunk = provider.recv(65536)

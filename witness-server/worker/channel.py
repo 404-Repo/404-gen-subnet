@@ -7,7 +7,7 @@ import time
 from typing import Protocol
 
 from storage import CHUNK_BYTES, MAX_BYTES, json_bytes
-from timing import exchange_id, transport
+from timing import exchange_id, progress, transport
 from websockets.sync.connection import Connection
 
 
@@ -30,6 +30,7 @@ class WorkerChannel:
         self.sent_messages = 0
 
     def recv(self, deadline: float) -> bytes:
+        progress()
         message = self.socket.recv(timeout=max(0, deadline - time.monotonic()))
         self.received_messages += 1
         transport("receive", exchange_id(), kind="binary" if isinstance(message, bytes) else "control",
