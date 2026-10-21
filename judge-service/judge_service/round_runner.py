@@ -118,7 +118,10 @@ class RoundRunner:
         submissions = dict(
             sorted(
                 submissions.items(),
-                key=lambda item: (item[1].revealed_at_block, blake2b(f"{seed}:{item[0]}".encode()).digest()),
+                key=lambda item: (
+                    item[1].revealed_at_block,
+                    item[1].tie_breaker or blake2b(f"{seed}:{item[0]}".encode()).hexdigest(),
+                ),
             )
         )
         logger.debug(f"Submission order: {list(submissions)}")

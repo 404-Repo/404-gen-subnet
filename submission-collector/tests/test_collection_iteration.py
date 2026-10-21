@@ -199,6 +199,31 @@ async def test_open_collects_submissions_and_transitions_to_miner_generation(
 HOTKEY_2 = "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY"
 
 
+@pytest.mark.parametrize("seed,expected", [(42, [HOTKEY_2, HOTKEY]), (43, [HOTKEY, HOTKEY_2])])
+async def test_open_saves_tie_breakers_for_same_block_submissions(
+    git: MockGitHubClient, settings: Settings, monkeypatch: pytest.MonkeyPatch, seed: int, expected: list[str]
+) -> None:
+    add_state(git, stage=RoundStage.OPEN, round_num=0)
+    add_schedule(git, round_num=0, latest_reveal_block=200)
+    add_config(git, carryover_prompts=0)
+    add_prompts(git, ["prompt_a", "prompt_b", "prompt_c"])
+    monkeypatch.setattr("submission_collector.collection_iteration.secrets.randbits", lambda _: seed)
+
+    await collection_iteration(
+        git=git,
+        get_block=make_get_block(200),
+        get_commitments=make_get_commitments({HOTKEY: make_commitment(), HOTKEY_2: make_commitment()}),
+        get_hotkey_owners=make_get_hotkey_owners({HOTKEY: "coldkey-1", HOTKEY_2: "coldkey-2"}),
+        get_locked_alpha=make_get_locked_alpha(),
+        download_fn=SpyDownloadFn(),
+        settings=settings,
+    )
+
+    submissions = json.loads(git.committed["rounds/0/submissions.json"])
+    ordered = sorted(submissions, key=lambda hk: (submissions[hk]["revealed_at_block"], submissions[hk]["tie_breaker"]))
+    assert ordered == expected
+
+
 async def test_open_insufficient_lock_drops_submission(git: MockGitHubClient, settings: Settings) -> None:
     add_state(git, stage=RoundStage.OPEN, round_num=0)
     add_schedule(git, round_num=0, latest_reveal_block=200, generation_deadline_block=500)

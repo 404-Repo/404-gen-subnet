@@ -255,6 +255,28 @@ async def test_seed_breaks_same_block_ties_after_reveal_block(
     assert runner._hotkeys == expected
 
 
+async def test_saved_tie_breakers_determine_same_block_timeline(settings: Settings) -> None:
+    git = _world([HK_B, HK_A, HK_C])
+    submissions = json.loads(git.files["rounds/1/submissions.json"])
+    for hotkey, submission in submissions.items():
+        submission["revealed_at_block"] = 101 if hotkey == HK_B else 100
+        submission["tie_breaker"] = {HK_A: "2", HK_B: "0", HK_C: "1"}[hotkey] * 128
+    git.files["rounds/1/submissions.json"] = json.dumps(submissions)
+
+    margins = {
+        (LEADER, HK_A): [1.0],
+        (LEADER, HK_B): [1.0],
+        (LEADER, HK_C): [1.0],
+        (HK_C, HK_A): [-1.0],
+        (HK_C, HK_B): [-1.0],
+        (HK_A, HK_B): [0.0],
+    }
+    deliveries = [lambda g: _deliver_passes(g, HK_C)]
+    await _run_round(git, margins, deliveries, settings)
+
+    assert _winner(git) == HK_C
+
+
 async def test_single_challenger_waits_for_both_verdicts(settings: Settings) -> None:
     git = _world([HK_A])
     passes = {HK_A: "passed"}
