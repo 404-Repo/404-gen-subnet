@@ -82,11 +82,23 @@ call allowance once. Known credit exhaustion blocks further dispatch. Concurrent
 calls can cross the credit limit, which remains a recorded breach. Unknown usage
 stays pending, with no claimed remaining balance or guessed zero charge.
 
-A Pod/host failure before response persistence can leave a paid result
-unrecoverable. Its exchange stays unresolved and is never silently inferred
-again. An infrastructure error leaves the generation attempt unresolved even if
-miner code catches it. A retry uses the same generation identity and saved
-prefix. Completed work is never replaced by fresh inference.
+The client joins an active capture and reuses a completed response. A failed
+capture can use up to two replacement attempts per `create()` call, with short
+backoff. Each replacement has a fresh exchange ID; the generation, request key,
+invocation position and existing delivery receipts stay the same. Failed attempts
+and partial evidence remain available. A late attempt cannot authorize or replace
+its successor's response. Delivered outcomes cannot be retried.
+
+An authorized attempt with missing response evidence retains unknown usage and
+consumes its dispatch allowance. A replacement is another possible dispatch and
+can consume model allowance again. A Pod/host failure while a capture is still
+unresolved is joined rather than automatically repeated. Exhausted retries leave
+the generation pending; restarting consumes its saved prefix and completed work.
+
+`WITNESS_TIMINGS=1` enables connection diagnostics across the client, gateway and
+worker. Records include call IDs, message kinds, byte counts, send/receive times,
+close codes and fixed failure stages. Message contents, credentials and exception
+messages are not logged.
 
 ## Provisioning and lifecycle
 
@@ -184,6 +196,8 @@ digest in [deploy/revivor.env.example](deploy/revivor.env.example). Set the actu
 deadline, canonical operator hotkey, frozen prompt hashes, rate ceilings, keys and
 HTTPS origin. Keep the deployment namespace/master key stable for the round.
 Both roles must use the image's frozen pricing bytes. Images must use digests.
+Gateway and worker state protocols must match. Finish active captures and replace
+both roles before resuming miner traffic with an updated state protocol.
 
 On the independent host, install `requirements-pods.txt` in a private virtualenv
 and put `witness-client/src` on `PYTHONPATH`. Generate upstream TLS material

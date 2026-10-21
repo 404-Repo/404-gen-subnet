@@ -56,7 +56,7 @@ def export_bundle(
         raise ValueError("Generation has no complete recording")
     if output.exists():
         raise ValueError("Replay output already exists")
-    data = recording.model_dump()
+    data = recording.model_dump(exclude={"attempts"})
     data["calls"] = {
         key: call.model_dump(exclude={"capture_id"})
         for key, call in recording.calls.items()

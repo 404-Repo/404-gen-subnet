@@ -89,9 +89,13 @@ class Budget:
             "priority",
         ):
             raise BudgetRejected("Unknown model or unsupported service tier")
-        key = self.charge_key(invocation)
+        base = self.charge_key(invocation)
         for _ in range(16):
             ledger, etag = self._load(scope, invocation)
+            original = ledger.charges.get(base)
+            key = base if original is None else f"{base}/{exchange_id}"
+            if original is not None and original.exchange_id == exchange_id:
+                raise BudgetRejected("This call already has a possible dispatch")
             if key in ledger.charges:
                 # A prior authorization can have released HTTP. Never issue it again.
                 raise BudgetRejected("This call already has a possible dispatch")
@@ -116,7 +120,9 @@ class Budget:
                 continue
         raise StateConflict("Prompt ledger is busy")
 
-    def settle(self, scope: Scope, invocation: Invocation, usage: object) -> None:
+    def settle(
+        self, scope: Scope, invocation: Invocation, usage: object, *, exchange_id: str | None = None
+    ) -> None:
         normalized: dict[str, int] | None = None
         if usage is not None:
             if not isinstance(usage, dict):
@@ -131,7 +137,12 @@ class Budget:
                 raise BudgetRejected("Inconsistent verified token counts")
         for _ in range(16):
             ledger, etag = self._load(scope, invocation)
-            charge = ledger.charges.get(self.charge_key(invocation))
+            base = self.charge_key(invocation)
+            charge = ledger.charges.get(base)
+            if exchange_id is None and any(key.startswith(base + "/") for key in ledger.charges):
+                raise BudgetRejected("Capture attempt is required for settlement")
+            if exchange_id is not None and (charge is None or charge.exchange_id != exchange_id):
+                charge = ledger.charges.get(f"{base}/{exchange_id}")
             if charge is None:
                 if normalized is not None:
                     raise BudgetRejected("Usage has no reserved dispatch")

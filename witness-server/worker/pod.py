@@ -307,7 +307,7 @@ class PodRuntime:
                         self.budget.reserve(
                             self.scope, invocation, call.exchange_id, body
                         )
-                        self.records.authorize(self.scope, invocation, self.pod_id)
+                        self.records.authorize(self.scope, invocation, self.pod_id, exchange_id=call.exchange_id)
                         if time.time() >= self.round_end:
                             raise RuntimeError("Round ended before provider release")
 
@@ -400,8 +400,8 @@ class PodRuntime:
                         }
                     ),
                 )
-                self.budget.settle(self.scope, invocation, final.get("usage"))
-                self.records.issued(self.scope, invocation, self.pod_id, manifest)
+                self.budget.settle(self.scope, invocation, final.get("usage"), exchange_id=call.exchange_id)
+                self.records.issued(self.scope, invocation, self.pod_id, manifest, exchange_id=call.exchange_id)
 
             self._retry_upload(issued)
         else:
@@ -428,8 +428,8 @@ class PodRuntime:
                         self.evidence.put(
                             prefix + "/" + file.name, file.read_bytes()
                         )
-                self.budget.settle(self.scope, invocation, None)
-                self.records.failed(self.scope, invocation, self.pod_id, failure)
+                self.budget.settle(self.scope, invocation, None, exchange_id=call.exchange_id)
+                self.records.failed(self.scope, invocation, self.pod_id, failure, exchange_id=call.exchange_id)
                 self.evidence.put(
                     prefix + "/status.json",
                     json_bytes({"status": "failed", "error_type": failure}),

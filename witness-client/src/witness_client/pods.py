@@ -120,6 +120,13 @@ class PodGatewayClient(GatewayClient):
             )
         )
 
+    def retry(self, invocation: Invocation, exchange_id: str) -> Snapshot:
+        return Snapshot.model_validate(
+            self._json("POST", "/calls/retry", {
+                "invocation": invocation.model_dump(), "exchange_id": exchange_id,
+            })
+        )
+
     def ensure_pod(self) -> str:
         with self._pod_lock:
             if self._start_id is not None:

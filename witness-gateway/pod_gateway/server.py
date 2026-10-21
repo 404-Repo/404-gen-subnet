@@ -49,6 +49,11 @@ class Dispatch(StrictInput):
     start_id: str
 
 
+class Retry(StrictInput):
+    invocation: Invocation
+    exchange_id: str
+
+
 class Finish(StrictInput):
     generation: Generation
     count: int = Field(ge=0, le=4096)
@@ -256,12 +261,10 @@ class Gateway:
         data = Dispatch.model_validate_json(await request.read())
         invocation, scope = data.invocation, self._scope(request)
         self._check_generation(invocation)
-        located = await asyncio.to_thread(
-            self.records.locate, scope, self._exchange_id(scope, invocation)
-        )
-        if located is None:
+        recording = await asyncio.to_thread(self.records.load, scope, invocation.generation.id)
+        call = None if recording is None else recording.calls.get(invocation.request.id)
+        if call is None:
             raise AuthRejected("exchange_not_found", 404)
-        _, call = located
         if invocation.ordinal != call.owner_ordinal:
             raise RecordingConflict("Only the original invocation dispatches")
         if call.phase in ("issued", "failed", "capturing"):
@@ -302,16 +305,16 @@ class Gateway:
             )
         return web.json_response(await self._snapshot(scope, invocation, call), status=202)
 
-    @staticmethod
-    def _exchange_id(scope: Scope, invocation: Invocation) -> str:
-        import uuid
-
-        return str(
-            uuid.uuid5(
-                uuid.NAMESPACE_URL,
-                f"{scope.key}/{invocation.generation.id}/{invocation.request.id}",
-            )
+    async def retry(self, request: web.Request) -> web.Response:
+        data = Retry.model_validate_json(await request.read())
+        self._check_generation(data.invocation)
+        if time.time() >= self.round_end:
+            raise AuthRejected("round_closed", 403)
+        scope = self._scope(request)
+        call = await asyncio.to_thread(
+            self.records.retry, scope, data.invocation, identifier(data.exchange_id)
         )
+        return web.json_response(await self._snapshot(scope, data.invocation, call))
 
     async def exchange_status(self, request: web.Request) -> web.Response:
         scope = self._scope(request)
@@ -361,7 +364,7 @@ class Gateway:
         )
         if recording is None:
             raise AuthRejected("recording_not_found", 404)
-        data = recording.model_dump()
+        data = recording.model_dump(exclude={"attempts"})
         data["calls"] = {
             key: call.model_dump(exclude={"capture_id"})
             for key, call in recording.calls.items()
@@ -696,6 +699,7 @@ class Gateway:
                 web.get("/pods/{start_id}", self.pod_status),
                 web.post("/calls", self.reserve),
                 web.post("/calls/dispatch", self.dispatch),
+                web.post("/calls/retry", self.retry),
                 web.post("/calls/deliver", self.deliver),
                 web.post("/generations/finish", self.finish),
                 web.post("/release/{exchange_id}", self.release),

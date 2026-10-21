@@ -51,7 +51,7 @@ def bundle(tmp_path: Path) -> Path:
             scope, invocation, "00000000-0000-4000-8000-000000000001", "pod-one"
         )
         assert records.claim(scope, invocation, "pod-one", assigned.capture_id or "")
-        records.authorize(scope, invocation, "pod-one")
+        records.authorize(scope, invocation, "pod-one", exchange_id=call.exchange_id)
         response = (
             b"data: "
             + canonical(
@@ -95,7 +95,7 @@ def bundle(tmp_path: Path) -> Path:
             "claim.json": b"{}",
         }.items():
             state.put(prefix + name, value)
-        records.issued(scope, invocation, "pod-one", canonical(metadata))
+        records.issued(scope, invocation, "pod-one", canonical(metadata), exchange_id=call.exchange_id)
     records.deliver(scope, invocations[1])
     records.deliver(scope, invocations[0])
     records.finish(scope, generation, 2, "source")

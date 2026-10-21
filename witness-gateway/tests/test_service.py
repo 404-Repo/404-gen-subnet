@@ -77,7 +77,7 @@ def test_fresh_signature_does_not_expire_while_waiting_for_runpod(
         )
         gateway = cast(Gateway, SimpleNamespace(auth=Authenticator(membership), fence=fence))
         response = await Gateway.middleware(gateway, request, handler)
-        assert response.status == (200 if selected else 503), response.text
+        assert response.status == (200 if selected else 503), cast(web.Response, response).text
 
     asyncio.run(scenario())
     assert handled == ([key.ss58_address] if selected else [])
@@ -133,6 +133,7 @@ class Fleet:
         self.tasks: list[asyncio.Task[None]] = []
         self.jobs: set[str] = set()
         self.paid = 0
+        self.failures_remaining = 0
 
     async def control(self, pod: Pod, body: dict[str, object]) -> None:
         env = object_dict(body["env"])
@@ -203,6 +204,12 @@ class Fleet:
             await socket.send_json({"type": "ready", "session": session})
             value = object_dict(await socket.receive_json())
             body = string(value["fixture_body"]).encode()
+            if self.failures_remaining:
+                self.failures_remaining -= 1
+                self.records.failed(self.scope, invocation, call.pod_id, "TimeoutError", exchange_id=call.exchange_id)
+                await socket.send_json({"type": "end"})
+                await socket.send_json({"type": "finished"})
+                return
             async with self.client.get(
                 f"{self.origin}/worker/exchanges/{call.exchange_id}/selection",
                 headers={
@@ -213,7 +220,7 @@ class Fleet:
             ) as check:
                 assert check.status == 200 and (await check.json())["selected"] is True
             self.budget.reserve(self.scope, invocation, call.exchange_id, body)
-            self.records.authorize(self.scope, invocation, call.pod_id)
+            self.records.authorize(self.scope, invocation, call.pod_id, exchange_id=call.exchange_id)
             self.paid += 1
             answer = f"answer-{self.paid}"
             await asyncio.sleep(0.05)
@@ -276,17 +283,18 @@ class Fleet:
                     }
                 ),
             )
-            self.budget.settle(self.scope, invocation, usage)
+            self.budget.settle(self.scope, invocation, usage, exchange_id=call.exchange_id)
             self.records.issued(
-                self.scope, invocation, call.pod_id, canonical(metadata)
+                self.scope, invocation, call.pod_id, canonical(metadata), exchange_id=call.exchange_id
             )
             await socket.send_json({"type": "end"})
             await socket.send_json({"type": "finished"})
 
 
 @pytest.mark.parametrize("call_limit", [1, 2])
+@pytest.mark.parametrize("fail_first", [False, True])
 def test_https_gateway_deduplicates_inflight_requests_and_replays_without_inference(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, call_limit: int
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, call_limit: int, fail_first: bool
 ) -> None:
     async def scenario() -> None:
         server_tls, client_tls = tls(tmp_path)
@@ -364,6 +372,7 @@ def test_https_gateway_deduplicates_inflight_requests_and_replays_without_infere
             connector=aiohttp.TCPConnector(ssl=client_tls)
         ) as http:
             fleet = Fleet(state, records, scope, http)
+            fleet.failures_remaining = int(fail_first)
             fleet.origin = origin
             loop = asyncio.get_running_loop()
 

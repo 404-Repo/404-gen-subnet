@@ -53,6 +53,7 @@ class Recording(BaseModel):
     generation: Generation
     entries: list[Entry] = Field(default_factory=list)
     calls: dict[str, Call] = Field(default_factory=dict)
+    attempts: dict[str, Call] = Field(default_factory=dict)
     output_sha256: str | None = None
     output_is_none: bool = False
     finished: bool = False
@@ -144,11 +145,15 @@ class CallRecords:
             return recording.calls[key].model_copy(deep=True)
 
         call = self._change(scope, invocation.generation, change)
+        self._index(scope, invocation.generation, call)
+        return call
+
+    def _index(self, scope: Scope, generation: Generation, call: Call) -> None:
         key = self.index_key(scope, call.exchange_id)
         data = json_bytes(
             {
-                "generation_id": invocation.generation.id,
-                "call_id": invocation.request.id,
+                "generation_id": generation.id,
+                "call_id": call.request.id,
             }
         )
         try:
@@ -157,6 +162,30 @@ class CallRecords:
             saved = self.store.load(key)
             if saved is None or saved.data != data:
                 raise RecordingConflict("Exchange index conflicts") from None
+
+    def retry(self, scope: Scope, invocation: Invocation, exchange_id: str) -> Call:
+        def change(recording: Recording) -> Call:
+            key = invocation.request.id
+            if recording.entries[invocation.ordinal].call_id != key:
+                raise RecordingConflict("Retry differs from recorded invocation")
+            current = recording.calls[key]
+            if current.exchange_id != exchange_id or current.phase != "failed":
+                return current.model_copy(deep=True)
+            if recording.finished or any(
+                entry.call_id == key and entry.delivery is not None for entry in recording.entries
+            ):
+                raise RecordingConflict("A delivered outcome cannot be retried")
+            recording.attempts[current.exchange_id] = current.model_copy(deep=True)
+            recording.calls[key] = Call(
+                request=current.request,
+                exchange_id=str(uuid.uuid4()),
+                owner_ordinal=current.owner_ordinal,
+                deadline=int(time.time()) + self.exchange_seconds,
+            )
+            return recording.calls[key].model_copy(deep=True)
+
+        call = self._change(scope, invocation.generation, change)
+        self._index(scope, invocation.generation, call)
         return call
 
     @staticmethod
@@ -175,7 +204,10 @@ class CallRecords:
             raise RecordingConflict("Exchange recording is missing")
         call = recording.calls[str(index["call_id"])]
         if call.exchange_id != exchange_id:
-            raise RecordingConflict("Exchange identity differs")
+            previous = recording.attempts.get(exchange_id)
+            if previous is None or previous.request != call.request:
+                raise RecordingConflict("Exchange identity differs")
+            call = previous
         return Invocation(
             generation=recording.generation,
             ordinal=call.owner_ordinal,
@@ -218,10 +250,13 @@ class CallRecords:
 
         return self._change(scope, invocation.generation, change)
 
-    def authorize(self, scope: Scope, invocation: Invocation, pod_id: str) -> None:
+    def authorize(self, scope: Scope, invocation: Invocation, pod_id: str, *, exchange_id: str) -> None:
         def change(recording: Recording) -> None:
             call = recording.calls[invocation.request.id]
-            if call.phase != "capturing" or call.pod_id != pod_id or call.authorized:
+            if (
+                call.exchange_id != exchange_id or call.phase != "capturing"
+                or call.pod_id != pod_id or call.authorized
+            ):
                 raise RecordingConflict(
                     "Capture is no longer eligible for authorization"
                 )
@@ -230,12 +265,14 @@ class CallRecords:
         self._change(scope, invocation.generation, change)
 
     def issued(
-        self, scope: Scope, invocation: Invocation, pod_id: str, manifest: bytes
+        self, scope: Scope, invocation: Invocation, pod_id: str, manifest: bytes, *, exchange_id: str
     ) -> None:
         digest = hashlib.sha256(manifest).hexdigest()
 
         def change(recording: Recording) -> None:
             call = recording.calls[invocation.request.id]
+            if call.exchange_id != exchange_id:
+                raise RecordingConflict("Capture attempt was superseded")
             if call.phase == "issued" and call.manifest_sha256 == digest:
                 return
             if (
@@ -249,10 +286,15 @@ class CallRecords:
         self._change(scope, invocation.generation, change)
 
     def failed(
-        self, scope: Scope, invocation: Invocation, pod_id: str, failure: str
+        self, scope: Scope, invocation: Invocation, pod_id: str, failure: str, *, exchange_id: str
     ) -> None:
         def change(recording: Recording) -> None:
             call = recording.calls[invocation.request.id]
+            if call.exchange_id != exchange_id:
+                previous = recording.attempts.get(exchange_id)
+                if previous is not None and previous.pod_id == pod_id and previous.failure == failure:
+                    return
+                raise RecordingConflict("Capture attempt was superseded")
             if call.phase == "failed" and call.failure == failure:
                 return
             if call.phase != "capturing" or call.pod_id != pod_id:

@@ -524,6 +524,7 @@ class GenerationWitness(WitnessClient):
         body = openai_request.serialize_body(normalized, self._mode)
         key = RequestKey.from_body(self._mode, body, witness_seed)
         identifier: str | None = None
+        retries = 0
         try:
             # Serialize reservation only. TLS, inference and result waiting remain
             # concurrent, including multiple invocations of the same request.
@@ -560,6 +561,9 @@ class GenerationWitness(WitnessClient):
                     generation=self.generation, ordinal=self._cursor, request=key
                 )
                 snapshot = self._gateway.reserve(invocation)
+                if snapshot.call.phase == "failed":
+                    snapshot = self._gateway.retry(invocation, snapshot.call.exchange_id)
+                    retries += 1
                 identifier = snapshot.call.exchange_id
                 identify_exchange(identifier)
                 if (
@@ -600,7 +604,30 @@ class GenerationWitness(WitnessClient):
                     and snapshot.call.phase in ("reserved", "assigned")
                 ):
                     preparation.enter_context(self._preparation)
-                while snapshot.call.phase not in ("issued", "failed"):
+                while snapshot.call.phase != "issued":
+                    if snapshot.call.phase == "failed":
+                        if retries >= 2:
+                            break
+                        retries += 1
+                        time.sleep(retries)
+                        snapshot = self._gateway.retry(invocation, snapshot.call.exchange_id)
+                        if (snapshot.call.request != key or snapshot.hotkey != self._hotkey.ss58_address
+                                or snapshot.round != self.generation.round):
+                            raise WitnessError("Retry reservation differs", code="invalid_recording")
+                        identifier = snapshot.call.exchange_id
+                        identify_exchange(identifier)
+                        directory = self._state / identifier
+                        directory.mkdir(mode=0o700, exist_ok=True)
+                        _save(directory / "job.json", _encode_json({
+                            "deadline": snapshot.call.deadline, "invocation": invocation.model_dump(),
+                        }))
+                        deadline = time.monotonic() + snapshot.call.deadline - time.time()
+                        attempted = False
+                        preparation.close()
+                        if (invocation.ordinal == snapshot.call.owner_ordinal
+                                and snapshot.call.phase in ("reserved", "assigned")):
+                            preparation.enter_context(self._preparation)
+                        continue
                     if (
                         invocation.ordinal == snapshot.call.owner_ordinal
                         and not attempted

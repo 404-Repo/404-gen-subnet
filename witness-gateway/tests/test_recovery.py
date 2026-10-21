@@ -29,7 +29,7 @@ def capture(state: MemoryState) -> tuple[CallRecords, Budget, Invocation, Call]:
     assert assigned.capture_id is not None
     assert records.claim(SCOPE, item, "pod-one", assigned.capture_id)
     budget.reserve(SCOPE, item, call.exchange_id, BODY)
-    records.authorize(SCOPE, item, "pod-one")
+    records.authorize(SCOPE, item, "pod-one", exchange_id=call.exchange_id)
     located = records.locate(SCOPE, call.exchange_id)
     assert located is not None
     return records, budget, item, located[1]
@@ -140,7 +140,7 @@ def test_restarted_worker_finishes_durable_capture(tmp_path: Path, completed: bo
         (directory / name).write_bytes(content)
     if completed:
         budget.settle(SCOPE, item, USAGE)
-        records.issued(SCOPE, item, "pod-one", (directory / "manifest.json").read_bytes())
+        records.issued(SCOPE, item, "pod-one", (directory / "manifest.json").read_bytes(), exchange_id=call.exchange_id)
     restarted = runtime(state, records, budget, directory.parent)
     restarted.executor.shutdown(wait=True)
     located = records.locate(SCOPE, call.exchange_id)
@@ -249,7 +249,7 @@ def test_failed_finalization_preserves_a_durable_response(tmp_path: Path, alread
         state.put(prefix(call) + name, content)
     if already_issued:
         budget.settle(SCOPE, item, USAGE)
-        records.issued(SCOPE, item, "pod-one", files["manifest.json"])
+        records.issued(SCOPE, item, "pod-one", files["manifest.json"], exchange_id=call.exchange_id)
     try:
         worker._finalize(item, call, None, "ConnectionClosed")
         located = records.locate(SCOPE, call.exchange_id)

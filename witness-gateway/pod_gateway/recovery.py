@@ -56,7 +56,7 @@ def recover_issued(
             return call
     # Both writes are idempotent. A restart between them repeats settlement, never
     # provider inference, and issued still means accounting and evidence are durable.
-    budget.settle(scope, invocation, metadata.get("usage"))
+    budget.settle(scope, invocation, metadata.get("usage"), exchange_id=call.exchange_id)
     assert call.pod_id is not None
-    records.issued(scope, invocation, call.pod_id, manifest)
+    records.issued(scope, invocation, call.pod_id, manifest, exchange_id=call.exchange_id)
     return call.model_copy(update={"phase": "issued", "manifest_sha256": hashlib.sha256(manifest).hexdigest()})

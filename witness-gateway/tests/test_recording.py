@@ -93,8 +93,8 @@ def test_stored_result_delivery_order_is_durable_and_retries_do_not_repeat_it() 
             SCOPE, item, "00000000-0000-4000-8000-000000000001", "pod-one"
         )
         assert records.claim(SCOPE, item, "pod-one", assigned.capture_id or "")
-        records.authorize(SCOPE, item, "pod-one")
-        records.issued(SCOPE, item, "pod-one", b"sealed fixture manifest")
+        records.authorize(SCOPE, item, "pod-one", exchange_id=assigned.exchange_id)
+        records.issued(SCOPE, item, "pod-one", b"sealed fixture manifest", exchange_id=assigned.exchange_id)
     assert records.deliver(SCOPE, second) == 0
     restarted = CallRecords(state)
     assert restarted.deliver(SCOPE, second) == 0
@@ -174,3 +174,82 @@ def test_verified_body_hash_is_checked_before_any_dispatch_reservation() -> None
     with pytest.raises(BudgetRejected):
         budget.reserve(SCOPE, invocation(), "exchange-one", canonical(changed))
     assert budget.summary(SCOPE, invocation())["possible_dispatches"] == 0
+
+
+def test_concurrent_retries_keep_completed_results_and_original_order() -> None:
+    records = CallRecords(MemoryState())
+    first, second = invocation(), invocation(1, witness_seed=1)
+    for item in (first, second):
+        records.reserve(SCOPE, item)
+        call = records.assign(SCOPE, item, "00000000-0000-4000-8000-000000000001", "pod-one")
+        assert records.claim(SCOPE, item, "pod-one", call.capture_id or "")
+        if item == first:
+            records.authorize(SCOPE, item, "pod-one", exchange_id=call.exchange_id)
+            records.issued(SCOPE, item, "pod-one", b"saved result", exchange_id=call.exchange_id)
+            records.deliver(SCOPE, item)
+        else:
+            records.failed(SCOPE, item, "pod-one", "TimeoutError", exchange_id=call.exchange_id)
+    before = records.load(SCOPE, first.generation.id)
+    assert before is not None
+    failed = before.calls[second.request.id]
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        retried = list(pool.map(lambda _: records.retry(SCOPE, second, failed.exchange_id), range(8)))
+    assert len({call.exchange_id for call in retried}) == 1
+    assert retried[0].exchange_id != failed.exchange_id
+    after = records.load(SCOPE, first.generation.id)
+    assert after is not None
+    assert after.entries == before.entries
+    assert after.calls[first.request.id] == before.calls[first.request.id]
+    assert records.locate(SCOPE, failed.exchange_id) == (second, failed)
+    assert records.locate(SCOPE, retried[0].exchange_id) == (second, retried[0])
+
+
+def test_late_attempt_cannot_authorize_or_replace_its_retry() -> None:
+    records, item = CallRecords(MemoryState()), invocation()
+    original = records.reserve(SCOPE, item)
+    call = records.assign(SCOPE, item, "00000000-0000-4000-8000-000000000001", "pod-one")
+    assert records.claim(SCOPE, item, "pod-one", call.capture_id or "")
+    assert records.retry(SCOPE, item, original.exchange_id).phase == "capturing"
+    records.failed(SCOPE, item, "pod-one", "TimeoutError", exchange_id=original.exchange_id)
+    retried = records.retry(SCOPE, item, original.exchange_id)
+    assigned = records.assign(SCOPE, item, "00000000-0000-4000-8000-000000000001", "pod-one")
+    assert not records.claim(SCOPE, item, "pod-one", call.capture_id or "")
+    assert records.claim(SCOPE, item, "pod-one", assigned.capture_id or "")
+    with pytest.raises(RecordingConflict):
+        records.authorize(SCOPE, item, "pod-one", exchange_id=original.exchange_id)
+    with pytest.raises(RecordingConflict):
+        records.issued(SCOPE, item, "pod-one", b"late result", exchange_id=original.exchange_id)
+    records.failed(SCOPE, item, "pod-one", "TimeoutError", exchange_id=original.exchange_id)
+    current = records.locate(SCOPE, retried.exchange_id)
+    assert current is not None and current[1].phase == "capturing" and not current[1].authorized
+    records.authorize(SCOPE, item, "pod-one", exchange_id=retried.exchange_id)
+    records.issued(SCOPE, item, "pod-one", b"new result", exchange_id=retried.exchange_id)
+    records.deliver(SCOPE, item)
+    records.finish(SCOPE, item.generation, 1, "source")
+    assert records.retry(SCOPE, item, original.exchange_id).phase == "issued"
+
+
+def test_retry_cannot_replace_an_already_delivered_failure() -> None:
+    records, item = CallRecords(MemoryState()), invocation()
+    original = records.reserve(SCOPE, item)
+    records.release(SCOPE, item)
+    records.deliver(SCOPE, item)
+    with pytest.raises(RecordingConflict, match="delivered"):
+        records.retry(SCOPE, item, original.exchange_id)
+
+
+def test_authorized_retry_retains_unknown_usage_and_counts_both_dispatches() -> None:
+    budget, item = Budget(MemoryState(), PRICING), invocation()
+    budget.reserve(SCOPE, item, "first-attempt", BODY)
+    budget.settle(SCOPE, item, None, exchange_id="first-attempt")
+    budget.reserve(SCOPE, item, "second-attempt", BODY)
+    budget.settle(SCOPE, item, {"input_tokens": 3, "output_tokens": 7}, exchange_id="second-attempt")
+    budget.settle(SCOPE, item, None, exchange_id="first-attempt")
+    summary = budget.summary(SCOPE, item)
+    assert summary["possible_dispatches"] == 2 and summary["pending_usage"] == 1
+    assert Decimal(str(summary["known_credits"])) == Decimal("3.8")
+    assert summary["remaining_credits"] is None
+    with pytest.raises(BudgetRejected):
+        budget.reserve(SCOPE, item, "second-attempt", BODY)
+    with pytest.raises(BudgetRejected):
+        budget.reserve(SCOPE, item, "third-attempt", BODY)
