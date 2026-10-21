@@ -141,6 +141,9 @@ class RunPodClient:
             markers = {
                 key: str(environment[key]) for key in MARKERS if key in environment
             }
+            # RunPod omits empty environment values, including the first start's
+            # optional predecessor. All other ownership markers remain required.
+            markers.setdefault("WITNESS_REPLACES", "")
             tcp: dict[int, tuple[str, int]] = {}
             runtime = value.get("runtime")
             if runtime is not None:

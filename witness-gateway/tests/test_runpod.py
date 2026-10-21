@@ -179,6 +179,15 @@ def test_nullable_environment_of_an_unrelated_pod_is_not_an_inventory_failure() 
     assert pod is not None and not pod.in_scope(SCOPE)
 
 
+def test_first_pod_is_owned_when_runpod_omits_its_empty_predecessor() -> None:
+    reply = pod_json()
+    reply["env"] = {key: value for key, value in SPEC.body(SCOPE, START)["env"].items() if value != ""}
+    provider = client(lambda _: httpx.Response(200, json=reply))
+    pod = provider.get("cpu-pod")
+    assert pod is not None and pod.scope() == SCOPE
+    assert pod.session().replaces is None
+
+
 def test_spec_is_pinned_and_caller_environment_cannot_mutate_it() -> None:
     env = {"PRIVATE_KEY": "original"}
     spec = replace(SPEC, env=env)
