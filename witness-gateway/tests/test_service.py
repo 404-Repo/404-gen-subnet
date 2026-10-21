@@ -297,6 +297,7 @@ def test_https_gateway_deduplicates_inflight_requests_and_replays_without_infere
         gateway = Gateway(
             allocator=allocator,
             records=records,
+            budget=Budget(state, PRICING),
             auth=Authenticator(membership),
             registry=registry,
             evidence=state,

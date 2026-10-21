@@ -26,6 +26,7 @@ from worker import PARAMETERS, PROVIDERS, relay, verify
 from pod_gateway.budget import Budget
 from pod_gateway.models import Scope, identifier, json_bytes, object_dict
 from pod_gateway.records import Call, CallRecords
+from pod_gateway.recovery import recover_issued
 from pod_gateway.security import capture_token
 
 
@@ -81,6 +82,18 @@ class PodRuntime:
         self.spool.mkdir(parents=True, mode=0o700, exist_ok=True)
         if self.spool.stat().st_mode & 0o077:
             raise ValueError("Witness spool must be private")
+        with self.lock:
+            for directory in self.spool.iterdir():
+                if not directory.is_dir() or directory.is_symlink():
+                    continue
+                try:
+                    exchange_id = identifier(directory.name)
+                except ValueError:
+                    continue
+                self.active[exchange_id] = None
+                future = self.executor.submit(self._recover, exchange_id)
+                self.active[exchange_id] = future
+                future.add_done_callback(partial(self._done, exchange_id))
 
     def drain(self) -> None:
         with self.lock:
@@ -171,6 +184,46 @@ class PodRuntime:
                 )
                 time.sleep(delay)
                 delay = min(30, delay * 2)
+
+    def _recover(self, exchange_id: str) -> None:
+        def recover() -> None:
+            located = self.records.locate(self.scope, exchange_id)
+            if located is None:
+                raise RuntimeError("Spool has no inference record")
+            invocation, call = located
+            if call.pod_id != self.pod_id or call.start_id != self.start_id:
+                raise RuntimeError("Spool belongs to a different capture allocation")
+            call = recover_issued(
+                self.records, self.budget, self.evidence.get, self.scope, invocation, call, self.proof_hash
+            )
+            if call.phase in ("issued", "failed", "assigned"):
+                return
+            if call.phase != "capturing":
+                raise RuntimeError("Spool has no claimed capture")
+            directory = self.spool / exchange_id
+            metadata: dict[str, object] | None = None
+            failure = "CaptureInterrupted"
+            # Finishing retained TLS bytes cannot open a provider connection.
+            if call.authorized:
+                try:
+                    metadata = verify("finish", directory, provider=invocation.request.provider)
+                    metadata.update(
+                        {
+                            **self._binding(invocation, call),
+                            "prefix": f"rounds/{self.scope.round}/{self.scope.hotkey}/{exchange_id}",
+                            "round": self.scope.round,
+                            "hotkey": self.scope.hotkey,
+                            "exchange_id": exchange_id,
+                            "verified_at": time.time(),
+                            "client_bytes": (directory / "client.bin").stat().st_size,
+                            "server_bytes": (directory / "server.bin").stat().st_size,
+                        }
+                    )
+                except Exception as error:  # noqa: BLE001 - retain partial evidence on interrupted TLS
+                    metadata, failure = None, type(error).__name__
+            self._finalize(invocation, call, metadata, failure)
+
+        self._retry_upload(recover)
 
     def _capture(self, invocation: Invocation, call: Call) -> None:
         assert call.capture_id is not None
@@ -287,11 +340,64 @@ class PodRuntime:
                                 .st_size,
                             }
                         )
-            if metadata is not None:
-                final = metadata
+            self._finalize(invocation, call, metadata, failure)
 
-                def issued() -> None:
-                    for name in (
+    def _finalize(self, invocation: Invocation, call: Call, metadata: dict[str, object] | None, failure: str) -> None:
+        directory = self.spool / identifier(call.exchange_id)
+        prefix = f"rounds/{self.scope.round}/{self.scope.hotkey}/{call.exchange_id}"
+        if metadata is not None:
+            final = metadata
+
+            def issued() -> None:
+                located = self.records.locate(self.scope, call.exchange_id)
+                if located is None:
+                    raise RuntimeError("Capture record is missing")
+                current = located[1]
+                if current.phase == "issued":
+                    return
+                for name in (
+                    "client.bin",
+                    "server.bin",
+                    "authorization-server.bin",
+                    "claim.json",
+                    "authorization.json",
+                    "handshake.json",
+                    "request.json",
+                    "response.sse",
+                ):
+                    file = directory / name
+                    if file.is_file():
+                        self.evidence.put(prefix + "/" + name, file.read_bytes())
+                recovered = recover_issued(
+                    self.records, self.budget, self.evidence.get, self.scope, invocation, current, self.proof_hash
+                )
+                if recovered.phase == "issued":
+                    return
+                manifest = json_bytes(final)
+                self.evidence.put(prefix + "/manifest.json", manifest)
+                self.evidence.put(
+                    prefix + "/status.json",
+                    json_bytes(
+                        {
+                            "status": "issued",
+                            "authorized": True,
+                            "provider_status": final["provider_status"],
+                            "usage": final.get("usage"),
+                            "evidence_expires": int(
+                                (time.time() + 7 * 86400) * 1000
+                            ),
+                        }
+                    ),
+                )
+                self.budget.settle(self.scope, invocation, final.get("usage"))
+                self.records.issued(self.scope, invocation, self.pod_id, manifest)
+
+            self._retry_upload(issued)
+        else:
+
+            def failed() -> None:
+                for file in directory.iterdir():
+                    if file.name in {
                         "client.bin",
                         "server.bin",
                         "authorization-server.bin",
@@ -299,55 +405,18 @@ class PodRuntime:
                         "authorization.json",
                         "handshake.json",
                         "request.json",
-                        "response.sse",
-                    ):
-                        file = directory / name
-                        if file.is_file():
-                            self.evidence.put(prefix + "/" + name, file.read_bytes())
-                    manifest = json_bytes(final)
-                    self.evidence.put(prefix + "/manifest.json", manifest)
-                    self.evidence.put(
-                        prefix + "/status.json",
-                        json_bytes(
-                            {
-                                "status": "issued",
-                                "authorized": True,
-                                "provider_status": final["provider_status"],
-                                "usage": final.get("usage"),
-                                "evidence_expires": int(
-                                    (time.time() + 7 * 86400) * 1000
-                                ),
-                            }
-                        ),
-                    )
-                    self.budget.settle(self.scope, invocation, final.get("usage"))
-                    self.records.issued(self.scope, invocation, self.pod_id, manifest)
+                    }:
+                        self.evidence.put(
+                            prefix + "/" + file.name, file.read_bytes()
+                        )
+                self.budget.settle(self.scope, invocation, None)
+                self.records.failed(self.scope, invocation, self.pod_id, failure)
+                self.evidence.put(
+                    prefix + "/status.json",
+                    json_bytes({"status": "failed", "error_type": failure}),
+                )
 
-                self._retry_upload(issued)
-            else:
-
-                def failed() -> None:
-                    for file in directory.iterdir():
-                        if file.name in {
-                            "client.bin",
-                            "server.bin",
-                            "authorization-server.bin",
-                            "claim.json",
-                            "authorization.json",
-                            "handshake.json",
-                            "request.json",
-                        }:
-                            self.evidence.put(
-                                prefix + "/" + file.name, file.read_bytes()
-                            )
-                    self.budget.settle(self.scope, invocation, None)
-                    self.records.failed(self.scope, invocation, self.pod_id, failure)
-                    self.evidence.put(
-                        prefix + "/status.json",
-                        json_bytes({"status": "failed", "error_type": failure}),
-                    )
-
-                self._retry_upload(failed)
+            self._retry_upload(failed)
 
     def _send(self, socket: Connection, data: dict[str, object]) -> None:
         socket.send(json_bytes(data).decode())

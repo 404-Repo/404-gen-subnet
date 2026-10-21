@@ -18,11 +18,12 @@ from witness_client.request import PROVIDERS
 
 from .admission import CapacityReached
 from .auth import Authenticator, AuthRejected
-from .budget import BudgetRejected
+from .budget import Budget, BudgetRejected
 from .control import Peer, Registry
 from .lifecycle import AllocationConflict, Allocator, InventoryConflict
 from .models import Scope, identifier, object_dict
 from .records import Call, CallRecords, RecordingConflict
+from .recovery import recover_issued
 from .runpod import ProviderUnavailable
 from .security import capability, capture_token
 from .state import StateConflict, WriteUncertain
@@ -68,6 +69,7 @@ class Gateway:
         *,
         allocator: Allocator,
         records: CallRecords,
+        budget: Budget,
         auth: Authenticator,
         registry: Registry,
         evidence: Evidence,
@@ -81,6 +83,7 @@ class Gateway:
         pricing_hash: str,
     ) -> None:
         self.allocator, self.records, self.auth = allocator, records, auth
+        self.budget = budget
         self.registry, self.evidence = registry, evidence
         self.deployment, self.round, self.round_end = (
             deployment,
@@ -223,7 +226,10 @@ class Gateway:
         if invocation.generation.prompt_sha256 not in self.prompts:
             raise AuthRejected("unknown_round_prompt", 403)
 
-    async def _snapshot(self, scope: Scope, call: Call) -> dict[str, object]:
+    async def _snapshot(self, scope: Scope, invocation: Invocation, call: Call) -> dict[str, object]:
+        call = await asyncio.to_thread(
+            recover_issued, self.records, self.budget, self.evidence.read, scope, invocation, call, self.proof_hash
+        )
         bridge = self.bridges.get(call.exchange_id)
         session = bridge.session if bridge is not None and not bridge.claimed else None
         return {
@@ -244,7 +250,7 @@ class Gateway:
             if recording is None or invocation.ordinal >= len(recording.entries):
                 raise AuthRejected("round_closed", 403)
         call = await asyncio.to_thread(self.records.reserve, scope, invocation)
-        return web.json_response(await self._snapshot(scope, call))
+        return web.json_response(await self._snapshot(scope, invocation, call))
 
     async def dispatch(self, request: web.Request) -> web.Response:
         data = Dispatch.model_validate_json(await request.read())
@@ -259,7 +265,7 @@ class Gateway:
         if invocation.ordinal != call.owner_ordinal:
             raise RecordingConflict("Only the original invocation dispatches")
         if call.phase in ("issued", "failed", "capturing"):
-            return web.json_response(await self._snapshot(scope, call))
+            return web.json_response(await self._snapshot(scope, invocation, call))
         if time.time() >= self.round_end:
             raise AuthRejected("round_closed", 403)
         current = await asyncio.to_thread(self.allocator.current, scope)
@@ -294,7 +300,7 @@ class Gateway:
                 invocation=invocation.model_dump(),
                 call=call.model_dump(),
             )
-        return web.json_response(await self._snapshot(scope, call), status=202)
+        return web.json_response(await self._snapshot(scope, invocation, call), status=202)
 
     @staticmethod
     def _exchange_id(scope: Scope, invocation: Invocation) -> str:
@@ -314,7 +320,7 @@ class Gateway:
         )
         if located is None:
             raise AuthRejected("exchange_not_found", 404)
-        return web.json_response(await self._snapshot(scope, located[1]))
+        return web.json_response(await self._snapshot(scope, *located))
 
     async def deliver(self, request: web.Request) -> web.Response:
         invocation = Invocation.model_validate_json(await request.read())

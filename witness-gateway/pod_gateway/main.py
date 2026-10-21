@@ -14,6 +14,7 @@ from aiohttp import web
 
 from .admission import Admission
 from .auth import Authenticator, Membership, MembershipRefresher
+from .budget import Budget
 from .control import DrainControl, Registry
 from .lifecycle import Allocator
 from .models import PodSpec
@@ -69,6 +70,7 @@ async def application(settings: GatewaySettings, worker_spec: PodSpec) -> web.Ap
     gateway = Gateway(
         allocator=allocator,
         records=CallRecords(state),
+        budget=Budget(state, settings.pricing_path.read_bytes()),
         auth=Authenticator(membership),
         registry=registry,
         evidence=state,
