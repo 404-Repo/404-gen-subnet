@@ -94,6 +94,7 @@ def gateway_spec(settings: Settings) -> PodSpec:
         disk_gb=10,
         port=8443,
         env=environment,
+        data_centers=settings.data_centers,
         registry=settings.registry,
     )
 

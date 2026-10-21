@@ -46,6 +46,15 @@ def test_private_registry_can_launch_both_pod_roles(values: dict[str, object]) -
     assert gateway_spec(settings).env["WITNESS_REGISTRY"] == "private-registry-id"
 
 
+def test_location_preferences_apply_to_both_pod_roles(values: dict[str, object]) -> None:
+    values["WITNESS_DATA_CENTERS"] = "EU-CZ-1,EU-RO-1"
+    settings = Settings.model_validate(values)
+    scope = Scope("test", "test-1", settings.gateway_owner_hotkey)
+    for build in (worker_spec, gateway_spec):
+        body = build(settings).body(scope, "00000000-0000-4000-8000-000000000001")
+        assert body["dataCenterIds"] == ["EU-CZ-1", "EU-RO-1"]
+
+
 @pytest.fixture
 def values(tmp_path: Path) -> dict[str, object]:
     pricing = tmp_path / "pricing.json"
