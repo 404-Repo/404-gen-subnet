@@ -12,7 +12,7 @@ from pod_gateway.models import Scope
 from pod_gateway.settings import Settings
 
 
-@pytest.mark.parametrize("round_number", ["test-0", "test-1"])
+@pytest.mark.parametrize("round_number", ["test-0", "test-1", "test-2"])
 def test_test_hotkey_can_authenticate_without_registration(round_number: str) -> None:
     hotkey = Keypair.create_from_mnemonic(Keypair.generate_mnemonic()).ss58_address
     membership = Membership("test", 17, round_number, hotkey)
