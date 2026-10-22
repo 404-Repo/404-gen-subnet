@@ -16,6 +16,7 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
 
 import aiohttp
+import httpx
 import pytest
 from aiohttp import WSMsgType, web
 from aiohttp.test_utils import make_mocked_request
@@ -29,6 +30,7 @@ from test_recording import PRICING
 from witness_client import ReplayMismatch, ReplayWitness, WitnessClient
 from witness_client.auth import hotkey_headers
 from witness_client.calls import Invocation, canonical
+from witness_client.gateway import GatewayClient
 from witness_client.pods import PodGatewayClient
 from witness_client.tunnel import WebSocketTunnel
 
@@ -501,12 +503,93 @@ def test_https_gateway_deduplicates_inflight_requests_and_replays_without_infere
                 ) as response:
                     assert response.status == 404
             finally:
-                await registry.close()
-                for task in fleet.tasks:
-                    task.cancel()
-                for task in fleet.tasks:
-                    with suppress(asyncio.CancelledError):
-                        await task
-        await runner.cleanup()
+                try:
+                    await registry.close()
+                    for task in fleet.tasks:
+                        task.cancel()
+                    for task in fleet.tasks:
+                        with suppress(asyncio.CancelledError):
+                            await task
+                finally:
+                    await runner.cleanup()
+
+    asyncio.run(scenario())
+
+
+def test_gateway_upgrade_during_tls_session_ticket_processing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from websockets.sync.client import connect
+
+    async def scenario() -> None:
+        server_tls, client_tls = tls(tmp_path)
+        reading_ticket, sent_upgrade = threading.Event(), threading.Event()
+        original_send = ssl.SSLSocket.send
+
+        def ticket(
+            socket: ssl.SSLSocket | ssl.SSLObject,
+            direction: str,
+            version: int,
+            content_type: int,
+            message_type: int,
+            data: bytes,
+        ) -> None:
+            # TLS 1.3 NewSessionTicket, while the reader is inside SSL_read.
+            if direction == "read" and content_type == 22 and message_type == 4:
+                reading_ticket.set()
+                assert sent_upgrade.wait(2)
+
+        def send(socket: ssl.SSLSocket, data: bytes, flags: int = 0) -> int:
+            if not bytes(data).startswith(b"GET "):
+                return original_send(socket, data, flags)
+            # An eager reader enters ticket processing before this write.
+            reading_ticket.wait(0.1)
+            try:
+                return original_send(socket, data, flags)
+            finally:
+                sent_upgrade.set()
+
+        monkeypatch.setattr(client_tls, "_msg_callback", ticket)
+        monkeypatch.setattr(ssl.SSLSocket, "send", send)
+        monkeypatch.setattr(ssl, "create_default_context", lambda **_: client_tls)
+        monkeypatch.setattr(
+            "witness_client.gateway.connect",
+            lambda uri, **options: connect(uri, **{**options, "open_timeout": 1}),
+        )
+        received: list[str] = []
+
+        async def echo(request: web.Request) -> web.WebSocketResponse:
+            socket = web.WebSocketResponse()
+            await socket.prepare(request)
+            value = await socket.receive_str()
+            received.append(value)
+            await socket.send_str(value)
+            await socket.close()
+            return socket
+
+        app = web.Application()
+        app.router.add_get("/exchanges/{exchange_id}/connect", echo)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", 0, ssl_context=server_tls)
+        await site.start()
+        server = cast(asyncio.Server, site._server)
+        assert server.sockets
+        origin = f"https://localhost:{server.sockets[0].getsockname()[1]}"
+        key = Keypair.create_from_mnemonic(Keypair.generate_mnemonic())
+
+        def run() -> None:
+            with httpx.Client(base_url=origin) as http:
+                gateway = GatewayClient(http, key, tmp_path, 1)
+                with gateway.tunnel("fixture") as tunnel:
+                    tunnel.socket.send("upgrade arrived")
+                    assert tunnel.socket.recv(timeout=1) == "upgrade arrived"
+
+        try:
+            await asyncio.wait_for(asyncio.to_thread(run), 5)
+            assert reading_ticket.is_set()
+            assert received == ["upgrade arrived"]
+        finally:
+            await runner.cleanup()
 
     asyncio.run(scenario())

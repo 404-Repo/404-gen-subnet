@@ -4,17 +4,20 @@ from __future__ import annotations
 
 import json
 import math
+import socket
+import threading
 import time
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Literal, cast
+from typing import Any, Literal, cast
 
 import httpx
 from bittensor_wallet import Keypair
+from websockets.client import ClientProtocol
 from websockets.exceptions import WebSocketException
-from websockets.sync.client import connect
+from websockets.sync.client import ClientConnection, connect
 
 from .auth import WITNESS_ID, hotkey_headers
 from .delivery import request, retry
@@ -27,6 +30,31 @@ from .types import AllocationStatus, ExchangeStatus, JSONObject, Session
 
 def encode(value: object) -> bytes:
     return json.dumps(value, separators=(",", ":"), ensure_ascii=False).encode()
+
+
+class _GatewayConnection(ClientConnection):
+    """Send the upgrade before reading TLS session tickets on the shared socket."""
+
+    def __init__(
+        self, sock: socket.socket, protocol: ClientProtocol, **kwargs: Any
+    ) -> None:
+        self._upgrade_sent = threading.Event()
+        super().__init__(sock, protocol, **kwargs)
+
+    def recv_events(self) -> None:
+        # Concurrent ticket processing and SSL_write can lose the opening request.
+        self._upgrade_sent.wait()
+        super().recv_events()
+
+    def send_data(self) -> None:
+        try:
+            super().send_data()
+        finally:
+            self._upgrade_sent.set()
+
+    def close_socket(self) -> None:
+        self._upgrade_sent.set()
+        super().close_socket()
 
 
 class GatewayClient:
@@ -280,6 +308,7 @@ class GatewayClient:
                     max_queue=16,
                     open_timeout=30,
                     close_timeout=5,
+                    create_connection=_GatewayConnection,
                 )
             with socket:
                 yield WebSocketTunnel(socket, identifier)
