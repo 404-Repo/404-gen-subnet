@@ -240,13 +240,43 @@ def test_initial_candidates_and_refinements_overlap_but_render_in_stable_order()
     ]
 
 
-def test_invalid_candidates_and_selections_do_not_trigger_repairs() -> None:
+def test_rejected_candidates_are_repaired_once_in_both_stages() -> None:
+    calls, renderer = Calls(), Renderer()
+    sources = {
+        i: normalize(Calls().create(witness_seed=i, stream=True, model="gpt-6.1-sol").output_text) for i in range(1, 13)
+    }
+    renderer.reject = {sources[i] for i in (1, 2, 3, 5, 6)}
+    assert run(PNG, 42, calls, renderer) in {sources[i] for i in (8, 9, 10, 11, 12)}
+    assert renderer.sources == [sources[i] for i in (1, 2, 3, 8, 9, 10, 5, 6, 11, 12)]
+    assert len(calls.requests) == 12
+    requests = dict(calls.requests)
+    for repair, original in ((8, 1), (9, 2), (10, 3), (11, 5), (12, 6)):
+        request = json.loads(serialize_body(requests[repair], "api"))
+        text = request["input"][0]["content"][-1]["text"]
+        assert sources[original] in text and '{"error":"invalid_geometry"}' in text
+        assert requests[repair]["model"] == "gpt-6.1-sol"
+
+
+def test_failed_repairs_stop_without_another_inference() -> None:
     calls, renderer = Calls(), Renderer()
     renderer.reject = {
-        normalize(Calls().create(witness_seed=i, stream=True, model="gpt-6.1-sol").output_text) for i in (1, 2, 3)
+        normalize(Calls().create(witness_seed=i, stream=True, model="gpt-6.1-sol").output_text)
+        for i in (1, 2, 3, 8, 9, 10)
     }
     assert run(PNG, 42, calls, renderer) is None
-    assert len(calls.requests) == 3
+    assert len(calls.requests) == 6 and len(renderer.sources) == 6
+
+
+def test_failed_refinement_repairs_keep_the_initial_winner() -> None:
+    calls, renderer = Calls(), Renderer()
+    renderer.reject = {
+        normalize(Calls().create(witness_seed=i, stream=True, model="gpt-6.1-sol").output_text) for i in (5, 6, 11, 12)
+    }
+    assert run(PNG, 42, calls, renderer) in renderer.sources[:3]
+    assert len(calls.requests) == 9
+
+
+def test_invalid_selection_does_not_trigger_a_repair() -> None:
     malformed = Calls()
     malformed.invalid_choice = True
     assert choose(PNG, 42, malformed, [Candidate("source", PNG)], 4) is None
@@ -386,5 +416,8 @@ def test_check_command_validates_frozen_inputs_without_loading_credentials(
         ],
     )
     batch_main()
-    assert json.loads(capsys.readouterr().out)["successful_workflow_calls"] == 28
+    checked = json.loads(capsys.readouterr().out)
+    assert checked["successful_workflow_calls"] == 28
+    assert checked["maximum_workflow_calls"] == 48
+    assert checked["maximum_candidate_renders"] == 40
     assert not (tmp_path / "run").exists()

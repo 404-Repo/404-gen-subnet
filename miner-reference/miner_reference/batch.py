@@ -81,7 +81,7 @@ class LimitedCalls:
         directory.mkdir(mode=0o700, exist_ok=True)
 
     def create(self, *, witness_seed: int = 0, **params: Unpack[ResponseCreateParamsStreaming]) -> WitnessResult:
-        self.progress(f"call {witness_seed}/7 {params.get('model')}: running")
+        self.progress(f"call {witness_seed} {params.get('model')}: running")
         try:
             result = self.calls.create(witness_seed=witness_seed, **params)
         except WitnessError as error:
@@ -110,7 +110,7 @@ class LimitedCalls:
             self.directory / f"{witness_seed:02}.json", canonical({"model": params.get("model"), "usage": result.usage})
         )
         self.progress(
-            f"call {witness_seed}/7: complete, input={result.usage.get('input_tokens', 'unknown')} "
+            f"call {witness_seed}: complete, input={result.usage.get('input_tokens', 'unknown')} "
             f"output={result.usage.get('output_tokens', 'unknown')}"
         )
         return result
@@ -271,7 +271,8 @@ def main() -> None:
                 {
                     "prompts": len(prompts),
                     "successful_workflow_calls": 7 * len(prompts),
-                    "maximum_candidate_renders": 5 * len(prompts),
+                    "maximum_workflow_calls": 12 * len(prompts),
+                    "maximum_candidate_renders": 10 * len(prompts),
                     "parallel_prompts": settings.parallel_prompts,
                     "parallel_calls": settings.parallel_calls,
                     "parallel_renders": settings.parallel_renders,

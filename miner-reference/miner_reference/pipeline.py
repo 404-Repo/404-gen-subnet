@@ -63,6 +63,7 @@ def candidate(
     *,
     parent: Candidate | None = None,
     feedback: str = "",
+    rejection: tuple[str, str] | None = None,
 ) -> str | None:
     content = [
         {"type": "input_text", "text": "Reconstruct this target as the specified Three.js module."},
@@ -82,6 +83,21 @@ def candidate(
             },
         )
         content.append({"type": "input_image", "image_url": png_data_url(parent.grid), "detail": "auto"})
+    if rejection is not None:
+        source, errors = rejection
+        content.append(
+            {
+                "type": "input_text",
+                "text": (
+                    "Repair this rejected module to satisfy the specification while preserving its reconstruction "
+                    "of the target. Fix all reported errors. Return a complete module, not a patch. "
+                    "This candidate has one repair attempt.\nValidation errors:\n"
+                    + errors
+                    + "\nRejected source:\n"
+                    + source
+                ),
+            }
+        )
     try:
         result = calls.create(
             witness_seed=position,
@@ -105,9 +121,27 @@ def candidate(
     return normalize(source) if source else None
 
 
-def render_candidates(futures: Iterable[Future[str | None]], renderer: Renderer) -> list[Candidate]:
+def render_candidates(
+    futures: Iterable[Future[str | None]],
+    renderer: Renderer,
+    *,
+    image: bytes,
+    calls: ModelCalls,
+    pool: ThreadPoolExecutor,
+    repair_seeds: Iterable[int],
+) -> list[Candidate]:
     candidates = []
-    for future in futures:
+    repairs = []
+    for future, repair_seed in zip(futures, repair_seeds, strict=True):
+        source = future.result()
+        if source is not None:
+            try:
+                candidates.append(Candidate(source, renderer.render(source, GRID)))
+            except RenderRejected as error:
+                repairs.append(
+                    pool.submit(candidate, image, calls, SOL, repair_seed, rejection=(source, error.detail_json))
+                )
+    for future in repairs:
         source = future.result()
         if source is not None:
             try:
@@ -192,7 +226,8 @@ def run(image: bytes, seed: int, calls: ModelCalls, renderer: Renderer) -> str |
             pool.submit(candidate, image, calls, model, position)
             for position, model in enumerate(("gpt-6-astra", SOL, SOL), start=1)
         ]
-        selected = choose(image, seed, calls, render_candidates(initial, renderer), 4)
+        candidates = render_candidates(initial, renderer, image=image, calls=calls, pool=pool, repair_seeds=(8, 9, 10))
+        selected = choose(image, seed, calls, candidates, 4)
         if selected is None:
             return None
         winner, choice = selected
@@ -208,5 +243,8 @@ def run(image: bytes, seed: int, calls: ModelCalls, renderer: Renderer) -> str |
             )
             for position in (5, 6)
         ]
-        selected = choose(image, seed, calls, [winner, *render_candidates(refinements, renderer)], 7)
+        candidates = render_candidates(
+            refinements, renderer, image=image, calls=calls, pool=pool, repair_seeds=(11, 12)
+        )
+        selected = choose(image, seed, calls, [winner, *candidates], 7)
         return None if selected is None else selected[0].source

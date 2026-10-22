@@ -6,6 +6,7 @@ import uuid
 from pathlib import Path
 from typing import Unpack
 
+import pytest
 from openai.types.responses.response_create_params import ResponseCreateParamsStreaming
 from renderer_client import RecordingRenderer, ReplayRenderer
 from test_batch import PNG, Calls, Renderer
@@ -14,10 +15,11 @@ from witness_client.calls import Generation, RequestKey, canonical
 from witness_client.pods import CallView, EntryView, RecordingView
 from witness_client.request import serialize_body
 
-from miner_reference.pipeline import run
+from miner_reference.pipeline import normalize, run
 
 
-def test_complete_five_candidate_pipeline_reconstructs_from_recordings(tmp_path: Path) -> None:
+@pytest.mark.parametrize("repair", [False, True])
+def test_complete_five_candidate_pipeline_reconstructs_from_recordings(tmp_path: Path, repair: bool) -> None:
     generation = Generation.from_prompt(PNG, 42, "a" * 64, round_number="test-0")
     entries: list[EntryView] = []
     calls: dict[str, CallView] = {}
@@ -67,9 +69,15 @@ def test_complete_five_candidate_pipeline_reconstructs_from_recordings(tmp_path:
             return value
 
     live = Capture()
-    renderer = RecordingRenderer(Renderer())
+    underlying = Renderer()
+    if repair:
+        underlying.reject = {
+            normalize(Calls().create(witness_seed=i, stream=True, model="gpt-6.1-sol").output_text)
+            for i in (1, 2, 3, 5, 6)
+        }
+    renderer = RecordingRenderer(underlying)
     expected = run(PNG, 42, live, renderer)
-    assert expected is not None and len(live.requests) == 7
+    assert expected is not None and len(live.requests) == (12 if repair else 7)
     recording = (
         RecordingView(
             version=1,
@@ -96,10 +104,11 @@ def test_complete_five_candidate_pipeline_reconstructs_from_recordings(tmp_path:
             }
         )
     )
-    replay = ReplayWitness(tmp_path)
-    previews = ReplayRenderer(renderer.records, renderer_id=renderer.renderer_id)
-    actual = run(PNG, 42, replay.responses, previews)
-    assert actual == expected
-    replay.finish(actual)
-    previews.assert_consumed()
-    assert len(live.requests) == 7
+    for _ in range(2):
+        replay = ReplayWitness(tmp_path)
+        previews = ReplayRenderer(renderer.records, renderer_id=renderer.renderer_id)
+        actual = run(PNG, 42, replay.responses, previews)
+        assert actual == expected
+        replay.finish(actual)
+        previews.assert_consumed()
+    assert len(live.requests) == (12 if repair else 7)
