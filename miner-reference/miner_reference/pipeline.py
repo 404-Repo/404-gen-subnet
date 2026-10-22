@@ -27,6 +27,7 @@ INSTRUCTIONS = (
 )
 GRID = RenderOptions(lighting="neutral")
 SOL = "gpt-6.1-sol"
+NORMALIZATION = Path(__file__).with_name("normalize.js").read_text()
 
 
 class ModelCalls(Protocol):
@@ -45,6 +46,13 @@ class Choice(BaseModel):
     winner: str
     reason: str
     improvements: str
+
+
+def normalize(source: str) -> str:
+    exported = re.match(r"export\s+default\s+", source)
+    if exported is None:
+        return source
+    return NORMALIZATION.replace("__GENERATED_SOURCE__", source[exported.end() :])
 
 
 def candidate(
@@ -94,7 +102,7 @@ def candidate(
     fenced = re.fullmatch(r"```(?:javascript|js)?\s*\n([\s\S]*?)\n```", source)
     if fenced:
         source = fenced[1]
-    return source or None
+    return normalize(source) if source else None
 
 
 def render_candidates(futures: Iterable[Future[str | None]], renderer: Renderer) -> list[Candidate]:

@@ -9,6 +9,8 @@ For each image, the example generates one Astra and two Sol candidates concurren
 renders their grids, and asks Sol to select a winner and improvements. Two concurrent
 Sol calls independently refine that same winner. Sol then selects from the incumbent
 and the valid refinements. The selected JavaScript is returned.
+Each candidate is centered and scaled using the specified bounding-box calculation
+before rendering, selection, or use as a refinement parent.
 
 The sandbox runner, automatic recording/replay and receipt submission described
 here still need implementation.

@@ -9,6 +9,7 @@
  */
 
 import * as THREE from 'three';
+import { readFileSync } from 'node:fs';
 import { postValidate } from '../src/post-validate.js';
 import { staticValidate } from '../src/validator/index.js';
 import { validationPool } from '../src/validation-pool.js';
@@ -86,22 +87,6 @@ console.log('=== postValidate unit tests ===\n');
 {
   const result = postValidate(THREE, { notAnObject3D: true });
   assertRule('non-Object3D rejected', result, 'INVALID_RETURN_TYPE');
-}
-
-{
-  const group = new THREE.Group();
-  const mesh = new THREE.Mesh(
-    new THREE.SphereGeometry(0.455, 32, 24),
-    new THREE.MeshStandardMaterial(),
-  );
-  mesh.scale.y = 1.045;
-  group.rotation.y = 0.4;
-  group.add(mesh);
-  const result = postValidate(THREE, group);
-  assert('rotated sphere within unit cube passes', result.passed);
-  assert('rotated sphere reports vertex bounds', result.metrics.bbox.max.x <= 0.455);
-  mesh.position.x = 0.2;
-  assertRule('rotated sphere outside unit cube rejected', postValidate(THREE, group), 'BOUNDING_BOX_OUT_OF_RANGE');
 }
 
 {
@@ -269,6 +254,25 @@ console.log('=== postValidate unit tests ===\n');
 console.log(`\n=== Validation pool tests ===\n`);
 
 await validationPool.init();
+
+{
+  const source = `export default function generate(THREE) {
+    const root = new THREE.Group();
+    const mesh = new THREE.Mesh(new THREE.SphereGeometry(0.455, 32, 24), new THREE.MeshStandardMaterial());
+    mesh.scale.y = 1.045;
+    mesh.rotation.y = 0.4;
+    root.position.set(2, -3, 1);
+    root.scale.set(2, 1, 3);
+    root.add(mesh);
+    return root;
+  }`;
+  assertRule('unfitted miner candidate rejected', await poolValidate(source), 'BOUNDING_BOX_OUT_OF_RANGE');
+  const template = readFileSync(new URL('../../miner-reference/miner_reference/normalize.js', import.meta.url), 'utf8');
+  const fitted = template.replace('__GENERATED_SOURCE__', source.replace(/^export\s+default\s+/, ''));
+  const result = await poolValidate(fitted);
+  assert('miner normalization satisfies specified bounds', result.passed, JSON.stringify(result.failures));
+  assert('miner normalization preserves draw calls', result.metrics?.drawCalls === 1);
+}
 
 {
   const source = `export default function(THREE) {

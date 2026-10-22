@@ -131,7 +131,7 @@ export function postValidate(THREE, root) {
     return { passed: false, failures, metrics: null };
   }
 
-  const box = new THREE.Box3().setFromObject(root, true);
+  const box = new THREE.Box3().setFromObject(root);
   if (box.isEmpty()) {
     failures.push({
       stage: 'post_validation',

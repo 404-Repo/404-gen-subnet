@@ -18,7 +18,7 @@ from witness_client.request import serialize_body
 
 from miner_reference.batch import BatchSettings, Prompt, run_batch
 from miner_reference.batch import main as batch_main
-from miner_reference.pipeline import Candidate, choose, run
+from miner_reference.pipeline import Candidate, choose, normalize, run
 from miner_reference.renders import SavedRenderer
 
 PNG = b"\x89PNG\r\n\x1a\nfixture"
@@ -236,13 +236,15 @@ def test_initial_candidates_and_refinements_overlap_but_render_in_stable_order()
     renderer = Renderer()
     assert run(PNG, 42, ParallelCalls(), renderer) is not None
     assert renderer.sources == [
-        Calls().create(witness_seed=i, stream=True, model="gpt-6.1-sol").output_text for i in (1, 2, 3, 5, 6)
+        normalize(Calls().create(witness_seed=i, stream=True, model="gpt-6.1-sol").output_text) for i in (1, 2, 3, 5, 6)
     ]
 
 
 def test_invalid_candidates_and_selections_do_not_trigger_repairs() -> None:
     calls, renderer = Calls(), Renderer()
-    renderer.reject = {Calls().create(witness_seed=i, stream=True, model="gpt-6.1-sol").output_text for i in (1, 2, 3)}
+    renderer.reject = {
+        normalize(Calls().create(witness_seed=i, stream=True, model="gpt-6.1-sol").output_text) for i in (1, 2, 3)
+    }
     assert run(PNG, 42, calls, renderer) is None
     assert len(calls.requests) == 3
     malformed = Calls()
