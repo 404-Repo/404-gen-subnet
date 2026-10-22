@@ -89,6 +89,22 @@ console.log('=== postValidate unit tests ===\n');
 }
 
 {
+  const group = new THREE.Group();
+  const mesh = new THREE.Mesh(
+    new THREE.SphereGeometry(0.455, 32, 24),
+    new THREE.MeshStandardMaterial(),
+  );
+  mesh.scale.y = 1.045;
+  group.rotation.y = 0.4;
+  group.add(mesh);
+  const result = postValidate(THREE, group);
+  assert('rotated sphere within unit cube passes', result.passed);
+  assert('rotated sphere reports vertex bounds', result.metrics.bbox.max.x <= 0.455);
+  mesh.position.x = 0.2;
+  assertRule('rotated sphere outside unit cube rejected', postValidate(THREE, group), 'BOUNDING_BOX_OUT_OF_RANGE');
+}
+
+{
   const mesh = new THREE.Mesh(
     new THREE.BoxGeometry(3, 3, 3),
     new THREE.MeshStandardMaterial(),
