@@ -516,8 +516,9 @@ def test_https_gateway_deduplicates_inflight_requests_and_replays_without_infere
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize("role", ["miner", "worker_capture", "worker_control"])
 def test_gateway_upgrade_during_tls_session_ticket_processing(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, role: str
 ) -> None:
     from websockets.sync.client import connect
 
@@ -556,19 +557,33 @@ def test_gateway_upgrade_during_tls_session_ticket_processing(
             "witness_client.gateway.connect",
             lambda uri, **options: connect(uri, **{**options, "open_timeout": 1}),
         )
+        monkeypatch.setattr(
+            "pod.connect",
+            lambda uri, **options: connect(uri, **{**options, "open_timeout": 1}),
+        )
         received: list[str] = []
 
         async def echo(request: web.Request) -> web.WebSocketResponse:
             socket = web.WebSocketResponse()
             await socket.prepare(request)
-            value = await socket.receive_str()
-            received.append(value)
-            await socket.send_str(value)
+            if role == "worker_control":
+                await socket.send_json({"type": "drain", "id": "fixture"})
+                await socket.receive_str()  # Drain acknowledgement.
+                received.append(await socket.receive_str())
+            else:
+                value = await socket.receive_str()
+                received.append(value)
+                if role == "worker_capture":
+                    await socket.send_bytes(b"upgrade arrived")
+                else:
+                    await socket.send_str(value)
             await socket.close()
             return socket
 
         app = web.Application()
         app.router.add_get("/exchanges/{exchange_id}/connect", echo)
+        app.router.add_get("/worker/exchanges/{exchange_id}", echo)
+        app.router.add_get("/control/{hotkey}/{start_id}", echo)
         runner = web.AppRunner(app)
         await runner.setup()
         site = web.TCPSite(runner, "127.0.0.1", 0, ssl_context=server_tls)
@@ -579,16 +594,53 @@ def test_gateway_upgrade_during_tls_session_ticket_processing(
         key = Keypair.create_from_mnemonic(Keypair.generate_mnemonic())
 
         def run() -> None:
-            with httpx.Client(base_url=origin) as http:
-                gateway = GatewayClient(http, key, tmp_path, 1)
-                with gateway.tunnel("fixture") as tunnel:
-                    tunnel.socket.send("upgrade arrived")
-                    assert tunnel.socket.recv(timeout=1) == "upgrade arrived"
+            if role == "miner":
+                with httpx.Client(base_url=origin) as http:
+                    gateway = GatewayClient(http, key, tmp_path, 1)
+                    with gateway.tunnel("fixture") as tunnel:
+                        tunnel.socket.send("upgrade arrived")
+                        assert tunnel.socket.recv(timeout=1) == "upgrade arrived"
+                return
+
+            from channel import WorkerChannel
+            from pod import PodRuntime
+            from test_recording import SCOPE
+            from test_recovery import START, capture
+
+            state = MemoryState()
+            records, budget, item, call = capture(state)
+            worker = PodRuntime(
+                evidence=state, records=records, budget=budget, scope=SCOPE,
+                start_id=START, pod_id="pod-one", token="ab" * 32, origin=origin,
+                proof_hash=PROOF, round_end=int(time.time()) + 3, spool=tmp_path / "spool",
+            )
+
+            def relay(*args: object, **kwargs: object) -> None:
+                channel = cast(WorkerChannel, args[5])
+                assert channel.recv(time.monotonic() + 1) == b"upgrade arrived"
+                raise RuntimeError("No provider is used in this test")
+
+            monkeypatch.setattr("pod.relay", relay)
+            try:
+                if role == "worker_capture":
+                    worker._capture(item, call)
+                    located = records.locate(SCOPE, call.exchange_id)
+                    assert located is not None and located[1].phase == "failed"
+                    assert located[1].failure == "RuntimeError"
+                else:
+                    worker.run()
+            finally:
+                worker.executor.shutdown(wait=True)
 
         try:
             await asyncio.wait_for(asyncio.to_thread(run), 5)
             assert reading_ticket.is_set()
-            assert received == ["upgrade arrived"]
+            if role == "miner":
+                assert received == ["upgrade arrived"]
+            elif role == "worker_capture":
+                assert len(received) == 1 and json.loads(received[0])["type"] == "ready"
+            else:
+                assert received == ['{"type":"drained"}']
         finally:
             await runner.cleanup()
 

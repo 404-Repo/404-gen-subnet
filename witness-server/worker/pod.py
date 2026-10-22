@@ -23,6 +23,7 @@ from timing import identify_exchange, measure, timed
 from websockets.sync.client import connect
 from websockets.sync.connection import Connection
 from witness_client.calls import Invocation
+from witness_client.gateway import _GatewayConnection
 from worker import PARAMETERS, PROVIDERS, relay, verify
 
 from pod_gateway.budget import Budget
@@ -272,6 +273,7 @@ class PodRuntime:
             max_queue=16,
             open_timeout=30,
             close_timeout=5,
+            create_connection=_GatewayConnection,
         )
         with socket:
             channel = WorkerChannel(socket)
@@ -470,6 +472,7 @@ class PodRuntime:
                         close_timeout=5,
                         ping_interval=15,
                         ping_timeout=20,
+                        create_connection=_GatewayConnection,
                     ) as socket:
                         delay = 1
                         while True:
