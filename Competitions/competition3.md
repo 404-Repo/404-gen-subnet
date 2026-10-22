@@ -1,23 +1,24 @@
 ## Competition 3: Closed-Source Model Competition
 
-This competition focuses on procedurally generating 3D models from image prompts
+This competition focuses on procedurally generating 3D assets from image prompts
 using approved closed-source OpenAI models. Your pipeline should output Three.js
 code that defines geometry, materials and procedural textures, closely matching
-the object in the reference image.
+the object shown in the reference image.
 
 ### What we provide:
 
 1. 2D image prompts and a published round seed.
 2. A fixed Python 3.13 runtime with pinned packages, including NumPy and Pillow.
-3. Witness and renderer clients for model requests and candidate previews.
+3. A witness client for OpenAI requests and a renderer client for previews of your
+   generated 3D assets.
 4. Three.js validation, rendering tools and evaluation code for judging outputs.
 
 ### Generator Recommendation:
 
-1. Build a pipeline that analyzes the image and decomposes the object into
-   procedural geometry, materials and textures.
-2. Render candidates, inspect the previews and refine your results within the
-   prompt's budget. Use the supplied seed for reproducible local processing.
+1. Build a pipeline that analyzes the input image and decomposes the object shown
+   in the image into procedurally defined geometry, materials and textures.
+2. Render your generated 3D assets, inspect the previews and refine your results
+   within the prompt's budget. Use the supplied seed for reproducible local processing.
 
 ### Requirements
 
@@ -37,8 +38,9 @@ Keep the following baseline expectations in mind:
    count at Standard rates; Flex is forbidden.
 5. Pass replay validation and source audit independently of visual quality judging.
    Replay checks reproducibility and budgets using recorded model responses.
-   Quality judging compares rendered models against the prompt and current leader.
-   The operator generates later incumbent outputs without miner resubmission.
+   Quality judging compares your rendered 3D assets and the leader's rendered
+   assets against the reference image. The operator generates the leader's outputs
+   for later rounds without miner resubmission.
 
 ### Requirements for the Python Application:
 
@@ -52,7 +54,7 @@ Keep the following baseline expectations in mind:
 2. Return final JavaScript for the supplied PNG image, or `None` for generation
    failure. Each module must export one synchronous `generate(THREE)` default
    function and meet the Three.js output limits.
-3. Use the supplied clients for model requests and rendering, and the fixed runtime
+3. Use the supplied clients for OpenAI requests and rendering, and the fixed runtime
    packages. Do not install or upgrade dependencies during generation or replay.
 4. Upload successful `{stem}.js` outputs to your committed CDN base URL and submit
    the runtime's receipt before cutoff, as specified in the miner guide.
