@@ -7,7 +7,7 @@ from collections.abc import Callable, Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from pathlib import Path
-from threading import Barrier, Event, Lock
+from threading import BoundedSemaphore, Event, Lock
 from typing import Literal, cast
 from unittest.mock import MagicMock
 
@@ -137,17 +137,17 @@ def event(response: dict[str, object]) -> bytes:
     )
 
 
-def test_pod_calls_prepare_serially_and_generate_concurrently(
-    config: WitnessConfig, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("preparations, call_limit", [(1, 4), (3, 4), (3, 2)])
+def test_pod_calls_bound_preparation_and_capture_concurrency(
+    config: WitnessConfig, monkeypatch: pytest.MonkeyPatch, preparations: int, call_limit: int
 ) -> None:
     key = Keypair.create_from_mnemonic(Keypair.generate_mnemonic())
     config = {**config, "transport": "pods-v1", "round": "test-0"}
-    first_dispatched, second_reserved, second_dispatched, allow_authorization = (
-        Event() for _ in range(4)
+    reserved, preparation_full, inference_full, excess, allow_authorization, allow_completion = (
+        Event() for _ in range(6)
     )
-    models = Barrier(2)
     lock = Lock()
-    preparing = generating = maximum_preparing = maximum_generating = 0
+    preparing = generating = active = maximum_preparing = maximum_generating = maximum_active = 0
     calls: dict[str, Snapshot] = {}
 
     def session(identifier: str) -> Session:
@@ -177,17 +177,22 @@ def test_pod_calls_prepare_serially_and_generate_concurrently(
             hotkey=key.ss58_address,
             session=None,
         )
-        if len(calls) == 2:
-            second_reserved.set()
+        if len(calls) == 4:
+            reserved.set()
         return calls[identifier]
 
     def dispatch(invocation: Invocation, _: str) -> Snapshot:
-        nonlocal preparing, maximum_preparing
+        nonlocal preparing, active, maximum_preparing, maximum_active
         identifier = str(uuid.uuid5(uuid.NAMESPACE_URL, invocation.generation.id))
         with lock:
             preparing += 1
+            active += 1
             maximum_preparing = max(maximum_preparing, preparing)
-            (second_dispatched if first_dispatched.is_set() else first_dispatched).set()
+            maximum_active = max(maximum_active, active)
+            if preparing > preparations or active > call_limit:
+                excess.set()
+            if preparing == min(preparations, call_limit):
+                preparation_full.set()
         current = calls[identifier]
         current.call.phase = "capturing"
         current.session = dict(session(identifier))
@@ -205,17 +210,20 @@ def test_pod_calls_prepare_serially_and_generate_concurrently(
             preparing -= 1
             generating += 1
             maximum_generating = max(maximum_generating, generating)
+            if generating == call_limit:
+                inference_full.set()
 
     def exchange(tunnel: WebSocketTunnel, *args: object, **kwargs: object) -> bytes:
-        nonlocal generating
+        nonlocal generating, active
         assert allow_authorization.wait(3)
         cast(Callable[[EarlyDisclosure], None], kwargs["authorize"])(
             cast(EarlyDisclosure, {})
         )
-        models.wait(timeout=3)
+        assert allow_completion.wait(3)
         calls[tunnel.identifier].call.phase = "issued"
         with lock:
             generating -= 1
+            active -= 1
         return b""
 
     def recorded(
@@ -229,7 +237,9 @@ def test_pod_calls_prepare_serially_and_generate_concurrently(
             ),
         )
 
-    with WitnessClient(config, hotkey=key, openai_api_key="x" * 80) as witness:
+    with WitnessClient(
+        config, hotkey=key, openai_api_key="x" * 80, parallel_preparations=preparations
+    ) as witness:
         gateway = witness._gateway
         for name, value in {
             "recording": missing,
@@ -244,27 +254,33 @@ def test_pod_calls_prepare_serially_and_generate_concurrently(
             monkeypatch.setattr(gateway, name, value, raising=False)
         monkeypatch.setattr(WitnessClient, "_authorize", authorize)
         monkeypatch.setattr("witness_client.client.exchange", exchange)
+        slots = BoundedSemaphore(call_limit)
         bound = [
-            witness.for_generation(bytes([index]), 42, "a" * 64) for index in range(2)
+            witness.for_generation(bytes([index]), 42, "a" * 64, call_slots=slots)
+            for index in range(4)
         ]
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            first = pool.submit(
-                bound[0].create, stream=True, model="fixture", input="one"
-            )
-            assert first_dispatched.wait(3)
-            second = pool.submit(
-                bound[1].create, stream=True, model="fixture", input="two"
-            )
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            futures = [
+                pool.submit(generation.create, stream=True, model="fixture", input="image")
+                for generation in bound
+            ]
             try:
-                assert second_reserved.wait(3)
-                assert not second_dispatched.wait(0.05)
+                assert reserved.wait(3)
+                assert preparation_full.wait(3)
+                assert not excess.wait(0.05)
+                with lock:
+                    assert preparing == min(preparations, call_limit)
+                allow_authorization.set()
+                assert inference_full.wait(3)
+                assert not excess.wait(0.05)
+                with lock:
+                    assert generating == call_limit
             finally:
                 allow_authorization.set()
-            assert (
-                first.result(timeout=5).response.id
-                != second.result(timeout=5).response.id
-            )
-    assert maximum_preparing == 1 and maximum_generating == 2
+                allow_completion.set()
+            assert len({future.result(timeout=5).response.id for future in futures}) == 4
+    assert maximum_preparing == min(preparations, call_limit)
+    assert maximum_generating == maximum_active == call_limit
 
 
 @pytest.mark.parametrize("round_remaining", [10.0, 1000.0])

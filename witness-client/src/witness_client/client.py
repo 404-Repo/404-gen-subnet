@@ -85,6 +85,7 @@ class WitnessClient:
         openai_api_key: str | None = None,
         subscription: Literal["codex"] | None = None,
         delivery_timeout: float = 600,
+        parallel_preparations: int = 3,
     ) -> None:
         """Configure credentials, proof parameters, and local recovery storage.
 
@@ -99,6 +100,8 @@ class WitnessClient:
                 Credentials are refreshed when needed.
             delivery_timeout: Positive retry window in seconds for each gateway
                 delivery phase (default 600), not a total create() time limit.
+            parallel_preparations: Maximum concurrent Pod call preparations
+                across generations (1 through 32, default 3).
         """
         self._config: WitnessConfig
         if isinstance(config, dict):
@@ -111,6 +114,12 @@ class WitnessClient:
             is None
         ):
             raise ValueError("Pod transport requires a pinned competition round")
+        if (
+            not isinstance(parallel_preparations, int)
+            or isinstance(parallel_preparations, bool)
+            or not 1 <= parallel_preparations <= 32
+        ):
+            raise ValueError("parallel_preparations must be an integer from 1 through 32")
         if not math.isfinite(delivery_timeout) or delivery_timeout <= 0:
             raise ValueError("delivery_timeout must be finite and > 0 seconds")
         if (openai_api_key is None) == (subscription is None) or subscription not in (
@@ -148,7 +157,7 @@ class WitnessClient:
             raise ValueError("Witness state directory must be private (chmod 700)")
         with measure("prover_initialize"):
             self._prover = Prover(parameters)
-        self._preparation = threading.Lock()
+        self._preparation = threading.BoundedSemaphore(parallel_preparations)
         self._hotkey = hotkey
         with measure("http_initialize"):
             context = ssl.create_default_context()
@@ -602,8 +611,8 @@ class GenerationWitness(WitnessClient):
                 else nullcontext(),
                 ExitStack() as preparation,
             ):
-                # The native prover is serial. Queue before opening the provider
-                # connection, then allow inference to overlap after authorization.
+                # Bound live preparation before opening provider connections.
+                # Release its slot after authorization so inference can overlap.
                 if (
                     invocation.ordinal == snapshot.call.owner_ordinal
                     and snapshot.call.phase in ("reserved", "assigned")

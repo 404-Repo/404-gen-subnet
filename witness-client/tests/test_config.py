@@ -96,6 +96,20 @@ def test_non_https_origins_are_rejected(
     assert not Path(config["state_directory"]).exists()
 
 
+@pytest.mark.parametrize("preparations", [0, -1, 33, True, 1.5, "3"])
+def test_invalid_preparation_limit_is_rejected_before_setup(
+    config: WitnessConfig, monkeypatch: pytest.MonkeyPatch, key: Keypair, preparations: int
+) -> None:
+    def forbidden(*args: object, **kwargs: object) -> None:
+        pytest.fail("Invalid concurrency must not initialize the prover or HTTP")
+
+    monkeypatch.setattr("witness_client.client.Prover", forbidden)
+    monkeypatch.setattr("witness_client.client.httpx.Client", forbidden)
+    with pytest.raises(ValueError, match="parallel_preparations"):
+        WitnessClient(config, hotkey=key, openai_api_key=TOKEN, parallel_preparations=preparations)
+    assert not Path(config["state_directory"]).exists()
+
+
 def test_invalid_configuration_is_rejected_before_setup(
     config: WitnessConfig,
     tmp_path: Path,

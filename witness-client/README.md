@@ -88,6 +88,18 @@ different `witness_seed` to request a fresh exchange. See the
 [CPU Pod guide](../witness-gateway/PODS.md) for configuration, recovery and
 verified offline replay.
 
+`WitnessClient(..., parallel_preparations=3)` bounds simultaneous Pod call
+preparations across all generations; the default is three and the range is
+1 through 32. A preparation slot covers dispatch, TLS setup, credential proving
+and durable authorization, then becomes available while GPT runs. Native
+proving remains serialized and uses the Go CPU and memory settings above.
+The trusted runner separately bounds active captures with a shared `call_slots`
+semaphore passed to `for_generation()`; the batch runner supplies this from
+`--parallel-calls`. For N=3 and M=12, use three preparations and
+`--parallel-calls 12`, with the Pod configured and sized for 12 captures.
+The call limit includes preparations because they use live witness captures.
+Saved responses and recorded-order waits do not consume either limit.
+
 ## Test your connection
 
 After installation and a local Codex login, run this from the repository root:
