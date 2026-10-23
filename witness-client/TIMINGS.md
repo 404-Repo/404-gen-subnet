@@ -36,7 +36,7 @@ not precise CPU time. See the [runtime timer documentation](https://developers.c
 | Local fresh proof | `credential_proof`, `native_prove_call`, native `proof_generate` substep; these exclude TLS and network waits |
 | Worker authorization | `authorization_claim_wait`, `verify_authorize`, `verifier_subprocess`, Node `process_start_to_ready` and `verification`, native certificate/verify subprocesses, `native_verifying_key_load`, `native_proof_verify`, `authorization_persistence` |
 | Provider | `provider_request_release`, `provider_first_ciphertext_wait`, `provider_response_capture` |
-| Completion and delivery | `final_transcript_persistence`, `verify_finish`, `evidence_persistence`, `manifest_persistence`, `final_status_persistence`, `delivery`, client `response_delivery_wait_and_decrypt`, `parse_and_save_response`, `evidence_retrieval_wait`, `resume`, conditional `recorded_response_download` |
+| Completion and delivery | `final_transcript_persistence`, `verify_finish`, `evidence_persistence`, `manifest_persistence`, `final_status_persistence`, `delivery`, client `response_delivery_wait_and_decrypt`, conditional `delivery_status_poll`, `parse_and_save_response`, `evidence_retrieval_wait`, `resume`, conditional `recorded_response_download` |
 
 The worker returns completed diagnostic spans under `timings` in its RunPod job
 output. The final `job` span is also logged after the handler exits. Actual

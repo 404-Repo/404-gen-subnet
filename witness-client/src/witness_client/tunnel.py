@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import time
 from collections import deque
+from collections.abc import Callable
 from typing import Protocol
 
 from .delivery import Phase
@@ -35,6 +36,18 @@ class WebSocketTunnel:
         self.upload_bytes = self.download_bytes = 0
         self.received_messages = 0
         self.ended = False
+        self.idle_check: Callable[[], None] | None = None
+        self.idle_interval = 0.0
+
+    def watch(self, check: Callable[[], None], interval: float) -> None:
+        """Run ``check`` after every ``interval`` seconds without a message.
+
+        Without a check, a wait is one socket read until its deadline. ``check``
+        may raise to abandon the wait; the caller closes the tunnel.
+        """
+        if not interval > 0:
+            raise ValueError("Tunnel check interval must be > 0 seconds")
+        self.idle_check, self.idle_interval = check, interval
 
     def send(self, data: bytes) -> None:
         self.upload_bytes += len(data)
@@ -82,8 +95,19 @@ class WebSocketTunnel:
                 return message
         raise WitnessError("Witness closed before proof acceptance", self.identifier)
 
+    def _next_message(self, timeout: float) -> str | bytes:
+        if self.idle_check is None:
+            return self.socket.recv(timeout=timeout)
+        deadline = time.monotonic() + timeout
+        while (remaining := deadline - time.monotonic()) > self.idle_interval:
+            try:
+                return self.socket.recv(timeout=self.idle_interval)
+            except TimeoutError:
+                self.idle_check()
+        return self.socket.recv(timeout=max(0, remaining))
+
     def _receive(self, timeout: float) -> bytes | ExchangeStatus:
-        message = self.socket.recv(timeout=timeout)
+        message = self._next_message(timeout)
         self.received_messages += 1
         if self.received_messages > 4096:
             raise WitnessError("Too many transport messages", self.identifier)

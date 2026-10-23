@@ -98,6 +98,13 @@ Each delivery phase retries temporary failures for up to `delivery_timeout`
 seconds (default: 600), with a 30-second timeout per HTTP attempt. The delivery
 timeout must be finite and greater than zero.
 
+After the worker accepts the authorization proof, `create()` reads the exchange
+status after every 60 seconds without a stream message. Failed status reads are
+ignored. If the stream is still silent `stall_timeout` seconds (default: 600)
+after a status read returned `issued`, `create()` closes the stream and returns
+the recorded result as `resume()` does. It never queues or sends another request.
+The stall timeout must be finite and greater than zero.
+
 Queue waiting and exchange execution share the generation round's closing time,
 within RunPod's seven-day maximum. Credentials are refreshed after waiting.
 Gateway access, including recovery, closes when the generation phase ends.

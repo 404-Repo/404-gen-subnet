@@ -41,6 +41,9 @@ from .types import (
     WitnessConfig,
 )
 
+# Seconds of stream silence between status reads while a response is pending.
+_STATUS_INTERVAL = 60.0
+
 
 @dataclass(frozen=True)
 class WitnessResult:
@@ -75,6 +78,7 @@ class WitnessClient:
         openai_api_key: str | None = None,
         subscription: Literal["codex"] | None = None,
         delivery_timeout: float = 600,
+        stall_timeout: float = 600,
     ) -> None:
         """Configure credentials, proof parameters, and local recovery storage.
 
@@ -89,6 +93,10 @@ class WitnessClient:
                 Credentials are refreshed when needed.
             delivery_timeout: Positive retry window in seconds for each gateway
                 delivery phase (default 600), not a total create() time limit.
+            stall_timeout: Positive seconds that create() keeps waiting on a
+                silent live stream after a status read reports the exchange
+                issued (default 600). It then closes the stream and returns
+                the recorded result as resume() does, without another request.
         """
         self._config: WitnessConfig
         if isinstance(config, dict):
@@ -97,6 +105,9 @@ class WitnessClient:
             self._config = json.loads(Path(config).read_text(encoding="utf-8"))
         if not math.isfinite(delivery_timeout) or delivery_timeout <= 0:
             raise ValueError("delivery_timeout must be finite and > 0 seconds")
+        if not math.isfinite(stall_timeout) or stall_timeout <= 0:
+            raise ValueError("stall_timeout must be finite and > 0 seconds")
+        self._stall_timeout = stall_timeout
         if (openai_api_key is None) == (subscription is None) or subscription not in (
             None,
             "codex",
@@ -247,15 +258,23 @@ class WitnessClient:
                     self._gateway.release(identifier)
                 raise
             _save(directory / "request.json", request.body)
-            with self._gateway.tunnel(identifier) as tunnel:
-                raw = exchange(
-                    tunnel,
-                    request.host,
-                    request.chunks,
-                    handshake=lambda disclosure: self._handshake(tunnel, disclosure),
-                    authorize=lambda disclosure: self._authorize(tunnel, disclosure),
-                    timeout=self._gateway.remaining_seconds(identifier),
-                )
+            try:
+                with self._gateway.tunnel(identifier) as tunnel:
+                    raw = exchange(
+                        tunnel,
+                        request.host,
+                        request.chunks,
+                        handshake=lambda disclosure: self._handshake(
+                            tunnel, disclosure
+                        ),
+                        authorize=lambda disclosure: self._authorize(
+                            tunnel, disclosure
+                        ),
+                        timeout=self._gateway.remaining_seconds(identifier),
+                    )
+            except _StalledDelivery:
+                # The tunnel is closed; the issued evidence holds the response.
+                return self.resume(identifier)
             with measure("parse_and_save_response"):
                 response = http_body(raw)
                 _save(directory / "response.bin", response)
@@ -383,6 +402,45 @@ class WitnessClient:
                     self._gateway.delivery_timeout,
                     self._gateway.remaining_seconds(tunnel.identifier),
                 ),
+            )
+        # From now on the worker can issue evidence before the stream delivers it.
+        tunnel.watch(
+            _DeliveryWatch(self._gateway, tunnel.identifier, self._stall_timeout),
+            min(_STATUS_INTERVAL, self._stall_timeout),
+        )
+
+
+class _StalledDelivery(WitnessError):
+    """The witness issued an exchange that its live stream did not deliver."""
+
+
+class _DeliveryWatch:
+    """Detect an issued exchange whose live stream stays silent.
+
+    The witness saves evidence before releasing response bytes, so an issued
+    exchange can be retrieved by resume() without another provider request.
+    """
+
+    def __init__(self, gateway: GatewayClient, identifier: str, timeout: float) -> None:
+        self.gateway, self.identifier, self.timeout = gateway, identifier, timeout
+        self.issued: float | None = None
+
+    def __call__(self) -> None:
+        if self.issued is None:
+            try:
+                with measure("delivery_status_poll"):
+                    status = self.gateway.status(self.identifier)
+            except (httpx.HTTPError, WitnessError):
+                return  # A failed status read never ends a stream that may deliver.
+            if status["status"] != "issued":
+                return
+            self.issued = time.monotonic()
+        if time.monotonic() - self.issued >= self.timeout:
+            raise _StalledDelivery(
+                "Witness issued the exchange but its live stream did not deliver it",
+                self.identifier,
+                code="delivery_stalled",
+                source="gateway",
             )
 
 
