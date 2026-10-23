@@ -68,7 +68,8 @@ class Timeline(BaseModel):
     ) -> "Timeline":
         """Build a Timeline from cached matches, validation results and source audits.
 
-        `all_hotkeys` is sorted by `(revealed_at_block, tie_breaker)`.
+        `all_hotkeys` follows the collector's order in `submissions.json`,
+        sorted by `(revealed_at_block, tie_breaker)`.
         Each submission must include the collector's seed-based `tie_breaker`.
 
         Non-qualified miners (no cached leader match, or leader margin below

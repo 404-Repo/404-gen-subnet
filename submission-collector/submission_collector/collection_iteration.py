@@ -384,6 +384,7 @@ def _serialize_submissions(submissions: list[Submission], config: CompetitionCon
         }
         for s in submissions
     }
+    data = dict(sorted(data.items(), key=lambda item: (item[1]["revealed_at_block"], item[1]["tie_breaker"])))
     return json.dumps(data, indent=2)
 
 

@@ -200,7 +200,7 @@ HOTKEY_2 = "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY"
 
 
 @pytest.mark.parametrize("seed,expected", [(42, [HOTKEY_2, HOTKEY]), (43, [HOTKEY, HOTKEY_2])])
-async def test_open_saves_tie_breakers_for_same_block_submissions(
+async def test_open_saves_same_block_submissions_in_seed_order(
     git: MockGitHubClient, settings: Settings, monkeypatch: pytest.MonkeyPatch, seed: int, expected: list[str]
 ) -> None:
     add_state(git, stage=RoundStage.OPEN, round_num=0)
@@ -220,8 +220,7 @@ async def test_open_saves_tie_breakers_for_same_block_submissions(
     )
 
     submissions = json.loads(git.committed["rounds/0/submissions.json"])
-    ordered = sorted(submissions, key=lambda hk: (submissions[hk]["revealed_at_block"], submissions[hk]["tie_breaker"]))
-    assert ordered == expected
+    assert list(submissions) == expected
 
 
 async def test_open_insufficient_lock_drops_submission(git: MockGitHubClient, settings: Settings) -> None:

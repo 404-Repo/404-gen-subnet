@@ -247,28 +247,6 @@ async def test_submissions_require_tie_breaker(settings: Settings, include_null:
         await _run_round(git, {}, [], settings)
 
 
-async def test_saved_tie_breakers_determine_same_block_timeline(settings: Settings) -> None:
-    git = _world([HK_B, HK_A, HK_C])
-    submissions = json.loads(git.files["rounds/1/submissions.json"])
-    for hotkey, submission in submissions.items():
-        submission["revealed_at_block"] = 101 if hotkey == HK_B else 100
-        submission["tie_breaker"] = {HK_A: "2", HK_B: "0", HK_C: "1"}[hotkey] * 128
-    git.files["rounds/1/submissions.json"] = json.dumps(submissions)
-
-    margins = {
-        (LEADER, HK_A): [1.0],
-        (LEADER, HK_B): [1.0],
-        (LEADER, HK_C): [1.0],
-        (HK_C, HK_A): [-1.0],
-        (HK_C, HK_B): [-1.0],
-        (HK_A, HK_B): [0.0],
-    }
-    deliveries = [lambda g: _deliver_passes(g, HK_C)]
-    await _run_round(git, margins, deliveries, settings)
-
-    assert _winner(git) == HK_C
-
-
 async def test_single_challenger_waits_for_both_verdicts(settings: Settings) -> None:
     git = _world([HK_A])
     passes = {HK_A: "passed"}
@@ -324,7 +302,7 @@ async def test_two_qualify_second_beats_first_second_wins(settings: Settings) ->
     assert _requested(discord) == [(HK_A, LEADER), (HK_B, HK_A)]
 
 
-async def test_reveal_block_order_determines_winner(settings: Settings) -> None:
+async def test_collector_submission_order_determines_winner(settings: Settings) -> None:
     git = _world([HK_A, HK_B])
     submissions = json.loads(git.files["rounds/1/submissions.json"])
     git.files["rounds/1/submissions.json"] = json.dumps({HK_B: submissions[HK_B], HK_A: submissions[HK_A]})
@@ -336,7 +314,7 @@ async def test_reveal_block_order_determines_winner(settings: Settings) -> None:
         settings,
     )
 
-    assert _winner(git) == HK_A
+    assert _winner(git) == HK_B
 
 
 async def test_loser_becomes_candidate_when_defender_fails(settings: Settings) -> None:

@@ -18,7 +18,8 @@ Three.js modules, rendered views and embeddings are compared throughout the roun
 How those outputs were produced is outside the judge's boundary.
 
 1. **Qualification.** Miners play the base leader. A margin of at least
-   `config.win_margin` qualifies them. Submissions are sorted by
+   `config.win_margin` qualifies them. The judge follows the collector's order
+   in `submissions.json`. The collector sorts entries by
    `(revealed_at_block, tie_breaker)`. Every entry must include `tie_breaker`,
    which the collector stores as the lowercase hex BLAKE2b digest of
    `f"{seed}:{hotkey}".encode()`.

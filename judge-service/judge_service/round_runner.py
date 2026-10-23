@@ -113,12 +113,6 @@ class RoundRunner:
         prompts = await require_prompts(git=git, round_num=round_num, ref=base_sha)
 
         submissions = await require_submissions(git=git, round_num=round_num, ref=base_sha)
-        submissions = dict(
-            sorted(
-                submissions.items(),
-                key=lambda item: (item[1].revealed_at_block, item[1].tie_breaker),
-            )
-        )
         logger.debug(f"Submission order: {list(submissions)}")
 
         match_matrix = await get_match_matrix(git=git, round_num=round_num, ref=base_sha)
