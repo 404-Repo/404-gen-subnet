@@ -9,6 +9,8 @@ import subprocess
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from functools import partial
+from collections.abc import Callable
 from pathlib import Path
 from typing import cast
 
@@ -20,6 +22,10 @@ from witness_client import WitnessClient, WitnessConfig, WitnessError
 from witness_client.response import completed_response, http_body
 from witness_client.transport import exchange
 from witness_client.types import EarlyDisclosure, HandshakeDisclosure
+from websockets.exceptions import ConnectionClosedError, ConnectionClosedOK
+from websockets.frames import Close
+
+from channel import WorkerChannel
 
 from identity import Provider, miner_prefix, signed_exchange
 from storage import json_bytes
@@ -57,6 +63,8 @@ def test_real_tls_gate_records_large_exchange_even_when_miner_leaves(
     terminal: str,
     provider_name: Provider,
     identity: tuple[Keypair, str],
+    authorization_notification_lost: bool = False,
+    before_release: Callable[[bytes], None] | None = None,
 ) -> None:
     hotkey, _ = identity
     certificates(tmp_path)
@@ -233,9 +241,11 @@ def test_real_tls_gate_records_large_exchange_even_when_miner_leaves(
         with ThreadPoolExecutor(max_workers=2) as executor:
             actual_request = executor.submit(provider)
 
+            run_relay = relay if before_release is None else partial(relay, before_release=before_release)
+
             def witness() -> dict[str, object]:
                 try:
-                    return relay(
+                    return run_relay(
                         store,
                         prefix_key,
                         time.monotonic() + 180,
@@ -283,6 +293,9 @@ def test_real_tls_gate_records_large_exchange_even_when_miner_leaves(
                     assert failure.value.status_code == provider_status
             except MinerLeft:
                 assert abandon
+            except WitnessError as error:
+                assert authorization_notification_lost
+                assert str(error) == "Witness closed before proof acceptance"
             finally:
                 tunnel.close()
             metadata = observed.result(timeout=90)
@@ -327,3 +340,41 @@ def test_real_tls_gate_records_large_exchange_even_when_miner_leaves(
     assert store.writes.index(prefix_key + "/authorization.json") < store.writes.index(
         prefix_key + "/manifest.json"
     )
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        ConnectionClosedOK(Close(1000, "disconnected"), Close(1000, "disconnected"), True),
+        ConnectionClosedError(None, None),
+        OSError("disconnected"),
+    ],
+    ids=["normal-close", "abnormal-close", "socket-error"],
+)
+def test_approved_capture_survives_lost_authorization_notification(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    identity: tuple[Keypair, str],
+    failure: Exception,
+) -> None:
+    original_notify = WorkerChannel.notify
+
+    def notify(channel: WorkerChannel, status: dict[str, object]) -> None:
+        if status.get("authorized") is True:
+            raise failure
+        original_notify(channel, status)
+
+    original_connect = socket.socket.connect
+
+    def connect(connection: socket.socket, address: tuple[str, int]) -> None:
+        assert address[0] in ("127.0.0.1", "::1"), "Only the local TLS fixture is permitted"
+        original_connect(connection, address)
+
+    reservations: list[bytes] = []
+    monkeypatch.setattr(WorkerChannel, "notify", notify)
+    monkeypatch.setattr(socket.socket, "connect", connect)
+    test_real_tls_gate_records_large_exchange_even_when_miner_leaves(
+        tmp_path, False, True, 200, "completed", "api", identity,
+        authorization_notification_lost=True, before_release=reservations.append,
+    )
+    assert len(reservations) == 1

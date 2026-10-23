@@ -252,9 +252,11 @@ def relay(
                     before_release((directory / "request.json").read_bytes())
                     if time.monotonic() >= authorization_deadline:
                         raise TimeoutError("Request authorization deadline reached")
-                channel.notify(
-                    {"status": "running", "handshook": True, "authorized": True}
-                )
+                # Durable authorization survives loss of its live acknowledgement.
+                with suppress(OSError, WebSocketException):
+                    channel.notify(
+                        {"status": "running", "handshook": True, "authorized": True}
+                    )
                 handshake_bytes = len(server)
                 with measure("provider_request_release"):
                     stage = "provider_request_release"
