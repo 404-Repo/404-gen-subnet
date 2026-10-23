@@ -29,4 +29,4 @@ COPY src/ src/
 
 EXPOSE 80
 
-CMD ["node", "src/server.js"]
+CMD ["node", "--import", "./src/software-rendering.js", "src/server.js"]

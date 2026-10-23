@@ -11,7 +11,8 @@
     "test:adversary": "node test/adversary.test.mjs",
     "test:runtime-adversary": "node test/runtime-adversary.test.mjs",
     "test:postval": "node test/post-validate.test.mjs",
-    "test:endpoint": "node test/endpoint.test.mjs"
+    "test:endpoint": "node test/endpoint.test.mjs",
+    "test:software-rendering": "node --import ./src/software-rendering.js test/software-rendering.test.mjs"
   },
   "dependencies": {
     "@babel/parser": "^7.24.0",
