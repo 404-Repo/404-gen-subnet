@@ -186,14 +186,18 @@ request can rebuild the failed entry.
 HTTP failure recovery and compares complete PNG bytes against a reference
 renderer. The HTTP recovery cases use a 60-second render deadline.
 
-Run both implementations in the same image with the same locked dependencies.
-From the repository root, after building a renderer image:
+Use the pinned `linux/amd64` validation image with Node `24.14.0`, Puppeteer
+`24.40.0`, Three.js `0.183.2` and Chrome `146.0.7680.153`. This image must already
+be loaded locally; building the Dockerfile above produces a different runtime.
+Run both implementations with the image's locked dependencies. From the
+repository root:
 
 ```sh
-PMREM_IMAGE_ID=$(docker image inspect render-service-js --format '{{.Id}}')
+PMREM_IMAGE_ID=sha256:4e8ea7a0ffe1f59d93ef489df009818ede0f92ef1438aa7d9096073c51cc3ea4
 PMREM_REFERENCE_DIR=$(mktemp -d)
 git archive c4dc226 render-service-js/src | tar -x -C "$PMREM_REFERENCE_DIR"
-docker run --rm --init --cpus=2 --memory=2g --pids-limit=512 --network none \
+docker run --rm --init --pull=never --platform linux/amd64 \
+  --cpus=2 --memory=2g --pids-limit=512 --network none \
   -e RENDER_POOL_SIZE=2 -e PMREM_REFERENCE_DIR=/app/reference \
   -e PMREM_IMAGE_ID="$PMREM_IMAGE_ID" \
   --mount "type=bind,src=$PWD/render-service-js/src,dst=/app/src,readonly" \
@@ -201,11 +205,13 @@ docker run --rm --init --cpus=2 --memory=2g --pids-limit=512 --network none \
   --mount "type=bind,src=$PMREM_REFERENCE_DIR/render-service-js,dst=/app/reference,readonly" \
   --mount "type=bind,src=$PWD/miner-reference/examples,dst=/fixtures,readonly" \
   --mount "type=bind,src=$PWD/render-service-js/package.json,dst=/app/package.json,readonly" \
+  --mount "type=bind,src=$PWD/render-service-js/package-lock.json,dst=/app/package-lock.json,readonly" \
   --entrypoint npm "$PMREM_IMAGE_ID" run test:pmrem
 ```
 
 To save PNGs and a JSON report with source hashes, output hashes and timings,
 mount an output directory and set `PMREM_TEST_OUTPUT` to its container path.
+Render failures identify the case and stage and preserve the original error.
 Byte identity is checked within the chosen runtime; this does not establish
 pixel determinism between different hosts or browser versions.
 

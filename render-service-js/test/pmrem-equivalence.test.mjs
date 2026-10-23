@@ -70,8 +70,13 @@ if (output) fs.mkdirSync(output, { recursive: true });
 
 async function render(api, item, stage) {
   const start = performance.now();
-  const images = item.mode === 'grid' ? [await api.renderGrid(item.source, item.options)]
-    : await api.renderViews(item.source, item.options);
+  let images;
+  try {
+    images = item.mode === 'grid' ? [await api.renderGrid(item.source, item.options)]
+      : await api.renderViews(item.source, item.options);
+  } catch (cause) {
+    throw new Error(`${stage}: ${item.name}: ${cause?.message || String(cause)}`, { cause });
+  }
   const record = { name: item.name, stage, milliseconds: Math.round(performance.now() - start),
     pngs: images.map(hash), source: hash(item.source), options: item.options };
   report.records.push(record);
