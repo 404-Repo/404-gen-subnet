@@ -12,7 +12,7 @@ WORKDIR /witness
 COPY witness-server/verifier/package.json witness-server/verifier/package-lock.json ./
 RUN npm ci --ignore-scripts --omit=dev --no-audit --no-fund
 
-FROM python:3.14.9-slim-bookworm@sha256:945c2676dc2b18e0c1f16879244122c57c0ffede60006bf3df159c507a31bcae
+FROM python:3.14.9-slim-bookworm@sha256:945c2676dc2b18e0c1f16879244122c57c0ffede60006bf3df159c507a31bcae AS witness-base
 WORKDIR /app/witness-gateway
 COPY witness-gateway/requirements.txt witness-gateway/requirements-pods.txt witness-gateway/constraints-pods.txt ./
 RUN pip install --no-cache-dir -c constraints-pods.txt -r requirements-pods.txt
@@ -30,3 +30,26 @@ ENV PYTHONPATH=/app/witness-client/src:/app/witness-gateway:/app/witness-server/
     PYTHONUNBUFFERED=1 WITNESS_TIMINGS=1 WITNESS_PRICING_FILE=/app/config/pricing.json
 EXPOSE 8443
 ENTRYPOINT ["python", "-m", "pod_gateway"]
+
+FROM witness-base AS render-benchmark
+ARG CHROMIUM_VERSION=155.0.8059.79-1~deb12u1
+ARG DEBIAN_SNAPSHOT=20261022T000000Z
+ENV DEBIAN_FRONTEND=noninteractive PUPPETEER_SKIP_DOWNLOAD=true PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
+RUN sed -i "s|http://deb.debian.org/debian-security|https://snapshot.debian.org/archive/debian-security/${DEBIAN_SNAPSHOT}|; s|http://deb.debian.org/debian|https://snapshot.debian.org/archive/debian/${DEBIAN_SNAPSHOT}|" /etc/apt/sources.list.d/debian.sources \
+    && apt-get -o Acquire::Check-Valid-Until=false update && apt-get install -y --no-install-recommends \
+    chromium=${CHROMIUM_VERSION} chromium-common=${CHROMIUM_VERSION} \
+    fonts-liberation fonts-noto-color-emoji util-linux \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=node /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/npm
+RUN ln -sf /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm
+COPY render-service-js/package*.json /opt/renderer/
+RUN cd /opt/renderer && npm ci --omit=dev --no-audit --no-fund
+COPY render-service-js/src /opt/renderer/src
+COPY render-service-js/test /opt/renderer/test
+COPY miner-reference/miner_reference/normalize.js /opt/miner-reference/miner_reference/normalize.js
+COPY miner-reference/examples/generated /opt/fixtures
+COPY witness-gateway/benchmarks/render_pod.py /opt/benchmark/harness.py
+RUN chmod -R a+rX /opt/renderer /opt/fixtures && mkdir -p /private-benchmark && chmod 700 /private-benchmark
+ENTRYPOINT ["python", "-u", "/opt/benchmark/harness.py"]
+
+FROM witness-base AS production

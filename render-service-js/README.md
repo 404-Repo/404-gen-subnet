@@ -31,6 +31,8 @@ The development server above listens on `http://localhost:8000`. The default por
 | `VALIDATION_POOL_SIZE` | `2` | Number of worker_threads for execution + post-validation |
 | `VALIDATION_TIMEOUT_MS` | `5000` | Wall-clock timeout for miner code execution (spec: 5 s) |
 | `RENDER_POOL_SIZE` | `1` | Max concurrent browser render slots |
+| `RENDER_QUEUE_CAPACITY` | `8` | Maximum requests waiting for the single validation-and-render job slot |
+| `RENDER_QUEUE_WAIT_MS` | `120000` | Maximum queue wait before returning 503 |
 
 ## Docker
 
@@ -126,6 +128,7 @@ Both render endpoints use these responses:
 | 422 | `validation_failed` | Static validation failed |
 | 422 | `post_validation_failed` | Execution or scene validation failed |
 | 503 | `validation_unavailable` | Unexpected validation worker failure or unavailable pool |
+| 503 | `queue_full` / `queue_wait_timeout` | Render admission queue is full or its wait limit expired; includes `Retry-After: 1` |
 | 500 | Error message | Render or internal error |
 
 Generator exceptions, execution timeouts and confirmed V8 heap-limit failures

@@ -273,6 +273,27 @@ docker buildx build --platform linux/amd64 --load \
   -f witness-server/worker/Dockerfile.pods -t witness-pods:local .
 ```
 
+The isolated renderer benchmark uses a separate target:
+
+```sh
+docker buildx build --platform linux/amd64 --load --target render-benchmark \
+  -f witness-server/worker/Dockerfile.pods -t witness-render-bench:local .
+```
+
+It runs Python capture and one Node.js renderer in the same Pod. Chromium and its
+Debian package snapshot are pinned in the Dockerfile. The benchmark entrypoint
+requires `RUNPOD_POD_ID`, `BENCH_ADMIN_TOKEN`, `BENCH_END` (Unix seconds),
+`BENCH_DEPLOYMENT`, `BENCH_HOTKEY`, `BENCH_START_ID` and `BENCH_IMAGE`.
+`BENCH_ROUND` defaults to `test-0`; the existing test-hotkey round restrictions
+apply. Use a fresh deployment, start ID and hotkey for each run.
+
+The authenticated admin API listens on port 8001. `POST /boot` accepts the private
+TLS files, R2 configuration, prompt hashes, hourly price and phase; it waits for
+renderer readiness before starting capture. The miner gateway then listens on
+TLS port 8000 and the admin API is also available on TLS port 8443. Node runs as
+UID 1001 without the Python process's storage credentials. The default build
+continues to start `python -m pod_gateway`.
+
 Publish through the operator's release process and configure the immutable image
 digest in [deploy/revivor.env.example](deploy/revivor.env.example). Set the actual
 deadline, canonical operator hotkey, frozen prompt hashes, rate ceilings, keys and
