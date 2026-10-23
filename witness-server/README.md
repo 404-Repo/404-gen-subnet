@@ -15,6 +15,10 @@ The public client is [`WitnessClient`](../witness-client/README.md).
 Transcripts are grouped under `rounds/<round>/<hotkey>/`; request IDs are internal
 transport and recovery handles. Recovery does not start another generation.
 
+The shared [witness with renderer baseline](../witness-gateway/PODS.md#pinned-witness-with-renderer)
+is pinned as `witness-renderer-20261023`; its manifest records the exact image,
+startup patch, limits and validation scope.
+
 See the [release checklist](../docs/witness-server-release-plan.md) for deployment
 preparation and validation.
 

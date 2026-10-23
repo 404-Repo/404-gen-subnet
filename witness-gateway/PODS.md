@@ -195,6 +195,41 @@ stock, storage/network costs and numeric Pod-count quota are not guaranteed.
 Fleet FIFO/priority queuing remains
 separate; busy workers provide bounded local backpressure.
 
+## Pinned witness with renderer
+
+The shared validated benchmark baseline is **`witness-renderer-20261023`**.
+Its source of truth is
+[`deploy/witness-renderer-20261023/manifest.json`](deploy/witness-renderer-20261023/manifest.json)
+at Git tag `witness-renderer-20261023`. Use that named baseline when coordinating
+work across chats. Keep its image, bootstrap, renderer, verifier and limit pins
+unchanged; create a different baseline ID and tag for a runtime change.
+
+The complete runtime is the manifest's **image digest plus its exact
+[`bootstrap.py`](deploy/witness-renderer-20261023/bootstrap.py)**. Mount the
+bootstrap read-only at `/opt/witness-baseline/bootstrap.py` and use the recorded
+Python entrypoint. The bootstrap checks the expected image sources before
+applying its fixed configuration and worker opening fix. The image alone does
+not contain that fix. The manifest's runtime file hashes are authoritative;
+rebuilding from the current branch does not reproduce the pinned renderer.
+
+For a credential-free configuration check, start the pinned image with
+`--network none` and `BENCH_CHECK_ONLY=1`. The bootstrap compiles the configured
+sources and prints their hashes without starting the benchmark or inference.
+Keep credentials and evidence volumes outside this baseline.
+
+The reference configuration uses three preparation slots, twelve model-call
+slots, eight prompt pipelines and one rendering job. It completed 128 prompts,
+256 offline replays and 1,278 exact PNG comparisons. This full run used an amd64
+container emulated on a Mac; it does not establish full-batch native RunPod
+performance or production allocation/revivor behavior. Successful PNGs matched;
+resource timeout outcomes remain load-sensitive and one unpaid connection
+required recovery. The manifest records these limits.
+
+The bootstrap's reference round is `test-3`. Preserve its saved recordings and
+accounting. New inference needs a fresh data namespace and a new run
+configuration; do not append a new experiment to the reference run. Retain the
+pinned image digest when cleaning up benchmark images.
+
 ## Build and configuration
 
 Build from the repository root for the target CPU architecture:
