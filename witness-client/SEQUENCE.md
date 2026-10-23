@@ -97,9 +97,11 @@ sequenceDiagram
 ```
 
 A broken live connection is not resumed as a TLS stream. `resume()` retrieves
-an authorized result from retained evidence. `release(exchange_id)` retires a
-stuck allocation, allowing a later `create()` to queue another job. It does not
-reset the job allowance or cancel provider capture already in progress.
+an authorized result from retained evidence. An open connection that stays
+silent after the status is `issued` is closed and retrieved the same way.
+`release(exchange_id)` retires a stuck allocation, allowing a later `create()`
+to queue another job. It does not reset the job allowance or cancel provider
+capture already in progress.
 
 The private allocation survives gateway restarts. Repeated queue calls keep the
 same request ID. A worker capability can be claimed once, and a retired request
