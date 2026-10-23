@@ -6,6 +6,7 @@ the replay engine must remain outside untrusted miner execution.
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Callable
 from typing import TypeVar
 
@@ -22,10 +23,9 @@ def run_generation(
     witness: WitnessClient,
     renderer: R,
     *,
-    source_sha256: str,
     prompt_url: str | None = None,
 ) -> str | None:
-    bound = witness.for_generation(image, seed, source_sha256, prompt_url=prompt_url)
+    bound = witness.for_generation(image, seed, prompt_url=prompt_url)
     output = generate(image, seed, bound, renderer)
     if output is not None and not isinstance(output, str):
         raise ValueError("generate() must return JavaScript or None")
@@ -39,18 +39,10 @@ def run_replay(
     seed: int,
     witness: ReplayWitness,
     renderer: R,
-    *,
-    source_sha256: str,
 ) -> str | None:
-    from .calls import Generation
-
-    if (
-        Generation.from_prompt(
-            image, seed, source_sha256, round_number=witness.recording.generation.round
-        ).id
-        != witness.recording.generation.id
-    ):
-        raise ValueError("Replay prompt, source or generation seed differs")
+    generation = witness.recording.generation
+    if hashlib.sha256(image).hexdigest() != generation.prompt_sha256 or seed != generation.seed:
+        raise ValueError("Replay prompt or generation seed differs")
     output = generate(image, seed, witness, renderer)
     if output is not None and not isinstance(output, str):
         raise ValueError("generate() must return JavaScript or None")

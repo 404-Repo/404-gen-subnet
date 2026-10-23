@@ -57,7 +57,6 @@ def check_prompts(prompts: Sequence[Prompt]) -> None:
 class BatchSettings:
     output: Path
     seed: int
-    source_sha256: str
     namespace: str
     parallel_prompts: int = 4
     parallel_calls: int = 2
@@ -66,8 +65,8 @@ class BatchSettings:
     def __post_init__(self) -> None:
         if not all(1 <= n <= 32 for n in (self.parallel_prompts, self.parallel_calls, self.parallel_renders)):
             raise ValueError("Concurrency must be between 1 and 32")
-        if not re.fullmatch(r"[a-f0-9]{64}", self.source_sha256) or not 0 <= self.seed < 2**64:
-            raise ValueError("Expected a source SHA256 and uint64 generation seed")
+        if not 0 <= self.seed < 2**64:
+            raise ValueError("Expected a uint64 generation seed")
 
 
 class LimitedCalls:
@@ -131,10 +130,9 @@ def run_batch(
         raise ValueError("Batch output must be private (chmod 700)")
     identity = canonical(
         {
-            "version": 1,
+            "version": 2,
             "namespace": settings.namespace,
             "seed": settings.seed,
-            "source_sha256": settings.source_sha256,
             "renderer_id": renderer.renderer_id,
             "pipeline_sha256": hashlib.sha256(
                 Path(pipeline.__file__).read_bytes()
@@ -156,7 +154,7 @@ def run_batch(
     def generate(prompt: Prompt) -> str:
         image = prompt.read()
         bound = witness.for_generation(
-            image, settings.seed, settings.source_sha256, prompt_url=prompt.url, call_slots=model_slots
+            image, settings.seed, prompt_url=prompt.url, call_slots=model_slots
         )
         directory = root / prompt.id
         directory.mkdir(mode=0o700, exist_ok=True)
@@ -229,7 +227,6 @@ def main() -> None:
     parser.add_argument("action", choices=("check", "run"))
     parser.add_argument("--manifest", type=Path, required=True)
     parser.add_argument("--witness-config", type=Path, required=True)
-    parser.add_argument("--source-sha256", required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--renderer-url", required=True)
     parser.add_argument("--renderer-id", required=True)
@@ -259,7 +256,6 @@ def main() -> None:
     settings = BatchSettings(
         args.output,
         manifest["seed"],
-        args.source_sha256,
         namespace,
         args.parallel_prompts,
         args.parallel_calls,

@@ -22,13 +22,16 @@ from urllib.parse import urlsplit
 import httpx
 from bittensor_wallet import Keypair
 from openai.types.responses import Response
-from openai.types.responses.response_create_params import ResponseCreateParamsStreaming
+from openai.types.responses.response_create_params import (
+    ResponseCreateParamsBase,
+    ResponseCreateParamsStreaming,
+)
 from websockets.exceptions import WebSocketException
 
 from . import recovery
 from . import request as openai_request
 from .calls import Generation, Invocation, RequestKey
-from .errors import WitnessError
+from .errors import ExchangePending, WitnessError
 from .gateway import GatewayClient
 from .proof import Prover
 from .response import completed_response, http_body, provider_error
@@ -205,18 +208,23 @@ class WitnessClient:
 
     @timed("create")
     def create(
-        self, *, witness_seed: int = 0, **params: Unpack[ResponseCreateParamsStreaming]
+        self,
+        *,
+        witness_seed: int = 0,
+        stream: Literal[True] = True,
+        **params: Unpack[ResponseCreateParamsBase],
     ) -> WitnessResult:
         """Make one OpenAI request and wait for its witnessed response.
 
         Args:
             **params: OpenAI Responses request parameters, typed by the SDK's
-                ResponseCreateParamsStreaming. Supply stream=True, model, and
+                ResponseCreateParamsBase. Supply model and
                 input directly, e.g. model="YOUR_MODEL_ID",
                 input="Make a three.js scene", instructions="Return JavaScript",
                 reasoning={"effort": "high"}, or prompt_cache_key="lorry".
                 Support depends on the model and API/subscription endpoint.
-                This method returns the completed result after consuming the
+                Streaming is enabled internally. This method returns the
+                completed result after consuming the
                 stream. Background generation is unsupported. Subscription
                 requests always use store=False.
 
@@ -226,6 +234,7 @@ class WitnessClient:
 
         Raises:
             ValueError: Invalid local request options, credentials, or body size.
+            ExchangePending: The original exchange is unresolved; use resume().
             WitnessError: Worker startup or exchange failed. If exchange_id is set,
                 keep it for resume(); inference is never automatically repeated.
                 Incomplete/failed generations retain their data in error.response.
@@ -254,7 +263,7 @@ class WitnessClient:
         if witness_seed != 0:
             raise ValueError("witness_seed requires the Pod transport")
         with measure("serialize_request"):
-            body = openai_request.serialize_body(params, self._mode)
+            body = openai_request.serialize_body({**params, "stream": stream}, self._mode)
         with measure("credentials_before_queue"):
             openai_request.load_credentials(self._config, self._mode, self._api_key)
         host, path = openai_request.PROVIDERS[self._mode]
@@ -327,12 +336,11 @@ class WitnessClient:
         self,
         image: bytes,
         seed: int,
-        source_sha256: str,
         *,
         prompt_url: str | None = None,
         call_slots: threading.Semaphore | None = None,
     ) -> GenerationWitness:
-        """Bind the supplied generate() client to frozen prompt/source bytes.
+        """Bind the supplied generate() client to one prompt and generation seed.
 
         The trusted runner constructs this client outside miner code. Repeating
         a generation resumes its existing prefix; it does not reset prompt usage.
@@ -346,7 +354,6 @@ class WitnessClient:
             Generation.from_prompt(
                 image,
                 seed,
-                source_sha256,
                 round_number=self._config["round"],
                 prompt_url=prompt_url,
             ),
@@ -392,12 +399,7 @@ class WitnessClient:
                         source="gateway",
                     )
                 if time.monotonic() >= deadline:
-                    raise WitnessError(
-                        "Capture remains unresolved",
-                        identifier,
-                        code="capture_in_progress",
-                        source="gateway",
-                    )
+                    raise ExchangePending("Capture remains unresolved", identifier)
                 time.sleep(min(0.5, max(0, deadline - time.monotonic())))
         try:
             directory = self._state / identifier
@@ -527,13 +529,17 @@ class GenerationWitness(WitnessClient):
         self._unresolved = False
 
     def create(
-        self, *, witness_seed: int = 0, **params: Unpack[ResponseCreateParamsStreaming]
+        self,
+        *,
+        witness_seed: int = 0,
+        stream: Literal[True] = True,
+        **params: Unpack[ResponseCreateParamsBase],
     ) -> WitnessResult:
         from .pods import PodGatewayClient
 
         assert isinstance(self._gateway, PodGatewayClient)
         normalized = cast(
-            ResponseCreateParamsStreaming, {"service_tier": "default", **params}
+            ResponseCreateParamsStreaming, {"service_tier": "default", **params, "stream": stream}
         )
         body = openai_request.serialize_body(normalized, self._mode)
         key = RequestKey.from_body(self._mode, body, witness_seed)
@@ -704,11 +710,8 @@ class GenerationWitness(WitnessClient):
                                 # this exact exchange, without another TLS connection.
                                 snapshot = self._gateway.snapshot(identifier)
                     if time.monotonic() >= deadline:
-                        raise WitnessError(
-                            "Capture remains unresolved; restart with the same generation",
-                            identifier,
-                            code="capture_in_progress",
-                            source="gateway",
+                        raise ExchangePending(
+                            "Capture remains unresolved; restart with the same generation", identifier
                         )
                     snapshot = self._gateway.snapshot(identifier)
                     if snapshot.call.phase not in ("issued", "failed"):

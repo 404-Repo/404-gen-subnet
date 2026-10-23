@@ -11,7 +11,7 @@ import httpx
 import pytest
 from bittensor_wallet import Keypair
 
-from witness_client import WitnessError
+from witness_client import ExchangePending, WitnessError
 from witness_client.gateway import GatewayClient
 
 
@@ -195,8 +195,9 @@ def test_recovery_polls_saved_progress_through_outage(
             assert gateway.wait_for_evidence(identifier)["status"] == "issued"
             assert polls == [0, 0.5, 1, 2, 2.5]
         else:
-            with pytest.raises(WitnessError) as failure:
+            with pytest.raises(ExchangePending) as failure:
                 gateway.wait_for_evidence(identifier)
+            assert failure.value.exchange == identifier
             assert failure.value.exchange_id == identifier
             assert failure.value.code == "capture_in_progress"
             assert failure.value.source == "gateway"

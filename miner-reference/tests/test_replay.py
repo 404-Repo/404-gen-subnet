@@ -20,7 +20,7 @@ from miner_reference.pipeline import normalize, run
 
 @pytest.mark.parametrize("repair", [False, True])
 def test_complete_five_candidate_pipeline_reconstructs_from_recordings(tmp_path: Path, repair: bool) -> None:
-    generation = Generation.from_prompt(PNG, 42, "a" * 64, round_number="test-0")
+    generation = Generation.from_prompt(PNG, 42, round_number="test-0")
     entries: list[EntryView] = []
     calls: dict[str, CallView] = {}
     lock = threading.Lock()

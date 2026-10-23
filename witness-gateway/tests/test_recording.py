@@ -36,7 +36,7 @@ PRICING = canonical(
 def invocation(index: int = 0, *, witness_seed: int = 0, seed: int = 42) -> Invocation:
     return Invocation(
         generation=Generation.from_prompt(
-            b"frozen PNG", seed, "a" * 64, round_number="test-0"
+            b"frozen PNG", seed, round_number="test-0"
         ),
         ordinal=index,
         request=RequestKey.from_body("api", BODY, witness_seed),
@@ -124,13 +124,12 @@ def test_stored_result_delivery_order_is_durable_and_retries_do_not_repeat_it() 
         restarted.reserve(SCOPE, invocation(2, witness_seed=2))
 
 
-def test_generation_uses_frozen_prompt_source_and_seed_while_url_is_descriptive() -> (
+def test_generation_uses_frozen_prompt_and_seed_while_url_is_descriptive() -> (
     None
 ):
     original = Generation.from_prompt(
         b"PNG",
         42,
-        "a" * 64,
         round_number="test-0",
         prompt_url="https://example.org/one",
     )
@@ -139,28 +138,23 @@ def test_generation_uses_frozen_prompt_source_and_seed_while_url_is_descriptive(
         == Generation.from_prompt(
             b"PNG",
             42,
-            "a" * 64,
             round_number="test-0",
             prompt_url="https://example.org/two",
         ).id
     )
     assert (
         original.id
-        != Generation.from_prompt(b"PNG", 43, "a" * 64, round_number="test-0").id
+        != Generation.from_prompt(b"PNG", 43, round_number="test-0").id
     )
     assert (
         original.id
         != Generation.from_prompt(
-            b"PNG changed", 42, "a" * 64, round_number="test-0"
+            b"PNG changed", 42, round_number="test-0"
         ).id
     )
     assert (
         original.id
-        != Generation.from_prompt(b"PNG", 42, "b" * 64, round_number="test-0").id
-    )
-    assert (
-        original.id
-        != Generation.from_prompt(b"PNG", 42, "a" * 64, round_number="test-1").id
+        != Generation.from_prompt(b"PNG", 42, round_number="test-1").id
     )
 
 
@@ -271,3 +265,22 @@ def test_authorized_retry_retains_unknown_usage_and_counts_both_dispatches() -> 
         budget.reserve(SCOPE, item, "second-attempt", BODY)
     with pytest.raises(BudgetRejected):
         budget.reserve(SCOPE, item, "third-attempt", BODY)
+
+
+def test_same_request_has_independent_exchanges_and_usage_for_each_prompt() -> None:
+    state = MemoryState()
+    records, budget = CallRecords(state), Budget(state, PRICING)
+    first = invocation()
+    second = first.model_copy(update={
+        "generation": Generation.from_prompt(b"another PNG", 42, round_number="test-0"),
+    })
+    first_call = records.reserve(SCOPE, first)
+    second_call = records.reserve(SCOPE, second)
+    assert first_call.exchange_id != second_call.exchange_id
+    for item, call in ((first, first_call), (second, second_call)):
+        budget.reserve(SCOPE, item, call.exchange_id, BODY)
+        budget.settle(SCOPE, item, {"input_tokens": 3, "output_tokens": 7})
+    assert budget.summary(SCOPE, first)["possible_dispatches"] == 1
+    assert budget.summary(SCOPE, second)["possible_dispatches"] == 1
+    assert budget.summary(SCOPE, first)["known_credits"] == "3.8"
+    assert budget.summary(SCOPE, second)["known_credits"] == "3.8"

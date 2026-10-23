@@ -5,11 +5,11 @@ import json
 import threading
 from contextlib import nullcontext
 from pathlib import Path
-from typing import Unpack
+from typing import Literal, Unpack
 
 import pytest
 from openai.types.responses import Response
-from openai.types.responses.response_create_params import ResponseCreateParamsStreaming
+from openai.types.responses.response_create_params import ResponseCreateParamsBase, ResponseCreateParamsStreaming
 from renderer_client import RenderOptions, RenderRejected, RenderUnavailable
 from witness_client import WitnessClient, WitnessError, WitnessResult
 from witness_client.calls import Generation, RequestKey
@@ -122,12 +122,11 @@ class Witness(WitnessClient):
         self,
         image: bytes,
         seed: int,
-        source_sha256: str,
         *,
         prompt_url: str | None = None,
         call_slots: threading.Semaphore | None = None,
     ) -> GenerationWitness:
-        generation = Generation.from_prompt(image, seed, source_sha256, round_number="test-0", prompt_url=prompt_url)
+        generation = Generation.from_prompt(image, seed, round_number="test-0", prompt_url=prompt_url)
         parent = self
 
         class Bound(GenerationWitness):
@@ -140,9 +139,13 @@ class Witness(WitnessClient):
                     self.prefix = list(parent.requests.get(generation.id, []))
 
             def create(
-                self, *, witness_seed: int = 0, **params: Unpack[ResponseCreateParamsStreaming]
+                self,
+                *,
+                witness_seed: int = 0,
+                stream: Literal[True] = True,
+                **params: Unpack[ResponseCreateParamsBase],
             ) -> WitnessResult:
-                key = RequestKey.from_body("api", serialize_body(params, "api"), witness_seed)
+                key = RequestKey.from_body("api", serialize_body({**params, "stream": stream}, "api"), witness_seed)
                 with self.condition:
                     while self.position < len(self.prefix) and self.prefix[self.position] != key:
                         assert self.condition.wait(timeout=5), "Generation request order changed on resume"
@@ -167,7 +170,7 @@ class Witness(WitnessClient):
                     try:
                         if barrier is not None:
                             barrier.wait(timeout=5)
-                        value = Calls().create(witness_seed=witness_seed, **params)
+                        value = Calls().create(witness_seed=witness_seed, stream=stream, **params)
                         with parent.lock:
                             parent.recorded[generation.id, key.id] = value
                             if parent.lose_reply_once:
@@ -197,7 +200,7 @@ def prompts(tmp_path: Path) -> list[Prompt]:
 
 
 def settings(tmp_path: Path, **limits: int) -> BatchSettings:
-    return BatchSettings(tmp_path / "run", 42, "a" * 64, "fixture", **limits)
+    return BatchSettings(tmp_path / "run", 42, "fixture", **limits)
 
 
 def test_five_candidates_refine_the_same_first_winner() -> None:
@@ -405,8 +408,6 @@ def test_check_command_validates_frozen_inputs_without_loading_credentials(
             str(manifest),
             "--witness-config",
             str(config),
-            "--source-sha256",
-            "a" * 64,
             "--output",
             str(tmp_path / "run"),
             "--renderer-url",

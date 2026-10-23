@@ -23,11 +23,14 @@ from pod_gateway.records import CallRecords
 from pod_gateway.replay import export_bundle
 
 
-@pytest.fixture
-def bundle(tmp_path: Path) -> Path:
+@pytest.fixture(params=["prompt", "legacy-source"])
+def bundle(tmp_path: Path, request: pytest.FixtureRequest) -> Path:
     state, scope = MemoryState(), Scope("competition", "test-0", "5" * 48)
     records = CallRecords(state)
-    generation = Generation.from_prompt(b"PNG", 42, "a" * 64, round_number="test-0")
+    generation = Generation.from_prompt(b"PNG", 42, round_number="test-0")
+    if request.param == "legacy-source":
+        generation = Generation.model_validate({**generation.model_dump(), "source_sha256": "a" * 64})
+        assert generation.id == "94877b97856e5ac7c071b78168ee47e20d620a89f07a6268e9eb792bd450bf9f"
     body = serialize_body(
         {
             "stream": True,
@@ -127,7 +130,7 @@ def test_replay_restores_different_concurrent_calls_and_their_delivery_order(
         )
         with pytest.raises(FutureTimeout):
             second.result(timeout=0.1)
-        first = pool.submit(replay.create, stream=True, model="fixture", input="image")
+        first = pool.submit(replay.responses.create, model="fixture", input="image")
         assert second.result(timeout=5).output_text == "second"
         assert first.result(timeout=5).output_text == "first"
     replay.finish("source")

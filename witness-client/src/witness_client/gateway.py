@@ -21,7 +21,7 @@ from websockets.sync.client import ClientConnection, connect
 
 from .auth import WITNESS_ID, hotkey_headers
 from .delivery import request, retry
-from .errors import WitnessError
+from .errors import ExchangePending, WitnessError
 from .state import save
 from .timing import identify_exchange, measure, timed
 from .tunnel import MAX_BYTES, WebSocketTunnel
@@ -247,12 +247,7 @@ class GatewayClient:
                     )
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    raise WitnessError(
-                        "Witness is still preparing the capture",
-                        identifier,
-                        code="capture_in_progress",
-                        source="gateway",
-                    )
+                    raise ExchangePending("Witness is still preparing the capture", identifier)
                 time.sleep(min(remaining, 0.5))
         except WitnessError as error:
             error.exchange_id = identifier

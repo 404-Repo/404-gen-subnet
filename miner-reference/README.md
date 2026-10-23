@@ -75,7 +75,7 @@ Return the final JavaScript string, or `None` to declare generation failure.
 An uncaught exception is a miner error. The runner checks the return type, UTF-8
 size and JavaScript rules.
 
-Use `witness.responses.create(stream=True, ...)` for model requests. It waits for
+Use `witness.responses.create(...)` for model requests. It waits for
 the complete response and returns `output_text`, `response` and `usage`.
 `renderer.render(source, options)` returns PNG bytes or raises a structured
 `RenderRejected`. Send prompt images and rendered previews as PNG data URLs in
@@ -149,7 +149,6 @@ by the experiment and ignored by this runner.
 PYTHONPATH=miner-reference python -m miner_reference.batch check \
   --manifest /private/prompts/manifest.json \
   --witness-config /private/witness.json \
-  --source-sha256 SOURCE_ARCHIVE_SHA256 \
   --output /private/miner-batch \
   --renderer-url http://127.0.0.1:18040 \
   --renderer-id PINNED_RENDERER_ID \

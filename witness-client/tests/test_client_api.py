@@ -256,7 +256,7 @@ def test_pod_calls_bound_preparation_and_capture_concurrency(
         monkeypatch.setattr("witness_client.client.exchange", exchange)
         slots = BoundedSemaphore(call_limit)
         bound = [
-            witness.for_generation(bytes([index]), 42, "a" * 64, call_slots=slots)
+            witness.for_generation(bytes([index]), 42, call_slots=slots)
             for index in range(4)
         ]
         with ThreadPoolExecutor(max_workers=4) as pool:
@@ -355,9 +355,9 @@ def test_create_verifies_on_active_tunnel_after_saving_proof(
 
 @pytest.mark.parametrize(
     "params",
-    [{}, {"stream": None}, {"stream": False}, {"stream": 1}, {"stream": "true"}],
+    [{"stream": None}, {"stream": False}, {"stream": 1}, {"stream": "true"}],
 )
-def test_create_requires_stream_true_before_queueing(
+def test_create_rejects_invalid_stream_before_queueing(
     client: WitnessClient,
     monkeypatch: pytest.MonkeyPatch,
     params: dict[str, object],
@@ -497,7 +497,7 @@ def test_streamed_output_survives_create_and_downloaded_recovery(
         hotkey=key,
     ) as client:
         identifier, calls = record_exchange(client, monkeypatch, body)
-        created = client.create(stream=True, model="fixture", input="hello")
+        created = client.responses.create(model="fixture", input="hello")
         (client._state / identifier / "response.bin").unlink()
         recovered = client.resume(identifier)
 

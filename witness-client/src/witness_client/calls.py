@@ -4,9 +4,16 @@ from __future__ import annotations
 
 import hashlib
 import json
-from typing import Annotated, Literal
+from typing import Annotated, Literal, cast
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SerializerFunctionWrapHandler,
+    StringConstraints,
+    model_serializer,
+)
 
 Digest = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
 
@@ -43,7 +50,7 @@ class Generation(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
     prompt_sha256: Digest
-    source_sha256: Digest
+    source_sha256: Digest | None = None
     seed: int
     round: Annotated[str, StringConstraints(pattern=r"^[a-z0-9][a-z0-9-]{0,63}$")]
     prompt_url: str | None = Field(default=None, max_length=4096)
@@ -53,25 +60,31 @@ class Generation(BaseModel):
         cls,
         image: bytes,
         seed: int,
-        source_sha256: str,
         *,
         round_number: str,
         prompt_url: str | None = None,
     ) -> Generation:
         return cls(
             prompt_sha256=hashlib.sha256(image).hexdigest(),
-            source_sha256=source_sha256,
             seed=seed,
             round=round_number,
             prompt_url=prompt_url,
         )
+
+    @model_serializer(mode="wrap")
+    def serialize(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
+        data = cast(dict[str, object], handler(self))
+        if self.source_sha256 is None:
+            data.pop("source_sha256", None)
+        return data
 
     @property
     def id(self) -> str:
         # URLs are descriptive: identical frozen bytes do not change identity
         # when a signed download URL expires or its query string changes.
         return hashlib.sha256(
-            b"404-generate/v1\n" + canonical(self.model_dump(exclude={"prompt_url"}))
+            (b"404-generate/v1\n" if self.source_sha256 is not None else b"404-generate/v2\n")
+            + canonical(self.model_dump(exclude={"prompt_url"}))
         ).hexdigest()
 
 

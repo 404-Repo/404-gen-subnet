@@ -12,8 +12,8 @@ Imports, installation, tests and `--help` do not create infrastructure.
 
 ## Identity, deduplication and order
 
-The operator pins the round, frozen PNG bytes, source archive SHA256 and
-generation seed. These identify one `generate` run. A prompt URL is optional
+The operator pins the round, frozen PNG bytes and generation seed.
+These identify one `generate` run. A prompt URL is optional
 descriptive metadata and is never fetched by the gateway. Keep private access
 tokens out of descriptive URLs.
 
@@ -34,6 +34,13 @@ the original identity. A restart consumes the saved generation prefix before
 appending work. Changed requests in an existing prefix are rejected. A pinned
 round prevents reconnects from silently moving work into another competition.
 
+Prompt-scoped generations use v2 identities. Replay also reads source-labelled
+v1 recordings with their original identities. Source identity belongs to the
+submission executor and validator; the witness does not attest program execution.
+Use matching client and gateway sources. Keep the matching v1 client for an
+existing v1 batch restart, or retrieve its saved exchanges with `resume()`.
+Use a fresh round namespace for a recording-format cutover.
+
 ```python
 from witness_client import WitnessClient, run_generation
 
@@ -45,14 +52,11 @@ config = {
     "state_directory": "/private/recovery",
 }
 with WitnessClient(config, hotkey=hotkey, openai_api_key=api_key) as witness:
-    source = run_generation(
-        generate, frozen_png, seed, witness, renderer,
-        source_sha256=submitted_source_archive_sha256,
-    )
+    source = run_generation(generate, frozen_png, seed, witness, renderer)
 ```
 
 Miner code keeps `generate(image, seed, witness, renderer)` and
-`witness.responses.create(stream=True, ...)`. Intentional fresh requests can use
+`witness.responses.create(...)`. Intentional fresh requests can use
 `witness.responses.create(..., witness_seed=1)`.
 
 ## Capture and durability

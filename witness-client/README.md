@@ -81,7 +81,7 @@ The same configuration works with either API-key or subscription authentication.
 
 For an operator running the Python CPU Pod gateway, set `transport` to
 `"pods-v1"` and pin `round` in the client configuration. The trusted runner binds
-the frozen prompt, source archive hash and generation seed with
+the frozen prompt and generation seed with
 `for_generation()` or `run_generation()`. Identical requests within that
 generation reuse one stored response, including concurrent duplicates. Pass a
 different `witness_seed` to request a fresh exchange. See the
@@ -180,7 +180,6 @@ hotkey = Wallet(
 
 with WitnessClient("witness.json", hotkey=hotkey, subscription="codex") as client:
     result = client.responses.create(
-        stream=True,
         model=os.environ["OPENAI_MODEL"],
         input="Write a three.js function that creates a red cube.",
     )
@@ -196,9 +195,9 @@ wait. Each `create()` call returns text in `result.output_text` and token usage
 in the `result.usage` dictionary, plus the full typed OpenAI response in
 `result.response`. Its `output` includes tool calls, refusals, and reasoning
 items for follow-up requests. Additional Responses settings use the OpenAI
-SDK's types and are forwarded into the request body. The client requires
-`stream=True` and returns the completed result; background generation is
-unsupported.
+SDK's types and are forwarded into the request body. The client enables
+streaming internally and returns the completed result. Explicit `stream=True`
+is also accepted; background generation is unsupported.
 
 For the competition allowance, cached input tokens count at the same rate as
 uncached input tokens. `result.usage["input_tokens"]` already includes cached
@@ -232,7 +231,6 @@ hotkey = Wallet(
 with WitnessClient("witness.json", hotkey=hotkey, subscription="codex") as client:
     try:
         result = client.responses.create(
-            stream=True,
             model=os.environ["OPENAI_MODEL"],
             input=[{
                 "role": "user",
@@ -298,6 +296,19 @@ with WitnessClient("witness.json", hotkey=hotkey, subscription="codex") as clien
     print(result.hotkey, result.usage)
 ```
 
+A pending capture raises `ExchangePending`, a `WitnessError` carrying the
+saved exchange in `pending.exchange`. Keep the same state directory, hotkey,
+authentication mode and round when resuming:
+
+```python
+from witness_client import ExchangePending
+
+try:
+    result = client.responses.create(model=model, input=messages)
+except ExchangePending as pending:
+    result = client.resume(pending.exchange)
+```
+
 `resume()` retrieves the recorded outcome without starting another generation.
 If delivery fails again, rerun `recover.py`; it keeps the ID until the result
 has been saved. API-key users should add `import os` and make the same
@@ -309,7 +320,7 @@ release it before making a new request:
 
 ```python
 client.release(exchange_id)
-result = client.create(stream=True, model=model, input=prompt)
+result = client.responses.create(model=model, input=prompt)
 ```
 
 `release()` can be repeated. It keeps the same per-round worker allowance.

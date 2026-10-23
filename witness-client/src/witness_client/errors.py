@@ -38,3 +38,21 @@ class WitnessError(RuntimeError):
         self.provider_message = provider_message
         self.response = response
         super().__init__(message)
+
+
+class ExchangePending(WitnessError):
+    """The saved exchange is unresolved; resume it without starting inference."""
+
+    def __init__(
+        self,
+        message: str,
+        exchange: str,
+        *,
+        code: str = "capture_in_progress",
+    ) -> None:
+        super().__init__(message, exchange, code=code, source="gateway")
+
+    @property
+    def exchange(self) -> str:
+        assert self.exchange_id is not None
+        return self.exchange_id

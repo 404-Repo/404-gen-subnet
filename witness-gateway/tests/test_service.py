@@ -414,13 +414,12 @@ def test_https_gateway_deduplicates_inflight_requests_and_replays_without_infere
                     delivery_timeout=20,
                 ) as witness:
                     bound = witness.for_generation(
-                        image, 42, "a" * 64, call_slots=threading.BoundedSemaphore(call_limit)
+                        image, 42, call_slots=threading.BoundedSemaphore(call_limit)
                     )
                     with ThreadPoolExecutor(max_workers=2) as pool:
                         futures = [
                             pool.submit(
                                 bound.create,
-                                stream=True,
                                 model="fixture",
                                 input="same image",
                             )
@@ -458,7 +457,6 @@ def test_https_gateway_deduplicates_inflight_requests_and_replays_without_infere
                         futures = [
                             pool.submit(
                                 replay.create,
-                                stream=True,
                                 model="fixture",
                                 input="same image",
                             )

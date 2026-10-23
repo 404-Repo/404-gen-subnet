@@ -9,7 +9,10 @@ import time
 from pathlib import Path
 from typing import Literal, Unpack, cast
 
-from openai.types.responses.response_create_params import ResponseCreateParamsStreaming
+from openai.types.responses.response_create_params import (
+    ResponseCreateParamsBase,
+    ResponseCreateParamsStreaming,
+)
 
 from .calls import RequestKey
 from .client import WitnessClient, WitnessResult, recorded_result
@@ -65,10 +68,14 @@ class ReplayWitness(WitnessClient):
         raise ReplayMismatch(message)
 
     def create(
-        self, *, witness_seed: int = 0, **params: Unpack[ResponseCreateParamsStreaming]
+        self,
+        *,
+        witness_seed: int = 0,
+        stream: Literal[True] = True,
+        **params: Unpack[ResponseCreateParamsBase],
     ) -> WitnessResult:
         normalized = cast(
-            ResponseCreateParamsStreaming, {"service_tier": "default", **params}
+            ResponseCreateParamsStreaming, {"service_tier": "default", **params, "stream": stream}
         )
         key = RequestKey.from_body(
             self.mode, serialize_body(normalized, self.mode), witness_seed
