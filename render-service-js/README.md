@@ -168,39 +168,23 @@ Post-validation rule codes: `EMPTY_SCENE`, `BOUNDING_BOX_OUT_OF_RANGE`, `VERTEX_
 ## PMREM cache
 
 The fixed `neutral` and `studio` lighting environments are baked once per
-Chromium instance, on first use. A trusted, disposable browser context generates
-each PMREM and reads its half-float pixels into a process-local cache. Each miner
-render still gets a fresh BrowserContext and uploads a private texture from those
-pixels. Miner code never runs in the baking context. `follow` lighting needs no
-PMREM and is unchanged.
+Chromium instance, on first use, and cached in memory. Baking runs in a trusted,
+disposable context without miner code. Each miner render gets a fresh
+BrowserContext and a private texture. `follow` lighting does not use PMREM.
 
 Concurrent requests share the same pending bake. A failed bake is evicted so a
-later request can retry; replacing the browser creates a fresh cache. Nothing is
-persisted across service restarts, so changing Three.js or Chromium automatically
-rebakes the environments. Pixels are cached only after a completed readback with
-no WebGL errors or context loss. The first use pays the baking and readback cost;
-later requests skip PMREM generation. Lighting values, camera settings and the
-existing studio environment are preserved.
+later request can retry. Replacing the browser or restarting the service clears
+the cache. Pixels are cached only after a completed readback with no WebGL errors
+or context loss. The first request for each environment includes the baking cost.
 
-Readback rejections are normalized to `Error` objects, including GPU waits that
-reject without a reason. They return HTTP 500; the service stays healthy and a
-later request can rebuild the failed cache entry.
+Readback failures return HTTP 500. The service stays available, and the next
+request can rebuild the failed entry.
 
-### Cache checks and PNG equivalence
+### Tests
 
-`npm test` includes cache reuse, concurrent initialization, failure cleanup/retry,
-and browser replacement checks. `npm run test:pmrem` first injects real WebGL
-readback failures (context loss, an invalid read and an unsupported texture type),
-checking rejection, context cleanup, retry and byte-identical recovery. It then
-checks both HTTP render endpoints for GPU-wait failure recovery: a 500 response,
-continued health, and byte-identical PNGs after retry and warm reuse. This HTTP
-test uses a 60-second render deadline to allow cold software rendering under CPU
-quotas. Finally it compares complete PNG bytes against the renderer before
-caching, with no pixel tolerance. It covers all ten repository example scenes
-plus a material roughness sweep, the validator's eight white and four gray
-1024-pixel views, the default 518-pixel studio grid, and a `follow` control. It also
-checks warm reuse, recovery after a miner error, browser restarts and simultaneous
-requests with an empty cache.
+`npm test` checks cache reuse and lifecycle. `npm run test:pmrem` checks WebGL and
+HTTP failure recovery and compares complete PNG bytes against a reference
+renderer. The HTTP recovery cases use a 60-second render deadline.
 
 Run both implementations in the same image with the same locked dependencies.
 From the repository root, after building a renderer image:
@@ -224,23 +208,6 @@ To save PNGs and a JSON report with source hashes, output hashes and timings,
 mount an output directory and set `PMREM_TEST_OUTPUT` to its container path.
 Byte identity is checked within the chosen runtime; this does not establish
 pixel determinism between different hosts or browser versions.
-
-Verified against `c4dc226` using the same pinned linux/amd64 runtime with
-Chrome 146.0.7680.153, a two-CPU quota, 2 GiB RAM and two render slots:
-179 PNG comparisons were byte-identical. Warm-request medians across ten scenes
-(excluding the first scene, which builds each cache entry) were:
-
-| Request | Original | Cached |
-| --- | ---: | ---: |
-| Neutral, eight white 1024-pixel views | 8.98 s | 5.21 s |
-| Neutral, four gray 1024-pixel views | 8.38 s | 4.22 s |
-| Studio, four-view 518-pixel grid | 8.35 s | 3.92 s |
-
-Legacy-only finding: concurrent initialization of a stopped browser can launch
-multiple Chromium instances in `browser.js`. The cache concurrency test starts
-Chromium before submitting requests, as service startup does, and asserts that
-two requests share one baking context. Browser startup synchronization remains a
-separate change.
 
 ## Security
 
