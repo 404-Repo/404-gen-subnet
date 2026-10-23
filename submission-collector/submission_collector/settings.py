@@ -63,10 +63,7 @@ class Settings(BaseSettings):
     max_js_size_bytes: int = Field(
         default=1 * 1024 * 1024,
         alias="MAX_JS_SIZE_BYTES",
-        description=(
-            "Maximum .js module size in bytes (default 1 MB; matches orchestrator "
-            "MAX_JS_BYTES and the miner output spec)"
-        ),
+        description="Maximum .js module size in bytes (default 1 MiB; matches the miner output specification)",
     )
 
     r2_access_key_id: SecretStr = Field(..., alias="R2_ACCESS_KEY_ID", description="R2 access key ID")

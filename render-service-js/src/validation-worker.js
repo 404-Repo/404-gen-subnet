@@ -22,6 +22,12 @@ import { parentPort } from 'node:worker_threads';
 import * as THREE from 'three';
 import { postValidate } from './post-validate.js';
 import { createSafeThree } from './safeThree.js';
+import { boundValidationResult } from './validation-report.js';
+import { protectValidationRealm } from './validation-realm.js';
+
+function postResult(message) {
+  parentPort.postMessage({ ...message, result: boundValidationResult(message.result) });
+}
 
 // One Proxy instance per worker — shared across all requests. The Proxy is
 // stateless and its backing object only holds references to allowlisted
@@ -53,23 +59,17 @@ function trapViolation(name) {
   throw new Error(`Runtime violation: ${name} is forbidden`);
 }
 
+const resetRandom = protectValidationRealm(THREE, CODEGEN_PROTOTYPES, TRAPPED_GLOBALS);
+
 parentPort.on('message', async (msg) => {
   if (msg.type !== 'validate') return;
 
   const { source, requestId } = msg;
 
-  const origRandom = Math.random;
   const savedGlobals = new Map();
-  const savedCtors = [];
 
   try {
-    let seed = 0x12345678;
-    Math.random = () => {
-      seed |= 0; seed = seed + 0x6D2B79F5 | 0;
-      let t = Math.imul(seed ^ seed >>> 15, 1 | seed);
-      t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
-      return ((t ^ t >>> 14) >>> 0) / 4294967296;
-    };
+    resetRandom();
 
     for (const name of TRAPPED_GLOBALS) {
       if (!(name in globalThis)) continue;
@@ -84,21 +84,12 @@ parentPort.on('message', async (msg) => {
       }
     }
 
-    for (const proto of CODEGEN_PROTOTYPES) {
-      const desc = Object.getOwnPropertyDescriptor(proto, 'constructor');
-      savedCtors.push({ proto, desc });
-      Object.defineProperty(proto, 'constructor', {
-        get() { trapViolation('Function constructor'); },
-        configurable: true,
-      });
-    }
-
     const body = `'use strict';\n${source}`;
     let factory;
     try {
       factory = new SafeFunction(body);
     } catch (err) {
-      parentPort.postMessage({
+      postResult({
         type: 'result',
         requestId,
         result: {
@@ -117,7 +108,7 @@ parentPort.on('message', async (msg) => {
     const generate = factory();
 
     if (typeof generate !== 'function') {
-      parentPort.postMessage({
+      postResult({
         type: 'result',
         requestId,
         result: {
@@ -141,7 +132,7 @@ parentPort.on('message', async (msg) => {
     const root = generate(SAFE_THREE);
 
     if (root instanceof Promise) {
-      parentPort.postMessage({
+      postResult({
         type: 'result',
         requestId,
         result: {
@@ -158,12 +149,16 @@ parentPort.on('message', async (msg) => {
     }
 
     const result = postValidate(THREE, root);
-    parentPort.postMessage({ type: 'result', requestId, result });
+    postResult({ type: 'result', requestId, result });
   } catch (err) {
-    const rule = err.message?.includes('Runtime violation')
-      ? 'RUNTIME_VIOLATION'
-      : 'EXECUTION_THREW';
-    parentPort.postMessage({
+    let detail;
+    try {
+      detail = typeof err?.message === 'string' ? err.message : String(err);
+    } catch {
+      detail = 'thrown value could not be inspected';
+    }
+    const rule = detail.includes('Runtime violation') ? 'RUNTIME_VIOLATION' : 'EXECUTION_THREW';
+    postResult({
       type: 'result',
       requestId,
       result: {
@@ -171,20 +166,15 @@ parentPort.on('message', async (msg) => {
         failures: [{
           stage: 'execution',
           rule,
-          detail: err.message || String(err),
+          detail,
         }],
         metrics: null,
       },
     });
   } finally {
-    Math.random = origRandom;
     for (const [name, desc] of savedGlobals) {
       try { Object.defineProperty(globalThis, name, desc); }
       catch { try { globalThis[name] = desc?.value; } catch {} }
-    }
-    for (const { proto, desc } of savedCtors) {
-      try { Object.defineProperty(proto, 'constructor', desc); }
-      catch {}
     }
   }
 });

@@ -11,10 +11,14 @@ Miners compete by providing the best 3D generation solution. Competition descrip
 
 The competition follows a **winner-stays-in** format with a **proof-of-work model**:
 
-1. **Miners generate**: When a round opens, miners use published seed and prompts to generate 3D models and upload to their CDNs
-2. **Validators collect**: Submissions are downloaded and rendered for comparison
-3. **VLM judges**: A vision-language model compares outputs in pairwise duels
-4. **Validators audit**: Winners are verified by regenerating their outputs using the miner's Docker image on serverless GPUs
+1. **Miners submit source** before prompts are published, then run that Python source on the published prompts through the witness using their own OpenAI credentials and upload the existing Three.js outputs.
+2. **Validators collect**: Submissions are downloaded and rendered into one canonical result bundle per miner.
+3. **VLM judges**: A vision-language model compares miners' outputs in pairwise tournament duels.
+4. **Validators replay**: The judge requests one validation pass per candidate. A separate validator replays its source against recorded requests/responses and publishes one pass/fail verdict. Independent source audit is also required for eligibility.
+
+The judge/shared contracts implement this validation boundary. The generation
+orchestrator still needs its Python leader-generation migration before the new
+competition can run; see [required producer migrations](shared/README.md#required-producer-migrations).
 
 All competition state is stored in a public git repository, making every decision auditable and every transition traceable.
 
@@ -44,7 +48,7 @@ FINALIZING ──► OPEN ──► MINER_GENERATION ──► DOWNLOADING ─�
 | Service | Description |
 |---------|-------------|
 | `submission-collector` | Monitors the round schedule, collects miner submissions, downloads 3D files, renders previews. Owns OPEN, MINER_GENERATION, and DOWNLOADING stages. |
-| `generation-orchestrator` | Verifies miner outputs by regenerating them using miner Docker images on serverless GPUs. Also generates baseline outputs using the leader's image. |
+| `generation-orchestrator` | Legacy Docker/regeneration implementation awaiting migration. Its remaining role is generating the previous leader's canonical results for new prompts. |
 | `render-service-js` | Renders miner Three.js submissions to multi-view PNG images via headless Chromium with WebGL. |
 | `miner-reference` | Miner guide, token budgets, a Three.js validator, examples and local tools. |
 | `image-distance-service` | Computes perceptual distance between images using DINOv3 embeddings. Used to verify regenerated outputs match submissions. |
@@ -73,9 +77,10 @@ All state is stored in the competition git repository.
 | `seed.json` | submission-collector | Random seed for deterministic generation |
 | `prompts.txt` | submission-collector | Selected prompts for the round |
 | `submissions.json` | submission-collector | Miner submissions from chain |
-| `builds.json` | generation-orchestrator | Docker build status per miner |
-| `require_audit.json` | judge-service | Miners requiring output verification |
-| `generation_reports.json` | generation-orchestrator | Generation reports (completed/rejected) |
+| `builds.json` | legacy generation-orchestrator | Docker build status; outside the new judge eligibility contract |
+| `validation_requests.json` | judge-service | One validation request per candidate hotkey |
+| `validation_results.json` | validator | One terminal passed/failed result per candidate; absent while pending |
+| `source_audit.json` | source auditor | Independent source-level verdict per miner |
 | `matches_matrix.csv` | judge-service | All match results (margin values) |
 | `winner.json` | judge-service | Final round winner |
 
@@ -83,22 +88,19 @@ All state is stored in the competition git repository.
 
 | File | Writer | Description |
 |------|--------|-------------|
-| `submitted.json` | submission-collector | Downloaded submission locations |
-| `generated.json` | generation-orchestrator | Regenerated output locations for verification |
+| `submitted.json` | submission-collector | Miner's single Three.js result and rendered-view bundle |
+| `generated_1.json` (under `leader/`) | leader generator | Previous leader's single result bundle for the round's prompts |
 | `duels_*.json` | judge-service | Detailed match reports with per-prompt outcomes |
 
 ## Verification Pipeline
 
 When a miner becomes a candidate winner, they are sent for verification:
 
-1. **Build tracking**: Monitor GitHub Actions for the miner's Docker image build
-2. **Pod deployment**: Deploy the image on a GPU pod via the batch generation API, using the hardware the miner declared in `hardware.json` (4×H200 by default)
-3. **Regeneration**: Send prompts in sequential batches (128 prompts, 4 batches of 32) with the same seed used in the round
-4. **Validation & rendering**: Each returned JavaScript module is statically analyzed, executed in a sandbox, and rendered via headless Chromium
-5. **Comparison**: Rendered outputs compared to submissions via VLM-based judging
-6. **Verdict**: Pass if regenerated outputs match submission quality
-
-If verification fails, the timeline is discarded and alternative winners are evaluated.
+1. **Request**: Judge appends the candidate hotkey to the round's `validation_requests.json` channel, once per hotkey.
+2. **Replay**: Validator runs the submitted Python source with the same prompts and seed, matching its outgoing requests to recorded witness evidence and returning the recorded responses. It checks outputs and budgets without new provider generations.
+3. **Validation verdict**: Validator publishes `passed` or `failed` with a useful failure reason in `validation_results.json`. In-progress work has no terminal result.
+4. **Source audit**: The existing independent auditor publishes `source_audit.json`; its contract is unchanged.
+5. **Eligibility**: Both checks must pass for every leader in the surviving timeline. Missing results mean wait; either failure removes that candidate and the judge recomputes the timeline from cached miner matches.
 
 ## Leader Transitions
 

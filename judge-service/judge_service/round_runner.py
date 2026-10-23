@@ -1,138 +1,79 @@
-"""Drives a single round to a fixed point: the verified winner.
+"""Choose a round winner by comparing miners' outputs.
 
-The judge is a convergence loop, not a script. One tick:
+Each miner that takes the lead must pass replay validation and a source audit.
+If either check fails, reject that miner and rebuild the tournament using
+cached match results.
 
-    reload observations -> derive timeline -> publish changes -> do ONE unit of
-    work -> repeat
-
-Observations (ground truth only — derived state never feeds back into derivation):
-
-    match matrix        judge's own match results
-    audit matrix        judge's own audit duel margins, keyed by the defender they
-                        were produced against
-    generation reports  orchestrator: per-miner regeneration progress and verdicts
-    source audits       source auditor: per-miner source-level verdicts
-    submissions / prompts / seed / config   static for the round
-
-Derived state flows OUT only:
-
-    timeline        recomputed from scratch every tick, never stored
-    audit requests  tell the orchestrator whom to regenerate and name the defender
-                    to audit against; refreshed from the current timeline for every
-                    "won" entry each tick, BEFORE the duel scan reads them — that
-                    order is what lets a request go stale and heal
-
-Work selection, one unit per tick, in priority order:
-
-    1. the next missing audit duel (per generated repeat of an audited hotkey)
-    2. the next timeline match (challenger vs current chain defender)
-    3. an exploratory duel (fill the match matrix between non-rejected miners)
-    4. idle: flush, wait, reload
-
-Progress argument — the property that makes the loop correct. In every
-non-finalized state at least one of these holds:
-
-    (a) a unit of work is due, or
-    (b) the round is blocked on a named external event whose producer will
-        deliver it: a generation report progressing (orchestrator), or a source
-        audit appearing (source auditor).
-
-Anything else is a stall: the round can never finalize.
-
-Audit margins are looked up by the CURRENT defender only; margins produced against
-prior defenders stay in the matrix as forensic data.
+Run available matches while checks are pending. Finalize the round once
+every miner in the surviving chain of winners has passed both checks.
 """
 
 from loguru import logger
 from openai import AsyncOpenAI
-from subnet_common.competition.audit_matrix import get_audit_matrix, save_audit_matrix
-from subnet_common.competition.audit_requests import (
-    AuditRequest,
-    AuditRequests,
-    get_audit_requests,
-    save_audit_requests,
-)
-from subnet_common.competition.build_info import require_builds
 from subnet_common.competition.config import require_competition_config
-from subnet_common.competition.generation_audit import (
-    GenerationAuditResult,
-    get_generation_audits,
-    save_generation_audits,
-)
-from subnet_common.competition.generation_report import (
-    GenerationReport,
-    GenerationReportOutcome,
-    get_generation_reports,
-)
-from subnet_common.competition.generations import GenerationSource, get_generations
+from subnet_common.competition.generations import get_generations
 from subnet_common.competition.leader import require_leader_state
 from subnet_common.competition.match_matrix import MatchMatrix, get_match_matrix, save_match_matrix
 from subnet_common.competition.match_report import save_match_report
 from subnet_common.competition.prompts import require_prompts
 from subnet_common.competition.round_result import RoundResult, save_round_result
 from subnet_common.competition.seed import require_seed_from_git
-from subnet_common.competition.source_audit import AuditResult, AuditVerdict, get_source_audits
+from subnet_common.competition.source_audit import AuditResult, get_source_audits
 from subnet_common.competition.state import (
     CompetitionState,
     RoundStage,
     update_competition_state,
 )
-from subnet_common.competition.submissions import require_submissions
+from subnet_common.competition.submissions import MinerSubmission, require_submissions
+from subnet_common.competition.validation import ValidationResult, get_validation_results
+from subnet_common.competition.validation_requests import (
+    ValidationRequest,
+    ValidationRequests,
+    get_validation_requests,
+    save_validation_requests,
+)
 from subnet_common.git_batcher import GitBatcher
 from subnet_common.github import GitHubClient
 from subnet_common.graceful_shutdown import GracefulShutdown
 
 from judge_service.discord import DiscordNotifier
 from judge_service.match_execution import run_match
-from judge_service.models import AuditDuel, MatchOutcome
+from judge_service.models import MatchOutcome
 from judge_service.settings import Settings
-from judge_service.timeline import (
-    Timeline,
-    audit_repeat_verified,
-    defender_audit_key,
-    render_timeline,
-    submitted_audit_key,
-)
+from judge_service.timeline import Timeline, candidate_rejection_reason, render_timeline
 
 
 class RoundRunner:
-    """Drives a single round end-to-end: qualification, timeline, exploratory duels,
-    per-repeat audit duel production (submitted + defender per repeat), verification
-    verdict derivation, and finalization."""
+    """Drive qualification, timeline matches, validation requests and finalization."""
 
     def __init__(
         self,
         git_batcher: GitBatcher,
         state: CompetitionState,
         openai: AsyncOpenAI,
-        hotkeys: list[str],
+        submissions: dict[str, MinerSubmission],
         seed: int,
         prompts: list[str],
         win_margin: float,
-        audit_repeats: int,
         match_matrix: MatchMatrix,
-        audit_matrix: MatchMatrix,
-        audit_requests: AuditRequests,
-        generation_audits: dict[str, GenerationAuditResult],
+        validation_requests: ValidationRequests,
         settings: Settings,
         discord: DiscordNotifier,
     ) -> None:
         self._git_batcher = git_batcher
         self._state = state
         self._openai = openai
-        self._hotkeys = hotkeys
+        self._submissions = submissions
+        self._hotkeys = list(submissions)
         self._seed = seed
         self._prompts = prompts
         self._win_margin = win_margin
-        self._audit_repeats = audit_repeats
 
         self._match_matrix = match_matrix
-        self._audit_matrix = audit_matrix
-        self._audit_requests = audit_requests
-        self._generation_audits = generation_audits
+        self._validation_requests = validation_requests
 
         # Snapshot of external verdicts, refreshed each `_reload_external_state`.
-        self._reports: dict[str, GenerationReport] = {}
+        self._validation_results: dict[str, ValidationResult] = {}
         self._source_audits: dict[str, AuditResult] = {}
 
         self._settings = settings
@@ -151,10 +92,6 @@ class RoundRunner:
     @property
     def _ref(self) -> str:
         return str(self._git_batcher.base_sha)
-
-    def _get_generation_source(self, hotkey: str) -> GenerationSource:
-        """Leader uses generated outputs, challengers use submitted outputs."""
-        return GenerationSource.GENERATED if hotkey == "leader" else GenerationSource.SUBMITTED
 
     @classmethod
     async def create(
@@ -176,41 +113,31 @@ class RoundRunner:
         prompts = await require_prompts(git=git, round_num=round_num, ref=base_sha)
 
         submissions = await require_submissions(git=git, round_num=round_num, ref=base_sha)
-        hotkeys = sorted(submissions.keys(), key=lambda hk: submissions[hk].revealed_at_block)
-        logger.debug(f"Sorted hotkeys: {hotkeys}")
+        logger.debug(f"Submission order: {list(submissions)}")
 
         match_matrix = await get_match_matrix(git=git, round_num=round_num, ref=base_sha)
         logger.info(f"Existing matches: {len(match_matrix)}")
 
-        audit_matrix = await get_audit_matrix(git=git, round_num=round_num, ref=base_sha)
-        logger.info(f"Existing audit margins: {len(audit_matrix)}")
-
-        audit_requests = await get_audit_requests(git=git, round_num=round_num, ref=base_sha)
-        logger.info(f"Existing audit requests: {len(audit_requests)}")
-
-        generation_audits = await get_generation_audits(git=git, round_num=round_num, ref=base_sha)
-        logger.info(f"Existing generation audits: {len(generation_audits)}")
+        validation_requests = await get_validation_requests(git=git, round_num=round_num, ref=base_sha)
+        logger.info(f"Existing validation requests: {len(validation_requests)}")
 
         return cls(
             git_batcher=git_batcher,
             state=state,
             openai=openai,
-            hotkeys=hotkeys,
+            submissions=submissions,
             seed=seed,
             prompts=prompts,
             win_margin=competition_config.win_margin,
-            audit_repeats=competition_config.audit_repeats,
             match_matrix=match_matrix,
-            audit_matrix=audit_matrix,
-            audit_requests=audit_requests,
-            generation_audits=generation_audits,
+            validation_requests=validation_requests,
             settings=settings,
             discord=discord,
         )
 
     async def run(self, shutdown: GracefulShutdown) -> None:
         """Main loop. Each tick: reload, derive state, push newsletter on change,
-        request audits for chain members, finalize OR run next unit of work."""
+        request validation for chain members, finalize OR run next unit of work."""
         if not self._hotkeys:
             await self._finalize(winner="leader", reason="No submissions found")
             return
@@ -226,17 +153,11 @@ class RoundRunner:
             state = self._derive_state()
             await self._announce_if_changed(state)
 
-            await self._request_audits(state)
-            await self._publish_audits(state)
+            await self._request_validations(state)
 
             if state.is_finalized:
                 await self._finalize(winner=state.winner)
                 return
-
-            if duel := self._next_audit_duel():
-                await self._run_audit_duel(duel, shutdown)
-                reload_needed = True
-                continue
 
             if state.next_match is not None:
                 defender, challenger = state.next_match
@@ -258,39 +179,25 @@ class RoundRunner:
         await self._git_batcher.flush()
 
     async def _reload_external_state(self) -> None:
-        """Reload generation reports and source audits from git into the local snapshot."""
+        """Reload validation results and source audits. Read errors propagate to the service loop."""
         await self._git_batcher.flush()
         await self._git_batcher.refresh_base_sha()
 
-        self._reports = await get_generation_reports(git=self._git, round_num=self._round_num, ref=self._ref)
+        self._validation_results = await get_validation_results(git=self._git, round_num=self._round_num, ref=self._ref)
         audits = await get_source_audits(git=self._git, round_num=self._round_num, ref=self._ref)
         self._source_audits = {a.hotkey: a for a in audits}
 
-    def _is_generation_rejected(self, hotkey: str) -> bool:
-        report = self._reports.get(hotkey)
-        return report is not None and report.outcome == GenerationReportOutcome.REJECTED
-
-    def _is_source_audit_failed(self, hotkey: str) -> bool:
-        audit = self._source_audits.get(hotkey)
-        return audit is not None and audit.verdict == AuditVerdict.FAILED
-
-    def _generated_repeats(self, hotkey: str) -> set[int]:
-        """Repeats the report says are fully generated, hence auditable. The report's
-        per-repeat stats are the sole authority: the orchestrator appends a repeat's
-        stats once it is generated (incrementally while PENDING, all of them once
-        COMPLETED). A REJECTED (or missing) report offers nothing to audit."""
-        report = self._reports.get(hotkey)
-        if report is None or report.outcome == GenerationReportOutcome.REJECTED:
-            return set()
-        return {stats.repeat_index for stats in report.repeats}
-
     async def _run_qualification(self, shutdown: GracefulShutdown) -> None:
         """Run leader-vs-miner matches to populate the match matrix. Idempotent: cached
-        matches are no-ops. Audit requests for chain members happen in the main loop."""
+        matches are no-ops. Validation requests for chain members happen in the main loop.
+        """
         for hotkey in self._hotkeys:
             if shutdown.should_stop:
                 break
-            if self._is_generation_rejected(hotkey) or self._is_source_audit_failed(hotkey):
+            if (
+                candidate_rejection_reason(self._validation_results.get(hotkey), self._source_audits.get(hotkey))
+                is not None
+            ):
                 continue
             match = await self._ensure_match("leader", hotkey, shutdown)
             if not match.from_cache:
@@ -302,9 +209,7 @@ class RoundRunner:
             all_hotkeys=self._hotkeys,
             match_matrix=self._match_matrix,
             win_margin=self._win_margin,
-            audit_matrix=self._audit_matrix,
-            audit_repeats=self._audit_repeats,
-            generation_reports=self._reports,
+            validation_results=self._validation_results,
             source_audits=self._source_audits,
         )
 
@@ -314,153 +219,18 @@ class RoundRunner:
         await self._discord.notify_timeline_change(round_num=self._round_num, body=render_timeline(state))
         self._last_state = state
 
-    async def _request_audits(self, state: Timeline) -> None:
-        """Sync audit requests to the timeline: insert or refresh one request per won
-        entry. Persists and notifies per change. Runs before the duel scan each tick,
-        which is what lets a stale defender heal (see module docstring)."""
+    async def _request_validations(self, state: Timeline) -> None:
+        """Request one validation pass per local winner, independent of its defender."""
         for entry in state.entries:
             if entry.status != "won" or entry.margin is None:
                 continue
-            if not self._audit_requests.add(AuditRequest(hotkey=entry.hotkey, latest_defender=entry.defender)):
+            if not self._validation_requests.add(ValidationRequest(hotkey=entry.hotkey)):
                 continue
-            await save_audit_requests(self._git_batcher, self._round_num, self._audit_requests)
-            logger.info(f"Audit requested for {entry.hotkey[:10]} (defender: {entry.defender[:10]})")
-            await self._discord.notify_audit_requested(
+            await save_validation_requests(self._git_batcher, self._round_num, self._validation_requests)
+            logger.info(f"Validation requested for {entry.hotkey[:10]}")
+            await self._discord.notify_validation_requested(
                 round_num=self._round_num, hotkey=entry.hotkey, defeated=entry.defender, margin=entry.margin
             )
-
-    async def _publish_audits(self, state: Timeline) -> None:
-        """Publish a verification verdict for each requested audit the timeline has
-        settled: `rejected` -> FAILED with the timeline's reason, `won` and verified ->
-        PASSED. Persists per change."""
-        entries = {e.hotkey: e for e in state.entries}
-        changed = False
-        for request in self._audit_requests:
-            entry = entries.get(request.hotkey)
-            if entry is None:
-                continue
-            if entry.status == "rejected":
-                verdict = GenerationAuditResult(
-                    hotkey=request.hotkey, verdict=AuditVerdict.FAILED, reason=entry.reason or ""
-                )
-            elif entry.status == "won" and entry.verified:
-                verdict = GenerationAuditResult(hotkey=request.hotkey, verdict=AuditVerdict.PASSED)
-            else:
-                continue
-            if self._generation_audits.get(request.hotkey) == verdict:
-                continue
-            self._generation_audits[request.hotkey] = verdict
-            changed = True
-            reason = f" — {verdict.reason}" if verdict.reason else ""
-            logger.info(f"Audit verdict for {request.hotkey[:10]}: {verdict.verdict.value}{reason}")
-        if changed:
-            await save_generation_audits(self._git_batcher, self._round_num, self._generation_audits)
-
-    def _next_audit_duel(self) -> AuditDuel | None:
-        """The next audit duel whose margin is missing from the audit matrix, in
-        production order. One duel at a time — the main loop reloads external state
-        between duels, so every duel sees the freshest chain. Single owner of the
-        audit gating rules; `_run_audit_duel` executes the item, so the scan and
-        the producer can never disagree. Pure scan of audit/generation state:
-        audit_requests, generation reports, audit_matrix, and source_audit.
-
-        Both duel kinds run as soon as their repeat is generated. The defender comes
-        from the audit request, which the main loop refreshes from the current timeline
-        before this scan — duels against a defender that later changes or gets rejected
-        stay in the matrix as forensic data and are simply re-produced against the new
-        defender's keys.
-
-        Hotkeys already disqualified out-of-band (rejected report, failed source audit)
-        yield nothing."""
-        for request in self._audit_requests:
-            hotkey = request.hotkey
-            if self._is_generation_rejected(hotkey) or self._is_source_audit_failed(hotkey):
-                continue
-            defender = request.latest_defender
-            for repeat_index in sorted(self._generated_repeats(hotkey)):
-                submitted_duel = AuditDuel(
-                    hotkey=hotkey, defender=defender, repeat_index=repeat_index, kind="submitted"
-                )
-                if self._audit_matrix.get(submitted_duel.matrix_key, hotkey) is None:
-                    return submitted_duel
-                defender_duel = AuditDuel(hotkey=hotkey, defender=defender, repeat_index=repeat_index, kind="defender")
-                if self._audit_matrix.get(defender_duel.matrix_key, hotkey) is None:
-                    return defender_duel
-        return None
-
-    async def _run_audit_duel(self, duel: AuditDuel, shutdown: GracefulShutdown) -> None:
-        """Run one audit duel: save its report, record its margin in the audit
-        matrix, and send the verdict summary once every margin for the hotkey is
-        present. Skipped without recording when either side has no usable outputs."""
-        left_hotkey = duel.hotkey if duel.kind == "submitted" else duel.defender
-        left_gens = await get_generations(
-            git=self._git,
-            round_num=self._round_num,
-            hotkey=left_hotkey,
-            source=self._get_generation_source(left_hotkey),
-            ref=self._ref,
-        )
-        generated_gens = await get_generations(
-            git=self._git,
-            round_num=self._round_num,
-            hotkey=duel.hotkey,
-            source=GenerationSource.GENERATED,
-            ref=self._ref,
-            repeat_index=duel.repeat_index,
-        )
-
-        if not any(g.js for g in left_gens.values()):
-            logger.warning(f"{duel.log_label} skipped: {duel.kind} has no usable outputs")
-            return
-        if not any(g.js for g in generated_gens.values()):
-            logger.warning(f"{duel.log_label} skipped: generated_{duel.repeat_index} has no usable outputs")
-            return
-
-        logger.info(f"Running {duel.log_label}")
-        report = await run_match(
-            openai=self._openai,
-            prompts=self._prompts,
-            seed=self._seed,
-            left_gens=left_gens,
-            right_gens=generated_gens,
-            left=duel.left,
-            right=duel.hotkey,
-            max_concurrent_vlm_calls=self._settings.max_concurrent_vlm_calls,
-            shutdown=shutdown,
-        )
-        # A duel interrupted by shutdown is partial — don't persist it.
-        if shutdown.should_stop:
-            return
-        await self._discord.notify_if_judge_error(report)
-        await save_match_report(
-            self._git_batcher, self._round_num, report, kind="audit", repeat_index=duel.repeat_index
-        )
-        logger.info(f"{duel.log_label}: margin={report.margin:+.2%}")
-        self._audit_matrix.add(duel.matrix_key, duel.hotkey, report.margin)
-        await save_audit_matrix(self._git_batcher, self._round_num, self._audit_matrix)
-        await self._notify_audit_verdict(hotkey=duel.hotkey, defender=duel.defender)
-
-    async def _notify_audit_verdict(self, hotkey: str, defender: str) -> None:
-        """Send the audit summary once every per-repeat margin is present. Called only
-        after new margins were produced, so the notification fires once per hotkey."""
-        repeats: list[tuple[float, float]] = []
-        for repeat_index in range(1, self._audit_repeats + 1):
-            submitted_margin = self._audit_matrix.get(submitted_audit_key(repeat_index), hotkey)
-            defender_margin = self._audit_matrix.get(defender_audit_key(defender, repeat_index), hotkey)
-            if submitted_margin is None or defender_margin is None:
-                return
-            repeats.append((submitted_margin, defender_margin))
-        verified = all(
-            audit_repeat_verified(submitted_margin, defender_margin, self._win_margin)
-            for submitted_margin, defender_margin in repeats
-        )
-        await self._discord.notify_audit_completed(
-            round_num=self._round_num,
-            hotkey=hotkey,
-            defender=defender,
-            repeats=repeats,
-            verified=verified,
-        )
 
     async def _ensure_match(self, left: str, right: str, shutdown: GracefulShutdown) -> MatchOutcome:
         """Run match if not in matrix, save a result. Returns MatchOutcome with a cached flag."""
@@ -488,14 +258,12 @@ class RoundRunner:
             git=self._git,
             round_num=self._round_num,
             hotkey=left,
-            source=self._get_generation_source(left),
             ref=self._ref,
         )
         right_gens = await get_generations(
             git=self._git,
             round_num=self._round_num,
             hotkey=right,
-            source=self._get_generation_source(right),
             ref=self._ref,
         )
 
@@ -562,17 +330,8 @@ class RoundRunner:
 
     async def _resolve_winner(self, winner: str) -> RoundResult:
         if winner != "leader":
-            builds = await require_builds(self._git, round_num=self._round_num, ref=self._ref)
-            build = builds.get(winner)
-            if build is None or build.docker_image is None:
-                raise RuntimeError(f"Build not found for {winner[:10]}")
-            return RoundResult(
-                winner_hotkey=winner,
-                repo=build.repo,
-                commit=build.commit,
-                docker_image=build.docker_image,
-                hardware=build.hardware,
-            )
+            submission = self._submissions[winner]
+            return RoundResult(winner_hotkey=winner, repo=submission.repo, commit=submission.commit)
 
         leader_state = await require_leader_state(self._git, ref=self._ref)
         leader = leader_state.get_latest()
@@ -583,8 +342,6 @@ class RoundRunner:
             winner_hotkey="leader",
             repo=leader.repo,
             commit=leader.commit,
-            docker_image=leader.docker,
-            hardware=leader.hardware,
         )
 
     async def _transition_to_next_stage(self, reason: str) -> None:
