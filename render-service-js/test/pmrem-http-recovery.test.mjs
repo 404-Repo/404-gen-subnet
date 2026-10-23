@@ -45,7 +45,8 @@ if (process.argv[2] === '--serve') {
     await closeBrowser();
     process.exit(0);
   });
-  await import('../src/server.js');
+  const { main } = await import('../src/server.js');
+  await main();
 } else {
   const source = `export default function(THREE) {
     return new THREE.Mesh(new THREE.SphereGeometry(0.35, 24, 16),
