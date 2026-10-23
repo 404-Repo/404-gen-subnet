@@ -125,7 +125,8 @@ def renderer_start():
     env={k:v for k,v in os.environ.items() if k in ('PATH','LANG','PUPPETEER_EXECUTABLE_PATH')}
     env.update(HOME='/tmp/renderer-home',PORT='8002',STATIC_PORT='3000',RENDER_POOL_SIZE='1',
         VALIDATION_POOL_SIZE='1',RENDER_TIMEOUT_MS='30000',VALIDATION_TIMEOUT_MS='5000',
-        RENDER_QUEUE_CAPACITY='8',RENDER_QUEUE_WAIT_MS='120000')
+        RENDER_QUEUE_CAPACITY='8',RENDER_QUEUE_WAIT_MS='120000',
+        LD_PRELOAD='/opt/witness-affinity/libwitness-affinity.so')
     Path('/tmp/renderer-home').mkdir(exist_ok=True);os.chown('/tmp/renderer-home',1001,1001)
     RENDERER=subprocess.Popen(['node','src/server.js'],cwd='/opt/renderer',env=env,
         stdout=(ROOT/'renderer.log').open('ab',buffering=0),stderr=subprocess.STDOUT,preexec_fn=isolate)

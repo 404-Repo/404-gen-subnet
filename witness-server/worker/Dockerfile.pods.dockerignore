@@ -59,3 +59,6 @@ miner-reference/examples/**
 !miner-reference/miner_reference/
 miner-reference/miner_reference/**
 !miner-reference/miner_reference/normalize.js
+!render-service-js/native/
+render-service-js/native/**
+!render-service-js/native/*.c

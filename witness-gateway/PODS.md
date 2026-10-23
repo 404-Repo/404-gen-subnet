@@ -291,8 +291,11 @@ The authenticated admin API listens on port 8001. `POST /boot` accepts the priva
 TLS files, R2 configuration, prompt hashes, hourly price and phase; it waits for
 renderer readiness before starting capture. The miner gateway then listens on
 TLS port 8000 and the admin API is also available on TLS port 8443. Node runs as
-UID 1001 without the Python process's storage credentials. The default build
-continues to start `python -m pod_gateway`.
+UID 1001 without the Python process's storage credentials. Node and Chromium load
+a scoped SwiftShader affinity wrapper that preserves the assigned CPU list for
+the driver's default CPU-count mask. The benchmark sets only `ThreadCount` in
+`SwiftShader.ini`; it does not configure an explicit affinity mask. The default
+build continues to start `python -m pod_gateway`.
 
 Publish through the operator's release process and configure the immutable image
 digest in [deploy/revivor.env.example](deploy/revivor.env.example). Set the actual

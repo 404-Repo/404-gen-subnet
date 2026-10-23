@@ -31,6 +31,17 @@ ENV PYTHONPATH=/app/witness-client/src:/app/witness-gateway:/app/witness-server/
 EXPOSE 8443
 ENTRYPOINT ["python", "-m", "pod_gateway"]
 
+FROM proof AS renderer-affinity-build
+WORKDIR /affinity-build
+COPY render-service-js/native/*.c ./
+RUN mkdir -p /affinity-artifacts/tests && \
+    gcc -std=c11 -O2 -Wall -Wextra -Werror -fPIC -fvisibility=hidden -shared affinity.c -o /affinity-artifacts/libwitness-affinity.so -ldl -pthread && \
+    gcc -std=c11 -O2 -Wall -Wextra -Werror -fPIC -shared test-driver.c -o /affinity-artifacts/tests/libvk_swiftshader.so -pthread && \
+    gcc -std=c11 -O2 -Wall -Wextra -Werror test-affinity.c -o /affinity-artifacts/tests/test-affinity -ldl -pthread && \
+    /affinity-artifacts/tests/test-affinity /affinity-artifacts/tests/libvk_swiftshader.so control && \
+    LD_PRELOAD=/affinity-artifacts/libwitness-affinity.so /affinity-artifacts/tests/test-affinity /affinity-artifacts/tests/libvk_swiftshader.so fixed && \
+    gcc --version > /affinity-artifacts/compiler-version.txt
+
 FROM witness-base AS render-benchmark
 ARG CHROMIUM_VERSION=155.0.8059.79-1~deb12u1
 ARG DEBIAN_SNAPSHOT=20261022T000000Z
@@ -40,6 +51,7 @@ RUN sed -i "s|http://deb.debian.org/debian-security|https://snapshot.debian.org/
     chromium=${CHROMIUM_VERSION} chromium-common=${CHROMIUM_VERSION} \
     fonts-liberation fonts-noto-color-emoji util-linux \
     && rm -rf /var/lib/apt/lists/*
+COPY --from=renderer-affinity-build /affinity-artifacts/ /opt/witness-affinity/
 COPY --from=node /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/npm
 RUN ln -sf /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm
 COPY render-service-js/package*.json /opt/renderer/
