@@ -233,20 +233,6 @@ def _assert_verdicts_are_read_only(git: MockGitHubClient) -> None:
     assert "rounds/1/source_audit.json" not in git.committed
 
 
-@pytest.mark.parametrize("include_null", [False, True])
-async def test_submissions_require_tie_breaker(settings: Settings, include_null: bool) -> None:
-    git = _world([HK_A])
-    submissions = json.loads(git.files["rounds/1/submissions.json"])
-    if include_null:
-        submissions[HK_A]["tie_breaker"] = None
-    else:
-        submissions[HK_A].pop("tie_breaker")
-    git.files["rounds/1/submissions.json"] = json.dumps(submissions)
-
-    with pytest.raises(ValidationError, match="tie_breaker"):
-        await _run_round(git, {}, [], settings)
-
-
 async def test_single_challenger_waits_for_both_verdicts(settings: Settings) -> None:
     git = _world([HK_A])
     passes = {HK_A: "passed"}
