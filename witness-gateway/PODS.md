@@ -249,6 +249,21 @@ The renderer CPU-quota startup candidate is not part of this runtime. The
 manifest distinguishes the reference benchmark from this pin's local recovery
 validation; native RunPod recovery validation is still required.
 
+## Python 3.14.9 Pod runtime pin
+
+**`witness-pods-20261023-python314`** pins the ordinary Pod worker and gateway
+image to Python 3.14.9. Its
+[`manifest.json`](deploy/witness-pods-20261023-python314/manifest.json) and Git tag
+`witness-pods-20261023-python314` identify the image, application sources,
+dependencies and local validation. It uses `python -m pod_gateway` directly and
+requires no bootstrap.
+
+The local image tag is `witness-pods:witness-pods-20261023-python314`. The manifest's
+`image` records its local digest; `publication_target` records the intended
+private registry tag. Registry publication is pending. RunPod configuration needs
+the published registry digest in `WITNESS_IMAGE` and, when explicitly set,
+`WITNESS_GATEWAY_IMAGE`.
+
 ## Build and configuration
 
 Build from the repository root for the target CPU architecture:

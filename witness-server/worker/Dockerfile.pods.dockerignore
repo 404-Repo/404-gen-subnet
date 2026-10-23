@@ -31,6 +31,7 @@ witness-server/worker/**
 witness-gateway/**
 !witness-gateway/requirements.txt
 !witness-gateway/requirements-pods.txt
+!witness-gateway/constraints-pods.txt
 !witness-gateway/pod_gateway/
 witness-gateway/pod_gateway/**
 !witness-gateway/pod_gateway/*.py
