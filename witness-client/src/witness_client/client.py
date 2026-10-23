@@ -210,7 +210,7 @@ class WitnessClient:
     def create(
         self,
         *,
-        witness_seed: int = 0,
+        request_id: int = 0,
         stream: Literal[True] = True,
         **params: Unpack[ResponseCreateParamsBase],
     ) -> WitnessResult:
@@ -260,8 +260,8 @@ class WitnessClient:
             raise ValueError(
                 "Use for_generation() or run_generation() with the Pod transport"
             )
-        if witness_seed != 0:
-            raise ValueError("witness_seed requires the Pod transport")
+        if request_id != 0:
+            raise ValueError("request_id requires the Pod transport")
         with measure("serialize_request"):
             body = openai_request.serialize_body({**params, "stream": stream}, self._mode)
         with measure("credentials_before_queue"):
@@ -531,7 +531,7 @@ class GenerationWitness(WitnessClient):
     def create(
         self,
         *,
-        witness_seed: int = 0,
+        request_id: int = 0,
         stream: Literal[True] = True,
         **params: Unpack[ResponseCreateParamsBase],
     ) -> WitnessResult:
@@ -542,7 +542,7 @@ class GenerationWitness(WitnessClient):
             ResponseCreateParamsStreaming, {"service_tier": "default", **params, "stream": stream}
         )
         body = openai_request.serialize_body(normalized, self._mode)
-        key = RequestKey.from_body(self._mode, body, witness_seed)
+        key = RequestKey.from_body(self._mode, body, request_id)
         identifier: str | None = None
         retries = 0
         try:

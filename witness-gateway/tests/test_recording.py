@@ -33,13 +33,13 @@ PRICING = canonical(
 )
 
 
-def invocation(index: int = 0, *, witness_seed: int = 0, seed: int = 42) -> Invocation:
+def invocation(index: int = 0, *, request_id: int = 0, seed: int = 42) -> Invocation:
     return Invocation(
         generation=Generation.from_prompt(
             b"frozen PNG", seed, round_number="test-0"
         ),
         ordinal=index,
-        request=RequestKey.from_body("api", BODY, witness_seed),
+        request=RequestKey.from_body("api", BODY, request_id),
     )
 
 
@@ -47,7 +47,7 @@ def test_equal_requests_share_one_capture_but_keep_both_invocations() -> None:
     records = CallRecords(MemoryState())
     first = records.reserve(SCOPE, invocation())
     repeated = records.reserve(SCOPE, invocation(1))
-    fresh = records.reserve(SCOPE, invocation(2, witness_seed=1))
+    fresh = records.reserve(SCOPE, invocation(2, request_id=1))
     assert first.exchange_id == repeated.exchange_id != fresh.exchange_id
     recording = records.load(SCOPE, invocation().generation.id)
     assert (
@@ -104,7 +104,7 @@ def test_concurrent_retries_grant_exactly_one_capture_claim() -> None:
 def test_stored_result_delivery_order_is_durable_and_retries_do_not_repeat_it() -> None:
     state = MemoryState()
     records = CallRecords(state)
-    first, second = invocation(), invocation(1, witness_seed=1)
+    first, second = invocation(), invocation(1, request_id=1)
     for item in (first, second):
         records.reserve(SCOPE, item)
         assigned = records.assign(
@@ -121,7 +121,7 @@ def test_stored_result_delivery_order_is_durable_and_retries_do_not_repeat_it() 
     with pytest.raises(RecordingConflict):
         restarted.finish(SCOPE, first.generation, 2, "different source")
     with pytest.raises(RecordingConflict):
-        restarted.reserve(SCOPE, invocation(2, witness_seed=2))
+        restarted.reserve(SCOPE, invocation(2, request_id=2))
 
 
 def test_generation_uses_frozen_prompt_and_seed_while_url_is_descriptive() -> (
@@ -169,13 +169,13 @@ def test_usage_is_charged_once_and_seed_changes_do_not_reset_prompt_allowance() 
     assert Decimal(str(budget.summary(SCOPE, first)["known_credits"])) == Decimal("3.8")
     with pytest.raises(BudgetRejected):
         budget.reserve(SCOPE, first, "exchange-one", BODY)
-    second = invocation(witness_seed=1, seed=43)
+    second = invocation(request_id=1, seed=43)
     budget.reserve(SCOPE, second, "exchange-two", BODY)
     assert budget.summary(SCOPE, first)["possible_dispatches"] == 2
     assert budget.summary(SCOPE, first)["remaining_credits"] is None
     with pytest.raises(BudgetRejected):
         budget.reserve(
-            SCOPE, invocation(witness_seed=2, seed=44), "exchange-three", BODY
+            SCOPE, invocation(request_id=2, seed=44), "exchange-three", BODY
         )
 
 
@@ -190,7 +190,7 @@ def test_verified_body_hash_is_checked_before_any_dispatch_reservation() -> None
 
 def test_concurrent_retries_keep_completed_results_and_original_order() -> None:
     records = CallRecords(MemoryState())
-    first, second = invocation(), invocation(1, witness_seed=1)
+    first, second = invocation(), invocation(1, request_id=1)
     for item in (first, second):
         records.reserve(SCOPE, item)
         call = records.assign(SCOPE, item, "00000000-0000-4000-8000-000000000001", "pod-one")

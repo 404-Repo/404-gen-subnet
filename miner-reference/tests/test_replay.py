@@ -27,15 +27,15 @@ def test_complete_five_candidate_pipeline_reconstructs_from_recordings(tmp_path:
     delivered = {i: threading.Event() for i in (1, 2, 3, 5, 6)}
 
     class Capture(Calls):
-        def create(self, *, witness_seed: int = 0, **params: Unpack[ResponseCreateParamsStreaming]) -> WitnessResult:
-            value = super().create(witness_seed=witness_seed, **params)
+        def create(self, *, request_id: int = 0, **params: Unpack[ResponseCreateParamsStreaming]) -> WitnessResult:
+            value = super().create(request_id=request_id, **params)
             body = serialize_body(params, "api")
-            key = RequestKey.from_body("api", body, witness_seed)
+            key = RequestKey.from_body("api", body, request_id)
             with lock:
                 ordinal = len(entries)
                 entries.append(EntryView(call_id=key.id, delivery=None))
-            if witness_seed in (1, 2, 5):
-                assert delivered[witness_seed + 1].wait(timeout=5)
+            if request_id in (1, 2, 5):
+                assert delivered[request_id + 1].wait(timeout=5)
             exchange_id = str(uuid.uuid4())
             directory = tmp_path / exchange_id
             directory.mkdir(mode=0o700)
@@ -64,15 +64,15 @@ def test_complete_five_candidate_pipeline_reconstructs_from_recordings(tmp_path:
                     authorized=True,
                     manifest_sha256=hashlib.sha256(manifest).hexdigest(),
                 )
-            if witness_seed in delivered:
-                delivered[witness_seed].set()
+            if request_id in delivered:
+                delivered[request_id].set()
             return value
 
     live = Capture()
     underlying = Renderer()
     if repair:
         underlying.reject = {
-            normalize(Calls().create(witness_seed=i, stream=True, model="gpt-6.1-sol").output_text)
+            normalize(Calls().create(request_id=i, stream=True, model="gpt-6.1-sol").output_text)
             for i in (1, 2, 3, 5, 6)
         }
     renderer = RecordingRenderer(underlying)

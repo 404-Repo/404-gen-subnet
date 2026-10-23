@@ -31,7 +31,7 @@ NORMALIZATION = Path(__file__).with_name("normalize.js").read_text()
 
 
 class ModelCalls(Protocol):
-    def create(self, *, witness_seed: int = 0, **params: Unpack[ResponseCreateParamsStreaming]) -> WitnessResult: ...
+    def create(self, *, request_id: int = 0, **params: Unpack[ResponseCreateParamsStreaming]) -> WitnessResult: ...
 
 
 @dataclass(frozen=True)
@@ -100,7 +100,7 @@ def candidate(
         )
     try:
         result = calls.create(
-            witness_seed=position,
+            request_id=position,
             stream=True,
             model=model,
             store=False,
@@ -176,7 +176,7 @@ def choose(
         )
     try:
         result = calls.create(
-            witness_seed=position,
+            request_id=position,
             stream=True,
             model=SOL,
             store=False,

@@ -82,11 +82,11 @@ the complete response and returns `output_text`, `response` and `usage`.
 `input_image` items. You may render, compare and refine candidates within the
 prompt's budget. A successful example run makes seven model calls and five
 four-view grid renders. It uses medium reasoning, up to 32,768 output tokens per
-candidate and 2,048 per selection. Candidate calls have distinct `witness_seed`
+candidate and 2,048 per selection. Candidate calls have distinct `request_id`
 values, so the two identical initial Sol requests produce separate exchanges.
 A rejected candidate gets one Sol repair attempt with its source and exact
 validation errors, followed by normalization and another render. Repairs share
-the model-call limit and have distinct `witness_seed` values. A prompt makes at
+the model-call limit and have distinct `request_id` values. A prompt makes at
 most twelve model calls and ten renders; valid candidates remain available when
 a repair fails. Infrastructure failures propagate to the runner for recovery.
 The runtime supplies a generation-bound Pod witness or its replay counterpart.

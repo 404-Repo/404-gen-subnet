@@ -84,7 +84,7 @@ For an operator running the Python CPU Pod gateway, set `transport` to
 the frozen prompt and generation seed with
 `for_generation()` or `run_generation()`. Identical requests within that
 generation reuse one stored response, including concurrent duplicates. Pass a
-different `witness_seed` to request a fresh exchange. See the
+different `request_id` to request a fresh exchange. See the
 [CPU Pod guide](../witness-gateway/PODS.md) for configuration, recovery and
 verified offline replay.
 

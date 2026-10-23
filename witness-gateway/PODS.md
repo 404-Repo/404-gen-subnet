@@ -18,14 +18,15 @@ descriptive metadata and is never fetched by the gateway. Keep private access
 tokens out of descriptive URLs.
 
 Within a generation, the request key covers the provider route, complete
-normalized JSON request and `witness_seed`. Object key order is normalized;
+normalized JSON request and `request_id`. Object key order is normalized;
 array order, images, tools, missing versus null values and all other request
 fields are preserved. API and subscription routes have different identities.
 
 Identical requests share one exchange, including concurrent duplicates. One
 worker atomically claims that exchange; other invocations wait for its durable
-result. `witness_seed=1` requests a fresh exchange for otherwise identical input.
-It distinguishes witness requests and is not sent as a provider seed parameter.
+result. `request_id=1` requests a fresh exchange for otherwise identical input.
+It is an integer call identifier, stays stable for recovery and replay, and is
+not sent to the provider. It does not control sampling.
 Fresh inference can still produce identical text.
 
 The recording stores every invocation in start order, including cache hits, and
@@ -57,7 +58,7 @@ with WitnessClient(config, hotkey=hotkey, openai_api_key=api_key) as witness:
 
 Miner code keeps `generate(image, seed, witness, renderer)` and
 `witness.responses.create(...)`. Intentional fresh requests can use
-`witness.responses.create(..., witness_seed=1)`.
+`witness.responses.create(..., request_id=1)`.
 
 ## Capture and durability
 

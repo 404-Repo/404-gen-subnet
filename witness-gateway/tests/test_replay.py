@@ -126,7 +126,7 @@ def test_replay_restores_different_concurrent_calls_and_their_delivery_order(
     replay = ReplayWitness(bundle, timeout=5)
     with ThreadPoolExecutor(max_workers=2) as pool:
         second = pool.submit(
-            replay.create, stream=True, model="fixture", input="image", witness_seed=1
+            replay.create, stream=True, model="fixture", input="image", request_id=1
         )
         with pytest.raises(FutureTimeout):
             second.result(timeout=0.1)
@@ -200,7 +200,7 @@ def test_resumed_generation_restores_reservation_order_without_occupying_capture
     slots = threading.BoundedSemaphore(1)
     resumed = resumed_generation(bundle, call_slots=slots)
     with slots, ThreadPoolExecutor(max_workers=2) as pool:
-        second = pool.submit(resumed.create, stream=True, model="fixture", input="image", witness_seed=1)
+        second = pool.submit(resumed.create, stream=True, model="fixture", input="image", request_id=1)
         with pytest.raises(FutureTimeout):
             second.result(timeout=0.1)
         first = pool.submit(resumed.create, stream=True, model="fixture", input="image")
@@ -214,7 +214,7 @@ def test_resumed_generation_honors_saved_delivery_order(bundle: Path) -> None:
         first = pool.submit(resumed.create, stream=True, model="fixture", input="image")
         with pytest.raises(FutureTimeout):
             first.result(timeout=0.1)
-        second = pool.submit(resumed.create, stream=True, model="fixture", input="image", witness_seed=1)
+        second = pool.submit(resumed.create, stream=True, model="fixture", input="image", request_id=1)
         assert second.result(timeout=5).output_text == "second"
         assert first.result(timeout=5).output_text == "first"
 

@@ -430,7 +430,7 @@ def test_https_gateway_deduplicates_inflight_requests_and_replays_without_infere
                         ]
                     assert answers == ["answer-1", "answer-1"] and fleet.paid == 1
                     fresh = bound.create(
-                        stream=True, model="fixture", input="same image", witness_seed=1
+                        stream=True, model="fixture", input="same image", request_id=1
                     )
                     assert fresh.output_text == "answer-2" and fleet.paid == 2
                     assert witness.resume(fresh._exchange_id).output_text == "answer-2"
@@ -470,7 +470,7 @@ def test_https_gateway_deduplicates_inflight_requests_and_replays_without_infere
                             stream=True,
                             model="fixture",
                             input="same image",
-                            witness_seed=1,
+                            request_id=1,
                         ).output_text
                         == "answer-2"
                     )

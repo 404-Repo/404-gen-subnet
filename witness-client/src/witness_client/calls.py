@@ -93,16 +93,17 @@ class RequestKey(BaseModel):
 
     provider: Literal["api", "codex"]
     request_sha256: Digest
+    # Wire key used by retained recordings, manifests and call hashes.
     witness_seed: int = 0
 
     @classmethod
     def from_body(
-        cls, provider: Literal["api", "codex"], body: bytes, witness_seed: int = 0
+        cls, provider: Literal["api", "codex"], body: bytes, request_id: int = 0
     ) -> RequestKey:
         return cls(
             provider=provider,
             request_sha256=request_digest(body),
-            witness_seed=witness_seed,
+            witness_seed=request_id,
         )
 
     @property

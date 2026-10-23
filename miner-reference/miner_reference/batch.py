@@ -79,15 +79,15 @@ class LimitedCalls:
         self.calls, self.directory, self.progress = calls, directory, progress
         directory.mkdir(mode=0o700, exist_ok=True)
 
-    def create(self, *, witness_seed: int = 0, **params: Unpack[ResponseCreateParamsStreaming]) -> WitnessResult:
-        self.progress(f"call {witness_seed} {params.get('model')}: running")
+    def create(self, *, request_id: int = 0, **params: Unpack[ResponseCreateParamsStreaming]) -> WitnessResult:
+        self.progress(f"call {request_id} {params.get('model')}: running")
         try:
-            result = self.calls.create(witness_seed=witness_seed, **params)
+            result = self.calls.create(request_id=request_id, **params)
         except WitnessError as error:
             if error.source == "provider":
                 usage = error.response.usage if error.response is not None else None
                 save(
-                    self.directory / f"{witness_seed:02}.json",
+                    self.directory / f"{request_id:02}.json",
                     canonical(
                         {
                             "model": params.get("model"),
@@ -98,18 +98,18 @@ class LimitedCalls:
                 )
                 if error.response is not None:
                     save(
-                        self.directory / f"{witness_seed:02}.response.json",
+                        self.directory / f"{request_id:02}.response.json",
                         error.response.model_dump_json().encode(),
                     )
             raise
         # A fixed stage file replaces its replayed observation; totals do not grow
         # when a restart consumes the same response again.
-        save(self.directory / f"{witness_seed:02}.response.json", result.response.model_dump_json().encode())
+        save(self.directory / f"{request_id:02}.response.json", result.response.model_dump_json().encode())
         save(
-            self.directory / f"{witness_seed:02}.json", canonical({"model": params.get("model"), "usage": result.usage})
+            self.directory / f"{request_id:02}.json", canonical({"model": params.get("model"), "usage": result.usage})
         )
         self.progress(
-            f"call {witness_seed}: complete, input={result.usage.get('input_tokens', 'unknown')} "
+            f"call {request_id}: complete, input={result.usage.get('input_tokens', 'unknown')} "
             f"output={result.usage.get('output_tokens', 'unknown')}"
         )
         return result

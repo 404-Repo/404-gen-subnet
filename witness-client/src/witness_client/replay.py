@@ -70,7 +70,7 @@ class ReplayWitness(WitnessClient):
     def create(
         self,
         *,
-        witness_seed: int = 0,
+        request_id: int = 0,
         stream: Literal[True] = True,
         **params: Unpack[ResponseCreateParamsBase],
     ) -> WitnessResult:
@@ -78,7 +78,7 @@ class ReplayWitness(WitnessClient):
             ResponseCreateParamsStreaming, {"service_tier": "default", **params, "stream": stream}
         )
         key = RequestKey.from_body(
-            self.mode, serialize_body(normalized, self.mode), witness_seed
+            self.mode, serialize_body(normalized, self.mode), request_id
         )
         deadline = time.monotonic() + self.timeout
         with self.condition:
@@ -97,7 +97,7 @@ class ReplayWitness(WitnessClient):
                 if not any(
                     e.call_id == key.id for e in self.recording.entries[self.cursor :]
                 ):
-                    self._mismatch("Replay changed a model request or witness_seed")
+                    self._mismatch("Replay changed a model request or request_id")
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     self._mismatch("Replay model invocation order differs")

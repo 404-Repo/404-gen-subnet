@@ -86,12 +86,12 @@ class Calls:
         self.invalid_choice = False
         self.failure: WitnessError | None = None
 
-    def create(self, *, witness_seed: int = 0, **params: Unpack[ResponseCreateParamsStreaming]) -> WitnessResult:
-        self.requests.append((witness_seed, params))
+    def create(self, *, request_id: int = 0, **params: Unpack[ResponseCreateParamsStreaming]) -> WitnessResult:
+        self.requests.append((request_id, params))
         if self.failure:
             raise self.failure
         model = str(params["model"])
-        if witness_seed in (4, 7):
+        if request_id in (4, 7):
             text = (
                 "not JSON"
                 if self.invalid_choice
@@ -104,7 +104,7 @@ class Calls:
                 )
             )
         else:
-            text = f"export default function generate(THREE) {{ return new THREE.Group(); }} // {witness_seed}"
+            text = f"export default function generate(THREE) {{ return new THREE.Group(); }} // {request_id}"
         return result(text, model)
 
 
@@ -141,11 +141,11 @@ class Witness(WitnessClient):
             def create(
                 self,
                 *,
-                witness_seed: int = 0,
+                request_id: int = 0,
                 stream: Literal[True] = True,
                 **params: Unpack[ResponseCreateParamsBase],
             ) -> WitnessResult:
-                key = RequestKey.from_body("api", serialize_body({**params, "stream": stream}, "api"), witness_seed)
+                key = RequestKey.from_body("api", serialize_body({**params, "stream": stream}, "api"), request_id)
                 with self.condition:
                     while self.position < len(self.prefix) and self.prefix[self.position] != key:
                         assert self.condition.wait(timeout=5), "Generation request order changed on resume"
@@ -170,7 +170,7 @@ class Witness(WitnessClient):
                     try:
                         if barrier is not None:
                             barrier.wait(timeout=5)
-                        value = Calls().create(witness_seed=witness_seed, stream=stream, **params)
+                        value = Calls().create(request_id=request_id, stream=stream, **params)
                         with parent.lock:
                             parent.recorded[generation.id, key.id] = value
                             if parent.lose_reply_once:
@@ -223,30 +223,30 @@ def test_initial_candidates_and_refinements_overlap_but_render_in_stable_order()
     lock = threading.Lock()
 
     class ParallelCalls(Calls):
-        def create(self, *, witness_seed: int = 0, **params: Unpack[ResponseCreateParamsStreaming]) -> WitnessResult:
-            if witness_seed in (1, 2, 3):
+        def create(self, *, request_id: int = 0, **params: Unpack[ResponseCreateParamsStreaming]) -> WitnessResult:
+            if request_id in (1, 2, 3):
                 initial.wait(timeout=5)
-            elif witness_seed in (5, 6):
+            elif request_id in (5, 6):
                 refinements.wait(timeout=5)
             with lock:
-                if witness_seed == 4:
+                if request_id == 4:
                     assert {1, 2, 3} <= completed
-                elif witness_seed == 7:
+                elif request_id == 7:
                     assert {5, 6} <= completed
-                completed.add(witness_seed)
-            return super().create(witness_seed=witness_seed, **params)
+                completed.add(request_id)
+            return super().create(request_id=request_id, **params)
 
     renderer = Renderer()
     assert run(PNG, 42, ParallelCalls(), renderer) is not None
     assert renderer.sources == [
-        normalize(Calls().create(witness_seed=i, stream=True, model="gpt-6.1-sol").output_text) for i in (1, 2, 3, 5, 6)
+        normalize(Calls().create(request_id=i, stream=True, model="gpt-6.1-sol").output_text) for i in (1, 2, 3, 5, 6)
     ]
 
 
 def test_rejected_candidates_are_repaired_once_in_both_stages() -> None:
     calls, renderer = Calls(), Renderer()
     sources = {
-        i: normalize(Calls().create(witness_seed=i, stream=True, model="gpt-6.1-sol").output_text) for i in range(1, 13)
+        i: normalize(Calls().create(request_id=i, stream=True, model="gpt-6.1-sol").output_text) for i in range(1, 13)
     }
     renderer.reject = {sources[i] for i in (1, 2, 3, 5, 6)}
     assert run(PNG, 42, calls, renderer) in {sources[i] for i in (8, 9, 10, 11, 12)}
@@ -263,7 +263,7 @@ def test_rejected_candidates_are_repaired_once_in_both_stages() -> None:
 def test_failed_repairs_stop_without_another_inference() -> None:
     calls, renderer = Calls(), Renderer()
     renderer.reject = {
-        normalize(Calls().create(witness_seed=i, stream=True, model="gpt-6.1-sol").output_text)
+        normalize(Calls().create(request_id=i, stream=True, model="gpt-6.1-sol").output_text)
         for i in (1, 2, 3, 8, 9, 10)
     }
     assert run(PNG, 42, calls, renderer) is None
@@ -273,7 +273,7 @@ def test_failed_repairs_stop_without_another_inference() -> None:
 def test_failed_refinement_repairs_keep_the_initial_winner() -> None:
     calls, renderer = Calls(), Renderer()
     renderer.reject = {
-        normalize(Calls().create(witness_seed=i, stream=True, model="gpt-6.1-sol").output_text) for i in (5, 6, 11, 12)
+        normalize(Calls().create(request_id=i, stream=True, model="gpt-6.1-sol").output_text) for i in (5, 6, 11, 12)
     }
     assert run(PNG, 42, calls, renderer) in renderer.sources[:3]
     assert len(calls.requests) == 9
