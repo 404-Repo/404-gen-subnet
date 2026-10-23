@@ -10,6 +10,7 @@
 
 import { ensureBrowser, isBrowserHealthy, restartBrowser } from './browser.js';
 import { STATIC_PORT } from './static-server.js';
+import { getCachedPmrem } from './pmrem-cache.js';
 import { SAFE_THREE_BROWSER_BUNDLE } from './safeThree.js';
 import {
   THREE_ALLOWED,
@@ -94,14 +95,15 @@ class RenderPool {
       await page.setOfflineMode(true);
 
       const result = await withTimeout(
-        page.evaluate(
+        getCachedPmrem(browser, params.lighting).then((environment) => page.evaluate(
           renderInPage,
           source,
           params,
           mode,
           SAFE_THREE_CONFIG,
           SAFE_THREE_BROWSER_BUNDLE,
-        ),
+          environment,
+        )),
         RENDER_TIMEOUT_MS,
       );
 
@@ -136,7 +138,7 @@ class RenderPool {
  * are trapped below — once those are trapped, `new Proxy(...)` itself
  * would throw.
  */
-async function renderInPage(source, params, mode, safeThreeConfig, safeThreeBundle) {
+async function renderInPage(source, params, mode, safeThreeConfig, safeThreeBundle, cachedEnvironment) {
   try {
     const THREE = window.THREE;
 
@@ -170,6 +172,21 @@ async function renderInPage(source, params, mode, safeThreeConfig, safeThreeBund
     scene.background = new THREE.Color(params.bgColor ? `#${params.bgColor}` : 0x808080);
 
     let followLight = null;
+    let environment = null;
+    if (cachedEnvironment) {
+      const binary = atob(cachedEnvironment.data);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+      environment = new THREE.DataTexture(
+        new Uint16Array(bytes.buffer), cachedEnvironment.width, cachedEnvironment.height,
+        THREE.RGBAFormat, THREE.HalfFloatType,
+      );
+      environment.mapping = THREE.CubeUVReflectionMapping;
+      environment.minFilter = THREE.LinearFilter;
+      environment.magFilter = THREE.LinearFilter;
+      environment.colorSpace = THREE.LinearSRGBColorSpace;
+      environment.needsUpdate = true;
+    }
 
     if (params.lighting === 'follow') {
       scene.add(new THREE.AmbientLight(0xffffff, 0.4));
@@ -194,29 +211,8 @@ async function renderInPage(source, params, mode, safeThreeConfig, safeThreeBund
       followLight = new THREE.DirectionalLight(0xffffff, 1.1);
       scene.add(followLight);
 
-      const pmrem = new THREE.PMREMGenerator(renderer);
-      const envScene = new THREE.Scene();
-
-      const shellMat = new THREE.MeshBasicMaterial({ side: THREE.BackSide });
-      shellMat.color.setRGB(0.32, 0.32, 0.32);
-      envScene.add(new THREE.Mesh(new THREE.BoxGeometry(10, 10, 10), shellMat));
-
-      const addPanel = (w, h, intensity, x, y, z, rx, ry) => {
-        const mat = new THREE.MeshBasicMaterial();
-        mat.color.setRGB(intensity, intensity, intensity);
-        const panel = new THREE.Mesh(new THREE.PlaneGeometry(w, h), mat);
-        panel.position.set(x, y, z);
-        panel.rotation.set(rx, ry, 0);
-        envScene.add(panel);
-      };
-      addPanel(4, 4, 2.6, 0, 4.9, 0, Math.PI / 2, 0);     // ceiling key panel
-      addPanel(3, 2, 1.4, -4.9, 1.5, 0, 0, Math.PI / 2);  // left fill panel
-      addPanel(3, 2, 1.1, 4.9, 1.0, -1, 0, -Math.PI / 2); // right fill panel
-      addPanel(4, 1.5, 0.9, 0, 1.0, -4.9, 0, 0);          // back rim panel
-
-      scene.environment = pmrem.fromScene(envScene, 0.04).texture;
+      scene.environment = environment;
       scene.environmentIntensity = 0.9;
-      pmrem.dispose();
     } else {
       scene.add(new THREE.AmbientLight(0xffffff, 0.12));
 
@@ -232,12 +228,8 @@ async function renderInPage(source, params, mode, safeThreeConfig, safeThreeBund
       rimLight.position.set(0, 2, -3);
       scene.add(rimLight);
 
-      const pmrem = new THREE.PMREMGenerator(renderer);
-      const envScene = new THREE.Scene();
-      envScene.add(new THREE.HemisphereLight(0xffffff, 0x444444, 1.0));
-      scene.environment = pmrem.fromScene(envScene, 0.04).texture;
+      scene.environment = environment;
       scene.environmentIntensity = 0.8;
-      pmrem.dispose();
     }
 
     const camera = new THREE.PerspectiveCamera(params.camFovDeg, 1.0, 0.01, 100);
@@ -418,6 +410,7 @@ async function renderInPage(source, params, mode, safeThreeConfig, safeThreeBund
         ctx.drawImage(renderer.domElement, col * (params.imgSize + gap), row * (params.imgSize + gap));
       }
 
+      environment?.dispose();
       renderer.dispose();
       return { data: gridCanvas.toDataURL('image/png') };
     }
@@ -436,6 +429,7 @@ async function renderInPage(source, params, mode, safeThreeConfig, safeThreeBund
       images.push(renderer.domElement.toDataURL('image/png'));
     }
 
+    environment?.dispose();
     renderer.dispose();
     return { data: images };
   } catch (err) {

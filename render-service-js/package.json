@@ -1,17 +1,18 @@
 {
   "name": "render-service-js",
-  "version": "0.4.8",
+  "version": "0.4.9",
   "description": "Renders miner Three.js submissions to multi-view PNG previews via headless Chromium with GPU WebGL.",
   "type": "module",
   "main": "src/server.js",
   "scripts": {
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
-    "test": "node test/validator.test.mjs && node test/adversary.test.mjs && node test/runtime-adversary.test.mjs && node test/post-validate.test.mjs",
+    "test": "node test/validator.test.mjs && node test/adversary.test.mjs && node test/runtime-adversary.test.mjs && node test/post-validate.test.mjs && node --test test/pmrem-cache.test.mjs",
     "test:adversary": "node test/adversary.test.mjs",
     "test:runtime-adversary": "node test/runtime-adversary.test.mjs",
     "test:postval": "node test/post-validate.test.mjs",
-    "test:endpoint": "node test/endpoint.test.mjs"
+    "test:endpoint": "node test/endpoint.test.mjs",
+    "test:pmrem": "node --test test/pmrem-readback.test.mjs && node --test test/pmrem-http-recovery.test.mjs && node test/pmrem-equivalence.test.mjs"
   },
   "dependencies": {
     "@babel/parser": "^7.24.0",
