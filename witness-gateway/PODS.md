@@ -230,6 +230,25 @@ accounting. New inference needs a fresh data namespace and a new run
 configuration; do not append a new experiment to the reference run. Retain the
 pinned image digest when cleaning up benchmark images.
 
+### Authorization notification recovery pin
+
+For recovery validation, use **`witness-renderer-20261023-auth-notify`** and its
+[`manifest.json`](deploy/witness-renderer-20261023-auth-notify/manifest.json) and
+[`bootstrap.py`](deploy/witness-renderer-20261023-auth-notify/bootstrap.py).
+The image digest is shared with the benchmark reference; this exact bootstrap
+is required. It makes the live authorization acknowledgement best-effort after
+durable authorization, so losing that notification cannot abort the approved
+capture. The manifest pins the post-bootstrap relay and channel source bytes.
+
+The compatible client source remains `5b5b68ba11246a20303bbc08f094fa90f4308398`.
+A client prover needs the full matching public v1 proof-parameter set and a
+platform-compatible ABI 2 library. An interrupted client retrieves the saved
+exchange; another authorization is not evidence of safe recovery. Other failed
+capture retry behavior and renderer timeout limits retain their existing scope.
+The renderer CPU-quota startup candidate is not part of this runtime. The
+manifest distinguishes the reference benchmark from this pin's local recovery
+validation; native RunPod recovery validation is still required.
+
 ## Build and configuration
 
 Build from the repository root for the target CPU architecture:
