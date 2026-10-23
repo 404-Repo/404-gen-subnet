@@ -68,7 +68,9 @@ class Timeline(BaseModel):
     ) -> "Timeline":
         """Build a Timeline from cached matches, validation results and source audits.
 
-        `all_hotkeys` follows the collector's order in `submissions.json`.
+        `all_hotkeys` is sorted by `(revealed_at_block, tie_breaker)`.
+        The judge uses a stored `tie_breaker`, or computes the BLAKE2b hex digest
+        of `f"{seed}:{hotkey}".encode()` when that field is missing or null.
 
         Non-qualified miners (no cached leader match, or leader margin below
         win_margin) are silently omitted — they aren't part of the round.
