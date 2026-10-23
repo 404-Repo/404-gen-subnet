@@ -19,10 +19,9 @@ How those outputs were produced is outside the judge's boundary.
 
 1. **Qualification.** Miners play the base leader. A margin of at least
    `config.win_margin` qualifies them. Submissions are sorted by
-   `(revealed_at_block, tie_breaker)`. The collector stores `tie_breaker` as the
-   lowercase hex BLAKE2b digest of `f"{seed}:{hotkey}".encode()`. For entries with
-   a missing or null `tie_breaker`, the judge computes the same value using the
-   round seed and hotkey.
+   `(revealed_at_block, tie_breaker)`. Every entry must include `tie_breaker`,
+   which the collector stores as the lowercase hex BLAKE2b digest of
+   `f"{seed}:{hotkey}".encode()`.
 2. **Timeline.** Qualified miners play the current chain defender in that order.
    A margin of at least `win_margin` advances the challenger. Every local winner
    gets one validation request, including provisional leaders whose own checks

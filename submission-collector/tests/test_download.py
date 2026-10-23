@@ -36,6 +36,7 @@ def _setup_round(git: MockGitHubClient, round_num: int, hotkeys: list[str], prom
             "commit": "a" * 40,
             "cdn_url": f"https://cdn.example.com/{hk[:10]}",
             "revealed_at_block": 150,
+            "tie_breaker": "0" * 128,
             "round": f"test-{round_num}",
         }
         for hk in hotkeys

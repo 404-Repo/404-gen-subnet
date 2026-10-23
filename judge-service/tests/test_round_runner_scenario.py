@@ -110,6 +110,7 @@ def _world(miners: list[str]) -> MockGitHubClient:
             commit=f"sha_{hk}",
             cdn_url=f"https://cdn/{hk}",
             revealed_at_block=100 + i,
+            tie_breaker="0" * 128,
             round="test-comp-1",
         )
         for i, hk in enumerate(miners)
@@ -232,27 +233,18 @@ def _assert_verdicts_are_read_only(git: MockGitHubClient) -> None:
     assert "rounds/1/source_audit.json" not in git.committed
 
 
-@pytest.mark.parametrize("miners", [[HK_A, HK_B, HK_C], [HK_C, HK_B, HK_A]])
-@pytest.mark.parametrize("seed,expected", [(42, [HK_A, HK_C, HK_B]), (43, [HK_C, HK_A, HK_B])])
-async def test_seed_breaks_same_block_ties_after_reveal_block(
-    settings: Settings, miners: list[str], seed: int, expected: list[str]
-) -> None:
-    git = _world(miners)
+@pytest.mark.parametrize("include_null", [False, True])
+async def test_submissions_require_tie_breaker(settings: Settings, include_null: bool) -> None:
+    git = _world([HK_A])
     submissions = json.loads(git.files["rounds/1/submissions.json"])
-    for hotkey, submission in submissions.items():
-        submission["revealed_at_block"] = 101 if hotkey == HK_B else 100
+    if include_null:
+        submissions[HK_A]["tie_breaker"] = None
+    else:
+        submissions[HK_A].pop("tie_breaker")
     git.files["rounds/1/submissions.json"] = json.dumps(submissions)
-    git.files["rounds/1/seed.json"] = json.dumps({"seed": seed})
 
-    runner = await RoundRunner.create(
-        git_batcher=GitBatcher(git=git, branch="main", base_sha=git.ref_sha),
-        state=CompetitionState(current_round=1, stage=RoundStage.DUELS),
-        openai=AsyncMock(),
-        settings=settings,
-        discord=NullDiscordNotifier(),
-    )
-
-    assert runner._hotkeys == expected
+    with pytest.raises(ValidationError, match="tie_breaker"):
+        await _run_round(git, {}, [], settings)
 
 
 async def test_saved_tie_breakers_determine_same_block_timeline(settings: Settings) -> None:
