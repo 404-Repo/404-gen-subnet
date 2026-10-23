@@ -110,6 +110,7 @@ def _world(miners: list[str]) -> MockGitHubClient:
             commit=f"sha_{hk}",
             cdn_url=f"https://cdn/{hk}",
             revealed_at_block=100 + i,
+            tie_breaker="0" * 128,
             round="test-comp-1",
         )
         for i, hk in enumerate(miners)

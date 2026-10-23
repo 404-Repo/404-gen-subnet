@@ -10,6 +10,11 @@ class MinerSubmission(BaseModel):
     commit: str = Field(..., description="Git commit SHA")
     cdn_url: str = Field(..., description="CDN URL for downloading generated Three.js modules")
     revealed_at_block: int = Field(..., description="Block number when miner's submission was revealed")
+    tie_breaker: str = Field(
+        ...,
+        pattern=r"^[0-9a-f]{128}$",
+        description="Seed-based BLAKE2b hex digest for ordering reveals in the same block",
+    )
     round: str = Field(..., description="Full round name: competition name and round number")
 
 

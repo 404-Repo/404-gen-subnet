@@ -3,6 +3,7 @@ import json
 import secrets
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
+from hashlib import blake2b
 
 import bittensor as bt
 import httpx
@@ -237,7 +238,7 @@ async def _collect_submissions(
             f"{round_dir}/seed.json": json.dumps({"seed": seed}),
             f"{round_dir}/prompts.txt": "\n".join(prompts),
             f"{round_dir}/submissions.json": _serialize_submissions(
-                submissions=submissions, config=config, round_num=state.current_round
+                submissions=submissions, config=config, round_num=state.current_round, seed=seed
             ),
         },
         message=f"Seed, prompts and submissions for round {state.current_round}",
@@ -370,7 +371,7 @@ async def _filter_by_conviction_lock(
     return kept
 
 
-def _serialize_submissions(submissions: list[Submission], config: CompetitionConfig, round_num: int) -> str:
+def _serialize_submissions(submissions: list[Submission], config: CompetitionConfig, round_num: int, seed: int) -> str:
     """Convert submissions to JSON for storage in git."""
     data = {
         s.hotkey: {
@@ -378,10 +379,12 @@ def _serialize_submissions(submissions: list[Submission], config: CompetitionCon
             "commit": s.commit,
             "cdn_url": str(s.cdn_url),
             "revealed_at_block": s.reveal_block,
+            "tie_breaker": blake2b(f"{seed}:{s.hotkey}".encode()).hexdigest(),
             "round": f"{config.name}-{round_num}",
         }
         for s in submissions
     }
+    data = dict(sorted(data.items(), key=lambda item: (item[1]["revealed_at_block"], item[1]["tie_breaker"])))
     return json.dumps(data, indent=2)
 
 
