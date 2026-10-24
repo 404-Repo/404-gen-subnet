@@ -9,6 +9,8 @@ import subprocess
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from functools import partial
+from collections.abc import Callable
 from pathlib import Path
 from typing import cast
 
@@ -17,11 +19,18 @@ import pytest
 from bittensor_wallet import Keypair
 from conftest import MemoryStore, certificates, connected_channels
 from witness_client import WitnessClient, WitnessConfig, WitnessError
+from witness_client.calls import Generation, Invocation, RequestKey
+from witness_client.pods import CallView, PodGatewayClient, Snapshot
+from witness_client.types import Session
 from witness_client.response import completed_response, http_body
 from witness_client.transport import exchange
 from witness_client.types import EarlyDisclosure, HandshakeDisclosure
+from websockets.exceptions import ConnectionClosedError, ConnectionClosedOK
+from websockets.frames import Close
 
-from identity import Provider, miner_prefix, signed_exchange
+from channel import WorkerChannel
+
+from identity import Provider, miner_prefix
 from storage import json_bytes
 from worker import PROVIDERS, relay
 
@@ -57,6 +66,9 @@ def test_real_tls_gate_records_large_exchange_even_when_miner_leaves(
     terminal: str,
     provider_name: Provider,
     identity: tuple[Keypair, str],
+    authorization_notification_lost: bool = False,
+    before_release: Callable[[bytes], None] | None = None,
+    session_id: str | None = None,
 ) -> None:
     hotkey, _ = identity
     certificates(tmp_path)
@@ -107,7 +119,9 @@ def test_real_tls_gate_records_large_exchange_even_when_miner_leaves(
     suffix = (
         b"\r\n\r\n"
         if provider_name == "api"
-        else b"\r\nChatGPT-Account-Id: abc123\r\n\r\n"
+        else b"\r\nChatGPT-Account-Id: abc123\r\n"
+        + (f"session-id: {session_id}\r\n".encode() if session_id is not None else b"")
+        + b"\r\n"
     ) + body
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.minimum_version = context.maximum_version = ssl.TLSVersion.TLSv1_3
@@ -158,7 +172,8 @@ def test_real_tls_gate_records_large_exchange_even_when_miner_leaves(
         assert "authorization" not in request.headers
         assert request.headers["x-bittensor-hotkey"] == hotkey.ss58_address
         assert request.headers["x-bittensor-receiver"] == "404-witness"
-        key = prefix_key + "/" + request.url.path.removeprefix(route)
+        name = request.url.path.removeprefix(route)
+        key = prefix_key + "/" + ("status.json" if name == "progress" else name)
         assert request.method == "GET"
         data = store.get(key)
         return (
@@ -169,6 +184,7 @@ def test_real_tls_gate_records_large_exchange_even_when_miner_leaves(
 
     config: WitnessConfig = {
         "witness_url": "https://witness.test",
+        "round": "1",
         "proof_parameters": str(WITNESS / "params"),
         "state_directory": str(tmp_path / "client"),
     }
@@ -189,11 +205,7 @@ def test_real_tls_gate_records_large_exchange_even_when_miner_leaves(
         client._gateway.http = http
         (client._state / identifier).mkdir(mode=0o700)
         (client._state / identifier / "job.json").write_bytes(
-            json_bytes(
-                signed_exchange(
-                    hotkey, identifier, int(time.time()) + 180, provider=provider_name
-                )
-            )
+            json_bytes({"deadline": int(time.time()) + 180})
         )
         server.bind(("127.0.0.1", 0))
         server.listen()
@@ -233,9 +245,11 @@ def test_real_tls_gate_records_large_exchange_even_when_miner_leaves(
         with ThreadPoolExecutor(max_workers=2) as executor:
             actual_request = executor.submit(provider)
 
+            run_relay = relay if before_release is None else partial(relay, before_release=before_release)
+
             def witness() -> dict[str, object]:
                 try:
-                    return relay(
+                    return run_relay(
                         store,
                         prefix_key,
                         time.monotonic() + 180,
@@ -283,10 +297,39 @@ def test_real_tls_gate_records_large_exchange_even_when_miner_leaves(
                     assert failure.value.status_code == provider_status
             except MinerLeft:
                 assert abandon
+            except WitnessError as error:
+                assert authorization_notification_lost
+                assert str(error) == "Witness closed before proof acceptance"
             finally:
                 tunnel.close()
             metadata = observed.result(timeout=90)
             assert client._gateway.response(identifier) == response_body
+            if session_id is not None:
+                invocation = Invocation(
+                    generation=Generation.from_prompt(b"PNG", 42, round_number="1"),
+                    ordinal=0,
+                    request=RequestKey.from_body(provider_name, body),
+                )
+                (client._state / identifier / "job.json").write_bytes(
+                    json_bytes({"invocation": invocation.model_dump(mode="json")})
+                )
+                session: Session = {
+                    "id": identifier, "protocol": 2, "round": "1",
+                    "miner": hotkey.ss58_address,
+                    "provider": f"https://{PROVIDERS[provider_name][0]}{path}",
+                    "proof_key_sha256": client._prover.verifying_key_sha256,
+                }
+                call = CallView(
+                    request=invocation.request, exchange_id=identifier, owner_ordinal=0,
+                    deadline=int(time.time()) + 180, phase="issued", authorized=True,
+                )
+                assert isinstance(client._gateway, PodGatewayClient)
+                with pytest.MonkeyPatch.context() as patch:
+                    patch.setattr(client._gateway, "snapshot", lambda _: Snapshot(
+                        call=call, round="1", hotkey=hotkey.ss58_address, session=dict(session),
+                    ))
+                    patch.setattr(client._gateway, "recorded", lambda *_: (session, provider_status, response_body))
+                    assert client.resume(identifier).output_text == text
             assert (
                 actual_request.result(timeout=10)
                 == prefix + credential.encode() + suffix
@@ -327,3 +370,41 @@ def test_real_tls_gate_records_large_exchange_even_when_miner_leaves(
     assert store.writes.index(prefix_key + "/authorization.json") < store.writes.index(
         prefix_key + "/manifest.json"
     )
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        ConnectionClosedOK(Close(1000, "disconnected"), Close(1000, "disconnected"), True),
+        ConnectionClosedError(None, None),
+        OSError("disconnected"),
+    ],
+    ids=["normal-close", "abnormal-close", "socket-error"],
+)
+def test_approved_capture_survives_lost_authorization_notification(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    identity: tuple[Keypair, str],
+    failure: Exception,
+) -> None:
+    original_notify = WorkerChannel.notify
+
+    def notify(channel: WorkerChannel, status: dict[str, object]) -> None:
+        if status.get("authorized") is True:
+            raise failure
+        original_notify(channel, status)
+
+    original_connect = socket.socket.connect
+
+    def connect(connection: socket.socket, address: tuple[str, int]) -> None:
+        assert address[0] in ("127.0.0.1", "::1"), "Only the local TLS fixture is permitted"
+        original_connect(connection, address)
+
+    reservations: list[bytes] = []
+    monkeypatch.setattr(WorkerChannel, "notify", notify)
+    monkeypatch.setattr(socket.socket, "connect", connect)
+    test_real_tls_gate_records_large_exchange_even_when_miner_leaves(
+        tmp_path, False, True, 200, "completed", "api", identity,
+        authorization_notification_lost=True, before_release=reservations.append,
+    )
+    assert len(reservations) == 1

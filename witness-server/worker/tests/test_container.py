@@ -21,7 +21,7 @@ def test_build_context_excludes_credentials_and_local_state(tmp_path: Path) -> N
     context.mkdir()
     (context / "Dockerfile").write_text("FROM scratch\nCOPY . /\n")
     (context / "Dockerfile.dockerignore").write_bytes(
-        (WORKER / "Dockerfile.dockerignore").read_bytes()
+        (WORKER / "Dockerfile.pods.dockerignore").read_bytes()
     )
     allowed = {
         "witness-client/LICENSE",
@@ -36,7 +36,6 @@ def test_build_context_excludes_credentials_and_local_state(tmp_path: Path) -> N
         "witness-server/worker/worker.py",
         "witness-server/worker/channel.py",
         "witness-server/worker/timing.py",
-        "witness-server/worker/worker-requirements.txt",
     }
     excluded = {
         ".env",
@@ -115,6 +114,8 @@ subprocess.run(['node', '--input-type=module', '-e',
             "linux/amd64",
             "--network",
             "none",
+            "--workdir",
+            "/app/witness-server/worker",
             "--entrypoint",
             "python",
             IMAGE,

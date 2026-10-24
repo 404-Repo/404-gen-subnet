@@ -5,12 +5,17 @@ import (
 	"encoding/asn1"
 	"encoding/pem"
 	"errors"
+	"strconv"
+	"time"
 )
 
 type CertificateInput struct {
 	Host  string   `json:"host"`
 	Chain []string `json:"chain"`
 	Roots []string `json:"roots"`
+	// Set only by the operator's offline replay verifier, from the sealed
+	// witness timestamp. Live authorization omits it and uses the current time.
+	TimeUnixNano string `json:"time_unix_ns,omitempty"`
 }
 
 func parseCertificate(s string) (*x509.Certificate, error) {
@@ -52,7 +57,15 @@ func verifyCertificates(in CertificateInput) error {
 			return errors.New("server certificate does not permit signatures")
 		}
 	}
-	_, err := leaf.Verify(x509.VerifyOptions{Roots: roots, Intermediates: intermediates,
-		DNSName: in.Host, KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}})
+	options := x509.VerifyOptions{Roots: roots, Intermediates: intermediates,
+		DNSName: in.Host, KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}}
+	if in.TimeUnixNano != "" {
+		nanoseconds, err := strconv.ParseInt(in.TimeUnixNano, 10, 64)
+		if err != nil || nanoseconds <= 0 {
+			return errors.New("invalid certificate verification time")
+		}
+		options.CurrentTime = time.Unix(0, nanoseconds)
+	}
+	_, err := leaf.Verify(options)
 	return err
 }

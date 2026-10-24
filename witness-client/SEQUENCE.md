@@ -1,110 +1,68 @@
-# Witness exchange
+# Witness request and recovery sequence
 
-The miner runs `WitnessClient`. Cloudflare owns worker allocation and forwards
-messages. A RunPod worker owns the provider connection, verification, and saved
-evidence. R2 stores evidence under `rounds/<round>/<hotkey>/<request-id>/`.
-
-## Allocation
-
-```mermaid
-sequenceDiagram
-    participant M as Miner client
-    participant G as Cloudflare gateway
-    participant Q as RunPod queue
-    participant W as Witness worker
-    M->>M: Validate request body and local credentials
-    M->>G: Signed exchange request
-    G->>G: Check registration and round allowance
-    G->>G: Save private allocation before dispatch
-    G->>Q: Queue job with private connection capability
-    Q->>W: Dispatch when a worker is available
-    W->>G: Claim allocation through outbound WebSocket
-    W->>G: Session metadata
-    M->>G: Read session metadata
-    M->>M: Check identity, provider and proof key
-    M->>M: Refresh credentials after queue waiting
-    M->>G: Open hotkey-signed WebSocket
-```
-
-The gateway pairs the two WebSockets. Encrypted OpenAI TLS bytes travel as binary
-messages. Claims and acknowledgements travel as text messages. The client-to-gateway
-and worker-to-gateway connections use their own TLS protection.
-
-## Provider handshake and authorization
-
-A disclosure supplies selected TLS record keys and metadata. The worker uses it
-to decode the traffic it captured. Both disclosures happen before generation.
+The trusted runner binds miner code to frozen generation inputs. The Python
+gateway authenticates the hotkey and coordinates ordinary CPU Pods. Durable R2
+claims prevent duplicate provider dispatch; recordings preserve invocation and
+delivery order.
 
 ```mermaid
 sequenceDiagram
-    participant M as Miner client
-    participant G as Gateway relay
-    participant W as Witness worker
+    participant M as Generation-bound client
+    participant G as Python gateway
+    participant W as Pod worker
+    participant R as Private R2
     participant O as OpenAI
-    participant R as R2 evidence
-    M->>G: TLS ClientHello
-    G->>W: TLS ClientHello
-    W->>W: Check allowed ClientHello
-    W->>O: Forward ClientHello
-    O-->>W: Provider handshake
-    W-->>G: Provider handshake bytes
-    G-->>M: Provider handshake bytes
-    M->>M: Validate provider certificate and handshake
-    M->>G: Client Finished, fixed HEAD probe, first disclosure
-    G->>W: Forward bytes and disclosure
-    W->>W: Verify handshake and exact unauthenticated probe
-    W->>R: Save handshake evidence
-    W-->>M: Handshake accepted through gateway
-    W->>O: Release Finished and HEAD probe
-    O-->>M: Probe response through worker and gateway
-    M->>M: Isolate credential records and generate proof
-    M->>G: Encrypted generation request and authorization proof
-    G->>W: Forward bytes and proof
-    W->>W: Verify request, credential proof and response key
-    W->>R: Save request, authorization and observed traffic
-    W-->>M: Authorization accepted through gateway
-    W->>O: Release generation request
-```
-
-The credential's encryption key stays in the miner process. The native proof
-binds the hidden credential records to the observed TLS connection. The worker
-receives the response key before releasing the request, so capture can continue
-without further miner disclosures.
-
-## Capture and recovery
-
-```mermaid
-sequenceDiagram
-    participant M as Miner client
-    participant G as Cloudflare gateway
-    participant W as Witness worker
-    participant O as OpenAI
-    participant R as R2 evidence
-    O-->>W: Generated response
-    W->>W: Capture and verify response and usage
-    W->>R: Save transcript, response, manifest and issued status
-    alt Miner connection remains open
-        W-->>G: Recorded response TLS bytes and end marker
-        G-->>M: Recorded response TLS bytes and end marker
-        M->>M: Decode typed OpenAI response
-    else Miner connection was lost
-        M->>G: resume with saved recovery state
-        G->>R: Read owned status and response
-        R-->>G: Saved evidence
-        G-->>M: Recorded result
+    M->>G: Reserve invocation with signed hotkey request
+    G->>R: Reserve call identity and invocation position
+    alt Recorded response exists
+        G->>R: Read verified recording
+        G-->>M: Deliver in recorded order
+    else Capture required
+        M->>G: Dispatch to selected exact Pod
+        G->>W: Assign exchange
+        M->>G: Open authenticated WebSocket
+        G->>W: Forward TLS records and proof messages
+        W->>O: TLS handshake and fixed probe
+        W-->>M: Handshake records and disclosure request
+        M->>W: Credential proof and request disclosure through gateway
+        W->>R: Persist authorization and dispatch allowance
+        W->>O: Release billable request bytes
+        O-->>W: Encrypted response
+        W->>R: Persist transcript, verified usage and manifest
+        W-->>M: Deliver retained response through gateway
+        M->>G: Record delivery receipt and generation output
+        G->>R: Save recording
     end
-    W->>G: Allocation finished
 ```
 
-A broken live connection is not resumed as a TLS stream. `resume()` retrieves
-an authorized result from retained evidence. `release(exchange_id)` retires a
-stuck allocation, allowing a later `create()` to queue another job. It does not
-reset the job allowance or cancel provider capture already in progress.
+The worker saves authorization before releasing billable bytes. After release,
+provider capture and persistence continue independently of the miner connection.
+Upload retries use the saved spool. A disconnected or timed-out client keeps the
+same exchange and generation identity.
 
-The private allocation survives gateway restarts. Repeated queue calls keep the
-same request ID. A worker capability can be claimed once, and a retired request
-cannot accept a late worker. A new RunPod job may reuse a warm worker.
+```mermaid
+sequenceDiagram
+    participant M as Client after interruption
+    participant G as Python gateway
+    participant W as Existing Pod capture
+    participant R as Private R2
+    M->>G: Resume saved exchange or repeat generation prefix
+    G->>R: Read durable call state
+    alt Capture is unresolved
+        G->>W: Join existing capture when available
+        G-->>M: Wait or report pending state
+    else Recording is issued
+        G->>R: Read and verify retained response
+        G-->>M: Return original response in recorded order
+    end
+```
 
-During validation, the validator lists evidence for the round and hotkey, runs
-the submitted miner code, compares its outgoing GPT requests with the recorded
-requests, and returns recorded responses instead of calling GPT.
+The revivor can replace a failed gateway while workers finish their captures.
+RunPod is authoritative for Pod ownership and lifecycle; R2 retains inference
+claims, attempts and usage. See [PODS.md](../witness-gateway/PODS.md) for fencing,
+replacement and unresolved-usage rules.
+
+Offline replay uses native-verified recordings and retained provider responses.
+It checks request identity, invocation order, delivery order and generated output
+without provider access. Renderer replay uses the pinned renderer and unchanged
+validation rules.

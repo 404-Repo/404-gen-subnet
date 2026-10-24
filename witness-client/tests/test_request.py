@@ -21,16 +21,26 @@ TOKEN = "sk-proj-" + "a" * 80
 def config() -> WitnessConfig:
     return {
         "witness_url": "https://witness.example",
+        "round": "1",
         "proof_parameters": "/unused",
     }
 
 
 @pytest.mark.parametrize("prompt", ["", "Make a 🚚"])
-@pytest.mark.parametrize("mode", ["api", "codex"])
+@pytest.mark.parametrize(
+    "mode,session_id",
+    [
+        ("api", None),
+        ("codex", None),
+        ("codex", "fixture-session"),
+        ("codex", "s" * 1024),
+    ],
+)
 def test_request_body_matches_wire_and_only_credential_is_hidden(
     config: WitnessConfig,
     mode: Literal["api", "codex"],
     prompt: str,
+    session_id: str | None,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
@@ -42,10 +52,13 @@ def test_request_body_matches_wire_and_only_credential_is_hidden(
         "input": prompt,
         "stream": True,
         "reasoning": {"effort": "high"},
+        "prompt_cache_key": "body-cache-key",
     }
     body = serialize_body(params, mode)
     assert params["input"] == prompt
-    request = prepare_request(config, mode, TOKEN if mode == "api" else None, body=body)
+    request = prepare_request(
+        config, mode, TOKEN if mode == "api" else None, body=body, session_id=session_id
+    )
     prefix, credential, suffix = request.chunks
     assert (prefix[0], credential[0], suffix[0]) == (False, True, False)
     assert credential[1] == TOKEN.encode()
@@ -59,12 +72,16 @@ def test_request_body_matches_wire_and_only_credential_is_hidden(
     assert (b"ChatGPT-Account-Id: abc123" in headers.split(b"\r\n")) == (
         mode == "codex"
     )
+    assert [
+        line for line in headers.split(b"\r\n") if line.startswith(b"session-id:")
+    ] == ([] if session_id is None else [f"session-id: {session_id}".encode()])
     expected: dict[str, object] = {
         "model": "fixture",
         "input": prompt,
         "tools": [],
         "reasoning": {"effort": "high"},
         "stream": True,
+        "prompt_cache_key": "body-cache-key",
     }
     if mode == "codex":
         expected.update(
@@ -80,6 +97,55 @@ def test_request_body_matches_wire_and_only_credential_is_hidden(
         if mode == "api"
         else "https://chatgpt.com/backend-api/codex/responses"
     )
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "",
+        "has space",
+        "a\r\nX: injected",
+        "a\n",
+        "a\r",
+        "a\t",
+        "a\x00",
+        "a\x7f",
+        "é",
+        "a" * 1025,
+        42,
+    ],
+)
+def test_invalid_session_id_fails_before_loading_credentials(
+    config: WitnessConfig, monkeypatch: pytest.MonkeyPatch, value: object
+) -> None:
+    def unexpected_login(*args: object) -> tuple[str, str]:
+        pytest.fail("Invalid session_id must fail before reading credentials")
+
+    monkeypatch.setattr(
+        "witness_client.request.subscription_credentials", unexpected_login
+    )
+    with pytest.raises(ValueError, match="visible ASCII") as failure:
+        prepare_request(config, "codex", None, body=b"{}", session_id=cast(str, value))
+    assert (
+        str(failure.value) == "session_id must contain 1-1024 visible ASCII characters"
+    )
+
+
+def test_session_id_does_not_enable_api_key_headers(config: WitnessConfig) -> None:
+    with pytest.raises(ValueError, match="requires subscription"):
+        prepare_request(config, "api", TOKEN, body=b"{}", session_id="fixture-session")
+
+
+def test_maximum_session_id_and_credentials_fit_transport_headers(
+    config: WitnessConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "witness_client.request.subscription_credentials",
+        lambda *args: ("a" * 4096, "a" * 80),
+    )
+    request = prepare_request(config, "codex", None, body=b"{}", session_id="s" * 1024)
+    headers, body = b"".join(data for _, data in request.chunks).split(b"\r\n\r\n", 1)
+    assert len(headers) <= 8192 and body == b"{}"
 
 
 @pytest.mark.parametrize("mode", ["api", "codex"])

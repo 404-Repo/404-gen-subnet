@@ -1,0 +1,6 @@
+certifi==2026.10.19
+httpcore2==2.15.1
+httpx2==2.15.1
+jiter==0.17.0
+openai==3.35.1
+pycparser==3.11

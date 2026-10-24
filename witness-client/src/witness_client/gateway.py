@@ -1,36 +1,57 @@
-"""Authenticated worker allocation and result recovery."""
+"""Authenticated witness transport and result recovery."""
 
 from __future__ import annotations
 
 import json
-import math
+import socket
+import threading
 import time
-import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Literal, cast
+from typing import Any, cast
 
 import httpx
 from bittensor_wallet import Keypair
+from websockets.client import ClientProtocol
 from websockets.exceptions import WebSocketException
-from websockets.sync.client import connect
+from websockets.sync.client import ClientConnection, connect
 
-from .auth import WITNESS_ID, hotkey_headers
+from .auth import hotkey_headers
 from .delivery import request, retry
-from .errors import WitnessError
-from .state import save
-from .timing import identify_exchange, measure, timed
+from .errors import ExchangePending, WitnessError
+from .timing import measure, timed
 from .tunnel import MAX_BYTES, WebSocketTunnel
-from .types import AllocationStatus, ExchangeStatus, JSONObject, Session
+from .types import ExchangeStatus, JSONObject
 
 
-def encode(value: object) -> bytes:
-    return json.dumps(value, separators=(",", ":"), ensure_ascii=False).encode()
+class _GatewayConnection(ClientConnection):
+    """Send the upgrade before reading TLS session tickets on the shared socket."""
+
+    def __init__(
+        self, sock: socket.socket, protocol: ClientProtocol, **kwargs: Any
+    ) -> None:
+        self._upgrade_sent = threading.Event()
+        super().__init__(sock, protocol, **kwargs)
+
+    def recv_events(self) -> None:
+        # Concurrent ticket processing and SSL_write can lose the opening request.
+        self._upgrade_sent.wait()
+        super().recv_events()
+
+    def send_data(self) -> None:
+        try:
+            super().send_data()
+        finally:
+            self._upgrade_sent.set()
+
+    def close_socket(self) -> None:
+        self._upgrade_sent.set()
+        super().close_socket()
 
 
 class GatewayClient:
-    """Queue witness workers and exchange data through the gateway.
+    """Exchange data with witness workers through the gateway.
 
     WitnessClient uses this to connect to its assigned worker and retrieve
     recorded evidence and responses. Gateway requests are signed with the
@@ -89,7 +110,7 @@ class GatewayClient:
         """Return seconds left before the exchange's job deadline.
 
         Read the gateway deadline from ``state/<identifier>/job.json``. It covers both
-        queueing and execution. Raise WitnessError if the deadline has passed.
+        preparation and execution. Raise WitnessError if the deadline has passed.
         """
         job: JSONObject = json.loads(
             (self.state / identifier / "job.json").read_bytes()
@@ -101,92 +122,6 @@ class GatewayClient:
             )
         return remaining
 
-    @timed("allocation")
-    def queue_and_wait_for_worker(
-        self, provider: Literal["api", "codex"], *, replace: str | None = None
-    ) -> Session:
-        """Queue one worker for an exchange and wait for its session metadata.
-
-        ``provider`` selects the OpenAI API ("api") or ChatGPT subscription
-        ("codex"). Save the signed job locally before queueing it. Poll allocation
-        status every five seconds until the worker is ready or the round ends.
-        Set replace to retire that existing allocation when queueing this one.
-
-        Return the worker's Session, including its exchange ID and provider
-        endpoint. The OpenAI request is sent later through ``tunnel()``. Queue
-        or startup failures raise WitnessError carrying the exchange ID.
-        """
-        if provider not in ("api", "codex"):
-            raise ValueError("Unknown witness provider")
-        identifier = str(uuid.uuid4())
-        identify_exchange(identifier)
-        job: JSONObject = {
-            "operation": "exchange",
-            "hotkey": self.hotkey.ss58_address,
-            "receiver": WITNESS_ID,
-            "exchange_id": identifier,
-            "deadline": math.floor(time.time()) + 7 * 86400,
-            "provider": provider,
-        }
-        if replace is not None:
-            job["replace"] = str(uuid.UUID(replace))
-        job["signature"] = self.hotkey.sign(
-            b"404-witness-queue/v1\n" + encode(job)
-        ).hex()
-        directory = self.state / identifier
-        directory.mkdir(mode=0o700)
-        body = encode(job)
-        save(directory / "job.json", body)
-        deadline = time.monotonic() + self.delivery_timeout
-        try:
-            with measure("gateway_admission_dispatch"):
-                reply = self._request_with_retry(
-                    "POST", "/run", body, deadline=deadline
-                )
-            job_reply = _parse_allocation(
-                reply or b"{}", identifier, self.hotkey.ss58_address
-            )
-            job["expires"] = job_reply["deadline"]
-            save(directory / "job.json", encode(job))
-            deadline = time.monotonic() + self.remaining_seconds(identifier)
-            while time.monotonic() < deadline:
-                with measure("allocation_poll"):
-                    raw = self._request_with_retry(
-                        "GET", f"/status/{identifier}", deadline=deadline
-                    )
-                if time.monotonic() >= deadline:
-                    break
-                status = _parse_allocation(
-                    raw or b"{}", identifier, self.hotkey.ss58_address
-                )
-                if status["queue_state"] in ("retired", "finished"):
-                    raise WitnessError(
-                        "Queued worker stopped before opening the exchange",
-                        identifier,
-                        source="gateway",
-                    )
-                if (
-                    status["queue_state"] == "connected"
-                    and status["session"] is not None
-                ):
-                    return status["session"]
-                with measure("allocation_poll_sleep"):
-                    time.sleep(min(5, max(0, deadline - time.monotonic())))
-            raise WitnessError(
-                "Queued exchange deadline reached", identifier, source="gateway"
-            )
-        except Exception as error:
-            if isinstance(error, WitnessError):
-                error.exchange_id = error.exchange_id or identifier
-                error.code = error.code or "queue_incomplete"
-                raise
-            raise WitnessError(
-                f"Worker startup did not complete; no OpenAI request was sent. "
-                f"Use release() with exchange {identifier} before queueing a replacement: {error}",
-                identifier,
-                code="queue_incomplete",
-                source="gateway",
-            ) from error
 
     def status(self, identifier: str) -> ExchangeStatus:
         """Fetch one snapshot of the worker's progress as ExchangeStatus.
@@ -219,12 +154,7 @@ class GatewayClient:
                     )
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    raise WitnessError(
-                        "Witness is still preparing the capture",
-                        identifier,
-                        code="capture_in_progress",
-                        source="gateway",
-                    )
+                    raise ExchangePending("Witness is still preparing the capture", identifier)
                 time.sleep(min(remaining, 0.5))
         except WitnessError as error:
             error.exchange_id = identifier
@@ -280,6 +210,7 @@ class GatewayClient:
                     max_queue=16,
                     open_timeout=30,
                     close_timeout=5,
+                    create_connection=_GatewayConnection,
                 )
             with socket:
                 yield WebSocketTunnel(socket, identifier)
@@ -340,46 +271,6 @@ def _json_object(raw: bytes, identifier: str) -> dict[str, object]:
             source="gateway",
         )
     return value
-
-
-def _parse_allocation(raw: bytes, identifier: str, hotkey: str) -> AllocationStatus:
-    value = _json_object(raw, identifier)
-    if (
-        value.get("exchange_id") != identifier
-        or value.get("hotkey") != hotkey
-        or not isinstance(value.get("round"), str)
-        or type(value.get("deadline")) is not int
-        or value.get("queue_state")
-        not in ("submitting", "queued", "uncertain", "connected", "finished", "retired")
-        or "session" not in value
-    ):
-        raise WitnessError(
-            "Invalid gateway allocation metadata",
-            identifier,
-            code="invalid_gateway_response",
-            source="gateway",
-        )
-    if value["session"] is not None:
-        value["session"] = _parse_session(value["session"], identifier)
-    return cast(AllocationStatus, value)
-
-
-def _parse_session(value: object, identifier: str) -> Session:
-    if (
-        not isinstance(value, dict)
-        or type(value.get("protocol")) is not int
-        or not all(
-            isinstance(value.get(name), str)
-            for name in ("id", "provider", "proof_key_sha256", "round", "miner")
-        )
-    ):
-        raise WitnessError(
-            "Invalid witness session metadata",
-            identifier,
-            code="invalid_gateway_response",
-            source="gateway",
-        )
-    return cast(Session, value)
 
 
 def _parse_status(raw: bytes, identifier: str) -> ExchangeStatus:

@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from io import StringIO
+from types import SimpleNamespace
 from typing import cast
 
 import pytest
@@ -23,7 +27,22 @@ def test_timings_are_opt_in(
     monkeypatch.delenv("WITNESS_TIMINGS", raising=False)
     with timing.measure("disabled"):
         timing.identify_exchange("test-exchange")
+    timing.transport("send_start", "test-exchange", kind="binary", size=42)
+    timing.transport("worker_receive", "test-exchange", host="gateway", kind="binary", size=42)
     assert records(capsys) == []
+
+
+def test_transport_records_only_message_metadata(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("WITNESS_TIMINGS", "1")
+    timing.transport("send_end", "test-exchange", kind="handshake", size=42, sequence=3)
+    event = json.loads(capsys.readouterr().err)
+    assert event["event"] == "witness_transport"
+    assert (event["host"], event["exchange_id"], event["kind"]) == ("client", "test-exchange", "handshake")
+    assert (event["bytes"], event["sequence"]) == (42, 3)
+    assert event["timestamp_ns"] > 0 and event["monotonic_ns"] > 0
+    assert event["error_type"] is None
 
 
 def test_monotonic_nested_spans_and_failure_privacy(
@@ -65,6 +84,7 @@ def test_broken_sink_preserves_result_and_original_error(
 ) -> None:
     monkeypatch.setenv("WITNESS_TIMINGS", "1")
     monkeypatch.setattr("witness_client.timing.sys.stderr", BrokenSink())
+    timing.transport("send_end", "test-exchange")
 
     @timing.timed("operation")
     def operation(value: int) -> int:
@@ -75,3 +95,42 @@ def test_broken_sink_preserves_result_and_original_error(
     assert operation(3) == 6
     with pytest.raises(ValueError, match="original failure"):
         operation(-1)
+
+
+def test_blocked_gateway_diagnostics_leave_the_event_loop_running(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    blocked, release = threading.Event(), threading.Event()
+
+    class Sink:
+        def write(self, text: str) -> int:
+            blocked.set()
+            if not release.wait(5):
+                raise TimeoutError("Fixture diagnostic sink stayed blocked")
+            return len(text)
+
+        def flush(self) -> None:
+            pass
+
+    monkeypatch.setenv("WITNESS_TIMINGS", "1")
+    monkeypatch.setattr(timing, "sys", SimpleNamespace(stderr=Sink()))
+
+    def run() -> str:
+        async def scenario() -> str:
+            heartbeat = asyncio.create_task(asyncio.sleep(0.01, result="ready"))
+            await asyncio.sleep(0)
+            # Exceed the bounded buffer while the output thread cannot write.
+            for _ in range(4096):
+                timing.transport("worker_receive", "fixture", host="gateway", kind="binary", size=1)
+            return await heartbeat
+
+        return asyncio.run(scenario())
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(run)
+        try:
+            assert blocked.wait(2)
+            assert future.result(timeout=2) == "ready"
+        finally:
+            release.set()
+            timing._gateway_output.queue.join()

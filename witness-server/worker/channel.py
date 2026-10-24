@@ -6,9 +6,9 @@ import json
 import time
 from typing import Protocol
 
-from websockets.sync.connection import Connection
-
 from storage import CHUNK_BYTES, MAX_BYTES, json_bytes
+from timing import exchange_id, progress, transport
+from websockets.sync.connection import Connection
 
 
 class Channel(Protocol):
@@ -27,10 +27,14 @@ class WorkerChannel:
         self.claims: dict[str, bytes] = {}
         self.received_bytes = self.received_messages = 0
         self.sent_bytes = 0
+        self.sent_messages = 0
 
     def recv(self, deadline: float) -> bytes:
+        progress()
         message = self.socket.recv(timeout=max(0, deadline - time.monotonic()))
         self.received_messages += 1
+        transport("receive", exchange_id(), kind="binary" if isinstance(message, bytes) else "control",
+                  size=len(message), sequence=self.received_messages)
         if self.received_messages > 4096:
             raise ValueError("Too many transport messages")
         if isinstance(message, bytes):
@@ -54,6 +58,7 @@ class WorkerChannel:
         if phase in self.claims or not isinstance(value.get("claim"), dict):
             raise ValueError("Invalid or repeated proof")
         self.claims[phase] = json_bytes(value["claim"])
+        transport("claim_received", exchange_id(), kind=phase, sequence=self.received_messages)
         raise TimeoutError("Control message received")
 
     def claim(self, phase: str) -> bytes | None:
@@ -64,7 +69,11 @@ class WorkerChannel:
         if self.sent_bytes > MAX_BYTES:
             raise ValueError("Provider traffic exceeds limit")
         for offset in range(0, len(data), CHUNK_BYTES):
-            self.socket.send(data[offset : offset + CHUNK_BYTES])
+            chunk = data[offset : offset + CHUNK_BYTES]
+            self.sent_messages += 1
+            transport("send_start", exchange_id(), kind="binary", size=len(chunk), sequence=self.sent_messages)
+            self.socket.send(chunk)
+            transport("send_end", exchange_id(), kind="binary", size=len(chunk), sequence=self.sent_messages)
 
     def notify(self, status: dict[str, object]) -> None:
         self.socket.send(json_bytes({"type": "status", **status}).decode())

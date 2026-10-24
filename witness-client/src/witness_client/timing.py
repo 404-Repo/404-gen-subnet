@@ -11,7 +11,40 @@ from contextlib import contextmanager, suppress
 from contextvars import ContextVar
 from dataclasses import dataclass
 from functools import wraps
-from typing import Literal, ParamSpec, TypedDict, TypeVar
+from queue import Full, Queue
+from threading import Lock, Thread
+from typing import Literal, ParamSpec, TextIO, TypedDict, TypeVar
+
+
+class _GatewayDiagnosticOutput:
+    """Keep blocked diagnostic output off the gateway event loop with bounded memory."""
+
+    def __init__(self) -> None:
+        self.queue: Queue[tuple[TextIO, str]] = Queue(maxsize=1024)
+        self.lock = Lock()
+        self.thread: Thread | None = None
+
+    def write(self, value: object) -> None:
+        line = json.dumps(value, separators=(",", ":"))
+        with self.lock:
+            if self.thread is None:
+                self.thread = Thread(target=self._run, name="witness-gateway-diagnostics", daemon=True)
+                self.thread.start()
+        with suppress(Full):
+            self.queue.put_nowait((sys.stderr, line))
+
+    def _run(self) -> None:
+        while True:
+            stream, line = self.queue.get()
+            try:
+                with suppress(Exception):
+                    stream.write(line + "\n")
+                    stream.flush()
+            finally:
+                self.queue.task_done()
+
+
+_gateway_output = _GatewayDiagnosticOutput()
 
 
 class TimingRecord(TypedDict):
@@ -39,6 +72,37 @@ _trace: ContextVar[_Trace | None] = ContextVar("witness_timing", default=None)
 P = ParamSpec("P")
 T = TypeVar("T")
 HOST = "client"
+
+
+def transport(
+    phase: str,
+    identifier: str,
+    *,
+    host: str = HOST,
+    kind: str = "",
+    size: int = 0,
+    sequence: int = 0,
+    reason: str = "",
+    error_type: str | None = None,
+    close_code: int | None = None,
+    expected_bytes: int | None = None,
+) -> None:
+    """Record message timing and fixed reason codes without message contents."""
+    if os.environ.get("WITNESS_TIMINGS") != "1":
+        return
+    with suppress(Exception):
+        record = {
+            "event": "witness_transport", "host": host, "exchange_id": identifier,
+            "phase": phase, "timestamp_ns": time.time_ns(),
+            "monotonic_ns": time.monotonic_ns(), "kind": kind, "bytes": size,
+            "sequence": sequence, "reason": reason, "error_type": error_type,
+            "close_code": close_code,
+            "expected_bytes": expected_bytes,
+        }
+        if host == "gateway":
+            _gateway_output.write(record)
+        else:
+            print(json.dumps(record, separators=(",", ":")), file=sys.stderr, flush=True)
 
 
 def identify_exchange(identifier: str) -> None:

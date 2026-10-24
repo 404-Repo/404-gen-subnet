@@ -32,6 +32,8 @@ class WitnessConfig(TypedDict):
         codex_home: Subscription login directory; defaults to CODEX_HOME or
             ~/.codex.
         codex: Codex executable name or path for login refresh; defaults to codex.
+        transport: "pods-v1" for persistent CPU Pods (the default).
+        round: Pinned competition round.
     """
 
     witness_url: str
@@ -39,6 +41,8 @@ class WitnessConfig(TypedDict):
     state_directory: NotRequired[str]
     codex_home: NotRequired[str]
     codex: NotRequired[str]
+    transport: NotRequired[Literal["pods-v1"]]
+    round: str
 
 
 class Session(TypedDict):
@@ -63,19 +67,6 @@ class Session(TypedDict):
     proof_key_sha256: str
     round: str
     miner: str
-
-
-class AllocationStatus(TypedDict):
-    """Gateway allocation state, with session metadata once the worker is ready."""
-
-    round: str
-    hotkey: str
-    exchange_id: str
-    queue_state: Literal[
-        "submitting", "queued", "uncertain", "connected", "finished", "retired"
-    ]
-    deadline: int
-    session: Session | None
 
 
 class ExchangeStatus(TypedDict):

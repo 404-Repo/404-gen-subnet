@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "404-witness-client"
-version = "0.2.13rc4"
+version = "0.2.13rc6"
 description = "Python client for the subnet 404 TLS witness"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -35,5 +35,5 @@ pythonpath = ["src"]
 
 [tool.mypy]
 python_version = "3.11"
-files = ["src", "examples", "tests", "setup.py", "build_wheel.py", "queue_live_test.py", "release_acceptance.py"]
+files = ["src", "tests", "setup.py", "build_wheel.py"]
 strict = true

@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { loadX509FromPem } from '@reclaimprotocol/tls';
 import { exchange, listen, relay, sha256 } from './transport.mjs';
-import { verifyPair, requestChunks, SUITE, parseResponse, encodeDisclosures } from './verify.mjs';
+import { verifyPair, requestChunks, SUITE, parseRequest, parseResponse, encodeDisclosures } from './verify.mjs';
 import { deflateRawSync } from 'node:zlib';
 import { makeCredentialProof } from './worker.mjs';
 
@@ -85,4 +85,23 @@ test('HTTP parser requires complete unambiguous framing', () => {
   const make = (headers, body) => Buffer.from(`HTTP/1.1 200 OK\r\n${headers}\r\n\r\n${body}`);
   assert.equal(parseResponse(make('Transfer-Encoding: chunked', '3\r\nabc\r\n0\r\n\r\n')).toString(), 'abc');
   for (const bad of [make('Content-Length: 3', 'ab'), make('Content-Length: 2', 'abc'), make('Content-Length: 3\r\nTransfer-Encoding: chunked', 'abc'), make('Transfer-Encoding: chunked', '3\r\nabc\r\n')]) assert.throws(() => parseResponse(bad));
+});
+
+test('request allowlist permits only a bounded optional subscription session-id', () => {
+  const body = Buffer.from('{"model":"synthetic","prompt_cache_key":"body-key"}');
+  const target = { host: 'chatgpt.com', path: '/backend-api/codex/responses', tokenLength: 4096, authentication: 'subscription' };
+  const make = (extra = '', authentication = 'subscription') => Buffer.concat([
+    Buffer.from(`POST ${target.path} HTTP/1.1\r\nHost: ${target.host}\r\nConnection: close\r\nContent-Length: ${body.length}\r\nContent-Type: application/json\r\nAccept: text/event-stream\r\nAuthorization: Bearer ${'*'.repeat(target.tokenLength)}\r\n${authentication === 'subscription' ? `ChatGPT-Account-Id: ${'a'.repeat(80)}\r\n` : ''}${extra}\r\n`), body,
+  ]);
+  for (const extra of ['', 'session-id: fixture-session\r\n', `session-id: ${'s'.repeat(1024)}\r\n`]) {
+    assert.ok(parseRequest(make(extra), target).equals(body));
+  }
+  assert.ok(parseRequest(make('', 'api'), { ...target, authentication: 'api' }).equals(body));
+  for (const value of ['', 'has space', 'a\t', 'a\x00', 'a\x7f', 'é', 'a\n', 'a\r', 'a'.repeat(1025), 'a\r\nX: injected', 'a\r\nsession-id: duplicate']) {
+    assert.throws(() => parseRequest(make(`session-id: ${value}\r\n`), target));
+  }
+  for (const extra of ['session_id: wrong-spelling\r\n', 'Cookie: injected\r\n', 'session-id: a\r\nCookie: injected\r\n']) {
+    assert.throws(() => parseRequest(make(extra), target));
+  }
+  assert.throws(() => parseRequest(make('session-id: a\r\n', 'api'), { ...target, authentication: 'api' }));
 });

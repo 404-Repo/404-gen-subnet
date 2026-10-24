@@ -3,9 +3,14 @@
 Submit a Python repository with a `generate` function in its root `main.py`.
 The sandbox calls it for each prompt image and receives a Three.js module.
 
-Copy [main.py](main.py) and the [miner_reference package](miner_reference/) into
-your repository root as a starting point. The example sends the reference image
-to OpenAI through the witness, renders the returned JavaScript, and returns that source.
+Copy [main.py](main.py), [output_specifications.md](output_specifications.md) and
+the [miner_reference package](miner_reference/) into your repository root.
+For each image, the example generates one Astra and two Sol candidates concurrently,
+renders their grids, and asks Sol to select a winner and improvements. Two concurrent
+Sol calls independently refine that same winner. Sol then selects from the incumbent
+and the valid refinements. The selected JavaScript is returned.
+Each candidate is centered and scaled using the specified bounding-box calculation
+before rendering, selection, or use as a refinement parent.
 
 The sandbox runner, automatic recording/replay and receipt submission described
 here still need implementation.
@@ -43,6 +48,7 @@ miner_reference/
     __init__.py
     pipeline.py
     images.py
+output_specifications.md
 ```
 
 [main.py](main.py) delegates to the model/render flow in
@@ -69,12 +75,21 @@ Return the final JavaScript string, or `None` to declare generation failure.
 An uncaught exception is a miner error. The runner checks the return type, UTF-8
 size and JavaScript rules.
 
-Use `witness.responses.create(stream=True, ...)` for model requests. It waits for
+Use `witness.responses.create(...)` for model requests. It waits for
 the complete response and returns `output_text`, `response` and `usage`.
 `renderer.render(source, options)` returns PNG bytes or raises a structured
 `RenderRejected`. Send prompt images and rendered previews as PNG data URLs in
 `input_image` items. You may render, compare and refine candidates within the
-prompt's budget; the example makes one model request and one renderer call.
+prompt's budget. A successful example run makes seven model calls and five
+four-view grid renders. It uses medium reasoning, up to 32,768 output tokens per
+candidate and 2,048 per selection. Candidate calls have distinct `request_id`
+values, so the two identical initial Sol requests produce separate exchanges.
+A rejected candidate gets one Sol repair attempt with its source and exact
+validation errors, followed by normalization and another render. Repairs share
+the model-call limit and have distinct `request_id` values. A prompt makes at
+most twelve model calls and ten renders; valid candidates remain available when
+a repair fails. Infrastructure failures propagate to the runner for recovery.
+The runtime supplies a generation-bound Pod witness or its replay counterpart.
 
 Both clients are supplied in generation and replay. Client construction,
 credentials, recording and recovery are handled by the runtime. Your function
@@ -85,6 +100,89 @@ The runner writes successful returns to `{stem}.js` and declared failures to
 `_failed.json`, for example `{"pumpkin": "generation_failed"}`. Stems are unique
 lowercase alphanumeric prompt IDs. Your function handles one image per call;
 prompt count is a round setting.
+
+## Run several prompts concurrently
+
+The [batch runner](miner_reference/batch.py) runs independent prompt pipelines
+against the Python CPU Pod witness. Each prompt has a separate generation
+recording. The three initial calls and two refinements run concurrently within
+their stages; each selection waits for all its candidates. Model requests from
+different prompts can overlap each other and rendering. Renders within a prompt
+follow candidate order, independently of model completion order.
+
+A batch may contain all 128 prompts or a larger manifest. `--parallel-prompts`
+bounds active prompt pipelines and `--parallel-calls` bounds active inference
+captures across them. Each pipeline can use up to three simultaneous model calls,
+so eight active prompts can offer up to 24 calls, subject to the shared call limit.
+Defaults remain four active prompts, two simultaneous model calls, and one render.
+All concurrency settings accept 1 through 32. Match `--parallel-calls` to the witness
+Pod's configured `WITNESS_MAX_CAPTURES`, and `--parallel-renders` to renderer capacity.
+For example, eight prompt pipelines with a 12-call limit require a witness Pod
+configured and sized for 12 concurrent captures. The Pod default is two.
+
+Use the pinned `witness_client` and `renderer_client` packages supplied by your
+runtime. From this checkout, put `miner-reference` on `PYTHONPATH`. The witness
+configuration must use `transport: "pods-v1"`, a pinned `round`, proof parameters,
+and a persistent private `state_directory`; see the [CPU Pod guide](../witness-gateway/PODS.md).
+The renderer URL and identity refer to an existing renderer. Authentication uses
+the named local wallet and Codex subscription, or `--api` with `OPENAI_API_KEY`.
+Set `RENDERER_API_KEY` when the renderer requires authentication.
+
+The manifest has a published seed and frozen local image references:
+
+```json
+{
+  "seed": 42,
+  "prompts": [
+    {"id": "pumpkin", "path": "/private/prompts/pumpkin.png", "sha256": "IMAGE_SHA256"}
+  ]
+}
+```
+
+IDs are unique lowercase alphanumeric strings; SHA256 values have 64 hexadecimal
+characters. Image bytes must be distinct within a batch. An optional `url` is
+descriptive metadata. The experiment manifest containing `seed` and `prompts`
+with these fields is also accepted; additional provenance fields are retained
+by the experiment and ignored by this runner.
+
+```sh
+PYTHONPATH=miner-reference python -m miner_reference.batch check \
+  --manifest /private/prompts/manifest.json \
+  --witness-config /private/witness.json \
+  --output /private/miner-batch \
+  --renderer-url http://127.0.0.1:18040 \
+  --renderer-id PINNED_RENDERER_ID \
+  --wallet-name miner --wallet-hotkey default \
+  --parallel-prompts 4 --parallel-calls 2 --parallel-renders 1
+```
+
+`check` verifies the frozen inputs and settings and prints the planned call,
+render and concurrency counts. It does not load credentials or contact services.
+Use `run` in place of `check` to execute. Supply the exact SHA256 of the admitted
+miner source archive. A 128-prompt successful workflow has 896 model calls and
+640 grid renders. Invalid or refused candidates are excluded; no valid initial
+candidate or an invalid selection returns `None`. There is no paid repair loop.
+
+Console progress shows prompt IDs, stage numbers, input/output tokens and session
+elapsed time. The private output directory contains `run.json`, `progress.json`
+and one subdirectory per prompt. Prompt directories retain model responses and
+usage under `calls/`, source/PNG/rejection checkpoints under `renders/`, and the
+final `selected.js` and `result.json`. The source, seed, inputs, witness
+configuration, wallet identity and renderer identity must stay fixed on resume.
+Concurrency settings may change between runs.
+Recovery restores recorded invocation and delivery order before returning saved
+responses; those waits do not occupy inference capture slots.
+
+An infrastructure failure leaves that prompt `pending` while other prompts
+continue. Repeat the same command to resume saved model responses and render
+outcomes. Completed prompts are skipped. Saved output and PNG hashes are checked
+before reuse, and one operator holds the output directory lock. The witness owns
+inference deduplication, shared prompt accounting and uncertain dispatches; a
+failed connection never permits this runner to buy a replacement inference.
+`run` exits with status 1 when any prompt is pending; declared failures are terminal.
+
+This is a local batch driver. Production sandbox isolation, verified renderer
+replay and receipt submission belong to the runtime described below.
 
 Outside `generate`, upload each successful file to
 `{cdn_url.rstrip('/')}/{stem}.js` and submit the runtime's receipt before cutoff.

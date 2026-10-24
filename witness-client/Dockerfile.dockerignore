@@ -21,6 +21,3 @@ witness-client/src/witness_client/**
 !witness-client/tests/
 witness-client/tests/**
 !witness-client/tests/*.py
-!witness-client/examples/
-witness-client/examples/**
-!witness-client/examples/*.py

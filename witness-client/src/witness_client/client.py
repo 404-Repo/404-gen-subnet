@@ -6,28 +6,34 @@ import base64
 import json
 import math
 import os
+import re
 import ssl
+import threading
 import time
 import uuid
 import zlib
-from contextlib import suppress
+from contextlib import ExitStack, nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import TracebackType
-from typing import Literal, Self, Unpack, cast
+from typing import TYPE_CHECKING, Literal, Self, Unpack, cast
 from urllib.parse import urlsplit
 
 import httpx
 from bittensor_wallet import Keypair
 from openai.types.responses import Response
-from openai.types.responses.response_create_params import ResponseCreateParamsStreaming
+from openai.types.responses.response_create_params import (
+    ResponseCreateParamsBase,
+    ResponseCreateParamsStreaming,
+)
+from websockets.exceptions import WebSocketException
 
-from . import recovery
 from . import request as openai_request
-from .errors import WitnessError
+from .calls import Generation, Invocation, RequestKey
+from .errors import ExchangePending, WitnessError
 from .gateway import GatewayClient
 from .proof import Prover
-from .response import completed_response, http_body, provider_error
+from .response import completed_response, provider_error
 from .state import save as _save
 from .timing import identify_exchange, measure, timed
 from .transport import exchange
@@ -37,9 +43,15 @@ from .types import (
     EarlyDisclosure,
     HandshakeClaim,
     HandshakeDisclosure,
+    Session,
     Usage,
     WitnessConfig,
 )
+
+if TYPE_CHECKING:
+    from ._tls import TLSAbruptCloseError
+else:
+    from tlslite.errors import TLSAbruptCloseError
 
 
 @dataclass(frozen=True)
@@ -61,9 +73,9 @@ class WitnessResult:
 class WitnessClient:
     """Send prompts to OpenAI through the subnet's witness server.
 
-    Call create() with a model and text or images. It returns generated text
-    and token usage. The witness saves the request and response so the
-    validator can replay the miner's code without calling OpenAI again.
+    Bind a generation with for_generation() or use run_generation(). The
+    generation client returns the recorded OpenAI result so the validator can
+    replay the miner's code without calling OpenAI again.
     """
 
     @timed("initialize")
@@ -75,12 +87,13 @@ class WitnessClient:
         openai_api_key: str | None = None,
         subscription: Literal["codex"] | None = None,
         delivery_timeout: float = 600,
+        parallel_preparations: int = 3,
     ) -> None:
         """Configure credentials, proof parameters, and local recovery storage.
 
         Args:
             config: WitnessConfig mapping or path to its JSON file. Requires
-                witness_url (HTTPS origin) and proof_parameters path.
+                witness_url (HTTPS origin), proof_parameters path, and pinned round.
                 Set state_directory to keep recovery files on persistent
                 storage; otherwise the user's local state directory is used.
             hotkey: Miner signing key loaded and managed by the caller.
@@ -89,12 +102,25 @@ class WitnessClient:
                 Credentials are refreshed when needed.
             delivery_timeout: Positive retry window in seconds for each gateway
                 delivery phase (default 600), not a total create() time limit.
+            parallel_preparations: Maximum concurrent Pod call preparations
+                across generations (1 through 32, default 3).
         """
         self._config: WitnessConfig
         if isinstance(config, dict):
             self._config = config.copy()
         else:
             self._config = json.loads(Path(config).read_text(encoding="utf-8"))
+        if self._config.get("transport", "pods-v1") != "pods-v1":
+            raise ValueError("Unknown witness transport")
+        self._config["transport"] = "pods-v1"
+        if re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", self._config.get("round", "")) is None:
+            raise ValueError("Pod transport requires a pinned competition round")
+        if (
+            not isinstance(parallel_preparations, int)
+            or isinstance(parallel_preparations, bool)
+            or not 1 <= parallel_preparations <= 32
+        ):
+            raise ValueError("parallel_preparations must be an integer from 1 through 32")
         if not math.isfinite(delivery_timeout) or delivery_timeout <= 0:
             raise ValueError("delivery_timeout must be finite and > 0 seconds")
         if (openai_api_key is None) == (subscription is None) or subscription not in (
@@ -132,6 +158,7 @@ class WitnessClient:
             raise ValueError("Witness state directory must be private (chmod 700)")
         with measure("prover_initialize"):
             self._prover = Prover(parameters)
+        self._preparation = threading.BoundedSemaphore(parallel_preparations)
         self._hotkey = hotkey
         with measure("http_initialize"):
             context = ssl.create_default_context()
@@ -142,11 +169,14 @@ class WitnessClient:
                 follow_redirects=False,
                 trust_env=False,
             )
-        self._gateway = GatewayClient(
+        from .pods import PodGatewayClient
+
+        self._gateway: GatewayClient = PodGatewayClient(
             self._http,
             self._hotkey,
             self._state,
             delivery_timeout,
+            round_number=self._config["round"],
         )
         # Preserve the familiar Responses API spelling without an extra layer.
         self.responses = self
@@ -167,116 +197,53 @@ class WitnessClient:
         self.close()
 
     @timed("create")
-    def create(self, **params: Unpack[ResponseCreateParamsStreaming]) -> WitnessResult:
-        """Make one OpenAI request and wait for its witnessed response.
-
-        Args:
-            **params: OpenAI Responses request parameters, typed by the SDK's
-                ResponseCreateParamsStreaming. Supply stream=True, model, and
-                input directly, e.g. model="YOUR_MODEL_ID",
-                input="Make a three.js scene", instructions="Return JavaScript",
-                reasoning={"effort": "high"}, or prompt_cache_key="lorry".
-                Support depends on the model and API/subscription endpoint.
-                This method returns the completed result after consuming the
-                stream. Background generation is unsupported. Subscription
-                requests always use store=False.
-
-        Returns:
-            WitnessResult with the full OpenAI response, hotkey, output_text,
-            and usage. Tool-call and refusal results can have empty output_text.
-
-        Raises:
-            ValueError: Invalid local request options, credentials, or body size.
-            WitnessError: Worker startup or exchange failed. If exchange_id is set,
-                keep it for resume(); inference is never automatically repeated.
-                Incomplete/failed generations retain their data in error.response.
-
-        Example:
-            from bittensor_wallet import Wallet
-
-            hotkey = Wallet(name="miner", hotkey="default").hotkey
-            image_url = "https://example.org/lorry.png"
-            with WitnessClient("witness.json", hotkey=hotkey, subscription="codex") as client:
-                result = client.create(
-                    stream=True,
-                    model="YOUR_MODEL_ID",
-                    input=[{"role": "user", "content": [
-                        {"type": "input_text", "text": "Make this in three.js"},
-                        {"type": "input_image", "image_url": image_url, "detail": "auto"},
-                    ]}],
-                    instructions="Return only JavaScript.",
-                )
-                print(result.output_text, result.usage)
-        """
-        with measure("serialize_request"):
-            body = openai_request.serialize_body(params, self._mode)
-        with measure("credentials_before_queue"):
-            openai_request.load_credentials(self._config, self._mode, self._api_key)
-        host, path = openai_request.PROVIDERS[self._mode]
-        identifier: str | None = None
-        try:
-            session = self._gateway.queue_and_wait_for_worker(self._mode)
-            identifier = str(uuid.UUID(session["id"]))
-            if (
-                session.get("protocol") != 2
-                or session["provider"] != f"https://{host}{path}"
-                or session["proof_key_sha256"] != self._prover.verifying_key_sha256
-                or session["miner"] != self._hotkey.ss58_address
-            ):
-                raise WitnessError(
-                    "Witness session differs from the requested exchange", identifier
-                )
-            directory = self._state / identifier
-            fd = os.open(self._state, os.O_RDONLY)
-            try:
-                os.fsync(fd)
-            finally:
-                os.close(fd)
-            _save(directory / "session.json", _encode_json(session))
-            try:
-                with measure("prepare_request_and_credentials"):
-                    request = openai_request.prepare_request(
-                        self._config,
-                        self._mode,
-                        self._api_key,
-                        body=body,
-                    )
-            except Exception:
-                # Release the unused worker without masking the credential error.
-                with suppress(Exception):
-                    self._gateway.release(identifier)
-                raise
-            _save(directory / "request.json", request.body)
-            with self._gateway.tunnel(identifier) as tunnel:
-                raw = exchange(
-                    tunnel,
-                    request.host,
-                    request.chunks,
-                    handshake=lambda disclosure: self._handshake(tunnel, disclosure),
-                    authorize=lambda disclosure: self._authorize(tunnel, disclosure),
-                    timeout=self._gateway.remaining_seconds(identifier),
-                )
-            with measure("parse_and_save_response"):
-                response = http_body(raw)
-                _save(directory / "response.bin", response)
-            return self.resume(identifier)
-        except WitnessError as error:
-            error.exchange_id = error.exchange_id or identifier
-            raise
-        except Exception as error:
-            raise WitnessError(
-                f"Exchange {identifier} failed; inference was not retried: {error}",
-                identifier,
-            ) from error
+    def create(
+        self,
+        *,
+        request_id: int = 0,
+        stream: Literal[True] = True,
+        session_id: str | None = None,
+        **params: Unpack[ResponseCreateParamsBase],
+    ) -> WitnessResult:
+        """Require a generation-bound client before making a witnessed request."""
+        raise ValueError("Use for_generation() or run_generation() with the Pod transport")
 
     def release(self, exchange_id: str) -> None:
-        """Release a stuck allocation so the next create() can queue a new worker.
+        """Release a stuck capture without resetting the generation's usage.
 
-        This is safe to repeat and does not reset the round's worker allowance.
+        This is safe to repeat.
         An OpenAI request already in progress may still finish and save evidence;
         use resume() to retrieve it. Releasing does not issue another GPT request.
         """
         self._gateway.release(str(uuid.UUID(exchange_id)))
+
+    def for_generation(
+        self,
+        image: bytes,
+        seed: int,
+        *,
+        prompt_url: str | None = None,
+        call_slots: threading.Semaphore | None = None,
+    ) -> GenerationWitness:
+        """Bind the supplied generate() client to one prompt and generation seed.
+
+        The trusted runner constructs this client outside miner code. Repeating
+        a generation resumes its existing prefix; it does not reset prompt usage.
+        Shared call slots bound active captures across generations; reservation
+        and recorded delivery waits do not occupy a slot.
+        """
+        if self._config.get("transport") != "pods-v1":
+            raise ValueError("Generation recording requires transport='pods-v1'")
+        return GenerationWitness(
+            self,
+            Generation.from_prompt(
+                image,
+                seed,
+                round_number=self._config["round"],
+                prompt_url=prompt_url,
+            ),
+            call_slots=call_slots,
+        )
 
     @timed("resume")
     def resume(self, exchange_id: str) -> WitnessResult:
@@ -291,64 +258,37 @@ class WitnessClient:
         """
         identifier = str(uuid.UUID(exchange_id))
         identify_exchange(identifier)
-        try:
-            directory = self._state / identifier
-            session = recovery.load_session(directory)
-            host, path = openai_request.PROVIDERS[self._mode]
-            if session["provider"] != f"https://{host}{path}":
-                raise WitnessError(
-                    "Cannot resume an exchange from a different provider",
-                    identifier,
-                )
-            with measure("evidence_retrieval_wait"):
-                status = self._gateway.wait_for_evidence(identifier)
-            if status["status"] != "issued":
-                raise WitnessError("Witness has not accepted this exchange", identifier)
-            provider_status = status.get("provider_status")
-            if not (status.get("evidence_expires") or 0) > time.time() * 1000:
-                raise WitnessError(
-                    "Witness evidence is unavailable; use a server with evidence retention",
-                    identifier,
-                )
-            if not (directory / "response.bin").exists():
-                _save(directory / "response.bin", self._gateway.response(identifier))
-            if session["miner"] != self._hotkey.ss58_address:
-                raise WitnessError(
-                    "Cannot resume an exchange from a different miner", identifier
-                )
-            body = (directory / "response.bin").read_bytes()
-            if provider_status is not None and provider_status != 200:
-                raise provider_error(provider_status, body)
-            try:
-                output, completed = completed_response(body)
-            except ValueError as error:
-                raise WitnessError(
-                    "Invalid recorded OpenAI response",
-                    identifier,
-                    source="provider",
-                    code="invalid_provider_response",
-                ) from error
-            return WitnessResult(
-                session["miner"],
-                output,
-                (
-                    cast(Usage, completed.usage.model_dump(exclude_unset=True))
-                    if completed.usage
-                    else {}
-                ),
-                response=completed,
-                _exchange_id=identifier,
-            )
-        except WitnessError as error:
-            error.exchange_id = identifier
-            raise
-        except Exception as error:
-            raise WitnessError(
-                f"Could not recover the recorded exchange: {error}",
-                identifier,
-                code="recovery_unavailable",
-            ) from error
+        from .pods import PodGatewayClient
 
+        assert isinstance(self._gateway, PodGatewayClient)
+        job = json.loads((self._state / identifier / "job.json").read_bytes())
+        invocation = Invocation.model_validate(job["invocation"])
+        if invocation.request.provider != self._mode:
+            raise WitnessError("Cannot resume a different provider", identifier)
+        deadline = time.monotonic() + self._gateway.delivery_timeout
+        while True:
+            snapshot = self._gateway.snapshot(identifier)
+            if snapshot.call.phase == "issued":
+                session, recorded_status, response = self._gateway.recorded(
+                    invocation, snapshot.call, self._prover.verifying_key_sha256
+                )
+                return recorded_result(
+                    session["miner"], identifier, recorded_status, response
+                )
+            if (
+                snapshot.call.phase == "failed"
+                and snapshot.call.not_dispatched
+                and not snapshot.call.authorized
+            ):
+                raise WitnessError(
+                    "Recorded witness capture failed",
+                    identifier,
+                    code="capture_failed",
+                    source="gateway",
+                )
+            if time.monotonic() >= deadline:
+                raise ExchangePending("Capture remains unresolved", identifier)
+            time.sleep(min(0.5, max(0, deadline - time.monotonic())))
     def _handshake(
         self, tunnel: WebSocketTunnel, disclosure: HandshakeDisclosure
     ) -> None:
@@ -384,6 +324,341 @@ class WitnessClient:
                     self._gateway.remaining_seconds(tunnel.identifier),
                 ),
             )
+
+
+class GenerationWitness(WitnessClient):
+    """One generate() invocation; equal requests share a captured response."""
+
+    def __init__(
+        self,
+        parent: WitnessClient,
+        generation: Generation,
+        *,
+        call_slots: threading.Semaphore | None = None,
+    ) -> None:
+        self._config, self._mode, self._api_key = (
+            parent._config,
+            parent._mode,
+            parent._api_key,
+        )
+        self._state, self._prover, self._hotkey = (
+            parent._state,
+            parent._prover,
+            parent._hotkey,
+        )
+        self._preparation = parent._preparation
+        self._http, self._gateway = parent._http, parent._gateway
+        self.generation = generation
+        self.responses = self
+        self._cursor = 0
+        self._invocations = threading.Condition()
+        self._prefix: list[str] | None = None
+        self._call_slots = call_slots
+        self._deliveries = threading.Condition()
+        self._delivery_cursor = 0
+        self._unresolved = False
+
+    def create(
+        self,
+        *,
+        request_id: int = 0,
+        stream: Literal[True] = True,
+        session_id: str | None = None,
+        **params: Unpack[ResponseCreateParamsBase],
+    ) -> WitnessResult:
+        from .pods import PodGatewayClient
+
+        assert isinstance(self._gateway, PodGatewayClient)
+        openai_request.validate_session_id(session_id, self._mode)
+        normalized = cast(
+            ResponseCreateParamsStreaming, {"service_tier": "default", **params, "stream": stream}
+        )
+        body = openai_request.serialize_body(normalized, self._mode)
+        key = RequestKey.from_body(self._mode, body, request_id)
+        identifier: str | None = None
+        retries = 0
+        try:
+            # Serialize reservation only. TLS, inference and result waiting remain
+            # concurrent, including multiple invocations of the same request.
+            with self._invocations:
+                if self._prefix is None:
+                    try:
+                        recording = self._gateway.recording(self.generation)
+                    except WitnessError as error:
+                        if error.status_code != 404:
+                            raise
+                        self._prefix = []
+                    else:
+                        if recording.generation.id != self.generation.id:
+                            raise WitnessError(
+                                "Generation recording differs",
+                                code="invalid_recording",
+                                source="gateway",
+                            )
+                        self._prefix = [entry.call_id for entry in recording.entries]
+                reservation_deadline = time.monotonic() + self._gateway.delivery_timeout
+                while (
+                    self._cursor < len(self._prefix)
+                    and self._prefix[self._cursor] != key.id
+                ):
+                    remaining = reservation_deadline - time.monotonic()
+                    if self._unresolved or remaining <= 0:
+                        raise WitnessError(
+                            "Recorded invocation order could not be restored",
+                            code="recording_unresolved",
+                            source="gateway",
+                        )
+                    self._invocations.wait(remaining)
+                invocation = Invocation(
+                    generation=self.generation, ordinal=self._cursor, request=key
+                )
+                snapshot = self._gateway.reserve(invocation)
+                if (
+                    snapshot.call.phase == "failed"
+                    and snapshot.call.not_dispatched
+                    and not snapshot.call.authorized
+                ):
+                    snapshot = self._gateway.retry(invocation, snapshot.call.exchange_id)
+                    retries += 1
+                identifier = snapshot.call.exchange_id
+                identify_exchange(identifier)
+                if (
+                    snapshot.call.request != key
+                    or snapshot.hotkey != self._hotkey.ss58_address
+                    or snapshot.round != self.generation.round
+                ):
+                    raise WitnessError(
+                        "Call reservation differs", identifier, code="invalid_recording"
+                    )
+                directory = self._state / identifier
+                directory.mkdir(mode=0o700, exist_ok=True)
+                _save(
+                    directory / "job.json",
+                    _encode_json(
+                        {
+                            "deadline": snapshot.call.deadline,
+                            "invocation": invocation.model_dump(),
+                        }
+                    ),
+                )
+                self._cursor += 1
+                self._invocations.notify_all()
+            attempted = False
+            deadline = time.monotonic() + snapshot.call.deadline - time.time()
+            with (
+                self._call_slots
+                if self._call_slots is not None
+                and invocation.ordinal == snapshot.call.owner_ordinal
+                and snapshot.call.phase not in ("issued", "failed")
+                else nullcontext(),
+                ExitStack() as preparation,
+            ):
+                # Bound live preparation before opening provider connections.
+                # Release its slot after authorization so inference can overlap.
+                if (
+                    invocation.ordinal == snapshot.call.owner_ordinal
+                    and snapshot.call.phase in ("reserved", "assigned")
+                ):
+                    preparation.enter_context(self._preparation)
+                while snapshot.call.phase != "issued":
+                    if (
+                        snapshot.call.phase == "failed"
+                        and snapshot.call.not_dispatched
+                        and not snapshot.call.authorized
+                    ):
+                        if retries >= 2:
+                            break
+                        retries += 1
+                        time.sleep(retries)
+                        snapshot = self._gateway.retry(invocation, snapshot.call.exchange_id)
+                        if (snapshot.call.request != key or snapshot.hotkey != self._hotkey.ss58_address
+                                or snapshot.round != self.generation.round):
+                            raise WitnessError("Retry reservation differs", code="invalid_recording")
+                        identifier = snapshot.call.exchange_id
+                        identify_exchange(identifier)
+                        directory = self._state / identifier
+                        directory.mkdir(mode=0o700, exist_ok=True)
+                        _save(directory / "job.json", _encode_json({
+                            "deadline": snapshot.call.deadline, "invocation": invocation.model_dump(),
+                        }))
+                        deadline = time.monotonic() + snapshot.call.deadline - time.time()
+                        attempted = False
+                        preparation.close()
+                        if (invocation.ordinal == snapshot.call.owner_ordinal
+                                and snapshot.call.phase in ("reserved", "assigned")):
+                            preparation.enter_context(self._preparation)
+                        continue
+                    if (
+                        invocation.ordinal == snapshot.call.owner_ordinal
+                        and not attempted
+                        and snapshot.call.phase != "failed"
+                    ):
+                        if snapshot.call.phase in ("reserved", "assigned"):
+                            openai_request.load_credentials(
+                                self._config, self._mode, self._api_key
+                            )
+                            start_id = self._gateway.ensure_pod()
+                            snapshot = self._gateway.dispatch(invocation, start_id)
+                        if snapshot.session is not None:
+                            session = cast(Session, snapshot.session)
+                            host, path = openai_request.PROVIDERS[self._mode]
+                            if any(
+                                session.get(k) != v
+                                for k, v in {
+                                    "id": identifier,
+                                    "protocol": 2,
+                                    "provider": f"https://{host}{path}",
+                                    "proof_key_sha256": self._prover.verifying_key_sha256,
+                                    "miner": self._hotkey.ss58_address,
+                                    "round": snapshot.round,
+                                }.items()
+                            ):
+                                raise WitnessError(
+                                    "Witness session differs",
+                                    identifier,
+                                    code="invalid_recording",
+                                )
+                            attempted = True
+                            _save(directory / "session.json", _encode_json(session))
+                            request = openai_request.prepare_request(
+                                self._config,
+                                self._mode,
+                                self._api_key,
+                                body=body,
+                                session_id=session_id,
+                            )
+                            _save(directory / "request.json", body)
+                            try:
+                                with self._gateway.tunnel(identifier) as tunnel:
+                                    def authorize(disclosure: EarlyDisclosure) -> None:
+                                        self._authorize(tunnel, disclosure)
+                                        preparation.close()
+
+                                    exchange(
+                                        tunnel,
+                                        request.host,
+                                        request.chunks,
+                                        handshake=lambda disclosure: self._handshake(
+                                            tunnel, disclosure
+                                        ),
+                                        authorize=authorize,
+                                        timeout=max(0, deadline - time.monotonic()),
+                                    )
+                            except (
+                                OSError,
+                                TimeoutError,
+                                WebSocketException,
+                                WitnessError,
+                                TLSAbruptCloseError,
+                            ):
+                                # The worker may already be paying/capturing. Recover
+                                # this exact exchange, without another TLS connection.
+                                snapshot = self._gateway.snapshot(identifier)
+                    if time.monotonic() >= deadline:
+                        raise ExchangePending(
+                            "Capture remains unresolved; restart with the same generation", identifier
+                        )
+                    snapshot = self._gateway.snapshot(identifier)
+                    if snapshot.call.phase != "issued":
+                        time.sleep(min(0.5, max(0, deadline - time.monotonic())))
+            if snapshot.call.phase == "failed":
+                raise WitnessError(
+                    "Recorded witness capture failed",
+                    identifier,
+                    code="capture_failed",
+                    source="gateway",
+                )
+            session, status, response = self._gateway.recorded(
+                invocation, snapshot.call, self._prover.verifying_key_sha256
+            )
+            result: WitnessResult | None = None
+            failure: WitnessError | None = None
+            try:
+                result = recorded_result(session["miner"], identifier, status, response)
+            except WitnessError as error:
+                failure = error
+            with self._deliveries:
+                delivery = self._gateway.delivered(invocation)
+                delivery_deadline = time.monotonic() + self._gateway.delivery_timeout
+                while delivery != self._delivery_cursor:
+                    remaining = delivery_deadline - time.monotonic()
+                    if self._unresolved or remaining <= 0:
+                        raise WitnessError(
+                            "Recorded delivery order could not be restored",
+                            identifier,
+                            code="recording_unresolved",
+                            source="gateway",
+                        )
+                    self._deliveries.wait(remaining)
+                self._delivery_cursor += 1
+                self._deliveries.notify_all()
+            if failure is not None:
+                raise failure
+            assert result is not None
+            return result
+        except WitnessError as error:
+            if error.source != "provider":
+                with self._deliveries:
+                    self._unresolved = True
+                    self._deliveries.notify_all()
+                with self._invocations:
+                    self._invocations.notify_all()
+            error.exchange_id = error.exchange_id or identifier
+            raise
+        except Exception as error:
+            with self._deliveries:
+                self._unresolved = True
+                self._deliveries.notify_all()
+            with self._invocations:
+                self._invocations.notify_all()
+            raise WitnessError(
+                "Generation recording did not complete",
+                identifier,
+                code="recording_unresolved",
+                source="gateway",
+            ) from error
+
+    def finish(self, output: str | None) -> None:
+        from .pods import PodGatewayClient
+
+        assert isinstance(self._gateway, PodGatewayClient)
+        if self._unresolved:
+            raise WitnessError(
+                "An infrastructure failure left this attempt unresolved",
+                code="recording_unresolved",
+                source="gateway",
+            )
+        self._gateway.finish_generation(self.generation, self._cursor, output)
+
+
+def recorded_result(
+    hotkey: str, identifier: str, status: int, body: bytes
+) -> WitnessResult:
+    """The same immutable provider outcome is decoded in generation and replay."""
+    try:
+        if status != 200:
+            raise provider_error(status, body)
+        try:
+            output, completed = completed_response(body)
+        except ValueError as error:
+            raise WitnessError(
+                "Invalid recorded OpenAI response",
+                identifier,
+                source="provider",
+                code="invalid_provider_response",
+            ) from error
+        return WitnessResult(
+            hotkey,
+            output,
+            cast(Usage, completed.usage.model_dump(exclude_unset=True))
+            if completed.usage
+            else {},
+            response=completed,
+            _exchange_id=identifier,
+        )
+    except WitnessError as error:
+        error.exchange_id = identifier
+        raise
 
 
 def _encode_json(value: object) -> bytes:

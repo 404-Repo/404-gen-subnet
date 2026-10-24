@@ -1,0 +1,70 @@
+# Build from the repository root.
+FROM golang:1.27.1-bookworm@sha256:69a7b9788769bec032d238959b61854e9ae87f57be9029ec04e9885fabf99195 AS proof
+ENV GOTOOLCHAIN=local
+WORKDIR /src
+COPY witness-client/native/go.mod witness-client/native/go.sum ./
+RUN go mod download
+COPY witness-client/native/*.go ./
+RUN CGO_ENABLED=0 go build -trimpath -o /privateauth .
+
+FROM node:22-bookworm-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c AS node
+WORKDIR /witness
+COPY witness-server/verifier/package.json witness-server/verifier/package-lock.json ./
+RUN npm ci --ignore-scripts --omit=dev --no-audit --no-fund
+
+FROM python:3.14.9-slim-bookworm@sha256:945c2676dc2b18e0c1f16879244122c57c0ffede60006bf3df159c507a31bcae AS witness-base
+WORKDIR /app/witness-gateway
+COPY witness-gateway/requirements.txt witness-gateway/requirements-pods.txt witness-gateway/constraints-pods.txt ./
+RUN pip install --no-cache-dir -c constraints-pods.txt -r requirements-pods.txt
+COPY --from=node /usr/local/bin/node /usr/local/bin/node
+COPY --from=node /witness/node_modules /app/witness-server/verifier/node_modules
+COPY --from=proof /privateauth /app/witness-client/native/privateauth
+COPY witness-client/LICENSE witness-client/THIRD_PARTY_NOTICES.md /app/licenses/
+COPY witness-server/verifier/*.mjs /app/witness-server/verifier/
+COPY witness-server/verifier/params/verifying.bin /app/witness-server/verifier/params/verifying.bin
+COPY witness-server/worker/*.py witness-server/worker/verify.mjs /app/witness-server/worker/
+COPY witness-client/src/witness_client/ /app/witness-client/src/witness_client/
+COPY witness-gateway/pod_gateway/ /app/witness-gateway/pod_gateway/
+COPY miner-reference/budgets/pricing.json /app/config/pricing.json
+ENV PYTHONPATH=/app/witness-client/src:/app/witness-gateway:/app/witness-server/worker \
+    PYTHONUNBUFFERED=1 WITNESS_TIMINGS=1 WITNESS_PRICING_FILE=/app/config/pricing.json
+EXPOSE 8443
+ENTRYPOINT ["python", "-m", "pod_gateway"]
+
+FROM proof AS renderer-affinity-build
+WORKDIR /affinity-build
+COPY render-service-js/native/*.c ./
+RUN mkdir -p /affinity-artifacts/tests && \
+    gcc -std=c11 -O2 -Wall -Wextra -Werror -fPIC -fvisibility=hidden -shared affinity.c -o /affinity-artifacts/libwitness-affinity.so -ldl -pthread && \
+    gcc -std=c11 -O2 -Wall -Wextra -Werror -fPIC -shared test-driver.c -o /affinity-artifacts/tests/libvk_swiftshader.so -pthread && \
+    gcc -std=c11 -O2 -Wall -Wextra -Werror test-affinity.c -o /affinity-artifacts/tests/test-affinity -ldl -pthread && \
+    /affinity-artifacts/tests/test-affinity /affinity-artifacts/tests/libvk_swiftshader.so control && \
+    LD_PRELOAD=/affinity-artifacts/libwitness-affinity.so /affinity-artifacts/tests/test-affinity /affinity-artifacts/tests/libvk_swiftshader.so fixed && \
+    gcc --version > /affinity-artifacts/compiler-version.txt
+
+FROM witness-base AS renderer-runtime
+ARG CHROMIUM_VERSION=155.0.8059.79-1~deb12u1
+ARG DEBIAN_SNAPSHOT=20261022T000000Z
+ENV DEBIAN_FRONTEND=noninteractive PUPPETEER_SKIP_DOWNLOAD=true PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
+RUN sed -i "s|http://deb.debian.org/debian-security|https://snapshot.debian.org/archive/debian-security/${DEBIAN_SNAPSHOT}|; s|http://deb.debian.org/debian|https://snapshot.debian.org/archive/debian/${DEBIAN_SNAPSHOT}|" /etc/apt/sources.list.d/debian.sources \
+    && apt-get -o Acquire::Check-Valid-Until=false update && apt-get install -y --no-install-recommends \
+    chromium=${CHROMIUM_VERSION} chromium-common=${CHROMIUM_VERSION} \
+    fonts-liberation fonts-noto-color-emoji util-linux \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=renderer-affinity-build /affinity-artifacts/ /opt/witness-affinity/
+COPY --from=node /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/npm
+RUN ln -sf /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm
+COPY render-service-js/package*.json /opt/renderer/
+RUN cd /opt/renderer && npm ci --omit=dev --no-audit --no-fund
+COPY render-service-js/src /opt/renderer/src
+ENV WITNESS_RENDERER_ENABLED=1
+
+FROM renderer-runtime AS render-benchmark
+COPY render-service-js/test /opt/renderer/test
+COPY miner-reference/miner_reference/normalize.js /opt/miner-reference/miner_reference/normalize.js
+COPY miner-reference/examples/generated /opt/fixtures
+COPY witness-gateway/benchmarks/render_pod.py /opt/benchmark/harness.py
+RUN chmod -R a+rX /opt/renderer /opt/fixtures && mkdir -p /private-benchmark && chmod 700 /private-benchmark
+ENTRYPOINT ["python", "-u", "/opt/benchmark/harness.py"]
+
+FROM renderer-runtime AS production

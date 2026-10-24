@@ -106,8 +106,10 @@ def prepare_request(
     api_key: str | None,
     *,
     body: bytes,
+    session_id: str | None = None,
 ) -> OpenAIRequest:
     """Build HTTP chunks for a serialized body using current credentials."""
+    validate_session_id(session_id, mode)
     credential, account = load_credentials(config, mode, api_key)
     host, path = PROVIDERS[mode]
     prefix = (
@@ -115,15 +117,28 @@ def prepare_request(
         f"Content-Length: {len(body)}\r\nContent-Type: application/json\r\n"
         "Accept: text/event-stream\r\nAuthorization: Bearer "
     ).encode()
-    suffix = (
-        f"\r\nChatGPT-Account-Id: {account}\r\n\r\n" if account else "\r\n\r\n"
-    ).encode() + body
+    suffix = "\r\n"
+    if account:
+        suffix += f"ChatGPT-Account-Id: {account}\r\n"
+    if session_id is not None:
+        suffix += f"session-id: {session_id}\r\n"
+    suffix_bytes = (suffix + "\r\n").encode() + body
     return OpenAIRequest(
         host=host,
         path=path,
         body=body,
-        chunks=((False, prefix), (True, credential.encode()), (False, suffix)),
+        chunks=((False, prefix), (True, credential.encode()), (False, suffix_bytes)),
     )
+
+
+def validate_session_id(value: str | None, mode: Literal["api", "codex"]) -> None:
+    """Keep optional subscription routing metadata within the 8 KiB header limit."""
+    if value is None:
+        return
+    if mode != "codex":
+        raise ValueError("session_id requires subscription='codex'")
+    if not isinstance(value, str) or re.fullmatch(r"[!-~]{1,1024}", value) is None:
+        raise ValueError("session_id must contain 1-1024 visible ASCII characters")
 
 
 def _json_default(value: object) -> object:

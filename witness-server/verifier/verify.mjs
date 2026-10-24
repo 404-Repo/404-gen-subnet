@@ -68,7 +68,7 @@ async function verifyHandshake({ observed, claim, host, rootCAs, proofOptions, a
   ci++;
 
   const transcript = [helloBytes, shMessages[0].raw];
-  let handshake = Buffer.alloc(0), step = 0, serverFinished = false, certificates;
+  let handshake = Buffer.alloc(0), step = 0, serverFinished = false, certificates, certificateTimeUnixNs;
   const handshakeKey = ds[si];
   for (let number = 0; si < server.length && !serverFinished; si++, number++) {
     sameEpoch(ds[si], handshakeKey, number);
@@ -84,7 +84,7 @@ async function verifyHandshake({ observed, claim, host, rootCAs, proofOptions, a
       if (message.type === 11) {
         certificates = parseCertificates(message.body, { version: 'TLS1_3' }).certificates;
         check(certificates.length > 0, 'Missing server certificate');
-        await verifyServerCertificates(certificates, host, rootCAs, proofOptions);
+        certificateTimeUnixNs = await verifyServerCertificates(certificates, host, rootCAs, proofOptions);
       } else if (message.type === 15) {
         await verifyCertificateSignature({ ...parseServerCertificateVerify(message.body),
           publicKey: certificates[0].getPublicKey(), signatureData: await getSignatureDataTls13(transcript, SUITE) });
@@ -99,7 +99,7 @@ async function verifyHandshake({ observed, claim, host, rootCAs, proofOptions, a
   }
   check(serverFinished && step === 4, 'Unfinished server authentication');
 
-  return { client, server, dc, ds, ci, si };
+  return { client, server, dc, ds, ci, si, certificateTimeUnixNs };
 }
 
 function initialResponseKey(claim) {
@@ -169,7 +169,7 @@ async function verifyRequest(options) {
   const request = Buffer.concat([prefix.data, Buffer.alloc(tokenLength, '*'), ...suffixParts]);
   const requestBody = parseRequest(request, { host, path, tokenLength, authentication });
 
-  return { requestBody, serverStart: si, server, disclosures: ds };
+  return { requestBody, serverStart: si, server, disclosures: ds, certificateTimeUnixNs: verified.certificateTimeUnixNs };
 }
 
 // Verify the complete held generation request and the earlier probe response.
@@ -181,7 +181,8 @@ export async function authorizeRequest(options) {
   const response = serverApplication(verified.server, verified.serverStart,
     index => ({ ...responseKey, number: index - verified.serverStart }), true);
   check(probeLength(response) === response.length, 'Additional response before generation');
-  return { requestBody: verified.requestBody, serverStart: verified.serverStart, responseKey, probe: true };
+  return { requestBody: verified.requestBody, serverStart: verified.serverStart, responseKey, probe: true,
+    certificateTimeUnixNs: verified.certificateTimeUnixNs };
 }
 
 function serverApplication(server, si, disclosure, probe = false) {
@@ -244,13 +245,21 @@ export function requestChunks(body, token, account, { host, path, authentication
   ];
 }
 
-function parseRequest(request, { host, path, tokenLength, authentication }) {
+export function parseRequest(request, { host, path, tokenLength, authentication }) {
   const boundary = request.indexOf('\r\n\r\n');
   check(boundary >= 0 && boundary <= 8192, 'Request headers invalid');
   check(request.subarray(0, boundary).every(byte => byte < 128), 'Non-ASCII request headers');
   const headers = request.subarray(0, boundary).toString('ascii').split('\r\n');
   check(['api', 'subscription'].includes(authentication), 'Unknown authentication mode');
-  check(headers.length === (authentication === 'api' ? 7 : 8) && headers[0] === `POST ${path} HTTP/1.1` && headers[1] === `Host: ${host}` && headers[2] === 'Connection: close', 'Request routing/framing mismatch');
+  const requiredHeaders = authentication === 'api' ? 7 : 8;
+  const hasSessionId = authentication === 'subscription' && headers.length === requiredHeaders + 1;
+  check(headers.length === requiredHeaders || hasSessionId, 'Unexpected request headers');
+  if (hasSessionId) {
+    check(headers[8].startsWith('session-id: '), 'Unexpected request headers');
+    const sessionId = headers[8].slice(12);
+    check(sessionId.length >= 1 && sessionId.length <= 1024 && !/[^!-~]/.test(sessionId), 'Invalid session-id header');
+  }
+  check(headers[0] === `POST ${path} HTTP/1.1` && headers[1] === `Host: ${host}` && headers[2] === 'Connection: close', 'Request routing/framing mismatch');
   check(/^Content-Length: (0|[1-9][0-9]*)$/.test(headers[3]) && headers[4] === 'Content-Type: application/json' && headers[5] === 'Accept: text/event-stream', 'Unexpected request headers');
   check(headers[6] === `Authorization: Bearer ${'*'.repeat(tokenLength)}` && (authentication === 'api' || /^ChatGPT-Account-Id: [a-f0-9-]{1,80}$/.test(headers[7])), 'Credential coverage mismatch');
   const body = request.subarray(boundary + 4);

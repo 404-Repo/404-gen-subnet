@@ -4,10 +4,10 @@ pythonpath = [".", "../../witness-client/src"]
 
 [tool.mypy]
 python_version = "3.11"
-files = ["storage.py", "identity.py", "worker.py", "channel.py", "timing.py", "tests"]
+files = ["storage.py", "identity.py", "worker.py", "pod.py", "channel.py", "timing.py", "tests"]
 strict = true
-mypy_path = ["../../witness-client/src"]
+mypy_path = ["../../witness-client/src", "../../witness-gateway"]
 
 [[tool.mypy.overrides]]
-module = ["boto3", "botocore.*", "runpod.*"]
+module = ["boto3", "botocore.*"]
 ignore_missing_imports = true

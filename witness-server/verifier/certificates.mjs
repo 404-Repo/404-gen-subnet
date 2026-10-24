@@ -7,6 +7,8 @@ export async function verifyServerCertificates(certificates, host, rootCAs = [],
   if (!certificates?.length || certificates.length > 16) throw new Error('Invalid certificate chain length');
   const chain = certificates.map(cert => cert.serialiseToPem());
   if (chain.reduce((n, pem) => n + Buffer.byteLength(pem), 0) > 192 * 1024) throw new Error('Certificate chain too large');
-  await runProof('certificate', { host, chain, roots: [...rootCertificates, ...rootCAs.map(cert => cert.serialiseToPem())] },
+  const result = await runProof('certificate', { host, chain, roots: [...rootCertificates, ...rootCAs.map(cert => cert.serialiseToPem())],
+    ...(options?.certificateTimeUnixNs ? {time_unix_ns: options.certificateTimeUnixNs} : {}) },
     { ...options, timeout: Math.min(options?.timeout ?? 10000, 10000) });
+  return result.verified_at_ns;
 }

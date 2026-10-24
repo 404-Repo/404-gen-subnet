@@ -9,6 +9,7 @@ import (
 	"encoding/asn1"
 	"encoding/pem"
 	"math/big"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -51,7 +52,7 @@ func TestCertificateValidation(t *testing.T) {
 		return c
 	}
 	root := issue(template("test root", true), nil)
-	for _, name := range []string{"valid", "non_CA_issuer", "issuer_without_cert_sign", "expired",
+	for _, name := range []string{"valid", "non_CA_issuer", "issuer_without_cert_sign", "expired", "historical_expired",
 		"wrong_host", "CN_cannot_override_SAN", "client_only_EKU", "leaf_without_signatures",
 		"unknown_critical_extension", "name_constraint", "path_length", "untrusted_root", "missing_issuer"} {
 		t.Run(name, func(t *testing.T) {
@@ -62,7 +63,7 @@ func TestCertificateValidation(t *testing.T) {
 				intermediate.IsCA = false
 			case "issuer_without_cert_sign":
 				intermediate.KeyUsage = x509.KeyUsageDigitalSignature
-			case "expired":
+			case "expired", "historical_expired":
 				leaf.NotAfter = time.Now().Add(-time.Minute)
 			case "wrong_host":
 				leaf.DNSNames = []string{"miner.example"}
@@ -95,8 +96,12 @@ func TestCertificateValidation(t *testing.T) {
 			if name == "missing_issuer" {
 				chain = chain[:1]
 			}
-			err := verifyCertificates(CertificateInput{Host: "chatgpt.com", Chain: chain, Roots: roots})
-			if (err == nil) != (name == "valid") {
+			in := CertificateInput{Host: "chatgpt.com", Chain: chain, Roots: roots}
+			if name == "historical_expired" {
+				in.TimeUnixNano = strconv.FormatInt(time.Now().Add(-10*time.Minute).UnixNano(), 10)
+			}
+			err := verifyCertificates(in)
+			if (err == nil) != (name == "valid" || name == "historical_expired") {
 				t.Fatalf("unexpected validation result: %v", err)
 			}
 		})

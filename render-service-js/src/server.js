@@ -22,8 +22,13 @@ import { renderViews, renderGrid } from './renderer.js';
 import { staticValidate } from './validator/index.js';
 import { validationPool, ValidationUnavailableError } from './validation-pool.js';
 import { boundValidationError } from './validation-report.js';
+import { JobQueue, QueueRejected } from './job-queue.js';
 
 const PORT = parseInt(process.env.PORT || '80', 10);
+const jobs = new JobQueue({
+  capacity: Number(process.env.RENDER_QUEUE_CAPACITY || 8),
+  waitMs: Number(process.env.RENDER_QUEUE_WAIT_MS || 120000),
+});
 
 // Every lighting mode the renderer implements. Anything else is a client bug.
 const LIGHTING_MODES = new Set(['follow', 'studio', 'neutral']);
@@ -219,17 +224,28 @@ export const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === 'POST' && pathname === '/render') {
-      await handleRender(req, res);
+      await jobs.run(async (waitMs) => {
+        res.setHeader('X-Render-Queue-Wait-Ms', waitMs.toFixed(3));
+        await handleRender(req, res);
+      });
       return;
     }
 
     if (req.method === 'POST' && pathname === '/render/grid') {
-      await handleRenderGrid(req, res);
+      await jobs.run(async (waitMs) => {
+        res.setHeader('X-Render-Queue-Wait-Ms', waitMs.toFixed(3));
+        await handleRenderGrid(req, res);
+      });
       return;
     }
 
     sendError(res, 404, 'not found');
   } catch (err) {
+    if (err instanceof QueueRejected) {
+      res.setHeader('Retry-After', '1');
+      sendJson(res, 503, { error: err.reason });
+      return;
+    }
     if (err instanceof ValidationUnavailableError) {
       sendError(res, 503, 'validation_unavailable');
       return;
