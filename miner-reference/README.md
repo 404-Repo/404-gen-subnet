@@ -192,7 +192,7 @@ replay and receipt submission belong to the runtime described below.
 Outside `generate`, the runner checkpoints the returned JavaScript or explicit
 `None` before saving its final choice through the witness Pod. It retries saving
 those bytes after a lost acknowledgement or Pod replacement. The collector reads
-the saved choice directly from private artifact storage. Replay validation compares
+the saved choice directly from the existing public R2 bucket. Replay validation compares
 the reproduced return with this independent submission; a storage receipt does
 not establish source reproducibility. See the [artifact guide](../witness-gateway/ARTIFACTS_POC.md).
 

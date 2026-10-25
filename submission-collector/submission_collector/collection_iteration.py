@@ -2,7 +2,6 @@ import asyncio
 import json
 import secrets
 from collections.abc import Awaitable, Callable
-from contextlib import AsyncExitStack
 from datetime import UTC, datetime, timedelta
 from hashlib import blake2b
 
@@ -86,17 +85,8 @@ async def run_collection_iteration(
                     r2_endpoint=settings.r2_endpoint.get_secret_value(),
                 ) as r2,
                 httpx.AsyncClient(timeout=httpx.Timeout(60, connect=10)) as http_client,
-                AsyncExitStack() as stack,
             ):
-                private_r2 = await stack.enter_async_context(
-                    R2Client(
-                        access_key_id=settings.r2_access_key_id.get_secret_value(),
-                        secret_access_key=settings.r2_secret_access_key.get_secret_value(),
-                        r2_endpoint=settings.r2_endpoint.get_secret_value(),
-                        bucket=settings.witness_artifacts.bucket,
-                    )
-                )
-                artifacts = WitnessArtifacts(private_r2, settings.witness_artifacts)
+                artifacts = WitnessArtifacts(r2, settings.witness_artifacts)
                 pipeline = DownloadPipeline(
                     git_batcher=git_batcher,
                     r2=r2,
@@ -137,7 +127,7 @@ async def collection_iteration(
     Handles three stages of the round lifecycle:
     - OPEN: Waits for latest_reveal_block, collects submissions from chain, saves to git
     - MINER_GENERATION: Waits for generation_deadline_block, then transitions
-    - DOWNLOADING: Downloads Three.js modules from miner CDNs, generates previews, saves to git
+    - DOWNLOADING: Collects saved Pod submissions, prepares judging images, saves to git
 
     Transitions to DUELS stage when downloading completes.
 

@@ -1,7 +1,7 @@
 # Witness artifact storage
 
 The artifact API saves candidate JavaScript and its preview PNG or structured
-rejection in private R2, then saves an explicit final choice. The submission
+rejection in the existing public R2 bucket, then saves an explicit final choice. The submission
 collector reads that choice directly, prepares the existing judging bundle and
 publishes its normal URLs. A storage receipt does not establish Python source
 reproducibility or replace the validator and source-audit eligibility gates.
@@ -95,14 +95,15 @@ artifacts/v1/<deployment>/<round>/<hotkey>/<prompt-sha256>/
     judging/<source-sha256>/<judging-profile-and-options-hash>/
 ```
 
-Keep the artifact bucket private and outside public CDN exposure. Miners receive
-no storage credentials. Authenticated routes are `POST /artifacts/render`,
+Use the existing public `404-gen` bucket for artifacts and judging outputs.
+Pods use the existing `R2_BUCKET` setting; the collector reuses its R2 client.
+Miners receive no storage credentials. Authenticated routes are `POST /artifacts/render`,
 `POST /submissions` and `GET /submissions/<prompt-sha256>`.
 
 ## Submission collector
 
 The collector accepts repo/commit reveals and freezes the admitted source in
-submission metadata. Final results are collected from private Pod-managed artifacts.
+submission metadata. Final results are collected from Pod-managed artifacts in that same public bucket.
 
 After prompts and seed are selected, configure `WITNESS_ARTIFACTS_COLLECTION`
 before DOWNLOADING:
@@ -111,7 +112,6 @@ before DOWNLOADING:
 {
   "deployment": "REPLACE_WITH_DEPLOYMENT",
   "round": "REPLACE_WITH_FULL_ROUND_NAME",
-  "bucket": "REPLACE_WITH_PRIVATE_WITNESS_BUCKET",
   "round_end": 2000000000,
   "prompt_hashes": ["REPLACE_WITH_FROZEN_PROMPT_SHA256"],
   "profile": {
@@ -128,8 +128,8 @@ before DOWNLOADING:
 }
 ```
 
-The artifact bucket uses the collector's existing R2 account endpoint and operator
-credentials. Its public uploads retain the existing output bucket and CDN.
+Artifact reads, collection sealing and judging-image writes use the collector's
+existing R2 client, bucket and operator credentials. Result URLs use the existing CDN.
 `round_end` must equal the witness cutoff. The collector waits for cutoff plus the
 settlement delay, verifies all frozen prompt bytes, and checks the selected source's
 scope, round, seed, admitted commit, operation, manifest identity, size and SHA256.
@@ -146,8 +146,8 @@ and all camera, angle, lighting, size, gap and background settings match. The ei
 white and four gray views use the existing judging requests. Rejected preview
 settings do not determine canonical judging validity.
 
-The complete judging PNG bundle is saved privately before embeddings and public
-upload. Retries reuse it, including after a lost manifest acknowledgement. Public
+The complete judging PNG bundle is saved in the same bucket before embeddings
+and result publication. Retries reuse it, including after a lost manifest acknowledgement. Public
 `views` appears only after all 12 views, grid and embeddings are uploaded.
 `submitted.json` also records the source SHA256 and final-choice revision.
 
@@ -175,7 +175,7 @@ new work. Completed records remain in R2 after cutoff and Pod replacement. An
 available authenticated worker can return them; new renders and final choices
 require the selected Pod and an open round.
 
-Retain the private prefix until judging, replay validation and the evidence
+Retain the artifact prefix until judging, replay validation and the evidence
 retention period finish. Configure the bucket's lifecycle policy for the operator's
 retention period; the service does not delete evidence. Recovered or orphaned bytes
 remain covered by the round's storage budget until retention removes them.

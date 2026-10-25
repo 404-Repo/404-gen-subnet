@@ -1,4 +1,4 @@
-"""Read selected witness outputs from the operator's private artifact bucket."""
+"""Read selected witness outputs from the existing public R2 bucket."""
 
 from __future__ import annotations
 
@@ -44,7 +44,6 @@ class ArtifactSettings(BaseModel):
 
     deployment: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{0,63}$")
     round: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{0,63}$")
-    bucket: str = Field(min_length=1)
     round_end: int = Field(gt=0)
     profile: Profile
     prompt_hashes: list[Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]] = Field(min_length=1, max_length=4096)
@@ -311,7 +310,7 @@ class WitnessArtifacts:
         source_sha256: str,
         render: Callable[[], Awaitable[dict[str, bytes]]],
     ) -> dict[str, bytes]:
-        """Save the complete judging images before embeddings and public publication."""
+        """Save the complete judging images before embeddings and result publication."""
         expected_names = {f"white/{v.name}" for v in WHITE_VIEWS} | {f"gray/{v.name}" for v in GRAY_VIEWS} | {"grid"}
         binding = _hash(
             _canonical(

@@ -40,5 +40,5 @@ client, proof parameters and configuration in the
 
 ## Artifact storage
 
-See [ARTIFACTS_POC.md](ARTIFACTS_POC.md) for private artifact saving, runner use,
+See [ARTIFACTS_POC.md](ARTIFACTS_POC.md) for artifact saving in the existing public bucket, runner use,
 submission-collector configuration, recovery and offline checks.

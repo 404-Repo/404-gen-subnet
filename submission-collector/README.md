@@ -11,7 +11,8 @@ The collector freezes the on-chain `repo` (`owner/repo`) and full 40-character
 `commit` in `submissions.json`. Source-copy CI consumes those immutable entries
 separately; the collector does not execute miner code or install dependencies.
 
-Configure the frozen private artifact bucket and renderer profiles before
+The collector uses the existing public R2 bucket (`404-gen`) for artifacts and
+judging outputs. Configure the approved renderer profiles and round bindings before
 DOWNLOADING. The collector verifies the saved final choice and exact source
 bytes, reuses compatible grids, and saves judging images for retries. Storage,
 render-service and embedding outages keep collection pending. See
@@ -23,7 +24,7 @@ render-service and embedding outages keep collection pending. See
 
 2. **MINER_GENERATION stage**: Wait for `generation_deadline_block`. Miners use the published seed and prompts to generate JavaScript and the runtime saves each final choice through the witness Pod.
 
-3. **DOWNLOADING stage**: For each submission, read its selected private witness artifact, prepare PNG views and a grid, compute embeddings, and upload the bundle to R2. Save progress after each completed generation. Transition to DUELS when complete.
+3. **DOWNLOADING stage**: For each submission, read its selected witness artifact, prepare PNG views and a grid, compute embeddings, and upload the bundle to R2. Save progress after each completed generation. Transition to DUELS when complete.
 
 ## State Files
 

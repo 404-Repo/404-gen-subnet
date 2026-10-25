@@ -1,4 +1,4 @@
-"""Private witness source delivery through the complete collection pipeline."""
+"""Public-bucket witness artifacts through the complete collection pipeline."""
 
 import asyncio
 import base64
@@ -103,14 +103,13 @@ class Collection:
         self.config = ArtifactSettings(
             deployment="competition",
             round="test-1",
-            bucket="private-witness",
             round_end=int(time.time()) - 600,
             profile=PROFILE,
             judging_profile=PROFILE,
             prompt_hashes=[digest(IMAGE)],
         )
         self.settings = settings.model_copy(update={"witness_artifacts": self.config})
-        self.private, self.public = MemoryR2(), MemoryR2()
+        self.r2 = MemoryR2()
         self.git = MockGitHubClient()
         self.git.files["rounds/1/seed.json"] = '{"seed":42}'
         self.git.files["rounds/1/prompts.txt"] = "https://prompts.test/chair.png"
@@ -213,22 +212,22 @@ class Collection:
             "artifact_id": None if output_none else artifact_id,
             "source": None if output_none else source,
         }
-        self.private.objects[source["key"]] = SOURCE
-        self.private.objects[png["key"]] = PNG
-        self.private.objects[f"{self.root}/renders/{artifact_id}.json"] = canonical(artifact)
-        self.private.objects[f"{self.root}/final.json"] = canonical(choice)
+        self.r2.objects[source["key"]] = SOURCE
+        self.r2.objects[png["key"]] = PNG
+        self.r2.objects[f"{self.root}/renders/{artifact_id}.json"] = canonical(artifact)
+        self.r2.objects[f"{self.root}/final.json"] = canonical(choice)
         return choice, artifact
 
     def save_choice(self) -> None:
-        self.private.objects[f"{self.root}/final.json"] = canonical(self.choice)
+        self.r2.objects[f"{self.root}/final.json"] = canonical(self.choice)
 
     async def run(self):
         pipeline = DownloadPipeline(
             GitBatcher(git=self.git, base_sha="ref", branch=self.settings.github_branch),
-            self.public,
+            self.r2,
             self.http,
             self.settings,
-            artifacts=WitnessArtifacts(self.private, self.config),
+            artifacts=WitnessArtifacts(self.r2, self.config),
         )
         return await pipeline.run(CompetitionState(current_round=1, stage=RoundStage.DOWNLOADING), "ref")
 
@@ -252,8 +251,8 @@ async def test_collects_exact_saved_source_and_reuses_only_matching_grid(
     result = collection.result()
     assert result.js and result.views and result.failure_reason is None
     assert result.source_sha256 == digest(SOURCE) and result.submission_revision == "e" * 64
-    assert collection.public.uploads[f"rounds/1/{HOTKEY}/submitted/chair.js"] == SOURCE
-    assert len(collection.public.uploads) == 15
+    assert collection.r2.uploads[f"rounds/1/{HOTKEY}/submitted/chair.js"] == SOURCE
+    assert len(collection.r2.uploads) == 15
     assert collection.rendered == ["/render", "/render"]
     assert collection.embeddings.call_args.args[0] == IMAGE
 
@@ -292,23 +291,23 @@ async def test_unresolved_provenance_never_becomes_a_miner_failure(collection: C
     elif field == "key":
         collection.choice["source"]["key"] = value
     else:
-        collection.private.objects[collection.artifact[field]["key"]] = value
+        collection.r2.objects[collection.artifact[field]["key"]] = value
     collection.save_choice()
     with pytest.raises(ArtifactReadError):
         await collection.run()
     assert f"rounds/1/{HOTKEY}/submitted.json" not in collection.git.committed
 
 
-@pytest.mark.parametrize("failure", ["embeddings", "public_upload", "lost_private_ack", "renderer"])
+@pytest.mark.parametrize("failure", ["embeddings", "public_upload", "lost_manifest_ack", "renderer"])
 async def test_infrastructure_failure_is_retryable_and_saved_views_survive(
     collection: Collection, failure: str
 ) -> None:
     if failure == "embeddings":
         collection.embeddings.side_effect = RuntimeError("DINO unavailable")
     elif failure == "public_upload":
-        collection.public.fail_public = True
-    elif failure == "lost_private_ack":
-        collection.private.lose_manifest_ack = True
+        collection.r2.fail_public = True
+    elif failure == "lost_manifest_ack":
+        collection.r2.lose_manifest_ack = True
     else:
         collection.render_status = 401
     with pytest.raises((OSError, RuntimeError, httpx.HTTPStatusError)):
@@ -316,11 +315,11 @@ async def test_infrastructure_failure_is_retryable_and_saved_views_survive(
     assert f"rounds/1/{HOTKEY}/submitted.json" not in collection.git.committed
     first_renders = len(collection.rendered)
     collection.embeddings.side_effect = None
-    collection.public.fail_public = False
+    collection.r2.fail_public = False
     collection.render_status = 200
     await collection.run()
     assert collection.result().views and collection.result().failure_reason is None
-    if failure in ("embeddings", "lost_private_ack"):
+    if failure in ("embeddings", "lost_manifest_ack"):
         assert len(collection.rendered) == first_renders
 
 
@@ -338,50 +337,50 @@ async def test_missing_and_declared_failures_do_not_select_old_renders(collectio
     if none:
         collection.install(output_none=True)
     else:
-        del collection.private.objects[f"{collection.root}/final.json"]
+        del collection.r2.objects[f"{collection.root}/final.json"]
     await collection.run()
     result = collection.result()
     assert result.js is None and result.views is None
     assert result.failure_reason == ("generation_failed" if none else "not_submitted")
-    assert not collection.rendered and not collection.public.uploads
+    assert not collection.rendered and not collection.r2.uploads
 
 
 async def test_collection_waits_for_witness_cutoff(collection: Collection) -> None:
     collection.config = collection.config.model_copy(update={"round_end": int(time.time())})
     with pytest.raises(ArtifactReadError, match="collection boundary"):
         await collection.run()
-    assert not collection.public.uploads
+    assert not collection.r2.uploads
 
 
 async def test_sealed_absence_prevents_a_late_inflight_submission(collection: Collection) -> None:
     key = f"{collection.root}/final.json"
-    del collection.private.objects[key]
+    del collection.r2.objects[key]
     await collection.run()
     assert collection.result().failure_reason == "not_submitted"
-    assert not await collection.private.compare_and_swap(key, canonical(collection.choice), None)
-    saved = json.loads(collection.private.objects[key])
+    assert not await collection.r2.compare_and_swap(key, canonical(collection.choice), None)
+    saved = json.loads(collection.r2.objects[key])
     assert saved["sealed"] and saved["missing"] and saved["accepted_at"] == 0
 
 
 async def test_sealed_choice_prevents_a_late_inflight_replacement(collection: Collection) -> None:
     key = f"{collection.root}/final.json"
-    old_version = digest(collection.private.objects[key])
+    old_version = digest(collection.r2.objects[key])
     await collection.run()
     replacement = {**collection.choice, "revision": "f" * 64}
-    assert not await collection.private.compare_and_swap(key, canonical(replacement), old_version)
+    assert not await collection.r2.compare_and_swap(key, canonical(replacement), old_version)
     assert collection.result().source_sha256 == digest(SOURCE)
-    assert json.loads(collection.private.objects[key])["sealed"]
+    assert json.loads(collection.r2.objects[key])["sealed"]
 
 
 async def test_collection_observes_the_final_choice_that_wins_the_sealing_race(collection: Collection) -> None:
-    collection.private.before_final_seal = lambda: collection.install(output_none=True)
+    collection.r2.before_final_seal = lambda: collection.install(output_none=True)
     await collection.run()
     assert collection.result().failure_reason == "generation_failed"
-    assert collection.result().js is None and not collection.public.uploads
+    assert collection.result().js is None and not collection.r2.uploads
 
 
 async def test_lost_seal_acknowledgement_recovers_the_same_choice(collection: Collection) -> None:
-    collection.private.lose_final_ack = True
+    collection.r2.lose_final_ack = True
     with pytest.raises(OSError, match="seal acknowledgement"):
         await collection.run()
     assert f"rounds/1/{HOTKEY}/submitted.json" not in collection.git.committed

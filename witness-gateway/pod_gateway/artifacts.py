@@ -1,4 +1,4 @@
-"""Private render artifacts and final choices, independent of model-call witnessing."""
+"""Durable render artifacts and final choices, independent of model-call witnessing."""
 
 from __future__ import annotations
 
@@ -434,7 +434,7 @@ class ArtifactRepository:
         return choice
 
     def collect_final(self, prompt: str) -> tuple[FinalChoice, bytes | None, RenderArtifact | None]:
-        """Resolve the selected source directly from private storage for a trusted consumer."""
+        """Resolve the selected source directly from artifact storage for a trusted consumer."""
         choice = self.load_final(prompt)
         if choice is None:
             raise ArtifactPending("No final choice has been saved")
