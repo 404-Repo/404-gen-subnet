@@ -24,7 +24,6 @@ Register a Finney netuid 17 hotkey and submit these chain commitment fields:
 | --- | --- |
 | `repo` | Repository URL containing `main.py` and its supporting source/data |
 | `commit` | Full 40-character commit, fixed before prompts and seed are published |
-| `cdn_url` | Base URL for rounds using miner-hosted output; omitted for operator-managed witness storage |
 
 Each submitting hotkey needs the 100-alpha lock. Multiple hotkeys per team are
 allowed; the coldkey must cover all their locks. Admission and anti-spam limits
@@ -97,10 +96,9 @@ credentials, recording and recovery are handled by the runtime. Your function
 does not select replay mode, manage exchange IDs, parse a command line or handle
 input/output directories.
 
-The runner writes successful returns to `{stem}.js` and declared failures to
-`_failed.json`, for example `{"pumpkin": "generation_failed"}`. Stems are unique
-lowercase alphanumeric prompt IDs. Your function handles one image per call;
-prompt count is a round setting.
+The runner saves the exact returned JavaScript or explicit `None` in managed
+submission storage. Prompt IDs are unique lowercase alphanumeric stems. Your
+function handles one image per call; prompt count is a round setting.
 
 ## Run several prompts concurrently
 
@@ -191,12 +189,12 @@ failed connection never permits this runner to buy a replacement inference.
 This is a local batch driver. Production sandbox isolation, verified renderer
 replay and receipt submission belong to the runtime described below.
 
-Outside `generate`, upload each successful file to
-`{cdn_url.rstrip('/')}/{stem}.js` and submit the runtime's receipt before cutoff.
-The receipt binds the admitted source, round/hotkey, inputs/seed, environment,
-rate table, output hashes and complete traffic records. The collector accepts
-only matching CDN bytes; a file or CDN timestamp alone is not a receipt.
-Receipt delivery and partial-submission handling still need implementation.
+Outside `generate`, the runner checkpoints the returned JavaScript or explicit
+`None` before saving its final choice through the witness Pod. It retries saving
+those bytes after a lost acknowledgement or Pod replacement. The collector reads
+the saved choice directly from private artifact storage. Replay validation compares
+the reproduced return with this independent submission; a storage receipt does
+not establish source reproducibility. See the [artifact guide](../witness-gateway/ARTIFACTS_POC.md).
 
 ## Generated JavaScript
 

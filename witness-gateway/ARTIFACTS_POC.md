@@ -101,10 +101,8 @@ no storage credentials. Authenticated routes are `POST /artifacts/render`,
 
 ## Submission collector
 
-Set `SUBMISSION_SOURCE=witness` before OPEN admission. The collector then accepts
-repo/commit reveals without a CDN, and freezes `storage: "witness"` in the admitted
-submission metadata. Old metadata defaults to `storage: "cdn"`. Collection refuses
-a mode that differs from the admitted metadata.
+The collector accepts repo/commit reveals and freezes the admitted source in
+submission metadata. Final results are collected from private Pod-managed artifacts.
 
 After prompts and seed are selected, configure `WITNESS_ARTIFACTS_COLLECTION`
 before DOWNLOADING:
@@ -157,7 +155,7 @@ Missing final choices and explicit `None` are terminal delivery outcomes. Canoni
 HTTP 422 is a terminal render rejection. Missing/changed stored bytes, incompatible
 provenance, unavailable prompts, service failures, embedding failures and upload
 failures stop collection for retry; they cannot advance the round to DUELS as
-miner failures. The default `SUBMISSION_SOURCE=cdn` retains CDN collection.
+miner failures.
 
 ## Recovery and retention
 

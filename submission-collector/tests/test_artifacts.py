@@ -12,7 +12,7 @@ import httpx
 import pytest
 from aiobotocore.response import StreamingBody
 from botocore.exceptions import ClientError
-from subnet_common.competition.generations import GenerationsAdapter
+from subnet_common.competition.generations import GenerationResult, GenerationsAdapter
 from subnet_common.competition.state import CompetitionState, RoundStage
 from subnet_common.git_batcher import GitBatcher
 from subnet_common.r2_client import R2Client
@@ -26,7 +26,6 @@ from submission_collector.artifacts import (
 )
 from submission_collector.download import DownloadPipeline
 from submission_collector.settings import Settings
-from submission_collector.submission import parse_commitment
 
 
 HOTKEY = "5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty"
@@ -110,7 +109,7 @@ class Collection:
             judging_profile=PROFILE,
             prompt_hashes=[digest(IMAGE)],
         )
-        self.settings = settings.model_copy(update={"witness_artifacts": self.config, "submission_source": "witness"})
+        self.settings = settings.model_copy(update={"witness_artifacts": self.config})
         self.private, self.public = MemoryR2(), MemoryR2()
         self.git = MockGitHubClient()
         self.git.files["rounds/1/seed.json"] = '{"seed":42}'
@@ -123,7 +122,6 @@ class Collection:
                     "revealed_at_block": 150,
                     "tie_breaker": "0" * 128,
                     "round": "test-1",
-                    "storage": "witness",
                 }
             }
         )
@@ -149,10 +147,6 @@ class Collection:
         self.embeddings = AsyncMock(return_value=b"embedding bytes")
         monkeypatch.setattr("submission_collector.download.build_embeddings_npz", self.embeddings)
 
-        async def forbidden_cdn(**kwargs: object) -> bytes:
-            pytest.fail("Witness-backed submissions must not read a miner CDN")
-
-        monkeypatch.setattr("submission_collector.download._fetch_js", forbidden_cdn)
         self.choice, self.artifact = self.install()
 
     def install(self, *, output_none: bool = False, options: dict | None = None) -> tuple[dict, dict]:
@@ -251,7 +245,7 @@ async def collection(settings: Settings, monkeypatch: pytest.MonkeyPatch):
         await instance.http.aclose()
 
 
-async def test_collects_exact_source_without_cdn_and_reuses_only_matching_grid(
+async def test_collects_exact_saved_source_and_reuses_only_matching_grid(
     collection: Collection,
 ) -> None:
     await collection.run()
@@ -359,16 +353,6 @@ async def test_collection_waits_for_witness_cutoff(collection: Collection) -> No
     assert not collection.public.uploads
 
 
-async def test_collection_cannot_switch_an_admitted_cdn_round_to_private_storage(collection: Collection) -> None:
-    path = "rounds/1/submissions.json"
-    submissions = json.loads(collection.git.files[path])
-    submissions[HOTKEY]["storage"] = "cdn"
-    collection.git.files[path] = json.dumps(submissions)
-    with pytest.raises(ArtifactReadError, match="admitted round submissions"):
-        await collection.run()
-    assert not collection.public.uploads
-
-
 async def test_sealed_absence_prevents_a_late_inflight_submission(collection: Collection) -> None:
     key = f"{collection.root}/final.json"
     del collection.private.objects[key]
@@ -434,15 +418,6 @@ async def test_failed_collection_joins_other_prompt_work_before_retry(
     assert stopped.is_set()
 
 
-def test_chain_reveal_requires_cdn_only_for_cdn_collection() -> None:
-    reveal = ((150, json.dumps({"repo": "owner/repo", "commit": COMMIT})),)
-    assert parse_commitment(HOTKEY, reveal, 100, 200) is None
-    submission = parse_commitment(HOTKEY, reveal, 100, 200, require_cdn=False)
-    assert submission is not None and submission.cdn_url is None and submission.commit == COMMIT
-    irrelevant_cdn = ((150, json.dumps({"repo": "owner/repo", "commit": COMMIT, "cdn_url": 42})),)
-    assert parse_commitment(HOTKEY, irrelevant_cdn, 100, 200, require_cdn=False) is not None
-
-
 async def test_bounded_r2_reads_handle_short_chunks_and_close_on_overflow() -> None:
     class Stream:
         def __init__(self):
@@ -479,3 +454,11 @@ async def test_bounded_r2_reads_handle_short_chunks_and_close_on_overflow() -> N
     storage._client.get_object.return_value = {"Body": StreamingBody(stream, 11), "ETag": "saved-version"}
     assert await storage.download_version("object", 20) == (b"exact bytes", "saved-version")
     assert stream.closed
+
+
+async def test_skips_already_completed_prompts(collection: Collection) -> None:
+    existing = {
+        "chair": GenerationResult(js="https://assets.test/chair.js", views="https://assets.test/chair", size=100)
+    }
+    collection.git.files[f"rounds/1/{HOTKEY}/submitted.json"] = GenerationsAdapter.dump_json(existing).decode()
+    assert await collection.run() == {HOTKEY: existing}

@@ -26,7 +26,7 @@ Keep the following baseline expectations in mind:
 
 1. Submit a Python application with all supporting source and data committed.
    No miner Docker image or GPU declaration is required.
-2. Submit `repo`, `commit` and `cdn_url` through your chain commitment. Fix the
+2. Submit `repo` and `commit` through your chain commitment. Fix the
    full 40-character commit before prompts and seed are published. Register a
    Finney netuid 17 hotkey with the required 100-alpha lock.
 3. Produce self-contained, deterministic Three.js modules using allowlisted APIs.
@@ -56,8 +56,8 @@ Keep the following baseline expectations in mind:
    function and meet the Three.js output limits.
 3. Use the supplied clients for OpenAI requests and rendering, and the fixed runtime
    packages. Do not install or upgrade dependencies during generation or replay.
-4. Upload successful `{stem}.js` outputs to your committed CDN base URL and submit
-   the runtime's receipt before cutoff, as specified in the miner guide.
+4. Return the final JavaScript or explicit `None`. The runtime saves that exact
+   choice through the witness Pod before cutoff, as specified in the miner guide.
 
 For exact requirements, output limits, budget accounting and round
 settings, see the [404-GEN miner guide](https://github.com/404-Repo/404-subnet/blob/ca9693e9b9d14eafacc62a5870f3ea205ae1a32e/miner-reference/README.md).

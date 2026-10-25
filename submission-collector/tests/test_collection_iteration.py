@@ -23,11 +23,10 @@ from tests.conftest import (
 HOTKEY = "5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty"
 
 
-async def test_witness_admission_does_not_require_cdn_or_unselected_prompt_configuration(
+async def test_admission_accepts_source_before_prompt_configuration(
     git: MockGitHubClient,
     settings: Settings,
 ) -> None:
-    settings = settings.model_copy(update={"submission_source": "witness", "witness_artifacts": None})
     add_state(git, stage=RoundStage.OPEN)
     add_schedule(git)
     add_config(git)
@@ -45,7 +44,7 @@ async def test_witness_admission_does_not_require_cdn_or_unselected_prompt_confi
         settings=settings,
     )
     submission = json.loads(git.committed["rounds/1/submissions.json"])[HOTKEY]
-    assert submission["storage"] == "witness" and submission["cdn_url"] is None
+    assert submission["repo"] == "owner/repo" and submission["commit"] == "c" * 40
     assert CompetitionState.model_validate_json(git.committed["state.json"]).stage == RoundStage.MINER_GENERATION
 
 

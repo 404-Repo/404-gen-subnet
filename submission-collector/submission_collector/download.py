@@ -21,14 +21,12 @@ from subnet_common.embeddings import build_embeddings_npz
 from subnet_common.git_batcher import GitBatcher
 from subnet_common.r2_client import R2Client
 from subnet_common.render import GRAY_BG, GRAY_VIEWS, WHITE_BG, WHITE_VIEWS, render_grid, render_views
-from tenacity import RetryError, retry, retry_if_exception_type, stop_after_attempt, wait_fixed
 
 from submission_collector.artifacts import (
     ArtifactReadError,
     SelectedOutput,
     WitnessArtifacts,
 )
-from submission_collector.discord import NULL_DISCORD_NOTIFIER, DiscordNotifier
 from submission_collector.settings import Settings
 
 
@@ -47,7 +45,7 @@ async def _join(group: Awaitable[_T], tasks: Sequence[asyncio.Future[Any]]) -> _
 
 
 class DownloadPipeline:
-    """Collect selected witness outputs or CDN modules and prepare judging bundles."""
+    """Collect selected witness outputs and prepare judging bundles."""
 
     def __init__(
         self,
@@ -55,19 +53,13 @@ class DownloadPipeline:
         r2: R2Client,
         http_client: httpx.AsyncClient,
         settings: Settings,
-        discord: DiscordNotifier = NULL_DISCORD_NOTIFIER,
-        artifacts: WitnessArtifacts | None = None,
+        artifacts: WitnessArtifacts,
     ) -> None:
         self.git_batcher = git_batcher
         self.r2 = r2
         self.http_client = http_client
         self.settings = settings
         self.semaphore = asyncio.Semaphore(settings.max_concurrent_downloads)
-        self._discord = discord
-        if (settings.submission_source == "witness") != (artifacts is not None) or (
-            settings.witness_artifacts is None
-        ) != (artifacts is None):
-            raise ValueError("Witness artifact collection requires its private R2 reader")
         self.artifacts = artifacts
         self._seed: int | None = None
 
@@ -81,27 +73,21 @@ class DownloadPipeline:
         Returns hotkey → prompt → GenerationResult for all miners.
         """
         submissions = await require_submissions(git=self.git_batcher.git, round_num=state.current_round, ref=ref)
-        if any(submission.storage != self.settings.submission_source for submission in submissions.values()):
-            raise ArtifactReadError("Collector source differs from the admitted round submissions")
         prompt_urls = await require_prompts(git=self.git_batcher.git, round_num=state.current_round, ref=ref)
         prompts = [Path(url).stem for url in prompt_urls]
-        if self.artifacts is not None:
-            self._seed = await require_seed_from_git(self.git_batcher.git, state.current_round, ref)
-        # Prefetch prompt images once per round so embedding computation reuses the bytes
-        # across all miners. Failures keep the run going — the affected stems just won't
-        # have embeddings (and views=None for them, treated as preview-less by the judge).
+        self._seed = await require_seed_from_git(self.git_batcher.git, state.current_round, ref)
+        # Freeze each prompt image once for artifact bindings and embeddings across miners.
         prompt_bytes = await self._fetch_prompt_images(prompt_urls)
-        if self.artifacts is not None and any(prompt not in prompt_bytes for prompt in prompts):
+        if any(prompt not in prompt_bytes for prompt in prompts):
             raise ArtifactReadError("A frozen prompt image is unavailable")
-        if self.artifacts is not None:
-            expected_hashes = set(self.artifacts.settings.prompt_hashes)
-            actual_hashes = {hashlib.sha256(image).hexdigest() for image in prompt_bytes.values()}
-            if (
-                actual_hashes != expected_hashes
-                or len(actual_hashes) != len(prompts)
-                or any(submission.round != self.artifacts.settings.round for submission in submissions.values())
-            ):
-                raise ArtifactReadError("Collector configuration differs from the frozen round or prompts")
+        expected_hashes = set(self.artifacts.settings.prompt_hashes)
+        actual_hashes = {hashlib.sha256(image).hexdigest() for image in prompt_bytes.values()}
+        if (
+            actual_hashes != expected_hashes
+            or len(actual_hashes) != len(prompts)
+            or any(submission.round != self.artifacts.settings.round for submission in submissions.values())
+        ):
+            raise ArtifactReadError("Collector configuration differs from the frozen round or prompts")
 
         hotkeys = list(submissions.keys())
         random.shuffle(hotkeys)
@@ -110,9 +96,8 @@ class DownloadPipeline:
         # No return_exceptions: any escape from `_download_submission` is an
         # infrastructure error (typically a git read failing) or an unhandled bug —
         # both should restart the iteration, not silently mark the miner as zero.
-        # Per-miner content failures (CDN dead, oversized JS, render rejection) are
-        # categorized via `failure_reason` inside `_fetch_render_upload` and travel
-        # through the success path, so they don't reach this gather.
+        # Declared failures, missing submissions and validation rejections persist
+        # as terminal outcomes; infrastructure failures remain retryable.
         tasks = [
             asyncio.create_task(
                 self._download_submission(
@@ -203,9 +188,8 @@ class DownloadPipeline:
     ) -> None:
         """Fetch .js, render 12 views + grid, compute embeddings, upload everything to R2.
 
-        Witness storage and service failures propagate for retry. Terminal delivery
-        outcomes and validation rejections persist a categorical failure_reason.
-        CDN collection retains partial results for its fetch/render/upload failures.
+        Storage and service failures propagate for retry. Terminal delivery outcomes
+        and validation rejections persist a categorical failure_reason.
 
         generations: Mutable dict updated in-place with results. Used as a shared state
             across concurrent tasks - each task writes its prompt's result and persists
@@ -248,54 +232,28 @@ class DownloadPipeline:
 
         async with self.semaphore:
             # Phase 1: resolve the admitted output source.
-            if self.artifacts is not None:
-                if prompt_image is None or self._seed is None:
-                    raise ArtifactReadError("Frozen generation inputs are unavailable")
-                selected = await self.artifacts.selected(
-                    hotkey,
-                    submission,
-                    prompt_image,
-                    self._seed,
-                    self.settings.max_js_size_bytes,
-                )
-                js_data, fetch_failure = selected.source, selected.failure_reason
-            else:
-                if submission.cdn_url is None:
-                    raise ValueError("CDN submission has no CDN URL")
-                js_data, fetch_failure = await _try_fetch_js(
-                    cdn_url=submission.cdn_url,
-                    prompt=prompt,
-                    log_id=log_id,
-                    max_js_size_bytes=self.settings.max_js_size_bytes,
-                )
+            if prompt_image is None or self._seed is None:
+                raise ArtifactReadError("Frozen generation inputs are unavailable")
+            selected = await self.artifacts.selected(
+                hotkey,
+                submission,
+                prompt_image,
+                self._seed,
+                self.settings.max_js_size_bytes,
+            )
+            js_data, fetch_failure = selected.source, selected.failure_reason
             if js_data is None:
                 await persist(failure_reason=fetch_failure)
                 return
             size = len(js_data)
 
-            # Phase 2: upload JS. If this fails, we still record the miner delivered
-            # (we just couldn't store it) — but `js` stays None so the judge skips it.
-            try:
-                js_url = await _upload_to_r2(
-                    self.r2, key_for(f"{prompt}.js"), js_data, "application/javascript", log_id, self.settings.cdn_url
-                )
-            except Exception as e:
-                if self.artifacts is not None:
-                    raise
-                logger.error(f"{log_id}: failed to upload JS: {type(e).__name__}: {e}")
-                await persist(size=size, failure_reason="js_upload_failed")
-                return
+            # Phase 2: publish the selected JavaScript.
+            js_url = await _upload_to_r2(
+                self.r2, key_for(f"{prompt}.js"), js_data, "application/javascript", log_id, self.settings.cdn_url
+            )
 
             if selected.failure_reason is not None:
                 await persist(js=js_url, size=size, failure_reason=selected.failure_reason)
-                return
-
-            # Skip Phase 3+ if the prompt image is missing — embeddings need it, so
-            # rendering is wasted work. One failure flag for the whole round's prompt;
-            # not actionable per-miner, so no Discord alert.
-            if prompt_image is None:
-                logger.warning(f"{log_id}: prompt image unavailable; skipping renders and embeddings")
-                await persist(js=js_url, size=size, failure_reason="prompt_image_missing")
                 return
 
             # Phase 3: render views + grid in parallel. Any None here means a render
@@ -310,7 +268,7 @@ class DownloadPipeline:
                         bg_color=WHITE_BG,
                         log_id=log_id,
                         api_key=render_key,
-                        raise_errors=self.artifacts is not None,
+                        raise_errors=True,
                     )
                 )
                 gray_task = asyncio.create_task(
@@ -322,7 +280,7 @@ class DownloadPipeline:
                         bg_color=GRAY_BG,
                         log_id=log_id,
                         api_key=render_key,
-                        raise_errors=self.artifacts is not None,
+                        raise_errors=True,
                     )
                 )
                 grid_task = asyncio.create_task(
@@ -334,7 +292,7 @@ class DownloadPipeline:
                         js_content=js_data,
                         log_id=log_id,
                         api_key=render_key,
-                        raise_errors=self.artifacts is not None,
+                        raise_errors=True,
                     )
                 )
                 return await _join(asyncio.gather(white_task, gray_task, grid_task), (white_task, gray_task, grid_task))
@@ -353,50 +311,31 @@ class DownloadPipeline:
                 white: dict[str, bytes] | None
                 gray: dict[str, bytes] | None
                 grid: bytes | None
-                if self.artifacts is not None:
-                    if selected.source_sha256 is None:
-                        raise ArtifactReadError("Selected source has no digest")
-                    images = await self.artifacts.previews(
-                        submission,
-                        hotkey,
-                        prompt_image,
-                        selected.source_sha256,
-                        complete_previews,
-                    )
-                    white = {v.name: images[f"white/{v.name}"] for v in WHITE_VIEWS}
-                    gray = {v.name: images[f"gray/{v.name}"] for v in GRAY_VIEWS}
-                    grid = images["grid"]
-                else:
-                    white, gray, grid = await render_previews()
+                if selected.source_sha256 is None:
+                    raise ArtifactReadError("Selected source has no digest")
+                images = await self.artifacts.previews(
+                    submission,
+                    hotkey,
+                    prompt_image,
+                    selected.source_sha256,
+                    complete_previews,
+                )
+                white = {v.name: images[f"white/{v.name}"] for v in WHITE_VIEWS}
+                gray = {v.name: images[f"gray/{v.name}"] for v in GRAY_VIEWS}
+                grid = images["grid"]
             except httpx.HTTPStatusError as error:
                 if error.response.status_code != 422:
                     raise
                 await persist(js=js_url, size=size, failure_reason="render_rejected")
                 return
-            if self.artifacts is not None and (white is None or gray is None or grid is None):
+            if white is None or gray is None or grid is None:
                 raise ArtifactReadError("Judging render did not produce a complete bundle")
-            if white is None or gray is None:
-                await self._discord.notify_render_failure(hotkey)
-                await persist(js=js_url, size=size, failure_reason="render_failed")
-                return
-            if grid is None:
-                await self._discord.notify_render_failure(hotkey)
-                await persist(js=js_url, size=size, failure_reason="grid_render_failed")
-                return
 
             # Phase 4a: embeddings.
-            try:
-                hf_token = self.settings.hf_token.get_secret_value() if self.settings.hf_token else None
-                npz_bytes = await build_embeddings_npz(
-                    prompt_image, white, log_id, revision=self.settings.dinov3_revision, hf_token=hf_token
-                )
-            except Exception as e:
-                if self.artifacts is not None:
-                    raise
-                logger.error(f"{log_id}: embedding computation failed: {type(e).__name__}: {e}")
-                await self._discord.notify_render_failure(hotkey)
-                await persist(js=js_url, size=size, failure_reason="embeddings_failed")
-                return
+            hf_token = self.settings.hf_token.get_secret_value() if self.settings.hf_token else None
+            npz_bytes = await build_embeddings_npz(
+                prompt_image, white, log_id, revision=self.settings.dinov3_revision, hf_token=hf_token
+            )
 
             # Phase 4b: bundle upload. Atomic — every PNG and the npz upload, or none.
             bundle = (
@@ -407,24 +346,17 @@ class DownloadPipeline:
                     (key_for(f"{prompt}/embeddings.npz"), npz_bytes, "application/octet-stream"),
                 ]
             )
-            try:
-                upload_start = asyncio.get_running_loop().time()
-                uploads = [
-                    asyncio.create_task(_upload_to_r2(self.r2, key, data, ctype, log_id, self.settings.cdn_url))
-                    for key, data, ctype in bundle
-                ]
-                await _join(asyncio.gather(*uploads), uploads)
-                upload_elapsed = asyncio.get_running_loop().time() - upload_start
-                bundle_kb = sum(len(data) for _, data, _ in bundle) / 1024
-                logger.debug(
-                    f"{log_id}: uploaded {len(bundle)} files in {upload_elapsed:.1f}s, {bundle_kb:.1f}KB total"
-                )
-            except Exception as e:
-                if self.artifacts is not None:
-                    raise
-                logger.error(f"{log_id}: failed to upload rendered views bundle: {type(e).__name__}: {e}")
-                await persist(js=js_url, size=size, failure_reason="views_upload_failed")
-                return
+            upload_start = asyncio.get_running_loop().time()
+            uploads = [
+                asyncio.create_task(_upload_to_r2(self.r2, key, data, ctype, log_id, self.settings.cdn_url))
+                for key, data, ctype in bundle
+            ]
+            await _join(asyncio.gather(*uploads), uploads)
+            upload_elapsed = asyncio.get_running_loop().time() - upload_start
+            bundle_kb = sum(len(data) for _, data, _ in bundle) / 1024
+            logger.debug(
+                f"{log_id}: uploaded {len(bundle)} files in {upload_elapsed:.1f}s, {bundle_kb:.1f}KB total"
+            )
 
             await persist(js=js_url, views=f"{self.settings.cdn_url}/{key_for(prompt)}", size=size)
 
@@ -433,74 +365,3 @@ async def _upload_to_r2(r2: R2Client, key: str, data: bytes, content_type: str, 
     """Upload data to R2 and return the CDN URL."""
     await r2.upload(key=key, data=data, content_type=content_type)
     return f"{cdn_url}/{key}"
-
-
-async def _try_fetch_js(
-    cdn_url: str,
-    prompt: str,
-    log_id: str,
-    max_js_size_bytes: int,
-) -> tuple[bytes | None, str | None]:
-    """Fetch JS from miner CDN, categorizing failures.
-
-    Returns (js_data, None) on success or (None, failure_reason) on failure.
-    Categorized failure reasons: "js_too_large", "js_fetch_failed: HTTP <code>",
-    "js_fetch_failed: <ExceptionType>".
-    """
-    try:
-        js_data = await _fetch_js(cdn_url=cdn_url, prompt=prompt, log_id=log_id, max_js_size_bytes=max_js_size_bytes)
-        return js_data, None
-    except Exception as e:
-        # Unwrap tenacity RetryError so we see the underlying cause (status + URL).
-        cause: BaseException = e
-        if isinstance(e, RetryError) and e.last_attempt is not None:
-            inner = e.last_attempt.exception()
-            if inner is not None:
-                cause = inner
-        if isinstance(cause, httpx.HTTPStatusError):
-            # Miner CDN inaccessibility is common and not operator-actionable; the
-            # categorical failure_reason is persisted on the GenerationResult for
-            # post-hoc analysis.
-            status = cause.response.status_code
-            failure_reason = f"js_fetch_failed: HTTP {status}"
-            logger.debug(f"{log_id}: miner CDN returned HTTP {status} for {cause.request.url}")
-        elif isinstance(cause, ValueError):
-            # Only ValueError raised by _fetch_js is the size cap.
-            failure_reason = "js_too_large"
-            logger.warning(f"{log_id}: JS exceeds size limit: {cause}")
-        else:
-            failure_reason = f"js_fetch_failed: {type(cause).__name__}"
-            logger.debug(f"{log_id}: JS fetch failed ({type(cause).__name__}): {cause}")
-        return None, failure_reason
-
-
-@retry(
-    stop=stop_after_attempt(2),
-    wait=wait_fixed(3),
-    retry=retry_if_exception_type((httpx.HTTPStatusError, httpx.TimeoutException, httpx.RequestError)),
-)
-async def _fetch_js(cdn_url: str, prompt: str, log_id: str, max_js_size_bytes: int) -> bytes:
-    """Fetch .js module from miner CDN with retries and size limit."""
-    url = f"{cdn_url.rstrip('/')}/{prompt}.js"
-    logger.debug(f"{log_id}: downloading {url}")
-
-    async with httpx.AsyncClient(timeout=httpx.Timeout(300, connect=10)) as client:
-        async with client.stream("GET", url) as response:
-            response.raise_for_status()
-
-            content_length = response.headers.get("content-length")
-            if content_length and int(content_length) > max_js_size_bytes:
-                raise ValueError(f"JS size {content_length} exceeds limit {max_js_size_bytes}")
-
-            chunks = []
-            total_size = 0
-            async for chunk in response.aiter_bytes():
-                total_size += len(chunk)
-                if total_size > max_js_size_bytes:
-                    raise ValueError(f"JS size exceeds limit {max_js_size_bytes}")
-                chunks.append(chunk)
-
-            data = b"".join(chunks)
-
-    logger.debug(f"{log_id}: downloaded {len(data) / 1024:.1f}KB")
-    return data

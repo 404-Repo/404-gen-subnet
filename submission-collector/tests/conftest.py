@@ -81,11 +81,10 @@ def add_prompts(git: MockGitHubClient, prompts: list[str], round_num: int | None
 def make_commitment(
     repo: str = "test/model",
     commit: str = "a" * 40,
-    cdn_url: str = "https://cdn.example.com/files",
     block: int = 150,
 ) -> tuple[tuple[int, str], ...]:
     """Create a single commitment tuple as returned by subtensor."""
-    data = json.dumps({"repo": repo, "commit": commit, "cdn_url": cdn_url})
+    data = json.dumps({"repo": repo, "commit": commit})
     return ((block, data),)
 
 

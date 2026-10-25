@@ -108,7 +108,6 @@ def _world(miners: list[str]) -> MockGitHubClient:
         hk: MinerSubmission(
             repo=f"org/{hk}",
             commit=f"sha_{hk}",
-            cdn_url=f"https://cdn/{hk}",
             revealed_at_block=100 + i,
             tie_breaker="0" * 128,
             round="test-comp-1",

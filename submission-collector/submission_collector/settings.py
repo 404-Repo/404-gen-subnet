@@ -1,5 +1,3 @@
-from typing import Literal
-
 from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -62,7 +60,7 @@ class Settings(BaseSettings):
     download_jitter_seconds: int = Field(
         default=300,
         alias="DOWNLOAD_JITTER_SECONDS",
-        description="Max random delay before each download to spread load across CDNs",
+        description="Max random delay before collecting each output",
     )
     max_js_size_bytes: int = Field(
         default=1 * 1024 * 1024,
@@ -74,7 +72,6 @@ class Settings(BaseSettings):
     r2_secret_access_key: SecretStr = Field(..., alias="R2_SECRET_ACCESS_KEY", description="R2 secret access key")
     r2_endpoint: SecretStr = Field(..., alias="R2_ENDPOINT", description="R2 endpoint")
     witness_artifacts: ArtifactSettings | None = Field(default=None, alias="WITNESS_ARTIFACTS_COLLECTION")
-    submission_source: Literal["cdn", "witness"] = Field(default="cdn", alias="SUBMISSION_SOURCE")
 
     render_service_url: str = Field(
         default="http://localhost:8000", alias="RENDER_URL", description="Render service base URL"
