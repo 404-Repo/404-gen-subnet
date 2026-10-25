@@ -11,11 +11,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, Unpack, cast
 
-from openai.types.responses import ResponseInputParam
-from openai.types.responses.response_create_params import ResponseCreateParamsStreaming
+from openai import APIError
+from openai.types.responses import Response, ResponseInputParam
+from openai.types.responses.response_create_params import ResponseCreateParamsBase
 from pydantic import BaseModel, ConfigDict
 from renderer_client import Renderer, RenderOptions, RenderRejected
-from witness_client import WitnessError, WitnessResult
+from witness_client import WitnessError
 
 from .images import png_data_url
 
@@ -31,7 +32,7 @@ NORMALIZATION = Path(__file__).with_name("normalize.js").read_text()
 
 
 class ModelCalls(Protocol):
-    def create(self, *, request_id: int = 0, **params: Unpack[ResponseCreateParamsStreaming]) -> WitnessResult: ...
+    def create(self, *, request_id: int = 0, **params: Unpack[ResponseCreateParamsBase]) -> Response: ...
 
 
 @dataclass(frozen=True)
@@ -101,7 +102,6 @@ def candidate(
     try:
         result = calls.create(
             request_id=position,
-            stream=True,
             model=model,
             store=False,
             service_tier="default",
@@ -110,9 +110,11 @@ def candidate(
             instructions=INSTRUCTIONS,
             input=cast(ResponseInputParam, [{"role": "user", "content": content}]),
         )
-    except WitnessError as error:
-        if error.source != "provider":
+    except (WitnessError, APIError) as error:
+        if isinstance(error, WitnessError) and error.source != "provider":
             raise
+        return None
+    if result.status != "completed":
         return None
     source = result.output_text.strip()
     fenced = re.fullmatch(r"```(?:javascript|js)?\s*\n([\s\S]*?)\n```", source)
@@ -177,7 +179,6 @@ def choose(
     try:
         result = calls.create(
             request_id=position,
-            stream=True,
             model=SOL,
             store=False,
             service_tier="default",
@@ -208,9 +209,11 @@ def choose(
                 }
             },
         )
-    except WitnessError as error:
-        if error.source != "provider":
+    except (WitnessError, APIError) as error:
+        if isinstance(error, WitnessError) and error.source != "provider":
             raise
+        return None
+    if result.status != "completed":
         return None
     try:
         choice = Choice.model_validate_json(result.output_text)

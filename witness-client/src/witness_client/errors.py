@@ -56,3 +56,8 @@ class ExchangePending(WitnessError):
     def exchange(self) -> str:
         assert self.exchange_id is not None
         return self.exchange_id
+
+
+class ReplayMismatch(WitnessError):
+    def __init__(self, message: str) -> None:
+        super().__init__(message, code="replay_mismatch")

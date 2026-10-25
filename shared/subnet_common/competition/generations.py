@@ -34,6 +34,8 @@ class GenerationResult(BaseModel):
         ),
     )
     size: int = Field(default=0, description="Size of the JS module in bytes")
+    source_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    submission_revision: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 
     def is_failed(self) -> bool:
         """True when this stem has a recorded permanent delivery failure."""

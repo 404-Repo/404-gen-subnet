@@ -24,9 +24,10 @@ COPY witness-server/verifier/*.mjs /app/witness-server/verifier/
 COPY witness-server/verifier/params/verifying.bin /app/witness-server/verifier/params/verifying.bin
 COPY witness-server/worker/*.py witness-server/worker/verify.mjs /app/witness-server/worker/
 COPY witness-client/src/witness_client/ /app/witness-client/src/witness_client/
+COPY renderer-client/src/renderer_client/ /app/renderer-client/src/renderer_client/
 COPY witness-gateway/pod_gateway/ /app/witness-gateway/pod_gateway/
 COPY miner-reference/budgets/pricing.json /app/config/pricing.json
-ENV PYTHONPATH=/app/witness-client/src:/app/witness-gateway:/app/witness-server/worker \
+ENV PYTHONPATH=/app/witness-client/src:/app/renderer-client/src:/app/witness-gateway:/app/witness-server/worker \
     PYTHONUNBUFFERED=1 WITNESS_TIMINGS=1 WITNESS_PRICING_FILE=/app/config/pricing.json
 EXPOSE 8000 8443
 ENTRYPOINT ["python", "-m", "pod_gateway"]

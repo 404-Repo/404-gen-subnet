@@ -24,7 +24,7 @@ from storage import json_bytes
 from websockets.exceptions import ConnectionClosedError, ConnectionClosedOK
 from websockets.frames import Close
 from witness_client import WitnessClient, WitnessConfig, WitnessError
-from witness_client.calls import Generation, Invocation, RequestKey
+from witness_client.calls import RequestKey
 from witness_client.gateway import GatewayClient
 from witness_client.pods import CallView, PodGatewayClient, Snapshot
 from witness_client.response import completed_response, http_body
@@ -303,13 +303,9 @@ def test_real_tls_gate_records_large_exchange_even_when_miner_leaves(
             metadata = observed.result(timeout=90)
             assert GatewayClient(http, hotkey, client._state, 180).response(identifier) == response_body
             if session_id is not None:
-                invocation = Invocation(
-                    generation=Generation.from_prompt(b"PNG", 42, round_number="1"),
-                    ordinal=0,
-                    request=RequestKey.from_body(provider_name, body),
-                )
+                invocation = RequestKey.from_body(provider_name, body, session_id=session_id)
                 (client._state / identifier / "job.json").write_bytes(
-                    json_bytes({"invocation": invocation.model_dump(mode="json")})
+                    json_bytes({"request": invocation.model_dump(mode="json")})
                 )
                 session: Session = {
                     "id": identifier, "protocol": 2, "round": "1",
@@ -318,13 +314,13 @@ def test_real_tls_gate_records_large_exchange_even_when_miner_leaves(
                     "proof_key_sha256": client._prover.verifying_key_sha256,
                 }
                 call = CallView(
-                    request=invocation.request, exchange_id=identifier, owner_ordinal=0,
+                    request=invocation, exchange_id=identifier,
                     deadline=int(time.time()) + 180, phase="issued", authorized=True,
                 )
                 assert isinstance(client._gateway, PodGatewayClient)
                 with pytest.MonkeyPatch.context() as patch:
                     patch.setattr(client._gateway, "snapshot", lambda _: Snapshot(
-                        call=call, round="1", hotkey=hotkey.ss58_address, session=dict(session),
+                        call=call, hotkey=hotkey.ss58_address, session=dict(session),
                     ))
                     patch.setattr(client._gateway, "recorded", lambda *_, **__: (session, provider_status, response_body))
                     assert client.resume(identifier).output_text == text
@@ -342,9 +338,6 @@ def test_real_tls_gate_records_large_exchange_even_when_miner_leaves(
     assert manifest["hotkey"] == hotkey.ss58_address
     assert manifest["exchange_id"] == identifier
     assert manifest["provider_status"] == provider_status
-    assert manifest["provider_rejected"] is (
-        provider_status in (400, 401, 403, 404, 429)
-    )
     if usage_known:
         assert metadata["usage"] == {
             "input_tokens": 123,
@@ -355,7 +348,7 @@ def test_real_tls_gate_records_large_exchange_even_when_miner_leaves(
         assert metadata["usage"] is None
         assert (
             json.loads(store.objects[prefix_key + "/status.json"])["usage_state"]
-            == "rejected"
+            == "unknown"
         )
     else:
         assert metadata["usage"] is None

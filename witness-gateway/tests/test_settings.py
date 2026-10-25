@@ -1,3 +1,4 @@
+import json
 import time
 from pathlib import Path
 
@@ -5,9 +6,11 @@ import pytest
 from bittensor_wallet import Keypair
 from pydantic import SecretStr
 
+from pod_gateway.artifacts import ArtifactProfile
 from pod_gateway.auth import AuthRejected, Membership
 from pod_gateway.dependencies import gateway_spec, worker_spec
 from pod_gateway.models import Scope
+from pod_gateway.renderer import renderer_profile_sha256, require_artifact_profile
 from pod_gateway.settings import Settings
 
 
@@ -65,7 +68,6 @@ def values(tmp_path: Path) -> dict[str, object]:
         "WITNESS_GATEWAY_OWNER_HOTKEY": Keypair.create_from_mnemonic(Keypair.generate_mnemonic()).ss58_address,
         "WITNESS_GATEWAY_URL": "https://witness.test",
         "WITNESS_MASTER_KEY": "ab" * 32,
-        "WITNESS_PROMPT_HASHES": '["' + "a" * 64 + '"]',
         "GATEWAY_RUNPOD_API_KEY": "fixture-runpod",
         "WITNESS_IMAGE": "registry/witness@sha256:" + "a" * 64,
         "R2_ENDPOINT": "https://r2.test",
@@ -91,7 +93,6 @@ def test_typed_settings_build_equivalent_pod_specs(values: dict[str, object]) ->
             "R2_ENDPOINT": SecretStr("https://r2.test"),
             "R2_ACCESS_KEY_ID": SecretStr("fixture-id"),
             "R2_SECRET_ACCESS_KEY": SecretStr("fixture-secret"),
-            "WITNESS_PROMPT_HASHES": frozenset({"a" * 64}),
             "WITNESS_DATA_CENTERS": ("EU-RO-1", "EU-CZ-1"),
             "WITNESS_MAX_PODS": 20,
             "WITNESS_PRICING_FILE": Path(str(values["WITNESS_PRICING_FILE"])),
@@ -110,13 +111,43 @@ def test_string_launch_values_remain_literal(values: dict[str, object]) -> None:
     values.update(
         {
             "WITNESS_ROUND_END": " 2000000000 ",
-            "WITNESS_PROMPT_HASHES": '[ "' + "a" * 64 + '" ]',
             "WITNESS_MAX_PODS": "0250",
             "WITNESS_IDLE_SECONDS": "01800",
         }
     )
     settings = Settings.model_validate(values)
-    for name in ("WITNESS_ROUND_END", "WITNESS_PROMPT_HASHES", "WITNESS_MAX_PODS", "WITNESS_IDLE_SECONDS"):
+    for name in ("WITNESS_ROUND_END", "WITNESS_MAX_PODS", "WITNESS_IDLE_SECONDS"):
         assert gateway_spec(settings).env[name] == values[name]
     assert "WITNESS_CPU_ID" not in gateway_spec(settings).env
     assert worker_spec(settings).env["WITNESS_IDLE_SECONDS"] == "01800"
+
+
+def test_artifact_configuration_reaches_both_pod_roles_and_pins_the_worker_image(values: dict[str, object]) -> None:
+    config = json.dumps(
+        {
+            "profile": {"image_digest": "sha256:" + "a" * 64, "validation_sha256": "b" * 64},
+            "limits": {"max_renders": 16, "max_bytes": 256 * 1024 * 1024},
+            "seed": 42,
+            "commits": {values["WITNESS_GATEWAY_OWNER_HOTKEY"]: "c" * 40},
+            "prompt_hashes": ["d" * 64],
+        }
+    )
+    values["WITNESS_ARTIFACTS"] = config
+    settings = Settings.model_validate(values)
+    assert gateway_spec(settings).env["WITNESS_ARTIFACTS"] == config
+    assert worker_spec(settings).env["WITNESS_ARTIFACTS"] == config
+    values["WITNESS_IMAGE"] = "registry/witness@sha256:" + "f" * 64
+    with pytest.raises(ValueError, match="pinned worker image"):
+        Settings.model_validate(values)
+
+
+def test_worker_refuses_a_profile_for_different_packaged_renderer_bytes(tmp_path: Path) -> None:
+    (tmp_path / "src").mkdir()
+    source = tmp_path / "src/server.js"
+    source.write_text("export const limit = 200;")
+    (tmp_path / "package-lock.json").write_text('{"version":1}')
+    profile = ArtifactProfile(image_digest="sha256:" + "a" * 64, validation_sha256=renderer_profile_sha256(tmp_path))
+    require_artifact_profile(profile, tmp_path)
+    source.write_text("export const limit = 201;")
+    with pytest.raises(ValueError, match="packaged renderer"):
+        require_artifact_profile(profile, tmp_path)

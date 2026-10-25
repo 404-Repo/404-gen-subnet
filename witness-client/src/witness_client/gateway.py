@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import socket
 import ssl
 import threading
@@ -139,14 +140,18 @@ class SignedTransport:
         )
 
     def render(self, request: httpx.Request) -> httpx.Response:
-        """Send one renderer request, preserving its caller's timeout."""
+        """Send one renderer or artifact request, preserving its caller's timeout."""
         path = request.url.raw_path.decode("ascii")
-        if request.method != "POST" or request.url.path != "/render/grid":
+        allowed = (
+            request.method == "POST" and request.url.path in ("/render/grid", "/artifacts/render", "/submissions")
+            or request.method == "GET" and re.fullmatch(r"/submissions/[0-9a-f]{64}", path) is not None
+        )
+        if not allowed:
             raise ValueError("Unknown renderer route")
         body = request.read()
-        headers = self._headers("POST", path, body)
+        headers = self._headers(request.method, path, body)
         headers["Content-Type"] = "application/json"
-        message = self.http.build_request("POST", path, content=body, headers=headers, timeout=150)
+        message = self.http.build_request(request.method, path, content=body, headers=headers, timeout=150)
         if "timeout" in request.extensions:
             message.extensions["timeout"] = request.extensions["timeout"]
         message.extensions["sni_hostname"] = self.server_name

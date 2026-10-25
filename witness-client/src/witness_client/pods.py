@@ -18,7 +18,7 @@ import httpx
 from bittensor_wallet import Keypair
 from pydantic import BaseModel, ConfigDict
 
-from .calls import Generation, Invocation, RequestKey, canonical, request_digest
+from .calls import RequestKey, canonical, request_digest
 from .delivery import ArtifactClient, retry
 from .errors import WitnessError
 from .gateway import SignedTransport
@@ -34,7 +34,6 @@ class CallView(BaseModel):
 
     request: RequestKey
     exchange_id: str
-    owner_ordinal: int
     deadline: int
     phase: Literal["reserved", "assigned", "capturing", "issued", "failed"]
     start_id: str | None = None
@@ -49,30 +48,9 @@ class Snapshot(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
     call: CallView
-    round: str
     hotkey: str
     session: dict[str, object] | None
     completion: dict[str, object] | None = None
-
-
-class EntryView(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
-    call_id: str
-    delivery: int | None
-
-
-class RecordingView(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
-
-    version: Literal[1]
-    revision: str
-    scope_key: str
-    generation: Generation
-    entries: list[EntryView]
-    calls: dict[str, CallView]
-    output_sha256: str | None
-    output_is_none: bool
-    finished: bool
 
 
 class PodGatewayClient:
@@ -120,7 +98,7 @@ class PodGatewayClient:
             raise WitnessError("Invalid Pod gateway response", source="gateway")
         return result
 
-    def reserve(self, invocation: Invocation) -> Snapshot:
+    def reserve(self, invocation: RequestKey) -> Snapshot:
         return self._snapshot(
             self._json("POST", "/calls", invocation.model_dump())
         )
@@ -130,19 +108,19 @@ class PodGatewayClient:
             self._json("GET", f"/status/{uuid.UUID(exchange_id)!s}")
         )
 
-    def dispatch(self, invocation: Invocation, start_id: str) -> Snapshot:
+    def dispatch(self, invocation: RequestKey, start_id: str) -> Snapshot:
         return self._snapshot(
             self._json(
                 "POST",
                 "/calls/dispatch",
-                {"invocation": invocation.model_dump(), "start_id": start_id},
+                {"request": invocation.model_dump(), "start_id": start_id},
             )
         )
 
-    def retry(self, invocation: Invocation, exchange_id: str) -> Snapshot:
+    def retry(self, invocation: RequestKey, exchange_id: str) -> Snapshot:
         return self._snapshot(
             self._json("POST", "/calls/retry", {
-                "invocation": invocation.model_dump(), "exchange_id": exchange_id,
+                "request": invocation.model_dump(), "exchange_id": exchange_id,
             })
         )
 
@@ -159,6 +137,8 @@ class PodGatewayClient:
         return result
 
     def _attach(self, reply: dict[str, object]) -> bool:
+        if reply.get("round") != self.round_number:
+            raise WitnessError("Gateway competition round changed", code="round_changed", source="gateway")
         session, endpoint = reply.get("session"), reply.get("witness")
         if (not isinstance(session, dict) or session.get("phase") != "allocated"
                 or not isinstance(endpoint, dict)):
@@ -310,32 +290,6 @@ class PodGatewayClient:
             raise WitnessError("Evidence object is unavailable", identifier, code="recording_unavailable")
         return self._download(links[name], limit)
 
-    def delivered(self, invocation: Invocation) -> int:
-        result = self._json("POST", "/calls/deliver", invocation.model_dump())
-        value = result.get("delivery")
-        if type(value) is not int:
-            raise WitnessError("Invalid delivery receipt", source="gateway")
-        return value
-
-    def finish_generation(
-        self, generation: Generation, count: int, output: str | None
-    ) -> None:
-        self._json(
-            "POST",
-            "/generations/finish",
-            {
-                "generation": generation.model_dump(),
-                "count": count,
-                "output_sha256": hashlib.sha256((output or "").encode()).hexdigest(),
-                "output_is_none": output is None,
-            },
-        )
-
-    def recording(self, generation: Generation) -> RecordingView:
-        return RecordingView.model_validate_json(
-            self._download(self._json("GET", f"/recordings/{generation.id}").get("recording"), 1024 * 1024)
-        )
-
     def required(
         self, exchange_id: str, name: str, *, limit: int = 16 * 1024 * 1024
     ) -> bytes:
@@ -350,7 +304,7 @@ class PodGatewayClient:
         return value
 
     def recorded(
-        self, invocation: Invocation, call: CallView, proof_hash: str, *,
+        self, invocation: RequestKey, call: CallView, proof_hash: str, *,
         request: bytes | None = None, raw_response: bytes | None = None,
     ) -> tuple[Session, int, bytes]:
         completion = self._completion(call)
@@ -364,17 +318,16 @@ class PodGatewayClient:
                     if raw_response is None else http_body(raw_response, allow_error=True))
         session = cast(Session, completion["session"])
         value = json.loads(manifest)
-        host, path = PROVIDERS[invocation.request.provider]
+        host, path = PROVIDERS[invocation.provider]
         expected_provider = f"https://{host}{path}"
         if (
             hashlib.sha256(manifest).hexdigest() != call.manifest_sha256
             or not isinstance(value, dict)
-            or value.get("generation_id") != invocation.generation.id
-            or value.get("call_id") != invocation.request.id
+            or value.get("call_id") != invocation.id
             or value.get("exchange_id") != call.exchange_id
             or value.get("proof_key_sha256") != proof_hash
-            or value.get("request_key") != invocation.request.model_dump()
-            or request_digest(request) != invocation.request.request_sha256
+            or value.get("request_key") != invocation.model_dump()
+            or request_digest(request) != invocation.request_sha256
             or value.get("request_sha256") != hashlib.sha256(request).hexdigest()
             or value.get("response_sha256") != hashlib.sha256(response).hexdigest()
             or session.get("id") != call.exchange_id
@@ -384,7 +337,6 @@ class PodGatewayClient:
             or session.get("miner") != self.hotkey.ss58_address
             or value.get("hotkey") != self.hotkey.ss58_address
             or session.get("round") != value.get("round")
-            or value.get("round") != invocation.generation.round
             or (raw_response is not None and int(raw_response.split(b" ", 2)[1]) != value.get("provider_status"))
             or type(value.get("provider_status")) is not int
         ):

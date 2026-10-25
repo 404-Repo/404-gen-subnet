@@ -9,230 +9,298 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
 
+import httpx
+import openai
 import pytest
+from bittensor_wallet import Keypair
 from support import MemoryState
-from witness_client import ReplayMismatch, ReplayWitness, WitnessClient, WitnessError
-from witness_client.calls import Generation, Invocation, RequestKey, canonical
-from witness_client.client import GenerationWitness
-from witness_client.pods import CallView, PodGatewayClient, RecordingView, Snapshot
-from witness_client.request import serialize_body
-from witness_client.types import Session
+from test_recording import PRICING, SCOPE
+from witness_client import ReplayMismatch, ReplayWitness, WitnessClient, WitnessError, run_generation, run_replay
+from witness_client.accounting import BudgetRejected
+from witness_client.calls import RequestKey, canonical
+from witness_client.client import CapturedResponse
+from witness_client.observations import Inputs
+from witness_client.pods import PodGatewayClient
 
-from pod_gateway.models import Scope, object_dict
+from pod_gateway.budget import Budget
 from pod_gateway.records import CallRecords
 from pod_gateway.replay import export_bundle
 
+START = "00000000-0000-4000-8000-000000000001"
 
-@pytest.fixture(params=["prompt", "legacy-source"])
-def bundle(tmp_path: Path, request: pytest.FixtureRequest) -> Path:
-    state, scope = MemoryState(), Scope("competition", "test-0", "5" * 48)
-    records = CallRecords(state)
-    generation = Generation.from_prompt(b"PNG", 42, round_number="test-0")
-    if request.param == "legacy-source":
-        generation = Generation.model_validate({**generation.model_dump(), "source_sha256": "a" * 64})
-        assert generation.id == "94877b97856e5ac7c071b78168ee47e20d620a89f07a6268e9eb792bd450bf9f"
-    body = serialize_body(
-        {
-            "stream": True,
-            "model": "fixture",
-            "input": "image",
-            "service_tier": "default",
-        },
-        "api",
-    )
-    invocations = [
-        Invocation(
-            generation=generation,
-            ordinal=i,
-            request=RequestKey.from_body("api", body, i),
-        )
-        for i in range(2)
-    ]
-    for invocation, text in zip(invocations, ("first", "second"), strict=True):
-        call = records.reserve(scope, invocation)
-        assigned = records.assign(
-            scope, invocation, "00000000-0000-4000-8000-000000000001", "pod-one"
-        )
-        assert records.claim(scope, invocation, "pod-one", assigned.capture_id or "")
-        records.authorize(scope, invocation, "pod-one", exchange_id=call.exchange_id)
+
+class Capture(WitnessClient):
+    def __init__(self, directory: Path, *, pricing: bytes = PRICING) -> None:
+        self._state = directory / "state"
+        self._state.mkdir(mode=0o700)
+        self._mode = "api"
+        self._http = cast(httpx.Client, SimpleNamespace(base_url="https://fixture.test"))
+        self._hotkey = cast(Keypair, SimpleNamespace(ss58_address=SCOPE.hotkey))
+        self._config = {"round": SCOPE.round, "witness_url": "https://fixture.test", "proof_parameters": "unused"}
+        self._gateway = cast(PodGatewayClient, SimpleNamespace(delivery_timeout=2))
+        self._calls_lock, self._calls = threading.Lock(), {}
+        self._call_slots = None
+        self.state = MemoryState()
+        self.records, self.budget = CallRecords(self.state), Budget(self.state, pricing)
+        self.pricing = pricing
+        self.paid = 0
+        self.failures: dict[int, str] = {}
+        self.gate: threading.Event | None = None
+
+    def _capture(self, key: RequestKey, body: bytes, session_id: str | None) -> CapturedResponse:
+        call = self.records.reserve(SCOPE, key)
+        if call.phase == "issued":
+            return self._saved_response(call.exchange_id)
+        assigned = self.records.assign(SCOPE, key, START, "pod")
+        assert self.records.claim(SCOPE, key, "pod", assigned.capture_id or "")
+        failure = self.failures.pop(key.witness_seed, "")
+        if failure == "before":
+            self.records.failed(SCOPE, key, "pod", "BeforeDispatch", exchange_id=call.exchange_id, not_dispatched=True)
+            raise WitnessError("Unavailable before dispatch", call.exchange_id, source="gateway", code="capture_failed")
+        self.budget.reserve(SCOPE, key, call.exchange_id, body)
+        self.records.authorize(SCOPE, key, "pod", exchange_id=call.exchange_id)
+        self.paid += 1
+        if self.gate is not None and key.witness_seed == 0:
+            assert self.gate.wait(2)
+        if failure == "unknown":
+            self.budget.settle(SCOPE, key, None)
+            self.records.failed(SCOPE, key, "pod", "Interrupted", exchange_id=call.exchange_id)
+            raise WitnessError("Provider outcome lost", call.exchange_id, source="gateway", code="capture_failed")
+        usage = None if failure == "provider" else {"input_tokens": 10, "output_tokens": 2}
+        status = 429 if failure == "provider" else 200
+        terminal = failure if failure in ("failed", "incomplete") else "completed"
         response = (
-            b"data: "
+            canonical({"error": {"message": "Rate limited", "code": "rate_limit_exceeded"}})
+            if status != 200
+            else b"data: "
             + canonical(
                 {
-                    "type": "response.completed",
+                    "type": "response." + terminal,
                     "response": {
-                        "status": "completed",
+                        "id": "resp_fixture",
+                        "status": terminal,
                         "output": [
-                            {
-                                "type": "message",
-                                "content": [{"type": "output_text", "text": text}],
-                            }
+                            {"type": "message", "content": [{"type": "output_text", "text": str(key.witness_seed)}]}
                         ],
+                        "usage": usage,
                     },
                 }
             )
             + b"\n\n"
         )
-        metadata = {
-            "generation_id": generation.id,
-            "call_id": invocation.request.id,
-            "request_key": invocation.request.model_dump(),
-            "round": scope.round,
-            "hotkey": scope.hotkey,
-            "exchange_id": call.exchange_id,
-            "proof_key_sha256": "c" * 64,
-            "pricing_sha256": "d" * 64,
-            "request_sha256": hashlib.sha256(body).hexdigest(),
-            "response_sha256": hashlib.sha256(response).hexdigest(),
-            "provider_status": 200,
-        }
-        prefix = f"rounds/{scope.round}/{scope.hotkey}/{call.exchange_id}/"
-        for name, value in {
-            "manifest.json": canonical(metadata),
+        manifest = canonical(
+            {
+                "call_id": key.id,
+                "request_key": key.model_dump(),
+                "round": SCOPE.round,
+                "hotkey": SCOPE.hotkey,
+                "exchange_id": call.exchange_id,
+                "proof_key_sha256": "c" * 64,
+                "pricing_sha256": self.budget.pricing_hash,
+                "provider_status": status,
+                "usage": usage,
+                "request_sha256": hashlib.sha256(body).hexdigest(),
+                "response_sha256": hashlib.sha256(response).hexdigest(),
+            }
+        )
+        prefix = f"rounds/{SCOPE.round}/{SCOPE.hotkey}/{call.exchange_id}/"
+        for name, content in {
             "request.json": body,
             "response.sse": response,
-            "session.json": b"{}",
+            "manifest.json": manifest,
             "client.bin": b"fixture",
             "server.bin": b"fixture",
             "authorization-server.bin": b"fixture",
             "claim.json": b"{}",
+            "session.json": b"{}",
         }.items():
-            state.put(prefix + name, value)
-        records.issued(scope, invocation, "pod-one", canonical(metadata), exchange_id=call.exchange_id)
-    records.deliver(scope, invocations[1])
-    records.deliver(scope, invocations[0])
-    records.finish(scope, generation, 2, "source")
+            self.state.put(prefix + name, content)
+        self.budget.settle(SCOPE, key, usage)
+        self.records.issued(SCOPE, key, "pod", manifest, exchange_id=call.exchange_id)
+        (self._state / call.exchange_id).mkdir(mode=0o700)
+        result = CapturedResponse(call.exchange_id, status, response)
+        self._save_response(result)
+        if failure == "delivery":
+            raise WitnessError("Delivery unavailable", call.exchange_id, source="gateway", code="delivery_failed")
+        return result
 
-    def verify(_: str, directory: Path) -> dict[str, object]:
-        return object_dict(json.loads((directory / "manifest.json").read_bytes()))
-
-    output = tmp_path / "bundle"
-    export_bundle(
-        records=records,
-        evidence=state,
-        scope=scope,
-        generation_id=generation.id,
-        output=output,
-        proof_hash="c" * 64,
-        pricing_hash="d" * 64,
-        verify=verify,
-    )
-    return output
-
-
-@pytest.mark.parametrize("legacy", [False, True])
-def test_replay_restores_different_concurrent_calls_and_their_delivery_order(
-    bundle: Path, legacy: bool,
-) -> None:
-    if legacy:
-        recording = json.loads((bundle / "recording.json").read_bytes())
-        for call in recording["calls"].values():
-            call.pop("not_dispatched")
-        raw = canonical(recording)
-        (bundle / "recording.json").write_bytes(raw)
-        verified = json.loads((bundle / "verified.json").read_bytes())
-        verified["recording_sha256"] = hashlib.sha256(raw).hexdigest()
-        (bundle / "verified.json").write_bytes(canonical(verified))
-    replay = ReplayWitness(bundle, timeout=5)
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        second = pool.submit(
-            replay.create, stream=True, model="fixture", input="image", request_id=1
+    def export(self, output: Path, image: bytes = b"PNG", seed: int = 42) -> Path:
+        execution = next(self._state.glob(f"executions/*/{Inputs.supplied(image, seed).id}/execution.json"))
+        export_bundle(
+            records=self.records,
+            evidence=self.state,
+            scope=SCOPE,
+            execution=execution,
+            output=output,
+            proof_hash="c" * 64,
+            pricing=self.pricing,
+            verify=lambda _, path: json.loads((path / "manifest.json").read_bytes()),
         )
-        with pytest.raises(FutureTimeout):
-            second.result(timeout=0.1)
-        first = pool.submit(replay.responses.create, model="fixture", input="image")
-        assert second.result(timeout=5).output_text == "second"
-        assert first.result(timeout=5).output_text == "first"
-    replay.finish("source")
+        return output
 
 
-def test_replay_rejects_changed_and_unconsumed_calls(bundle: Path) -> None:
-    replay = ReplayWitness(bundle)
-    with pytest.raises(ReplayMismatch):
-        replay.create(stream=True, model="fixture", input="different image")
-    incomplete = ReplayWitness(bundle)
-    with pytest.raises(ReplayMismatch):
-        incomplete.finish("source")
+def test_concurrent_arrival_order_is_independent_of_identity_and_delivery(tmp_path: Path) -> None:
+    live = Capture(tmp_path)
+    live.gate = threading.Event()
+    live.failures[1] = "failed"
+    order = [0, 1]
 
+    def generate(image: bytes, seed: int, witness: WitnessClient, renderer: None) -> str:
+        def call(index: int) -> str:
+            value = witness.create(model="fixture", input="image", request_id=index)
+            if index == 1:
+                assert live.gate is not None
+                live.gate.set()
+            return str(value.status) + value.output_text
 
-def test_replay_rejects_response_tampering_after_verification(bundle: Path) -> None:
-    replay = ReplayWitness(bundle)
-    first = replay.recording.calls[replay.recording.entries[0].call_id]
-    (bundle / first.exchange_id / "response.sse").write_bytes(b"altered")
-    with pytest.raises(ReplayMismatch):
-        replay.create(stream=True, model="fixture", input="image")
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            jobs = {i: pool.submit(call, i) for i in order}
+            return jobs[0].result() + jobs[1].result()
 
-
-def resumed_generation(
-    bundle: Path, timeout: float = 5, call_slots: threading.Semaphore | None = None
-) -> GenerationWitness:
-    recording = RecordingView.model_validate_json((bundle / "recording.json").read_bytes())
-
-    class CachedGateway(PodGatewayClient):
-        def __init__(self) -> None:
-            self.delivery_timeout = timeout
-
-        def recording(self, generation: Generation) -> RecordingView:
-            return recording
-
-        def reserve(self, invocation: Invocation) -> Snapshot:
-            call = recording.calls[recording.entries[invocation.ordinal].call_id]
-            # Completed captures remain reusable after their original deadline.
-            return Snapshot(call=call.model_copy(update={"deadline": 1}), round="test-0", hotkey="5" * 48, session=None)
-
-        def recorded(self, invocation: Invocation, call: CallView, proof_hash: str,
-                     **kwargs: object) -> tuple[Session, int, bytes]:
-            session: Session = {
-                "id": call.exchange_id, "miner": "5" * 48, "round": "test-0", "protocol": 2,
-                "proof_key_sha256": proof_hash, "provider": "https://api.openai.com/v1/responses",
-            }
-            return session, 200, (bundle / call.exchange_id / "response.sse").read_bytes()
-
-        def delivered(self, invocation: Invocation) -> int:
-            delivery = recording.entries[invocation.ordinal].delivery
-            assert delivery is not None
-            return delivery
-
-    state = bundle.parent / "resumed"
-    state.mkdir(mode=0o700)
-    parent = cast(
-        WitnessClient,
-        SimpleNamespace(
-            _config={}, _mode="api", _api_key="fixture", _state=state,
-            _prover=SimpleNamespace(verifying_key_sha256="c" * 64),
-            _preparation=threading.Lock(),
-            _hotkey=SimpleNamespace(ss58_address="5" * 48), _http=None, _gateway=CachedGateway(),
-        ),
-    )
-    return GenerationWitness(parent, recording.generation, call_slots=call_slots)
-
-
-def test_resumed_generation_restores_reservation_order_without_occupying_capture_slots(bundle: Path) -> None:
-    slots = threading.BoundedSemaphore(1)
-    resumed = resumed_generation(bundle, call_slots=slots)
-    with slots, ThreadPoolExecutor(max_workers=2) as pool:
-        second = pool.submit(resumed.create, stream=True, model="fixture", input="image", request_id=1)
-        with pytest.raises(FutureTimeout):
-            second.result(timeout=0.1)
-        first = pool.submit(resumed.create, stream=True, model="fixture", input="image")
-        assert second.result(timeout=5).output_text == "second"
-        assert first.result(timeout=5).output_text == "first"
-
-
-def test_resumed_generation_honors_saved_delivery_order(bundle: Path) -> None:
-    resumed = resumed_generation(bundle)
+    expected = run_generation(generate, b"PNG", 42, live, None)
+    bundle = live.export(tmp_path / "bundle")
+    order.reverse()
+    assert run_replay(generate, b"PNG", 42, ReplayWitness(bundle, timeout=2), None) == expected == "completed0failed1"
+    assert run_generation(generate, b"PNG", 42, live, None) == expected
+    ordered = ReplayWitness(bundle, timeout=2)
     with ThreadPoolExecutor(max_workers=2) as pool:
-        first = pool.submit(resumed.create, stream=True, model="fixture", input="image")
+        first = pool.submit(ordered.create, model="fixture", input="image", request_id=0)
         with pytest.raises(FutureTimeout):
-            first.result(timeout=0.1)
-        second = pool.submit(resumed.create, stream=True, model="fixture", input="image", request_id=1)
-        assert second.result(timeout=5).output_text == "second"
-        assert first.result(timeout=5).output_text == "first"
+            first.result(timeout=0.05)
+        second = pool.submit(ordered.create, model="fixture", input="image", request_id=1)
+        assert second.result(timeout=2).status == "failed"
+        assert first.result(timeout=2).status == "completed"
+    ordered.finish(expected)
+    assert live.paid == 2
 
 
-def test_resumed_generation_fails_if_preceding_delivery_is_never_consumed(bundle: Path) -> None:
-    resumed = resumed_generation(bundle, timeout=0.05)
-    with pytest.raises(WitnessError, match="delivery order"):
-        resumed.create(stream=True, model="fixture", input="image")
-    with pytest.raises(WitnessError, match="unresolved"):
-        resumed.finish("source")
+@pytest.mark.parametrize("failure", ["before", "delivery", "failed", "incomplete"])
+def test_original_failures_replay_even_when_current_delivery_would_succeed(tmp_path: Path, failure: str) -> None:
+    live = Capture(tmp_path)
+    live.failures[0] = failure
+
+    def generate(image: bytes, seed: int, witness: WitnessClient, renderer: None) -> str:
+        try:
+            value = witness.create(model="fixture", input="image")
+            return str(value.status) + value.output_text
+        except WitnessError as error:
+            return str(error.code)
+
+    expected = run_generation(generate, b"PNG", 42, live, None)
+    bundle = live.export(tmp_path / "bundle")
+    assert run_replay(generate, b"PNG", 42, ReplayWitness(bundle), None) == expected
+    assert run_generation(generate, b"PNG", 42, live, None) == expected
+    assert live.paid == int(failure != "before")
+
+
+@pytest.mark.parametrize("failure", ["provider", "unknown"])
+def test_unknown_usage_is_reproduced_but_cannot_pass_prompt_budget(tmp_path: Path, failure: str) -> None:
+    live = Capture(tmp_path)
+    live.failures[0] = failure
+
+    def generate(image: bytes, seed: int, witness: WitnessClient, renderer: None) -> str:
+        try:
+            return witness.create(model="fixture", input="image").output_text
+        except openai.RateLimitError as error:
+            return str(error.status_code) + str(error.code)
+        except WitnessError as error:
+            return str(error.code)
+
+    expected = run_generation(generate, b"PNG", 42, live, None)
+    replay = ReplayWitness(live.export(tmp_path / "bundle"))
+    assert generate(b"PNG", 42, replay, None) == expected
+    with pytest.raises(BudgetRejected, match="unknown usage"):
+        replay.finish(expected)
+    assert live.paid == 1
+
+
+@pytest.mark.parametrize("limit,accepted", [(2, True), (1, False)])
+def test_replay_charges_unique_consumed_calls_and_ignores_unrelated_capture(
+    tmp_path: Path, limit: int, accepted: bool
+) -> None:
+    pricing = json.loads(PRICING)
+    pricing["calls_per_prompt"] = limit
+    live = Capture(tmp_path, pricing=canonical(pricing))
+    live.create(model="fixture", input="unrelated", request_id=99)
+
+    def generate(image: bytes, seed: int, witness: WitnessClient, renderer: None) -> str:
+        return "".join(witness.create(model="fixture", input="image", request_id=i).output_text for i in (0, 0, 1))
+
+    expected = run_generation(generate, b"PNG", 42, live, None)
+    bundle = live.export(tmp_path / "bundle")
+    for _ in range(2):
+        replay = ReplayWitness(bundle)
+        assert generate(b"PNG", 42, replay, None) == expected
+        if accepted:
+            replay.finish(expected)
+            assert len(replay.budget.charges) == 2
+        else:
+            with pytest.raises(BudgetRejected, match="exceeds"):
+                replay.finish(expected)
+    assert live.paid == 3
+
+
+def test_replay_rejects_changed_missing_extra_inputs_and_tampering(tmp_path: Path) -> None:
+    live = Capture(tmp_path)
+
+    def generate(image: bytes, seed: int, witness: WitnessClient, renderer: None) -> str:
+        return witness.create(model="fixture", input="image").output_text
+
+    run_generation(generate, b"PNG", 42, live, None)
+    bundle = live.export(tmp_path / "bundle")
+    with pytest.raises(ReplayMismatch):
+        ReplayWitness(bundle).create(model="fixture", input="changed")
+    with pytest.raises(ReplayMismatch):
+        ReplayWitness(bundle).create(model="fixture", input="image", request_id=1)
+    with pytest.raises(ReplayMismatch):
+        ReplayWitness(bundle).finish("0")
+    with pytest.raises(ReplayMismatch):
+        run_replay(generate, b"changed", 42, ReplayWitness(bundle), None)
+    replay = ReplayWitness(bundle)
+    replay.create(model="fixture", input="image")
+    with pytest.raises(ReplayMismatch):
+        replay.create(model="fixture", input="image")
+    replay = ReplayWitness(bundle)
+    capture = next(iter(replay.bundle["captures"]))
+    (bundle / capture / "response.sse").write_bytes(b"altered")
+    with pytest.raises(ReplayMismatch):
+        replay.create(model="fixture", input="image")
+
+
+def test_stream_events_and_early_close_replay_with_typed_values(tmp_path: Path) -> None:
+    live = Capture(tmp_path)
+
+    def generate(image: bytes, seed: int, witness: WitnessClient, renderer: None) -> str:
+        with witness.create(model="fixture", input="image", stream=True) as stream:
+            event = next(stream)
+            assert event.type == "response.completed"
+            return event.response.output_text
+
+    expected = run_generation(generate, b"PNG", 42, live, None)
+    assert run_replay(generate, b"PNG", 42, ReplayWitness(live.export(tmp_path / "bundle")), None) == expected
+    assert live.paid == 1
+
+
+@pytest.mark.parametrize("limit,accepted", [("4", True), ("3.9", False)])
+def test_each_prompt_is_charged_for_reused_calls_and_credit_limit_is_exact(
+    tmp_path: Path, limit: str, accepted: bool
+) -> None:
+    pricing = json.loads(PRICING)
+    pricing["credits_per_prompt"] = limit
+    live = Capture(tmp_path, pricing=canonical(pricing))
+
+    def generate(image: bytes, seed: int, witness: WitnessClient, renderer: None) -> str:
+        return "".join(witness.create(model="fixture", input="shared", request_id=i).output_text for i in (0, 0, 1))
+
+    for i, image in enumerate((b"first prompt", b"different prompt")):
+        expected = run_generation(generate, image, 42, live, None)
+        replay = ReplayWitness(live.export(tmp_path / str(i), image))
+        assert generate(image, 42, replay, None) == expected
+        if accepted:
+            replay.finish(expected)
+            assert len(replay.budget.charges) == 2
+            assert sum(value for value in replay.budget.charges.values() if value is not None) == 4
+        else:
+            with pytest.raises(BudgetRejected, match="exceeds"):
+                replay.finish(expected)
+    assert live.paid == 2

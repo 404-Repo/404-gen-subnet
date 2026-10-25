@@ -12,20 +12,25 @@ import threading
 import time
 from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import nullcontext
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Unpack, cast
 
 from bittensor_wallet import Wallet
-from openai.types.responses.response_create_params import ResponseCreateParamsStreaming
-from renderer_client import Renderer, RendererClient
-from witness_client import WitnessClient, WitnessConfig, WitnessError, WitnessResult
+from openai import APIError
+from openai.types.responses import Response
+from openai.types.responses.response_create_params import ResponseCreateParamsBase
+from renderer_client import ArtifactClient, Renderer, RendererClient
+from witness_client import WitnessClient, WitnessConfig, WitnessError, run_generation
 from witness_client.calls import canonical
+from witness_client.observations import Inputs
 from witness_client.state import save
 
 from . import images, pipeline
 from .pipeline import ModelCalls
 from .renders import SavedRenderer
+from .submissions import run_and_save
 
 
 @dataclass(frozen=True)
@@ -33,7 +38,6 @@ class Prompt:
     id: str
     path: Path
     sha256: str
-    url: str | None = None
 
     def __post_init__(self) -> None:
         if not re.fullmatch(r"[a-z0-9]{1,128}", self.id) or not re.fullmatch(r"[a-f0-9]{64}", self.sha256):
@@ -61,10 +65,13 @@ class BatchSettings:
     parallel_prompts: int = 4
     parallel_calls: int = 2
     parallel_renders: int = 1
+    submission_commit: str | None = None
 
     def __post_init__(self) -> None:
         if not all(1 <= n <= 32 for n in (self.parallel_prompts, self.parallel_calls, self.parallel_renders)):
             raise ValueError("Concurrency must be between 1 and 32")
+        if self.submission_commit is not None and not re.fullmatch(r"[0-9a-f]{40}", self.submission_commit):
+            raise ValueError("Expected the admitted source commit for managed submissions")
         if not 0 <= self.seed < 2**64:
             raise ValueError("Expected a uint64 generation seed")
 
@@ -79,38 +86,23 @@ class LimitedCalls:
         self.calls, self.directory, self.progress = calls, directory, progress
         directory.mkdir(mode=0o700, exist_ok=True)
 
-    def create(self, *, request_id: int = 0, **params: Unpack[ResponseCreateParamsStreaming]) -> WitnessResult:
+    def create(self, *, request_id: int = 0, **params: Unpack[ResponseCreateParamsBase]) -> Response:
         self.progress(f"call {request_id} {params.get('model')}: running")
         try:
             result = self.calls.create(request_id=request_id, **params)
-        except WitnessError as error:
-            if error.source == "provider":
-                usage = error.response.usage if error.response is not None else None
-                save(
-                    self.directory / f"{request_id:02}.json",
-                    canonical(
-                        {
-                            "model": params.get("model"),
-                            "error": error.code,
-                            "usage": None if usage is None else usage.model_dump(),
-                        }
-                    ),
-                )
-                if error.response is not None:
-                    save(
-                        self.directory / f"{request_id:02}.response.json",
-                        error.response.model_dump_json().encode(),
-                    )
+        except APIError as error:
+            save(self.directory / f"{request_id:02}.json",
+                 canonical({"model": params.get("model"), "error": error.code, "usage": None}))
             raise
         # A fixed stage file replaces its replayed observation; totals do not grow
         # when a restart consumes the same response again.
-        save(self.directory / f"{request_id:02}.response.json", result.response.model_dump_json().encode())
+        save(self.directory / f"{request_id:02}.response.json", result.model_dump_json().encode())
         save(
-            self.directory / f"{request_id:02}.json", canonical({"model": params.get("model"), "usage": result.usage})
+            self.directory / f"{request_id:02}.json", canonical({"model": params.get("model"), "usage": None if result.usage is None else result.usage.model_dump()})
         )
         self.progress(
-            f"call {request_id}: complete, input={result.usage.get('input_tokens', 'unknown')} "
-            f"output={result.usage.get('output_tokens', 'unknown')}"
+            f"call {request_id}: complete, input={result.usage.input_tokens if result.usage else 'unknown'} "
+            f"output={result.usage.output_tokens if result.usage else 'unknown'}"
         )
         return result
 
@@ -131,6 +123,7 @@ def run_batch(
     identity = canonical(
         {
             "version": 2,
+            **({"submission_commit": settings.submission_commit} if settings.submission_commit else {}),
             "namespace": settings.namespace,
             "seed": settings.seed,
             "renderer_id": renderer.renderer_id,
@@ -142,7 +135,7 @@ def run_batch(
             "prompts": [{"id": p.id, "sha256": p.sha256} for p in prompts],
         }
     )
-    model_slots = threading.BoundedSemaphore(settings.parallel_calls)
+    witness._call_slots = threading.BoundedSemaphore(settings.parallel_calls)
     render_slots = threading.BoundedSemaphore(settings.parallel_renders)
     console = threading.Lock()
     started = time.monotonic()
@@ -153,15 +146,13 @@ def run_batch(
 
     def generate(prompt: Prompt) -> str:
         image = prompt.read()
-        bound = witness.for_generation(
-            image, settings.seed, prompt_url=prompt.url, call_slots=model_slots
-        )
+        inputs = Inputs.supplied(image, settings.seed)
         directory = root / prompt.id
         directory.mkdir(mode=0o700, exist_ok=True)
         checkpoint, selected = directory / "result.json", directory / "selected.js"
         if checkpoint.exists():
             result = json.loads(checkpoint.read_bytes())
-            if result["generation_id"] != bound.generation.id:
+            if result["execution_id"] != inputs.id:
                 raise ValueError("Saved generation identity differs")
             if result["status"] in ("selected", "failed"):
                 if (
@@ -170,14 +161,42 @@ def run_batch(
                 ):
                     raise ValueError("Selected output changed")
                 return str(result["status"])
-        calls = LimitedCalls(bound.responses, directory / "calls", lambda text: notify(prompt.id + " | " + text))
-        previews = SavedRenderer(renderer, directory / "renders", render_slots)
         try:
-            source = pipeline.run(image, settings.seed, calls, previews)
-            bound.finish(source)
+            with (
+                ArtifactClient(
+                    "https://witness.internal",
+                    renderer_id=renderer.renderer_id,
+                    round=str(witness._config["round"]),
+                    prompt_sha256=prompt.sha256,
+                    seed=settings.seed,
+                    submission_commit=settings.submission_commit,
+                    transport=witness.renderer_transport(),
+                    timeout=240,
+                )
+                if settings.submission_commit is not None
+                else nullcontext(renderer)
+            ) as prompt_renderer:
+                previews = SavedRenderer(prompt_renderer, directory / "renders", render_slots)
+
+                def execute(image: bytes, seed: int, client: WitnessClient, renderer: SavedRenderer) -> str | None:
+                    calls = LimitedCalls(
+                        client.responses, directory / "calls", lambda text: notify(prompt.id + " | " + text)
+                    )
+                    return pipeline.run(image, seed, calls, renderer)
+
+                if isinstance(prompt_renderer, ArtifactClient):
+                    final_checkpoint = directory / "final.json"
+                    run_and_save(
+                        lambda: run_generation(execute, image, settings.seed, witness, previews),
+                        prompt_renderer,
+                        final_checkpoint,
+                    )
+                    source = json.loads(final_checkpoint.read_bytes())["output"]
+                else:
+                    source = run_generation(execute, image, settings.seed, witness, previews)
         except Exception as error:
             code = error.code if isinstance(error, WitnessError) else type(error).__name__
-            save(checkpoint, canonical({"generation_id": bound.generation.id, "status": "pending", "error": code}))
+            save(checkpoint, canonical({"execution_id": inputs.id, "status": "pending", "error": code}))
             notify(f"{prompt.id} | pending: {code}")
             return "pending"
         if source is not None:
@@ -187,7 +206,7 @@ def run_batch(
             checkpoint,
             canonical(
                 {
-                    "generation_id": bound.generation.id,
+                    "execution_id": inputs.id,
                     "status": status,
                     "sha256": None if source is None else hashlib.sha256(source.encode()).hexdigest(),
                 }
@@ -228,7 +247,8 @@ def main() -> None:
     parser.add_argument("--manifest", type=Path, required=True)
     parser.add_argument("--witness-config", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--renderer-url", required=True)
+    parser.add_argument("--renderer-url")
+    parser.add_argument("--submission-commit", help="Save final results on the witness Pod for this admitted commit")
     parser.add_argument("--renderer-id", required=True)
     parser.add_argument("--parallel-prompts", type=int, default=4)
     parser.add_argument("--parallel-calls", type=int, default=2)
@@ -238,8 +258,10 @@ def main() -> None:
     parser.add_argument("--wallet-path", default="~/.bittensor/wallets")
     parser.add_argument("--api", action="store_true", help="Use OPENAI_API_KEY instead of a local Codex subscription")
     args = parser.parse_args()
+    if args.renderer_url is None and args.submission_commit is None:
+        parser.error("--renderer-url is required without --submission-commit")
     manifest = json.loads(args.manifest.read_bytes())
-    prompts = [Prompt(row["id"], Path(row["path"]), row["sha256"], row.get("url")) for row in manifest["prompts"]]
+    prompts = [Prompt(row["id"], Path(row["path"]), row["sha256"]) for row in manifest["prompts"]]
     check_prompts(prompts)
     config = cast(WitnessConfig, json.loads(args.witness_config.read_bytes()))
     if config.get("transport", "pods-v1") != "pods-v1" or not config.get("round"):
@@ -260,6 +282,7 @@ def main() -> None:
         args.parallel_prompts,
         args.parallel_calls,
         args.parallel_renders,
+        args.submission_commit,
     )
     if args.action == "check":
         print(
@@ -299,7 +322,7 @@ def main() -> None:
             subscription=None if args.api else "codex",
         ) as witness,
         RendererClient(
-            args.renderer_url,
+            args.renderer_url or "https://witness.internal",
             renderer_id=args.renderer_id,
             api_key=os.environ.get("RENDERER_API_KEY"),
             timeout=240,

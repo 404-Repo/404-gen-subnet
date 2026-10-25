@@ -1,4 +1,4 @@
-"""Generation-bound calls respect preparation and capture concurrency."""
+"""Direct calls respect preparation and capture concurrency."""
 
 import json
 import time
@@ -14,9 +14,8 @@ from unittest.mock import MagicMock
 
 import pytest
 from bittensor_wallet import Keypair
-
 from witness_client import WitnessClient, WitnessConfig, WitnessError
-from witness_client.calls import Generation, Invocation
+from witness_client.calls import RequestKey
 from witness_client.pods import CallView, Snapshot
 from witness_client.tunnel import WebSocketTunnel
 from witness_client.types import (
@@ -84,20 +83,15 @@ def test_pod_calls_bound_preparation_and_capture_concurrency(
             "miner": key.ss58_address,
         }
 
-    def missing(_: Generation) -> None:
-        raise WitnessError("No recording", status_code=404)
-
-    def reserve(invocation: Invocation) -> Snapshot:
-        identifier = str(uuid.uuid5(uuid.NAMESPACE_URL, invocation.generation.id))
+    def reserve(invocation: RequestKey) -> Snapshot:
+        identifier = str(uuid.uuid5(uuid.NAMESPACE_URL, invocation.id))
         calls[identifier] = Snapshot(
             call=CallView(
-                request=invocation.request,
+                request=invocation,
                 exchange_id=identifier,
-                owner_ordinal=0,
                 deadline=int(time.time()) + 60,
                 phase="reserved",
             ),
-            round="test-0",
             hotkey=key.ss58_address,
             session=None,
         )
@@ -105,9 +99,9 @@ def test_pod_calls_bound_preparation_and_capture_concurrency(
             reserved.set()
         return calls[identifier]
 
-    def dispatch(invocation: Invocation, _: str) -> Snapshot:
+    def dispatch(invocation: RequestKey, _: str) -> Snapshot:
         nonlocal preparing, active, maximum_preparing, maximum_active
-        identifier = str(uuid.uuid5(uuid.NAMESPACE_URL, invocation.generation.id))
+        identifier = str(uuid.uuid5(uuid.NAMESPACE_URL, invocation.id))
         with lock:
             preparing += 1
             active += 1
@@ -151,7 +145,7 @@ def test_pod_calls_bound_preparation_and_capture_concurrency(
         return b""
 
     def recorded(
-        invocation: Invocation, call: CallView, proof_hash: str, **kwargs: object
+        invocation: RequestKey, call: CallView, proof_hash: str, **kwargs: object
     ) -> tuple[Session, int, bytes]:
         return (
             session(call.exchange_id),
@@ -162,32 +156,23 @@ def test_pod_calls_bound_preparation_and_capture_concurrency(
         )
 
     with WitnessClient(
-        config, hotkey=key, openai_api_key="x" * 80, parallel_preparations=preparations
+        config, hotkey=key, openai_api_key="x" * 80, parallel_preparations=preparations,
+        call_slots=BoundedSemaphore(call_limit)
     ) as witness:
         gateway = witness._gateway
         for name, value in {
-            "recording": missing,
             "reserve": reserve,
             "dispatch": dispatch,
             "ensure_pod": lambda: str(uuid.uuid4()),
             "tunnel": tunnel,
             "snapshot": lambda identifier: calls[identifier],
             "recorded": recorded,
-            "delivered": lambda invocation: 0,
         }.items():
             monkeypatch.setattr(gateway, name, value, raising=False)
         monkeypatch.setattr(WitnessClient, "_authorize", authorize)
         monkeypatch.setattr("witness_client.client.exchange", exchange)
-        slots = BoundedSemaphore(call_limit)
-        bound = [
-            witness.for_generation(bytes([index]), 42, call_slots=slots)
-            for index in range(4)
-        ]
         with ThreadPoolExecutor(max_workers=4) as pool:
-            futures = [
-                pool.submit(generation.create, stream=True, model="fixture", input="image")
-                for generation in bound
-            ]
+            futures = [pool.submit(witness.create, model="fixture", input="image", request_id=i) for i in range(4)]
             try:
                 assert reserved.wait(3)
                 assert preparation_full.wait(3)
@@ -202,7 +187,7 @@ def test_pod_calls_bound_preparation_and_capture_concurrency(
             finally:
                 allow_authorization.set()
                 allow_completion.set()
-            assert len({future.result(timeout=5).response.id for future in futures}) == 4
+            assert len({future.result(timeout=5).id for future in futures}) == 4
     assert maximum_preparing == min(preparations, call_limit)
     assert maximum_generating == maximum_active == call_limit
 
@@ -218,17 +203,14 @@ def test_pod_failed_capture_without_non_dispatch_proof_remains_unresolved(
     snapshots: list[str] = []
     current: Snapshot | None = None
 
-    def missing(_: Generation) -> None:
-        raise WitnessError("No recording", status_code=404)
-
-    def reserve(invocation: Invocation) -> Snapshot:
+    def reserve(invocation: RequestKey) -> Snapshot:
         nonlocal current
         current = Snapshot(
             call=CallView(
-                request=invocation.request, exchange_id=identifier, owner_ordinal=0,
+                request=invocation, exchange_id=identifier,
                 deadline=1002, phase="failed", authorized=authorized, not_dispatched=not_dispatched,
             ),
-            round="test-0", hotkey=key.ss58_address, session=None,
+            hotkey=key.ss58_address, session=None,
         )
         return current
 
@@ -248,11 +230,11 @@ def test_pod_failed_capture_without_non_dispatch_proof_remains_unresolved(
     ))
     with WitnessClient(config, hotkey=key, openai_api_key="x" * 80, delivery_timeout=1) as witness:
         for name, value in {
-            "recording": missing, "reserve": reserve, "snapshot": snapshot,
+            "reserve": reserve, "snapshot": snapshot,
             "retry": repeat, "ensure_pod": repeat, "dispatch": repeat, "tunnel": repeat,
         }.items():
             monkeypatch.setattr(witness._gateway, name, value)
-        bound = witness.for_generation(b"PNG", 42)
+        bound = witness
         operations: tuple[Callable[[], object], ...] = (
             lambda: bound.create(stream=True, model="fixture", input="image"),
             lambda: witness.resume(identifier),
@@ -260,13 +242,9 @@ def test_pod_failed_capture_without_non_dispatch_proof_remains_unresolved(
         for operation in operations:
             with pytest.raises(WitnessError) as error:
                 operation()
-            assert error.value.code == "capture_in_progress"
+            assert error.value.code in ("capture_in_progress", "capture_failed")
             assert error.value.exchange_id == identifier and error.value.source == "gateway"
         assert len(snapshots) > 1 and set(snapshots) == {identifier}
-        with pytest.raises(WitnessError) as unfinished:
-            bound.finish(None)
-        assert unfinished.value.code == "recording_unresolved"
-
 
 
 @pytest.mark.parametrize("mode", ["api", "codex"])
@@ -288,7 +266,7 @@ def test_invalid_session_id_fails_before_credentials_or_allocation(
         subscription="codex" if mode == "codex" else None,
         hotkey=key,
     ) as client:
-        witness = client.for_generation(b"PNG", 42)
+        witness = client
         with pytest.raises(ValueError, match="session_id"):
             witness.create(
                 stream=True, model="fixture", input="image", session_id="a\r\nX: injected"

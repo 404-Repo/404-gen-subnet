@@ -1,3 +1,4 @@
+from .artifacts import ArtifactClient, ArtifactUnavailable
 from .client import (
     Renderer,
     RendererClient,
@@ -10,6 +11,8 @@ from .client import (
 from .replay import RecordingRenderer, RenderRecord, ReplayMismatch, ReplayRenderer
 
 __all__ = [
+    "ArtifactClient",
+    "ArtifactUnavailable",
     "RecordingRenderer",
     "RenderOptions",
     "RenderRecord",

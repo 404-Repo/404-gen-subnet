@@ -111,8 +111,8 @@ def child(directory: Path, mode: str, stage: str, origin: str) -> None:
             if key.startswith("pod-usage/"):
                 charges = json.loads(data)["charges"].values()
                 pause("settled" if any(c["state"] == "settled" for c in charges) else "reserved")
-            if key.startswith("pod-recordings/"):
-                calls = json.loads(data)["calls"].values()
+            if key.startswith("pod-calls/"):
+                calls = [json.loads(data)["call"]]
                 if any(c["phase"] == "issued" for c in calls):
                     pause("issued")
                 elif any(c["authorized"] for c in calls):

@@ -2,7 +2,9 @@ from types import TracebackType
 from typing import Self
 
 import aioboto3
+from botocore.exceptions import ClientError
 from types_aiobotocore_s3 import S3Client
+from types_aiobotocore_s3.type_defs import PutObjectRequestTypeDef
 
 
 class R2Client:
@@ -53,7 +55,58 @@ class R2Client:
         )
         return key
 
-    async def download(self, key: str) -> bytes:
+    async def download(self, key: str, limit: int | None = None) -> bytes:
         response = await self.client.get_object(Bucket=self.bucket, Key=key)
-        body: bytes = await response["Body"].read()
-        return body
+        stream = response["Body"]
+        async with stream:
+            if limit is None:
+                body: bytes = await stream.read()
+                return body
+            result = bytearray()
+            while chunk := await stream.read(min(256 * 1024, limit + 1 - len(result))):
+                result.extend(chunk)
+                if len(result) > limit:
+                    raise ValueError("R2 object exceeds its size limit")
+            return bytes(result)
+
+    async def create(self, key: str, data: bytes, content_type: str = "application/json") -> bool:
+        """Publish an immutable object; False means another complete object already exists."""
+        return await self.compare_and_swap(key, data, None, content_type)
+
+    async def compare_and_swap(
+        self, key: str, data: bytes, expected: str | None, content_type: str = "application/json"
+    ) -> bool:
+        """Conditionally replace an object using its exact version, or create it if absent."""
+        parameters: PutObjectRequestTypeDef = {
+            "Bucket": self.bucket,
+            "Key": key,
+            "Body": data,
+            "ContentType": content_type,
+            "CacheControl": "no-store",
+        }
+        if expected is None:
+            parameters["IfNoneMatch"] = "*"
+        else:
+            parameters["IfMatch"] = expected
+        try:
+            await self.client.put_object(**parameters)
+        except ClientError as error:
+            if error.response.get("ResponseMetadata", {}).get("HTTPStatusCode") in (409, 412):
+                return False
+            raise
+        return True
+
+    async def download_version(self, key: str, limit: int) -> tuple[bytes, str]:
+        """Read bounded bytes and their ETag in one storage operation."""
+        response = await self.client.get_object(Bucket=self.bucket, Key=key)
+        stream = response["Body"]
+        async with stream:
+            etag = response.get("ETag")
+            if not isinstance(etag, str) or not etag:
+                raise ValueError("R2 object has no version")
+            result = bytearray()
+            while chunk := await stream.read(min(256 * 1024, limit + 1 - len(result))):
+                result.extend(chunk)
+                if len(result) > limit:
+                    raise ValueError("R2 object exceeds its size limit")
+            return bytes(result), etag

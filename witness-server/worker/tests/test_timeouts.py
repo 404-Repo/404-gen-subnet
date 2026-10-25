@@ -149,7 +149,7 @@ def test_setup_deadline_applies_before_release_but_not_during_capture(
                 clock.now += worker.AUTHORIZATION_TIMEOUT
         if mode == "finish":
             (directory / "response.sse").write_bytes(b"response")
-            return {"provider_status": 200, "provider_rejected": False}
+            return {"provider_status": 200}
         return {}
 
     store = MemoryStore()

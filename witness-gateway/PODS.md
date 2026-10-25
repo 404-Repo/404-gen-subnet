@@ -2,7 +2,7 @@
 
 The Python gateway authenticates miners, allocates one current witness Pod per
 miner, and returns its direct TLS endpoint. Witness Pods own call reservation,
-authorization, recovery, delivery ordering and generation recording. They perform verification and
+authorization, recovery and provider evidence retention. They perform verification and
 provider capture; they never execute miner programs. An independent revivor
 restores the gateway and cleans up exactly owned Pods. RunPod owns Pod identity,
 lifecycle and capacity. Private R2 objects retain model-call records, usage and
@@ -10,99 +10,182 @@ evidence. SQL is not required.
 
 Imports, installation, tests and `--help` do not create infrastructure.
 
-## Identity, deduplication and order
+## Execution and replay contract
 
-The operator pins the round, frozen PNG bytes and generation seed.
-These identify one `generate` run. A prompt URL is optional
-descriptive metadata and is never fetched by the gateway. Keep private access
-tokens out of descriptive URLs.
+The miner supplies `generate(image, seed, witness, renderer)`. Model calls need no
+prompt binding, recording handle or finish operation. The execution host invokes
+the function; its witness boundary automatically observes calls. The validator
+uses that execution's observations and authenticated capture evidence to run the
+same submitted code with the expected image and seed.
 
-Within a generation, the request key covers the provider route, complete
-normalized JSON request and `request_id`. Object key order is normalized;
-array order, images, tools, missing versus null values and all other request
-fields are preserved. API and subscription routes have different identities.
+### Supplied inputs and prerequisites
 
-Identical requests share one exchange, including concurrent duplicates. One
-worker atomically claims that exchange; other invocations wait for its durable
-result. `request_id=1` requests a fresh exchange for otherwise identical input.
-It is an integer call identifier, stays stable for recovery and replay, and is
-not sent to the provider. It does not control sampling.
-Fresh inference can still produce identical text.
+The host must freeze the source archive, dependencies, relevant environment,
+image bytes and any content the program reads. An image URL alone is insufficient:
+freeze and verify its content before execution. The generation seed is an input
+to the program's local algorithm, separate from the model-call `request_id`.
+Neither is automatically sent to OpenAI as a randomness seed.
 
-The recording stores every invocation in start order, including cache hits, and
-the order in which results become available to Python. Transport retries retain
-the original identity. A restart consumes the saved generation prefix before
-appending work. Changed requests in an existing prefix are rejected. A pinned
-round prevents reconnects from silently moving work into another competition.
+The renderer must reproduce its bytes, structured rejections and relevant errors
+under the same build/options. Time, external files, process state, random sources,
+thread scheduling and alternate network access must be controlled or excluded by
+the execution host. Witness metadata and TLS proofs do not make arbitrary Python
+code deterministic or attest that it worked on a particular prompt.
 
-Prompt-scoped generations use v2 identities. Replay also reads source-labelled
-v1 recordings with their original identities. Source identity belongs to the
-submission executor and validator; the witness does not attest program execution.
-Use matching client and gateway sources. Keep the matching v1 client for an
-existing v1 batch restart, or retrieve its saved exchanges with `resume()`.
-Use a fresh round namespace for a recording-format cutover.
+`run_generation` and `run_replay` are development execution-host helpers, not a
+sandbox. The submitted function sees only the supplied clients. An actual trusted
+host must keep evidence, expected outputs, observation state and the replay engine
+outside miner access, including imports, native code and child processes. These
+helpers observe the witness boundary only; they do not implement that isolation,
+a shared renderer/model scheduler, or the competition's complete validation job.
 
-```python
-from witness_client import WitnessClient, run_generation
+### Model-call interface and identity
 
-config = {
-    "round": "test-0",
-    "witness_url": "https://witness.example.org",
-    "proof_parameters": "/runtime/params",
-    "state_directory": "/private/recovery",
-}
-with WitnessClient(config, hotkey=hotkey, openai_api_key=api_key) as witness:
-    source = run_generation(generate, frozen_png, seed, witness, renderer)
+`witness.responses.create(model=..., input=...)` returns an OpenAI `Response`.
+Failed/incomplete Responses retain their status, usage and output. HTTP errors
+raise the corresponding OpenAI SDK status-error class; SSE errors raise SDK
+`APIError`. Witness infrastructure failures use `WitnessError`/`ExchangePending`.
+Background generation and raw SDK transport options are unsupported.
+
+`stream=True` returns a typed event iterator with close/context-manager support.
+The full SSE capture is verified and durable before the iterator becomes
+available. Event contents/order and iterator observations are reproducible;
+provider token timing and incremental network delivery are not exposed.
+Default calls assemble the terminal Response, including subscription output items
+sent before a terminal event. Credentials remain outside model parameters.
+
+The canonical request includes provider normalization: `stream=true`, default
+`tools=[]`, default `service_tier=default`, and subscription `store=false` plus
+string-input conversion. JSON object key order is ignored; arrays, null versus
+missing, images, tool arguments and other values retain their meaning. API and
+subscription routes are distinct. The optional bounded subscription `session_id`
+routing header is included in matching and checked against the TLS authorization.
+
+The logical key is `(provider, canonical-body SHA256, request_id, session_id)`
+inside an authenticated allocation scope `(deployment, round, miner)`.
+`request_id` is an integer, default zero. Equal keys reuse the retained outcome,
+including concurrent duplicates and reuse across prompts. A different identifier
+permits fresh inference for an otherwise identical request. The retained hash/wire
+spelling is `witness_seed`; there is no public parameter with that name.
+
+Round is pinned at allocation/reconnect. Per-call requests contain no round,
+prompt, image hash, generation seed, source hash, URL or global invocation ordinal.
+The server owns round context for access deadlines, state and evidence.
+
+### Capture, failures and restart
+
+A logical call owns a current capture attempt; an exchange UUID identifies an
+attempt, and a private capture capability fences its selected Pod/start. CAS state
+allows only one claim and authorization. The verified request body/header must
+match the reserved key before any billable HTTP bytes leave. Frozen model/tier
+eligibility remains enforced; live per-prompt admission is absent.
+
+Authorization and a possible-dispatch ledger entry become durable before release.
+A missing acknowledgement can mean dispatch occurred. It never permits a fresh
+paid request. Recovery finalizes retained ciphertext or joins the same exchange;
+an unresolved paid attempt keeps unknown usage and its retained spool. Losing
+unuploaded spool bytes can prevent completion. Only durable non-dispatch evidence
+permits an internal replacement attempt; earlier attempts remain addressable.
+The client allows two such replacements per call, with one/two-second delays.
+No inference retry follows a provider rejection or an ambiguously dispatched call.
+
+The worker captures independently of client delivery and saves the response,
+verified usage, manifest and settlement before issuing a result. Delivery outages
+retry retrieval. If an outage escapes to submitted code, its exact witnessed error
+is retained by the execution host, separately from the provider outcome. Replay
+restores that observation even if delivery would now succeed. It never replaces
+unknown usage with zero or manufactures a provider response for missing evidence.
+
+The host saves observation entry before attempting work and its outcome before
+returning to the caller. A process restart resumes saved observations and pending
+logical calls. A top-level exception aborts that execution attempt; its trace is
+retained separately and a subsequent attempt may recover the same paid calls.
+Completed traces and their visible failures cannot be rewritten by a restart.
+`resume(exchange_id)` retrieves a durable Response; `release(exchange_id)` can
+retire an unclaimed attempt and cannot repeat inference.
+
+### Observation order and validator accounting
+
+Each invocation has a per-logical-key occurrence number, independent of other
+calls' arrival order. Concurrent identical keys are indistinguishable at this
+boundary. Code requiring different branch-specific observations must supply stable,
+distinct request IDs; the evidence cannot reconstruct thread roles from equal
+arguments. Stream `next`/`close` operations also have observation
+identities. Entry/exit event positions preserve causal overlap and delivery order;
+they do not identify a model request. Replay permits overlapping invocations to
+arrive in a different order, waits for their recorded predecessors, and rejects
+missing/extra/changed operations, mismatched stream use or impossible order within
+its timeout. Final JavaScript/None must match exactly. Ordering is enforced at
+this boundary, not at arbitrary subsequent Python instructions. Programs whose
+output still depends on uncontrolled scheduling fail output reproduction.
+
+Only the expected prompt's execution observations are required. Other captured
+work in the round remains available and need not be consumed by that replay.
+Prompt attribution comes from running the expected submitted program and inputs,
+not from client labels, body hashes or URLs. The validator charges distinct logical
+calls consumed by that execution. Repeated use of one retained call in a replay
+is charged once. Each different prompt consuming the same retained call is
+independently charged its full verified cost; reuse does not transfer allowance.
+
+A proven pre-dispatch failure has no paid dispatch charge. A provider failure or
+lost delivery after possible dispatch counts once and needs verified usage.
+Missing usage remains unknown and prevents budget acceptance, even for HTTP
+rejections. Exactly the frozen call/credit limit is accepted; exceeding either
+is rejected. Pricing uses Decimal arithmetic, full input weight including cached
+tokens, output/reasoning once, and the existing long-context tier. Failed and
+discarded candidates count if their calls were consumed. Replay has no inference
+client and never appends evidence to satisfy missing work.
+
+Example (letters denote logical keys, not global sequence numbers):
+
+```text
+original: enter A[0], enter B[0], deliver B[0]=HTTP failure,
+          deliver A[0]=Response, enter C[0](A output), deliver C[0], output JS
+replay:   B[0] may arrive before A[0]; both must enter before B's recorded
+          delivery; restore the same failure, then A, then C and identical JS
+other U:  captured elsewhere in the round; absent from this execution
+reuse A:  A[1] gets the saved outcome; A's verified cost is charged once here
 ```
 
-Miner code keeps `generate(image, seed, witness, renderer)` and
-`witness.responses.create(...)`. Intentional fresh requests can use
-`witness.responses.create(..., request_id=1)`.
+### Retained field inventory
 
-## Capture and durability
+All client-supplied request fields are claims until matched to verified provider
+bytes. Execution observations are trusted host evidence, not TLS-attested execution.
+The verified bundle and its descriptor must remain in trusted validator storage.
 
-The existing TLS gate and credential proof remain authoritative. Before paid
-HTTP bytes leave the Pod, the worker verifies the actual request, compares its
-hash to the reservation, checks the frozen model/service-tier policy, saves the
-authorization and reserves the dispatch allowance. A supplied hash alone cannot
-authorize a different request. Flex and models missing from frozen pricing are
-rejected. Other service tiers are forwarded to the provider; competition usage
-is charged at the frozen model rates for every admitted tier.
+| Retained fields | Producer and trust | Storage and consumer | Requirement lost if removed |
+|---|---|---|---|
+| deployment, round, miner/scope key | Authenticated allocator/operator | Scoped R2 keys, grants, session/manifest; gateway, worker, exporter | Cross-miner/round isolation, access deadline and evidence binding |
+| provider | Client claim, verified TLS host/path | RequestKey, execution, session; capture/replay | API and subscription requests could match different routes |
+| request_sha256, witness_seed, optional session_id | Client key; body/header verified before dispatch | Call records, manifest; deduplication/replay | Changed work could reuse a capture; identical fresh requests could not be distinguished |
+| actual request JSON | TLS request verifier | Private request.json and authorized ciphertext; exporter | Cannot check full parameters or derive requested model and canonical hash |
+| exchange_id, historical attempts | Server UUID/CAS history | Call document/index and evidence directory; recovery/export | Cannot locate/fence a particular attempt or preserve safe retry history |
+| phase, authorized, not_dispatched, failure | Worker/control writes, never miner assertions | CAS call state; capture, recovery, export | Cannot distinguish reusable result, safe retry and ambiguous paid dispatch |
+| deadline | Server reservation clock | Call/local job state; worker/client | Cannot bound capture lifetime across reconnects |
+| start_id, pod_id, capture_id | Allocator/selected worker; private claim fence | Call state (capture_id private); authorization/recovery | Old allocation or claimant could authorize a replacement |
+| revision, version and conditional object ETag | Server/model schema and R2 CAS | Call/usage journals; state readers | Cannot distinguish schema or concurrent writes; revision prevents ABA |
+| manifest_sha256 and request/response byte hashes | Sealed worker evidence plus native re-verification | Call/manifest/trusted bundle; downloads/replay | Cannot detect replacement or altered retained bytes |
+| client/server/authorization ciphertext, credential claim, session | TLS capture and hidden-credential proof | Private evidence/spool; native verifier | Cannot authenticate request/response, hidden credential or allocation binding |
+| certificate_time_unix_ns, proof_key_sha256 | Verifier plus sealed operator context | Manifest; replay verifier | Later certificate expiry/key changes could invalidate or misverify captures |
+| artifacts: object key, SHA256, size; signed URL | Authenticated Pod descriptor, scoped R2 signer | Manifest/retrieval reply; artifact client | Cannot retrieve bounded evidence from the intended immutable object |
+| pricing_sha256, model, charge state, usage, credits | Frozen operator policy, verified request/usage | Per-call dispatch journal and verified bundle; settlement/budget | Cannot price consistently, fence uncertain dispatch or distinguish unknown from zero |
+| provider_status and response SSE | Authenticated provider HTTP/TLS | Manifest/response.sse; SDK decoder | Cannot reproduce results, errors, event contents, refusals or failed Responses |
+| image_sha256, generation seed | Execution host's frozen inputs; validator rechecks expected inputs | Local execution.json; execution host/replay | Cannot select/resume/check the same execution inputs; never call attribution |
+| occurrence, action, index, stream | Execution boundary | Execution observations; replay | Cannot distinguish repeated invocations and stream operations using one capture |
+| entered, exited, outcome | Execution boundary's serialized event clock | Execution observations; replay scheduler | Cannot restore causal overlap/visible delivery or detect incomplete work |
+| observed exchange_id and failure message/code/status/source/pending | Execution boundary; exchange checked against operator call state | Execution observations; replay | A delivery/infrastructure failure could disappear or become a different exception |
+| finished, aborted, output_sha256, output_is_none | Execution host | Execution observations; restart/export/replay | Cannot distinguish crash/abort/completion or compare None versus empty JS |
+| execution/pricing hashes and captures in verified.json | Operator exporter after native checks | Trusted local bundle; ReplayWitness | Cannot bind the validated observations to the retained outcomes and accounting |
 
-Clients queue TLS setup and credential proofs locally. Once authorized, model
-calls can run in parallel while later requests prepare their proofs.
-
-After release, capture is independent of the miner or gateway connection. The
-full response, verified usage and manifest become durable before delivery. A
-local spool supports upload/finalization retries without another provider
-connection. Pending uploads keep the Pod busy. `resume()` and repeated
-generation calls recover the original response, including structured provider
-rejections, failed/incomplete Responses and tool/refusal output.
-
-The prompt ledger spans generation seeds, source revisions, credentials and Pod
-replacements. It uses exact frozen pricing bytes and Decimal arithmetic, counts
-input tokens at their full published weight, includes output/reasoning once and
-applies the long-context tier to the whole call. Possible dispatches consume the
-call allowance once. Known credit exhaustion blocks further dispatch. Concurrent
-calls can cross the credit limit, which remains a recorded breach. Unknown usage
-stays pending, with no claimed remaining balance or guessed zero charge.
-
-The client joins an active capture and reuses a completed response. A failed
-capture can use up to two replacement attempts per `create()` call, with short
-backoff. Each replacement has a fresh exchange ID; the generation, request key,
-invocation position and existing delivery receipts stay the same. Failed attempts
-and partial evidence remain available. A late attempt cannot authorize or replace
-its successor's response. Delivered outcomes cannot be retried.
-
-An authorized attempt with missing response evidence retains unknown usage and
-consumes its dispatch allowance. Only durable evidence that an attempt did not
-dispatch permits replacement inference. A Pod/host failure while a capture is still
-unresolved is joined. Exhausted retries leave
-the generation pending; restarting consumes its saved prefix and completed work.
-After a worker process restarts, an incomplete authorized capture stays unresolved
-with unknown usage and its original deadline. Its spool is retained. A complete
-saved capture can be finalized without another provider request. Losing the Pod's
-ephemeral spool also loses bytes that have not reached durable evidence storage.
+Derived: call IDs from keys, first exchange ID from scope/key, artifact paths,
+requested model, terminal Response, typed events and prompt totals. No prompt
+allowlist, live prompt ledger, generation-owned call table, global invocation
+cursor, descriptive URL, source-labelled compatibility object or miner recording
+lifecycle is needed. Call/usage state uses v2 keys. Existing v1 evidence is not
+converted or deleted; its pinned client/exporter remains necessary to read it.
+Finish old active captures with the matching pinned stack. Use matching v2 client,
+worker and gateway sources in a new round/deployment scope for this incompatible
+state/API cutover; these local changes are not a deployment.
 
 `WITNESS_TIMINGS=1` enables connection diagnostics across the client, gateway and
 worker. Records include call IDs, message kinds, byte counts, send/receive times,
@@ -197,12 +280,11 @@ before deployment; documentation and local fixtures do not establish live reacha
 
 Private journals and spool uploads use the existing `rounds/<round>/<hotkey>/<exchange>/`
 paths. Completed public evidence has immutable, content-addressed copies under
-`evidence/v1/<deployment>/<round>/<hotkey>/<exchange>/<sha256>/<name>`. Sanitized
-recordings use generation- and hash-scoped keys under the same evidence prefix.
+`evidence/v1/<deployment>/<round>/<hotkey>/<exchange>/<sha256>/<name>`. Execution observations stay with the execution host, outside miner scratch space.
 The Pod returns the trusted manifest and expected hashes through its authenticated
 TLS service and issues short-lived, object-specific signed R2 GET URLs. The client
 downloads directly from R2, with a separate HTTP client that sends no hotkey or
-allocation credentials, and verifies size, SHA256 and invocation bindings.
+allocation credentials, and verifies size, SHA256 and call bindings.
 
 Normal completion checks the locally held request and received HTTP response
 against the trusted manifest after durable accounting and evidence completion.
@@ -374,7 +456,7 @@ requires `RUNPOD_POD_ID`, `BENCH_ADMIN_TOKEN`, `BENCH_END` (Unix seconds),
 apply. Use a fresh deployment, start ID and hotkey for each run.
 
 The authenticated admin API listens on port 8001. `POST /boot` accepts the private
-TLS files, R2 configuration, prompt hashes, hourly price and phase; it waits for
+TLS files, R2 configuration, hourly price and phase; it waits for
 renderer readiness before starting capture. The allocation gateway listens on
 TLS port 8004, the direct witness on TLS port 8000, and the admin API is also
 available on TLS port 8443. Expose `8004/tcp` and `8000/tcp`; the direct mapping
@@ -390,7 +472,7 @@ build continues to start `python -m pod_gateway`.
 
 Publish through the operator's release process and configure the immutable image
 digest in [deploy/revivor.env.example](deploy/revivor.env.example). Set the actual
-deadline, canonical operator hotkey, frozen prompt hashes, capacity limits, keys and
+deadline, canonical operator hotkey, capacity limits, keys and
 HTTPS origin. Keep the deployment namespace/master key stable for the round.
 Both roles must use the image's frozen pricing bytes. Images must use digests.
 Gateway and worker state protocols must match. Finish active captures and replace
@@ -411,32 +493,23 @@ not performed by installation.
 
 ## Verified offline replay
 
-Use the pinned verifier/runtime to read and verify a private replay bundle:
+Export the trusted execution-host observation file with the operator's retained
+capture store and exact frozen pricing bytes:
 
 ```sh
 python -m pod_gateway export --deployment competition --round test-0 \
-  --hotkey "$MINER_HOTKEY" --generation "$GENERATION_SHA256" \
+  --hotkey "$MINER_HOTKEY" --execution /private/host/execution.json \
   --output /private/replay/bundle
 ```
 
-Export only reads the bucket. It rechecks the credential/TLS proof using the held
-authorization snapshot and final ciphertext, then compares request, response,
-usage and manifest hashes. Certificate validation uses the exact sealed
-authorization time, so later expiry does not invalidate a capture. Partial,
-altered and unresolved recordings cannot become verified bundles.
-
-`ReplayWitness(bundle)` has no HTTP/prover/inference client. It matches model
-requests, restores invocation and delivery order across concurrent callers,
-returns original provider outcomes, and checks final JavaScript/None and complete
-consumption. Missing, extra, reordered or changed calls are findings. Impossible
-orders fail within the replay timeout.
-
-Keep the bundle and replay engine outside untrusted miner execution. The
-`run_generation`/`run_replay` helpers are integration/development helpers, not a
-process-isolation boundary. This layer records witness calls; the separate miner
-sandbox, renderer replay and OS scheduling are outside it. The validator still
-owns competition-wide reconciliation, including pending prompt usage from other
-generations.
+The exporter reads retained evidence and rechecks the credential/TLS proof using
+the authorization snapshot, sealed certificate time and final ciphertext. It
+compares the actual request, response, status, routing header and usage. Failed
+infrastructure observations retain their operator call snapshot/partial evidence;
+they cannot invent a provider result. Unknown usage can be exported and replayed,
+but cannot pass prompt budget acceptance. `ReplayWitness(bundle)` has no network,
+prover or inference client. Supply it to `run_replay` with the expected frozen
+image, seed, submitted code and reproducible renderer.
 
 ## Validation
 

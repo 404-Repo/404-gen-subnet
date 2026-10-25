@@ -29,6 +29,7 @@ def test_pod_contains_current_client_gateway_worker_and_renderer() -> None:
     expected = {}
     for source, target, pattern in (
         ("witness-client/src/witness_client", "/app/witness-client/src/witness_client", "*.py"),
+        ("renderer-client/src/renderer_client", "/app/renderer-client/src/renderer_client", "*.py"),
         ("witness-gateway/pod_gateway", "/app/witness-gateway/pod_gateway", "*.py"),
         ("witness-server/worker", "/app/witness-server/worker", "*.py"),
         ("witness-server/verifier", "/app/witness-server/verifier", "*.mjs"),

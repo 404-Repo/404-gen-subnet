@@ -13,11 +13,23 @@ from typing import TYPE_CHECKING
 import httpx
 from aiohttp import WSMsgType, web
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
-from witness_client.calls import Digest, Generation, Invocation
+from renderer_client import RenderOptions, RenderRejected
+from witness_client.calls import Digest, RequestKey
 from witness_client.request import PROVIDERS
 
+from .artifacts import (
+    MAX_PNG_BYTES,
+    MAX_REJECTION_BYTES,
+    ArtifactConflict,
+    ArtifactFailed,
+    ArtifactLimit,
+    ArtifactPending,
+    ArtifactRepository,
+    RenderArtifact,
+    SubmissionContext,
+)
 from .auth import Authenticator, AuthRejected, Membership
-from .models import Scope, identifier, json_bytes
+from .models import Scope, identifier
 from .records import Call, RecordingConflict
 from .recovery import recover_issued
 from .security import verify_miner_access
@@ -31,20 +43,28 @@ class StrictInput(BaseModel):
 
 
 class Dispatch(StrictInput):
-    invocation: Invocation
+    request: RequestKey
     start_id: str
 
 
 class Retry(StrictInput):
-    invocation: Invocation
+    request: RequestKey
     exchange_id: str
 
 
-class Finish(StrictInput):
-    generation: Generation
-    count: int = Field(ge=0, le=4096)
-    output_sha256: Digest
-    output_is_none: bool
+class SaveRender(StrictInput):
+    generation: SubmissionContext
+    submission_commit: str = Field(pattern=r"^[0-9a-f]{40}$")
+    source: str
+    options: RenderOptions = RenderOptions()
+    include_png: bool = True
+
+
+class SaveChoice(StrictInput):
+    generation: SubmissionContext
+    submission_commit: str = Field(pattern=r"^[0-9a-f]{40}$")
+    source_sha256: Digest | None
+    expected_revision: Digest | None = None
 
 
 class AssignedMiner(Membership):
@@ -57,12 +77,21 @@ class AssignedMiner(Membership):
 
 
 class Witness:
-    def __init__(self, runtime: PodRuntime, prompts: frozenset[str], artifact_url: Callable[[str], str]) -> None:
-        self.runtime, self.prompts, self.artifact_url = runtime, prompts, artifact_url
+    def __init__(
+        self,
+        runtime: PodRuntime,
+        artifact_url: Callable[[str], str],
+        *,
+        artifacts: ArtifactRepository | None = None,
+    ) -> None:
+        self.runtime, self.artifact_url = runtime, artifact_url
         self.records, self.budget, self.evidence = runtime.records, runtime.budget, runtime.evidence
         self.round, self.round_end, self.proof_hash = runtime.scope.round, runtime.round_end, runtime.proof_hash
         self.auth = Authenticator(AssignedMiner(runtime.scope.hotkey))
         self.renderer_url = "http://127.0.0.1:8002/render/grid"
+        if artifacts is not None and artifacts.scope != runtime.scope:
+            raise ValueError("Artifact storage belongs to another miner")
+        self.artifacts = artifacts
 
     @web.middleware
     async def middleware(
@@ -74,7 +103,7 @@ class Witness:
             body = await request.read()
             if request.method == "GET" and body:
                 raise ValueError("Unexpected request body")
-            if not request.path.startswith("/render/") and len(body) > 16384:
+            if not (request.path.startswith("/render/") or request.path == "/artifacts/render") and len(body) > 16384:
                 raise ValueError("Invalid body size")
             for name in (
                 "x-bittensor-version",
@@ -100,6 +129,14 @@ class Witness:
             return web.json_response({"error": str(error)}, status=error.status, headers={"Cache-Control": "no-store"})
         except RecordingConflict:
             return web.json_response({"error": "RecordingConflict"}, status=409)
+        except ArtifactConflict:
+            return web.json_response({"error": "artifact_conflict"}, status=409)
+        except ArtifactLimit:
+            return web.json_response({"error": "artifact_storage_limit"}, status=429)
+        except ArtifactFailed:
+            return web.json_response({"error": "artifact_recovery_exhausted"}, status=409)
+        except ArtifactPending:
+            return web.json_response({"error": "artifact_pending"}, status=503)
         except (ValidationError, ValueError, KeyError):
             return web.json_response({"error": "invalid_request"}, status=400)
         except web.HTTPException:
@@ -114,13 +151,7 @@ class Witness:
         if not self.runtime.selected():
             raise AuthRejected("pod_not_selected", 409)
 
-    def _check_generation(self, invocation: Invocation) -> None:
-        if invocation.generation.round != self.round:
-            raise AuthRejected("round_changed", 409)
-        if invocation.generation.prompt_sha256 not in self.prompts:
-            raise AuthRejected("unknown_round_prompt", 403)
-
-    async def _snapshot(self, scope: Scope, invocation: Invocation, call: Call) -> dict[str, object]:
+    async def _snapshot(self, scope: Scope, invocation: RequestKey, call: Call) -> dict[str, object]:
         call = await asyncio.to_thread(
             recover_issued, self.records, self.budget, self.evidence.get, scope, invocation, call, self.proof_hash
         )
@@ -130,19 +161,17 @@ class Witness:
         )
         return {
             "call": call.model_dump(exclude={"capture_id"}),
-            "round": scope.round,
             "hotkey": scope.hotkey,
             "session": session,
             "completion": completion,
         }
 
     async def reserve(self, request: web.Request) -> web.Response:
-        invocation = Invocation.model_validate_json(await request.read())
-        self._check_generation(invocation)
+        invocation = RequestKey.model_validate_json(await request.read())
         scope = self._scope(request)
         if time.time() >= self.round_end:
-            recording = await asyncio.to_thread(self.records.load, scope, invocation.generation.id)
-            if recording is None or invocation.ordinal >= len(recording.entries):
+            record = await asyncio.to_thread(self.records.load, scope, invocation.id)
+            if record is None:
                 raise AuthRejected("round_closed", 403)
         await asyncio.to_thread(self._require_selected)
         call = await asyncio.to_thread(self.records.reserve, scope, invocation)
@@ -150,14 +179,11 @@ class Witness:
 
     async def dispatch(self, request: web.Request) -> web.Response:
         data = Dispatch.model_validate_json(await request.read())
-        invocation, scope = data.invocation, self._scope(request)
-        self._check_generation(invocation)
-        recording = await asyncio.to_thread(self.records.load, scope, invocation.generation.id)
-        call = None if recording is None else recording.calls.get(invocation.request.id)
+        invocation, scope = data.request, self._scope(request)
+        record = await asyncio.to_thread(self.records.load, scope, invocation.id)
+        call = None if record is None else record.call
         if call is None:
             raise AuthRejected("exchange_not_found", 404)
-        if invocation.ordinal != call.owner_ordinal:
-            raise RecordingConflict("Only the original invocation dispatches")
         if call.phase in ("issued", "failed", "capturing"):
             return web.json_response(await self._snapshot(scope, invocation, call))
         if time.time() >= self.round_end:
@@ -177,13 +203,12 @@ class Witness:
 
     async def retry(self, request: web.Request) -> web.Response:
         data = Retry.model_validate_json(await request.read())
-        self._check_generation(data.invocation)
         if time.time() >= self.round_end:
             raise AuthRejected("round_closed", 403)
         scope = self._scope(request)
         await asyncio.to_thread(self._require_selected)
-        call = await asyncio.to_thread(self.records.retry, scope, data.invocation, identifier(data.exchange_id))
-        return web.json_response(await self._snapshot(scope, data.invocation, call))
+        call = await asyncio.to_thread(self.records.retry, scope, data.request, identifier(data.exchange_id))
+        return web.json_response(await self._snapshot(scope, data.request, call))
 
     async def exchange_status(self, request: web.Request) -> web.Response:
         scope = self._scope(request)
@@ -191,11 +216,6 @@ class Witness:
         if located is None:
             raise AuthRejected("exchange_not_found", 404)
         return web.json_response(await self._snapshot(scope, *located))
-
-    async def deliver(self, request: web.Request) -> web.Response:
-        invocation = Invocation.model_validate_json(await request.read())
-        delivery = await asyncio.to_thread(self.records.deliver, self._scope(request), invocation)
-        return web.json_response({"delivery": delivery})
 
     async def release(self, request: web.Request) -> web.Response:
         scope = self._scope(request)
@@ -206,37 +226,8 @@ class Witness:
         await asyncio.to_thread(self.records.release, scope, located[0])
         return web.json_response({"released": True})
 
-    async def finish(self, request: web.Request) -> web.Response:
-        data = Finish.model_validate_json(await request.read())
-        if data.generation.round != self.round:
-            raise AuthRejected("round_changed", 409)
-        await asyncio.to_thread(
-            self.records.finish_digest,
-            self._scope(request),
-            data.generation,
-            data.count,
-            data.output_sha256,
-            data.output_is_none,
-        )
-        return web.json_response({"finished": True})
-
-    async def recording(self, request: web.Request) -> web.Response:
-        scope = self._scope(request)
-        recording = await asyncio.to_thread(self.records.load, scope, request.match_info["generation_id"])
-        if recording is None:
-            raise AuthRejected("recording_not_found", 404)
-        data = recording.model_dump(exclude={"attempts"})
-        data["calls"] = {key: call.model_dump(exclude={"capture_id"}) for key, call in recording.calls.items()}
-        raw = json_bytes(data)
-        key = (
-            f"evidence/v1/{scope.deployment}/{scope.round}/{scope.hotkey}/recordings/"
-            f"{recording.generation.id}/{hashlib.sha256(raw).hexdigest()}.json"
-        )
-        await asyncio.to_thread(self.evidence.put, key, raw)
-        return web.json_response({"recording": self.link(key, raw)}, headers={"Cache-Control": "no-store"})
-
-    def session(self, invocation: Invocation, call: Call) -> dict[str, object]:
-        host, path = PROVIDERS[invocation.request.provider]
+    def session(self, invocation: RequestKey, call: Call) -> dict[str, object]:
+        host, path = PROVIDERS[invocation.provider]
         return {
             "id": call.exchange_id,
             "protocol": 2,
@@ -249,17 +240,15 @@ class Witness:
     def link(self, key: str, raw: bytes) -> dict[str, object]:
         return {"url": self.artifact_url(key), "sha256": hashlib.sha256(raw).hexdigest(), "size": len(raw)}
 
-    def completion(self, scope: Scope, invocation: Invocation, call: Call) -> dict[str, object]:
+    def completion(self, scope: Scope, invocation: RequestKey, call: Call) -> dict[str, object]:
         prefix = f"rounds/{scope.round}/{scope.hotkey}/{call.exchange_id}/"
         manifest = self.evidence.get(prefix + "manifest.json", 1024 * 1024)
         if manifest is None or hashlib.sha256(manifest).hexdigest() != call.manifest_sha256:
             raise RecordingConflict("Durable manifest differs")
         metadata = json.loads(manifest)
         objects = metadata.get("artifacts")
-        if objects is None:
-            # Retained captures remain byte-for-byte intact. Publish immutable
-            # copies when their original manifest predates artifact descriptors.
-            objects = self.runtime.publish(call.exchange_id, {})["artifacts"]
+        if not isinstance(objects, dict):
+            raise RecordingConflict("Manifest has no artifact descriptors")
         links = {}
         for name, item in objects.items():
             if name not in self.runtime.PUBLIC_EVIDENCE or not isinstance(item, dict):
@@ -347,6 +336,147 @@ class Witness:
                 self.runtime.rendering -= 1
                 self.runtime.last_used = self.runtime.clock()
 
+    def _artifacts(self, generation: SubmissionContext | None = None) -> ArtifactRepository:
+        if self.artifacts is None:
+            raise AuthRejected("artifact_storage_disabled", 404)
+        if generation is not None:
+            if generation.round != self.round:
+                raise AuthRejected("round_changed", 409)
+            if generation.prompt_sha256 not in self.artifacts.prompt_hashes:
+                raise AuthRejected("unknown_round_prompt", 403)
+        return self.artifacts
+
+    def _admit_artifact(self) -> float:
+        with self.runtime.lock:
+            self._require_selected()
+            if time.time() >= self.round_end:
+                raise AuthRejected("round_closed", 403)
+            self.runtime.rendering += 1
+            return time.time()
+
+    def _artifact_done(self) -> None:
+        with self.runtime.lock:
+            self.runtime.rendering -= 1
+            self.runtime.last_used = self.runtime.clock()
+
+    async def _saved_render_response(self, artifact: RenderArtifact, include_png: bool) -> web.Response:
+        store = self._artifacts(artifact.generation)
+        headers = {
+            "Cache-Control": "no-store",
+            "X-Artifact-Id": artifact.artifact_id,
+            "X-Source-Sha256": artifact.source.sha256,
+            "X-Renderer-Id": artifact.profile.image_digest,
+        }
+        if not include_png:
+            return web.json_response({"artifact": artifact.model_dump(mode="json")}, headers=headers)
+        if artifact.rejection_json is not None:
+            return web.Response(
+                text=artifact.rejection_json, status=422, content_type="application/json", headers=headers
+            )
+        assert artifact.png is not None
+        png = await asyncio.to_thread(store.read_object, artifact.png, MAX_PNG_BYTES)
+        headers["X-Png-Sha256"] = artifact.png.sha256
+        return web.Response(body=png, content_type="image/png", headers=headers)
+
+    async def save_render(self, request: web.Request) -> web.Response:
+        data = SaveRender.model_validate_json(await request.read())
+        store = self._artifacts(data.generation)
+        if data.submission_commit != store.submission_commit:
+            raise ArtifactConflict("Source submission changed")
+        artifact_id = store.identity(data.generation, data.source, data.options)
+        saved = await asyncio.to_thread(store.load_render, data.generation, artifact_id)
+        if saved is not None:
+            await asyncio.to_thread(store.release_reservation, saved)
+            return await self._saved_render_response(saved, data.include_png)
+        await asyncio.to_thread(self._admit_artifact)
+        try:
+            owner = await asyncio.to_thread(store.reserve, data.generation, data.source, data.options)
+            async with (
+                httpx.AsyncClient(timeout=150, trust_env=False) as client,
+                client.stream(
+                    "POST",
+                    self.renderer_url,
+                    params=data.options.query(),
+                    json={"source": data.source},
+                ) as response,
+            ):
+                body = bytearray()
+                limit = MAX_REJECTION_BYTES if response.status_code == 422 else MAX_PNG_BYTES
+                async for chunk in response.aiter_bytes():
+                    body.extend(chunk)
+                    if len(body) > limit:
+                        raise ArtifactPending("Renderer response exceeds limit")
+                png, rejection = None, None
+                if response.status_code == 422:
+                    try:
+                        rejection = RenderRejected(body.decode()).detail_json
+                    except (UnicodeError, ValueError) as error:
+                        raise ArtifactPending("Invalid renderer rejection") from error
+                else:
+                    response.raise_for_status()
+                    if response.headers.get("Content-Type", "").split(";", 1)[0] != "image/png":
+                        raise ArtifactPending("Renderer did not return PNG bytes")
+                    png = bytes(body)
+                    if not png.startswith(b"\x89PNG\r\n\x1a\n"):
+                        raise ArtifactPending("Invalid renderer PNG")
+            saved = await asyncio.to_thread(
+                store.complete,
+                data.generation,
+                data.source,
+                data.options,
+                owner=owner,
+                png=png,
+                rejection_json=rejection,
+            )
+            await asyncio.to_thread(store.release_reservation, saved)
+            return await self._saved_render_response(saved, data.include_png)
+        finally:
+            self._artifact_done()
+
+    async def save_choice(self, request: web.Request) -> web.Response:
+        data = SaveChoice.model_validate_json(await request.read())
+        store = self._artifacts(data.generation)
+        store._generation(data.generation)
+        if data.submission_commit != store.submission_commit:
+            raise ArtifactConflict("Source submission changed")
+        previous = await asyncio.to_thread(store.load_final, data.generation.prompt_sha256)
+        operation = store.operation(data.generation, data.source_sha256)
+        if previous is not None and previous.operation_id == operation:
+            return web.json_response({"submission": previous.model_dump(mode="json")})
+        if (previous.revision if previous else None) != data.expected_revision:
+            raise ArtifactConflict("Final choice changed")
+        accepted_at = await asyncio.to_thread(self._admit_artifact)
+        try:
+            artifact = None
+            if data.source_sha256 is not None:
+                artifact = await asyncio.to_thread(store.find_render, data.generation, data.source_sha256)
+                if artifact is None:
+                    raise AuthRejected("source_not_saved", 404)
+            saved = await asyncio.to_thread(
+                store.save_final,
+                data.generation,
+                data.source_sha256,
+                data.expected_revision,
+                artifact,
+                accepted_at=accepted_at,
+                round_end=self.round_end,
+            )
+            return web.json_response(
+                {"submission": saved.model_dump(mode="json")}, headers={"Cache-Control": "no-store"}
+            )
+        finally:
+            self._artifact_done()
+
+    async def get_choice(self, request: web.Request) -> web.Response:
+        prompt = request.match_info["prompt"]
+        store = self._artifacts()
+        if prompt not in store.prompt_hashes:
+            raise AuthRejected("unknown_round_prompt", 403)
+        saved = await asyncio.to_thread(store.load_final, prompt)
+        if saved is None:
+            raise AuthRejected("submission_not_found", 404)
+        return web.json_response({"submission": saved.model_dump(mode="json")}, headers={"Cache-Control": "no-store"})
+
     def application(self) -> web.Application:
         app = web.Application(middlewares=[self.middleware], client_max_size=6 * 1024 * 1024 + 4096)
         app.add_routes(
@@ -354,13 +484,13 @@ class Witness:
                 web.post("/calls", self.reserve),
                 web.post("/calls/dispatch", self.dispatch),
                 web.post("/calls/retry", self.retry),
-                web.post("/calls/deliver", self.deliver),
-                web.post("/generations/finish", self.finish),
                 web.post("/release/{exchange_id}", self.release),
-                web.get("/recordings/{generation_id}", self.recording),
                 web.get("/status/{exchange_id}", self.exchange_status),
                 web.get("/exchanges/{exchange_id}/connect", self.miner_exchange),
                 web.post("/render/grid", self.render),
+                web.post("/artifacts/render", self.save_render),
+                web.post("/submissions", self.save_choice),
+                web.get("/submissions/{prompt}", self.get_choice),
             ]
         )
         return app

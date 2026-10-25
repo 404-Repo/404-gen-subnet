@@ -4,7 +4,7 @@ import hashlib
 import json
 from collections.abc import Callable
 
-from witness_client.calls import Invocation, request_digest
+from witness_client.calls import RequestKey, request_digest
 
 from .budget import Budget
 from .models import Scope, object_dict
@@ -16,7 +16,7 @@ def recover_issued(
     budget: Budget,
     read: Callable[[str], bytes | None],
     scope: Scope,
-    invocation: Invocation,
+    invocation: RequestKey,
     call: Call,
     proof_hash: str,
 ) -> Call:
@@ -28,9 +28,8 @@ def recover_issued(
         return call
     metadata = object_dict(json.loads(manifest))
     binding = {
-        "generation_id": invocation.generation.id,
-        "call_id": invocation.request.id,
-        "request_key": invocation.request.model_dump(),
+        "call_id": invocation.id,
+        "request_key": invocation.model_dump(),
         "round": scope.round,
         "hotkey": scope.hotkey,
         "exchange_id": call.exchange_id,
@@ -45,7 +44,7 @@ def recover_issued(
     if request is None or response is None:
         return call
     if (
-        request_digest(request) != invocation.request.request_sha256
+        request_digest(request) != invocation.request_sha256
         or metadata.get("request_sha256") != hashlib.sha256(request).hexdigest()
         or metadata.get("response_sha256") != hashlib.sha256(response).hexdigest()
         or type(metadata.get("provider_status")) is not int

@@ -12,7 +12,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from witness_client.calls import request_digest
-from witness_client.pods import RecordingView
+from witness_client.observations import Execution, Schedule
 
 from .models import Scope, json_bytes
 from .records import CallRecords
@@ -45,37 +45,31 @@ def export_bundle(
     records: CallRecords,
     evidence: Evidence,
     scope: Scope,
-    generation_id: str,
+    execution: Path,
     output: Path,
     proof_hash: str,
-    pricing_hash: str,
+    pricing: bytes,
     verify: Verify,
 ) -> None:
-    recording = records.load(scope, generation_id)
-    if recording is None or not recording.finished:
-        raise ValueError("Generation has no complete recording")
+    """Combine trusted host observations with independently verified provider evidence."""
+    raw = execution.read_bytes()
+    observed = Execution.model_validate_json(raw)
+    Schedule(observed)
+    if not observed.finished or any(entry.exited is None for entry in observed.observations):
+        raise ValueError("Execution observations are incomplete")
     if output.exists():
         raise ValueError("Replay output already exists")
-    data = recording.model_dump(exclude={"attempts"})
-    data["calls"] = {
-        key: call.model_dump(exclude={"capture_id"})
-        for key, call in recording.calls.items()
-    }
-    public = RecordingView.model_validate(data)
-    providers = {call.request.provider for call in public.calls.values()}
-    if len(providers) > 1 or any(
-        call.phase != "issued" for call in public.calls.values()
-    ):
-        raise ValueError("Recording contains unresolved calls or mixed providers")
-    if sorted(e.delivery for e in public.entries if e.delivery is not None) != list(
-        range(len(public.entries))
-    ):
-        raise ValueError("Recording has incomplete delivery order")
+    pricing_hash = hashlib.sha256(pricing).hexdigest()
     temporary = Path(tempfile.mkdtemp(prefix=".witness-replay-", dir=output.parent))
+    captures: dict[str, object] = {}
     try:
-        for call_id, call in public.calls.items():
-            if call_id != call.request.id:
-                raise ValueError("Recording request identity differs")
+        for entry in observed.observations:
+            if entry.action != "create" or entry.exchange_id is None or entry.exchange_id in captures:
+                continue
+            located = records.locate(scope, entry.exchange_id)
+            if located is None or located[0] != entry.request:
+                raise ValueError("Execution references an unknown captured call")
+            key, call = located
             directory = temporary / call.exchange_id
             directory.mkdir(mode=0o700)
             prefix = f"rounds/{scope.round}/{scope.hotkey}/{call.exchange_id}/"
@@ -90,52 +84,60 @@ def export_bundle(
                 "session.json",
             ):
                 content = evidence.read(prefix + name)
-                if content is None:
-                    raise ValueError("Captured evidence is missing")
-                (directory / name).write_bytes(content)
-            manifest_bytes = (directory / "manifest.json").read_bytes()
-            manifest = json.loads(manifest_bytes)
-            request, response = (
-                (directory / "request.json").read_bytes(),
-                (directory / "response.sse").read_bytes(),
-            )
-            if (
-                hashlib.sha256(manifest_bytes).hexdigest() != call.manifest_sha256
-                or manifest.get("generation_id") != generation_id
-                or manifest.get("call_id") != call_id
-                or manifest.get("request_key") != call.request.model_dump()
-                or manifest.get("hotkey") != scope.hotkey
-                or manifest.get("round") != scope.round
-                or manifest.get("exchange_id") != call.exchange_id
-                or manifest.get("proof_key_sha256") != proof_hash
-                or manifest.get("pricing_sha256") != pricing_hash
-                or request_digest(request) != call.request.request_sha256
-                or manifest.get("request_sha256") != hashlib.sha256(request).hexdigest()
-                or manifest.get("response_sha256")
-                != hashlib.sha256(response).hexdigest()
-            ):
-                raise ValueError("Recorded evidence binding differs")
-            verified = verify(call.request.provider, directory)
-            if (
-                verified.get("request_sha256") != manifest["request_sha256"]
-                or verified.get("response_sha256") != manifest["response_sha256"]
-                or verified.get("provider_status") != manifest["provider_status"]
-                or verified.get("usage") != manifest.get("usage")
-                or (directory / "request.json").read_bytes() != request
-                or (directory / "response.sse").read_bytes() != response
-            ):
-                raise ValueError("TLS verification differs from retained response")
-        public_bytes = public.model_dump_json().encode()
-        (temporary / "recording.json").write_bytes(public_bytes)
+                if content is not None:
+                    (directory / name).write_bytes(content)
+            model, usage = "", None
+            if call.phase == "issued":
+                manifest_bytes = (directory / "manifest.json").read_bytes()
+                manifest = json.loads(manifest_bytes)
+                request, response = (directory / "request.json").read_bytes(), (directory / "response.sse").read_bytes()
+                binding = {
+                    "call_id": key.id,
+                    "request_key": key.model_dump(),
+                    "hotkey": scope.hotkey,
+                    "round": scope.round,
+                    "exchange_id": call.exchange_id,
+                    "proof_key_sha256": proof_hash,
+                    "pricing_sha256": pricing_hash,
+                }
+                if (
+                    hashlib.sha256(manifest_bytes).hexdigest() != call.manifest_sha256
+                    or any(manifest.get(k) != value for k, value in binding.items())
+                    or request_digest(request) != key.request_sha256
+                    or manifest.get("request_sha256") != hashlib.sha256(request).hexdigest()
+                    or manifest.get("response_sha256") != hashlib.sha256(response).hexdigest()
+                ):
+                    raise ValueError("Recorded evidence binding differs")
+                verified = verify(key.provider, directory)
+                if (
+                    any(
+                        verified.get(k) != manifest.get(k)
+                        for k in ("request_sha256", "response_sha256", "provider_status", "usage")
+                    )
+                    or verified.get("session_id") != key.session_id
+                    or (directory / "request.json").read_bytes() != request
+                    or (directory / "response.sse").read_bytes() != response
+                ):
+                    raise ValueError("TLS verification differs from retained outcome")
+                model, usage = json.loads(request)["model"], verified.get("usage")
+            elif entry.failure is None:
+                raise ValueError("Successful observation has no issued capture")
+            captures[call.exchange_id] = {
+                "call": call.model_dump(exclude={"capture_id"}),
+                "model": model,
+                "usage": usage,
+            }
+        (temporary / "execution.json").write_bytes(raw)
+        (temporary / "pricing.json").write_bytes(pricing)
         (temporary / "verified.json").write_bytes(
             json_bytes(
                 {
-                    "version": 1,
-                    "recording_sha256": hashlib.sha256(public_bytes).hexdigest(),
-                    "hotkey": scope.hotkey,
-                    "provider": next(iter(providers), "api"),
+                    "version": 2,
+                    "execution_sha256": hashlib.sha256(raw).hexdigest(),
+                    "scope_key": scope.key,
                     "proof_key_sha256": proof_hash,
                     "pricing_sha256": pricing_hash,
+                    "captures": captures,
                 }
             )
         )

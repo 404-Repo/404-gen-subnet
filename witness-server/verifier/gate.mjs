@@ -36,10 +36,3 @@ export function responseUsage(body) {
   if (usage.input_tokens + usage.output_tokens !== usage.total_tokens) return null;
   return { input_tokens: usage.input_tokens, output_tokens: usage.output_tokens, total_tokens: usage.total_tokens };
 }
-
-// Only a complete, authenticated provider HTTP response can reach this check.
-// Invalid requests/resources, auth/access failures and rate limits are rejections,
-// not reported zero usage. Timeouts, other errors and lost replies remain unknown.
-export function providerRejected(status) {
-  return [400, 401, 403, 404, 429].includes(status);
-}

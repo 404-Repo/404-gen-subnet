@@ -1,19 +1,12 @@
-"""Versioned identities shared by recording, worker authorization and replay."""
+"""Logical model-call identity, independent of executions and arrival order."""
 
 from __future__ import annotations
 
 import hashlib
 import json
-from typing import Annotated, Literal, cast
+from typing import Annotated, Literal
 
-from pydantic import (
-    BaseModel,
-    ConfigDict,
-    Field,
-    SerializerFunctionWrapHandler,
-    StringConstraints,
-    model_serializer,
-)
+from pydantic import BaseModel, ConfigDict, StringConstraints, model_serializer
 
 Digest = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
 
@@ -46,64 +39,40 @@ def request_digest(body: bytes) -> str:
     return hashlib.sha256(canonical(value)).hexdigest()
 
 
-class Generation(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
-
-    prompt_sha256: Digest
-    source_sha256: Digest | None = None
-    seed: int
-    round: Annotated[str, StringConstraints(pattern=r"^[a-z0-9][a-z0-9-]{0,63}$")]
-    prompt_url: str | None = Field(default=None, max_length=4096)
-
-    @classmethod
-    def from_prompt(
-        cls,
-        image: bytes,
-        seed: int,
-        *,
-        round_number: str,
-        prompt_url: str | None = None,
-    ) -> Generation:
-        return cls(
-            prompt_sha256=hashlib.sha256(image).hexdigest(),
-            seed=seed,
-            round=round_number,
-            prompt_url=prompt_url,
-        )
-
-    @model_serializer(mode="wrap")
-    def serialize(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
-        data = cast(dict[str, object], handler(self))
-        if self.source_sha256 is None:
-            data.pop("source_sha256", None)
-        return data
-
-    @property
-    def id(self) -> str:
-        # URLs are descriptive: identical frozen bytes do not change identity
-        # when a signed download URL expires or its query string changes.
-        return hashlib.sha256(
-            (b"404-generate/v1\n" if self.source_sha256 is not None else b"404-generate/v2\n")
-            + canonical(self.model_dump(exclude={"prompt_url"}))
-        ).hexdigest()
-
-
 class RequestKey(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
     provider: Literal["api", "codex"]
     request_sha256: Digest
-    # Wire key used by retained recordings, manifests and call hashes.
+    # Retained call hashes and capture manifests use this wire spelling.
     witness_seed: int = 0
+    session_id: str | None = None
+
+    @model_serializer
+    def serialize(self) -> dict[str, object]:
+        value: dict[str, object] = {
+            "provider": self.provider,
+            "request_sha256": self.request_sha256,
+            "witness_seed": self.witness_seed,
+        }
+        if self.session_id is not None:
+            value["session_id"] = self.session_id
+        return value
 
     @classmethod
     def from_body(
-        cls, provider: Literal["api", "codex"], body: bytes, request_id: int = 0
+        cls,
+        provider: Literal["api", "codex"],
+        body: bytes,
+        request_id: int = 0,
+        *,
+        session_id: str | None = None,
     ) -> RequestKey:
         return cls(
             provider=provider,
             request_sha256=request_digest(body),
             witness_seed=request_id,
+            session_id=session_id,
         )
 
     @property
@@ -111,11 +80,3 @@ class RequestKey(BaseModel):
         return hashlib.sha256(
             b"404-call/v1\n" + canonical(self.model_dump())
         ).hexdigest()
-
-
-class Invocation(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
-
-    generation: Generation
-    ordinal: int = Field(ge=0, lt=4096)
-    request: RequestKey

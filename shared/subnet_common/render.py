@@ -180,13 +180,26 @@ async def render_views(
     bg_color: str,
     log_id: str,
     api_key: str | None = None,
+    *,
+    raise_errors: bool = False,
 ) -> dict[str, bytes] | None:
     """Render a batch of views in one call. Returns {view_name: png_bytes} or None on failure.
 
     Retries up to 3 times on 5xx/429/timeout. Validation failures from the render service
     (e.g. 422 for static-analysis rejection) are returned as None without retry — those
     are permanent miner failures, not transient errors.
+    Set raise_errors to preserve exceptions for a caller that distinguishes failures.
     """
+    if raise_errors:
+        return await _render_views_with_retry(
+            client,
+            endpoint,
+            js_content,
+            views,
+            bg_color,
+            log_id=log_id,
+            api_key=api_key,
+        )
     try:
         return await _render_views_with_retry(
             client, endpoint, js_content, views, bg_color, log_id=log_id, api_key=api_key
@@ -243,12 +256,17 @@ async def render_grid(
     js_content: bytes,
     log_id: str,
     api_key: str | None = None,
+    *,
+    raise_errors: bool = False,
 ) -> bytes | None:
     """Render the 4-view 2x2 grid PNG via `POST /render/grid`. Returns None on failure.
 
     Used by the multi-stage judge's grid-based stages (artifact compare + checklist
     verify). Producers cache one grid PNG per stem.
+    Set raise_errors to preserve exceptions for a caller that distinguishes failures.
     """
+    if raise_errors:
+        return await _render_grid_with_retry(client, endpoint, js_content, log_id=log_id, api_key=api_key)
     try:
         return await _render_grid_with_retry(client, endpoint, js_content, log_id=log_id, api_key=api_key)
     except httpx.HTTPStatusError as e:

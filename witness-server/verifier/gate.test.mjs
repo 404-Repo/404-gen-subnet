@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { responseUsage, providerRejected } from './gate.mjs';
+import { responseUsage } from './gate.mjs';
 import { parseResponse } from './verify.mjs';
 
 const usage = { input_tokens: 20, output_tokens: 40, total_tokens: 60 };
@@ -17,11 +17,6 @@ test('terminal usage is accounted even when generation failed or was incomplete'
   assert.equal(responseUsage(sse(event('completed'), event('failed'))), null);
   assert.equal(responseUsage(sse({ type: 'response.failed', response: { status: 'completed', usage } })), null);
   assert.equal(responseUsage(sse({ type: 'response.in_progress', response: { status: 'in_progress', usage } })), null);
-});
-
-test('only authenticated request/resource/auth/access/rate rejections lift the unknown-usage hold', () => {
-  for (const status of [400, 401, 403, 404, 429]) assert.equal(providerRejected(status), true);
-  for (const status of [undefined, null, 200, 402, 405, 408, 409, 422, 500, 502, 503, 504]) assert.equal(providerRejected(status), false);
 });
 
 test('non-200 evidence still requires a complete, unambiguous HTTP body', () => {

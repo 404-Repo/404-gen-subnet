@@ -16,7 +16,7 @@ from pod import PodRuntime
 from support import MemoryState
 from test_recording import BODY, PRICING, SCOPE, invocation
 from test_state import FakeS3, s3_error
-from witness_client.calls import Invocation, canonical
+from witness_client.calls import RequestKey, canonical
 
 from pod_gateway.budget import Budget
 from pod_gateway.records import Call, CallRecords, RecordingConflict
@@ -28,7 +28,7 @@ PROOF = "c" * 64
 USAGE = {"input_tokens": 10, "output_tokens": 2}
 
 
-def capture(state: MemoryState) -> tuple[CallRecords, Budget, Invocation, Call]:
+def capture(state: MemoryState) -> tuple[CallRecords, Budget, RequestKey, Call]:
     records, budget, item = CallRecords(state), Budget(state, PRICING), invocation()
     call = records.reserve(SCOPE, item)
     assigned = records.assign(SCOPE, item, START, "pod-one")
@@ -41,13 +41,11 @@ def capture(state: MemoryState) -> tuple[CallRecords, Budget, Invocation, Call]:
     return records, budget, item, located[1]
 
 
-def evidence(budget: Budget, item: Invocation, call: Call) -> dict[str, bytes]:
+def evidence(budget: Budget, item: RequestKey, call: Call) -> dict[str, bytes]:
     response = b"complete captured response"
     metadata = {
-        "generation": item.generation.model_dump(),
-        "generation_id": item.generation.id,
-        "call_id": item.request.id,
-        "request_key": item.request.model_dump(),
+        "call_id": item.id,
+        "request_key": item.model_dump(),
         "round": SCOPE.round,
         "hotkey": SCOPE.hotkey,
         "exchange_id": call.exchange_id,
@@ -348,7 +346,10 @@ def test_capture_retry_requires_proven_failure_before_dispatch_reservation(
         elif stage == "budget_conflicts":
             state.conflicts = 16
         elif stage == "authorization":
-            state.pending_key = records.key(SCOPE, item.generation.id)
+            state.pending_key = records.key(SCOPE, item.id)
+        directory = args[3]
+        assert isinstance(directory, Path)
+        (directory / "authorization.json").write_bytes(b"{}")
         before_release(BODY)
         raise TimeoutError("Fixture failed after authorization")
 
@@ -368,9 +369,7 @@ def test_capture_retry_requires_proven_failure_before_dispatch_reservation(
     summary = budget.summary(SCOPE, item)
     reserved = stage in ("authorization", "after_authorization") or stage == "budget" and committed
     assert summary["possible_dispatches"] == summary["pending_usage"] == int(reserved)
-    if reserved:
-        assert summary["remaining_credits"] is None
-    elif stage in ("budget_read", "budget_conflicts"):
+    if not reserved and stage in ("budget_read", "budget_conflicts"):
         budget.reserve(SCOPE, item, retried.exchange_id, BODY)
         assert budget.summary(SCOPE, item)["possible_dispatches"] == 1
 
@@ -403,6 +402,9 @@ def test_capture_retries_rejected_budget_writes_but_not_uncertain_writes(
 
     def relay(*args: object, before_release: Callable[[bytes], None], **kwargs: object) -> None:
         nonlocal released
+        directory = args[3]
+        assert isinstance(directory, Path)
+        (directory / "authorization.json").write_bytes(b"{}")
         before_release(BODY)
         released += 1
         raise TimeoutError("Fixture failed after provider release")

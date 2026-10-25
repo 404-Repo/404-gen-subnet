@@ -169,7 +169,8 @@ async function verifyRequest(options) {
   const request = Buffer.concat([prefix.data, Buffer.alloc(tokenLength, '*'), ...suffixParts]);
   const requestBody = parseRequest(request, { host, path, tokenLength, authentication });
 
-  return { requestBody, serverStart: si, server, disclosures: ds, certificateTimeUnixNs: verified.certificateTimeUnixNs };
+  const sessionId = /^session-id: ([!-~]{1,1024})$/m.exec(request.subarray(0, request.indexOf('\r\n\r\n')).toString('ascii').replaceAll('\r\n', '\n'))?.[1] ?? null;
+  return { requestBody, sessionId, serverStart: si, server, disclosures: ds, certificateTimeUnixNs: verified.certificateTimeUnixNs };
 }
 
 // Verify the complete held generation request and the earlier probe response.
@@ -181,7 +182,7 @@ export async function authorizeRequest(options) {
   const response = serverApplication(verified.server, verified.serverStart,
     index => ({ ...responseKey, number: index - verified.serverStart }), true);
   check(probeLength(response) === response.length, 'Additional response before generation');
-  return { requestBody: verified.requestBody, serverStart: verified.serverStart, responseKey, probe: true,
+  return { requestBody: verified.requestBody, sessionId: verified.sessionId, serverStart: verified.serverStart, responseKey, probe: true,
     certificateTimeUnixNs: verified.certificateTimeUnixNs };
 }
 

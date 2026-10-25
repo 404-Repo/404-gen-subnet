@@ -12,11 +12,14 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import cast
 
+import openai
 import pytest
 from channel import Channel
 from storage import Store
-from test_service import Harness
-from witness_client import WitnessClient, WitnessError
+from test_service import Harness, exchange_id
+from witness_client import WitnessClient
+from witness_client.calls import RequestKey
+from witness_client.request import serialize_body
 from witness_client.transport import exchange
 from worker import Verifier, relay
 
@@ -158,27 +161,29 @@ def test_native_direct_tls_durable_completion_and_exact_recovery(
                     await asyncio.to_thread(gateway.ensure_pod)
                     await fixture.runners[0].cleanup()
                     gateway_bytes = fixture.gateway_bytes
-                    bound = witness.for_generation(fixture.image, 42)
+                    bound = witness
 
                     def run() -> None:
                         if status != 200:
-                            with pytest.raises(WitnessError) as rejected:
+                            with pytest.raises(openai.APIStatusError) as rejected:
                                 bound.create(model="fixture", input="x" * (1024 * 1024))
-                            assert rejected.value.source == "provider" and rejected.value.status_code == status
+                            assert rejected.value.status_code == status
                             return
                         answer = bound.create(model="fixture", input="x" * (1024 * 1024))
                         assert answer.output_text == text
                         if not leave:
                             assert fixture.origin_bytes == 0
-                        assert witness.resume(answer._exchange_id).output_text == text
+                        assert witness.resume(exchange_id(witness)).output_text == text
 
                     await asyncio.wait_for(asyncio.to_thread(run), 120)
                     assert done.is_set() and len(seen) == 1
                     assert fixture.gateway_bytes == gateway_bytes
                     assert fixture.provider.creates == 1
-                    recording = fixture.records.load(fixture.scope, bound.generation.id)
+                    key = RequestKey.from_body("api", serialize_body({"model": "fixture", "input": "x" * (1024 * 1024),
+                                                                    "stream": True, "service_tier": "default"}, "api"))
+                    recording = fixture.records.load(fixture.scope, key.id)
                     assert recording is not None
-                    call = next(iter(recording.calls.values()))
+                    call = recording.call
                     assert call.phase == "issued"
                     assert (
                         fixture.state.get(f"rounds/test-0/{fixture.scope.hotkey}/{call.exchange_id}/response.sse")

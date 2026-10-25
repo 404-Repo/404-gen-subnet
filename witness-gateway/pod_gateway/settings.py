@@ -1,6 +1,5 @@
 """Typed runtime configuration; importing this module does not read the environment."""
 
-import json
 from collections.abc import Mapping
 from functools import cached_property
 from pathlib import Path
@@ -18,6 +17,7 @@ from pydantic import (
 )
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
+from .artifacts import ArtifactConfig
 from .auth import public_key
 from .models import Scope
 
@@ -31,7 +31,6 @@ class Settings(BaseSettings):
     gateway_owner_hotkey: str = Field(..., alias="WITNESS_GATEWAY_OWNER_HOTKEY")
     gateway_url: str = Field(..., alias="WITNESS_GATEWAY_URL")
     master_key: SecretStr = Field(..., alias="WITNESS_MASTER_KEY")
-    prompts: Annotated[frozenset[str], NoDecode] = Field(..., alias="WITNESS_PROMPT_HASHES")
 
     runpod_api_key: SecretStr = Field(..., alias="GATEWAY_RUNPOD_API_KEY")
     runpod_min_request_interval: float = Field(default=1.1, alias="RUNPOD_MIN_REQUEST_INTERVAL")
@@ -40,6 +39,7 @@ class Settings(BaseSettings):
     idle_seconds: int = Field(default=1800, alias="WITNESS_IDLE_SECONDS", ge=1800)
 
     image: str = Field(..., alias="WITNESS_IMAGE")
+    artifacts: str | None = Field(default=None, alias="WITNESS_ARTIFACTS")
     registry: str | None = Field(default=None, alias="WITNESS_REGISTRY")
     worker_cpu_id: str = Field(default="cpu3c", alias="WITNESS_CPU_ID")
     worker_vcpu_count: int = Field(default=2, alias="WITNESS_VCPU")
@@ -83,8 +83,6 @@ class Settings(BaseSettings):
                     environment[alias] = data[alias]
                 elif isinstance(value, SecretStr):
                     environment[alias] = value.get_secret_value()
-                elif name == "prompts":
-                    environment[alias] = json.dumps(sorted(value))
                 elif name == "data_centers":
                     environment[alias] = ",".join(value)
                 else:
@@ -106,22 +104,6 @@ class Settings(BaseSettings):
     @classmethod
     def parse_integer(cls, value: object) -> object:
         return int(value) if isinstance(value, str) else value
-
-    @field_validator("prompts", mode="before")
-    @classmethod
-    def parse_prompts(cls, value: object) -> frozenset[str]:
-        values = json.loads(value) if isinstance(value, str) else value
-        if (
-            not isinstance(values, (list, tuple, set, frozenset))
-            or not values
-            or len(values) > 4096
-            or any(
-                not isinstance(item, str) or len(item) != 64 or any(c not in "0123456789abcdef" for c in item)
-                for item in values
-            )
-        ):
-            raise ValueError("Expected frozen prompt SHA256 hashes")
-        return frozenset(values)
 
     @field_validator("data_centers", mode="before")
     @classmethod
@@ -149,6 +131,10 @@ class Settings(BaseSettings):
         public_key(self.gateway_owner_hotkey)
         if len(self.secret) < 32 or self.round == "gateway":
             raise ValueError("Invalid master key or round deadline")
+        if self.artifacts is not None:
+            config = ArtifactConfig.model_validate_json(self.artifacts)
+            if self.image.rsplit("@", 1)[-1] != config.profile.image_digest:
+                raise ValueError("Artifact renderer profile must match the pinned worker image")
         return self
 
     @cached_property

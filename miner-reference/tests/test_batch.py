@@ -2,18 +2,24 @@ from __future__ import annotations
 
 import hashlib
 import json
+import tempfile
 import threading
+import uuid
 from contextlib import nullcontext
 from pathlib import Path
-from typing import Literal, Unpack
+from types import SimpleNamespace
+from typing import Unpack, cast
 
+import httpx
 import pytest
+from bittensor_wallet import Keypair
 from openai.types.responses import Response
-from openai.types.responses.response_create_params import ResponseCreateParamsBase, ResponseCreateParamsStreaming
+from openai.types.responses.response_create_params import ResponseCreateParamsBase
 from renderer_client import RenderOptions, RenderRejected, RenderUnavailable
-from witness_client import WitnessClient, WitnessError, WitnessResult
-from witness_client.calls import Generation, RequestKey
-from witness_client.client import GenerationWitness
+from witness_client import WitnessClient, WitnessError
+from witness_client.calls import RequestKey
+from witness_client.client import CapturedResponse
+from witness_client.pods import PodGatewayClient
 from witness_client.request import serialize_body
 
 from miner_reference.batch import BatchSettings, Prompt, run_batch
@@ -24,7 +30,7 @@ from miner_reference.renders import SavedRenderer
 PNG = b"\x89PNG\r\n\x1a\nfixture"
 
 
-def result(text: str, model: str) -> WitnessResult:
+def result(text: str, model: str) -> Response:
     response = Response.model_validate(
         {
             "id": "resp_fixture",
@@ -53,13 +59,7 @@ def result(text: str, model: str) -> WitnessResult:
             },
         }
     )
-    return WitnessResult(
-        "hotkey",
-        text,
-        {"input_tokens": 10, "output_tokens": 20},
-        response=response,
-        _exchange_id="fixture",
-    )
+    return response
 
 
 class Renderer:
@@ -82,11 +82,11 @@ class Renderer:
 
 class Calls:
     def __init__(self) -> None:
-        self.requests: list[tuple[int, ResponseCreateParamsStreaming]] = []
+        self.requests: list[tuple[int, ResponseCreateParamsBase]] = []
         self.invalid_choice = False
         self.failure: WitnessError | None = None
 
-    def create(self, *, request_id: int = 0, **params: Unpack[ResponseCreateParamsStreaming]) -> WitnessResult:
+    def create(self, *, request_id: int = 0, **params: Unpack[ResponseCreateParamsBase]) -> Response:
         self.requests.append((request_id, params))
         if self.failure:
             raise self.failure
@@ -110,83 +110,52 @@ class Calls:
 
 class Witness(WitnessClient):
     def __init__(self) -> None:
-        self.requests: dict[str, list[RequestKey]] = {}
-        self.recorded: dict[tuple[str, str], WitnessResult] = {}
-        self.finished: dict[str, str | None] = {}
+        self._state = Path(tempfile.mkdtemp(prefix="miner-witness-"))
+        self._mode = "api"
+        self._config = {"round": "test-0", "witness_url": "https://witness.test", "proof_parameters": "unused"}
+        self._http = cast(httpx.Client, SimpleNamespace(base_url="https://witness.test"))
+        self._hotkey = cast(Keypair, SimpleNamespace(ss58_address="hotkey"))
+        self._gateway = cast(PodGatewayClient, SimpleNamespace(delivery_timeout=5))
+        self._calls_lock = threading.Lock()
+        self._calls = {}
+        self._call_slots = None
+        self.recorded: dict[str, CapturedResponse] = {}
         self.lock = threading.Lock()
         self.active = self.peak = self.paid = 0
         self.first_pair: threading.Barrier | None = None
         self.lose_reply_once = False
 
-    def for_generation(
-        self,
-        image: bytes,
-        seed: int,
-        *,
-        prompt_url: str | None = None,
-        call_slots: threading.Semaphore | None = None,
-    ) -> GenerationWitness:
-        generation = Generation.from_prompt(image, seed, round_number="test-0", prompt_url=prompt_url)
-        parent = self
-
-        class Bound(GenerationWitness):
-            def __init__(self) -> None:
-                self.generation = generation
-                self.responses = self
-                self.position = 0
-                self.condition = threading.Condition()
-                with parent.lock:
-                    self.prefix = list(parent.requests.get(generation.id, []))
-
-            def create(
-                self,
-                *,
-                request_id: int = 0,
-                stream: Literal[True] = True,
-                session_id: str | None = None,
-                **params: Unpack[ResponseCreateParamsBase],
-            ) -> WitnessResult:
-                key = RequestKey.from_body("api", serialize_body({**params, "stream": stream}, "api"), request_id)
-                with self.condition:
-                    while self.position < len(self.prefix) and self.prefix[self.position] != key:
-                        assert self.condition.wait(timeout=5), "Generation request order changed on resume"
-                    with parent.lock:
-                        requests = parent.requests.setdefault(generation.id, [])
-                        if self.position == len(requests):
-                            requests.append(key)
-                    self.position += 1
-                    self.condition.notify_all()
-                with parent.lock:
-                    saved = parent.recorded.get((generation.id, key.id))
-                    if saved is not None:
-                        return saved
-                with call_slots if call_slots is not None else nullcontext():
-                    with parent.lock:
-                        parent.active += 1
-                        parent.peak = max(parent.peak, parent.active)
-                        parent.paid += 1
-                        barrier = parent.first_pair
-                        if barrier is not None and parent.paid > barrier.parties:
-                            barrier = None
-                    try:
-                        if barrier is not None:
-                            barrier.wait(timeout=5)
-                        value = Calls().create(request_id=request_id, stream=stream, **params)
-                        with parent.lock:
-                            parent.recorded[generation.id, key.id] = value
-                            if parent.lose_reply_once:
-                                parent.lose_reply_once = False
-                                raise WitnessError("Lost delivery", source="gateway", code="connection_lost")
-                        return value
-                    finally:
-                        with parent.lock:
-                            parent.active -= 1
-
-            def finish(self, output: str | None) -> None:
-                with parent.lock:
-                    parent.finished[generation.id] = output
-
-        return Bound()
+    def _capture(self, key: RequestKey, body: bytes, session_id: str | None) -> CapturedResponse:
+        with self.lock:
+            saved = self.recorded.get(key.id)
+        if saved is not None:
+            return saved
+        with self._call_slots if self._call_slots is not None else nullcontext():
+            with self.lock:
+                self.active += 1
+                self.peak = max(self.peak, self.active)
+                self.paid += 1
+                barrier = self.first_pair if self.first_pair is not None and self.paid <= self.first_pair.parties else None
+            try:
+                if barrier is not None:
+                    barrier.wait(timeout=5)
+                params = json.loads(body)
+                response = Calls().create(request_id=key.witness_seed, **params)
+                identifier = str(uuid.uuid4())
+                (self._state / identifier).mkdir(mode=0o700)
+                captured = CapturedResponse(identifier, 200, b"data: " + json.dumps({
+                    "type": "response.completed", "response": response.model_dump(),
+                }).encode() + b"\n\n")
+                self._save_response(captured)
+                with self.lock:
+                    self.recorded[key.id] = captured
+                    if self.lose_reply_once:
+                        self.lose_reply_once = False
+                        raise WitnessError("Lost delivery", identifier, source="gateway", code="connection_lost")
+                return captured
+            finally:
+                with self.lock:
+                    self.active -= 1
 
 
 @pytest.fixture
@@ -201,7 +170,12 @@ def prompts(tmp_path: Path) -> list[Prompt]:
 
 
 def settings(tmp_path: Path, **limits: int) -> BatchSettings:
-    return BatchSettings(tmp_path / "run", 42, "fixture", **limits)
+    return BatchSettings(
+        tmp_path / "run", 42, "fixture",
+        parallel_prompts=limits.get("parallel_prompts", 4),
+        parallel_calls=limits.get("parallel_calls", 2),
+        parallel_renders=limits.get("parallel_renders", 1),
+    )
 
 
 def test_five_candidates_refine_the_same_first_winner() -> None:
@@ -211,7 +185,7 @@ def test_five_candidates_refine_the_same_first_winner() -> None:
     requests = dict(calls.requests)
     assert [requests[i]["model"] for i in range(1, 8)] == ["gpt-6-astra"] + ["gpt-6.1-sol"] * 6
     assert len({seed for seed, _ in calls.requests}) == 7
-    refinements = [json.loads(serialize_body(requests[i], "api"))["input"][0]["content"] for i in (5, 6)]
+    refinements = [json.loads(serialize_body({**requests[i], "stream": True}, "api"))["input"][0]["content"] for i in (5, 6)]
     assert refinements[0] == refinements[1]
     assert "widen the base" in refinements[0][2]["text"]
     assert any(value in refinements[0][2]["text"] for value in renderer.sources[:3])
@@ -224,7 +198,7 @@ def test_initial_candidates_and_refinements_overlap_but_render_in_stable_order()
     lock = threading.Lock()
 
     class ParallelCalls(Calls):
-        def create(self, *, request_id: int = 0, **params: Unpack[ResponseCreateParamsStreaming]) -> WitnessResult:
+        def create(self, *, request_id: int = 0, **params: Unpack[ResponseCreateParamsBase]) -> Response:
             if request_id in (1, 2, 3):
                 initial.wait(timeout=5)
             elif request_id in (5, 6):
@@ -240,14 +214,14 @@ def test_initial_candidates_and_refinements_overlap_but_render_in_stable_order()
     renderer = Renderer()
     assert run(PNG, 42, ParallelCalls(), renderer) is not None
     assert renderer.sources == [
-        normalize(Calls().create(request_id=i, stream=True, model="gpt-6.1-sol").output_text) for i in (1, 2, 3, 5, 6)
+        normalize(Calls().create(request_id=i, model="gpt-6.1-sol").output_text) for i in (1, 2, 3, 5, 6)
     ]
 
 
 def test_rejected_candidates_are_repaired_once_in_both_stages() -> None:
     calls, renderer = Calls(), Renderer()
     sources = {
-        i: normalize(Calls().create(request_id=i, stream=True, model="gpt-6.1-sol").output_text) for i in range(1, 13)
+        i: normalize(Calls().create(request_id=i, model="gpt-6.1-sol").output_text) for i in range(1, 13)
     }
     renderer.reject = {sources[i] for i in (1, 2, 3, 5, 6)}
     assert run(PNG, 42, calls, renderer) in {sources[i] for i in (8, 9, 10, 11, 12)}
@@ -255,7 +229,7 @@ def test_rejected_candidates_are_repaired_once_in_both_stages() -> None:
     assert len(calls.requests) == 12
     requests = dict(calls.requests)
     for repair, original in ((8, 1), (9, 2), (10, 3), (11, 5), (12, 6)):
-        request = json.loads(serialize_body(requests[repair], "api"))
+        request = json.loads(serialize_body({**requests[repair], "stream": True}, "api"))
         text = request["input"][0]["content"][-1]["text"]
         assert sources[original] in text and '{"error":"invalid_geometry"}' in text
         assert requests[repair]["model"] == "gpt-6.1-sol"
@@ -264,7 +238,7 @@ def test_rejected_candidates_are_repaired_once_in_both_stages() -> None:
 def test_failed_repairs_stop_without_another_inference() -> None:
     calls, renderer = Calls(), Renderer()
     renderer.reject = {
-        normalize(Calls().create(request_id=i, stream=True, model="gpt-6.1-sol").output_text)
+        normalize(Calls().create(request_id=i, model="gpt-6.1-sol").output_text)
         for i in (1, 2, 3, 8, 9, 10)
     }
     assert run(PNG, 42, calls, renderer) is None
@@ -274,7 +248,7 @@ def test_failed_repairs_stop_without_another_inference() -> None:
 def test_failed_refinement_repairs_keep_the_initial_winner() -> None:
     calls, renderer = Calls(), Renderer()
     renderer.reject = {
-        normalize(Calls().create(request_id=i, stream=True, model="gpt-6.1-sol").output_text) for i in (5, 6, 11, 12)
+        normalize(Calls().create(request_id=i, model="gpt-6.1-sol").output_text) for i in (5, 6, 11, 12)
     }
     assert run(PNG, 42, calls, renderer) in renderer.sources[:3]
     assert len(calls.requests) == 9
@@ -302,7 +276,7 @@ def test_batch_runs_prompts_in_parallel_with_a_shared_call_limit(tmp_path: Path,
         str(i): "selected" for i in range(4)
     }
     assert witness.peak == 2 and witness.paid == 28
-    assert len(witness.finished) == 4 and len(renderer.sources) == 20
+    assert len(list(witness._state.glob("executions/*/*/execution.json"))) == 4 and len(renderer.sources) == 20
     assert len(list(config.output.glob("*/selected.js"))) == 4
     assert run_batch(prompts, config, witness, renderer, progress=lambda _: None) == {
         str(i): "selected" for i in range(4)
@@ -380,7 +354,7 @@ def test_128_prompt_batch_finishes_896_calls_and_640_renders(tmp_path: Path) -> 
     statuses = run_batch(prompts, config, witness, renderer, progress=lambda _: None)
     assert len(statuses) == 128 and set(statuses.values()) == {"selected"}
     assert witness.paid == 896 and witness.peak == 12
-    assert len(renderer.sources) == 640 and len(witness.finished) == 128
+    assert len(renderer.sources) == 640 and len(list(witness._state.glob("executions/*/*/execution.json"))) == 128
 
 
 def test_check_command_validates_frozen_inputs_without_loading_credentials(

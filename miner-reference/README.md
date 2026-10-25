@@ -12,8 +12,9 @@ and the valid refinements. The selected JavaScript is returned.
 Each candidate is centered and scaled using the specified bounding-box calculation
 before rendering, selection, or use as a refinement parent.
 
-The sandbox runner, automatic recording/replay and receipt submission described
-here still need implementation.
+Production sandbox isolation and validator integration still need implementation.
+Development helpers capture execution observations, save managed submissions and
+run offline replay without process isolation.
 
 ## What to submit
 
@@ -23,7 +24,7 @@ Register a Finney netuid 17 hotkey and submit these chain commitment fields:
 | --- | --- |
 | `repo` | Repository URL containing `main.py` and its supporting source/data |
 | `commit` | Full 40-character commit, fixed before prompts and seed are published |
-| `cdn_url` | Base URL from which the collector downloads generated files |
+| `cdn_url` | Base URL for rounds using miner-hosted output; omitted for operator-managed witness storage |
 
 Each submitting hotkey needs the 100-alpha lock. Multiple hotkeys per team are
 allowed; the coldkey must cover all their locks. Admission and anti-spam limits
@@ -89,7 +90,7 @@ validation errors, followed by normalization and another render. Repairs share
 the model-call limit and have distinct `request_id` values. A prompt makes at
 most twelve model calls and ten renders; valid candidates remain available when
 a repair fails. Infrastructure failures propagate to the runner for recovery.
-The runtime supplies a generation-bound Pod witness or its replay counterpart.
+The runtime supplies a Pod witness or its offline replay counterpart. Model calls require no prompt binding or recording lifecycle API.
 
 Both clients are supplied in generation and replay. Client construction,
 credentials, recording and recovery are handled by the runtime. Your function
@@ -104,8 +105,7 @@ prompt count is a round setting.
 ## Run several prompts concurrently
 
 The [batch runner](miner_reference/batch.py) runs independent prompt pipelines
-against the Python CPU Pod witness. Each prompt has a separate generation
-recording. The three initial calls and two refinements run concurrently within
+against the Python CPU Pod witness. The execution host automatically observes each prompt execution. The three initial calls and two refinements run concurrently within
 their stages; each selection waits for all its candidates. Model requests from
 different prompts can overlap each other and rendering. Renders within a prompt
 follow candidate order, independently of model completion order.
@@ -156,10 +156,17 @@ PYTHONPATH=miner-reference python -m miner_reference.batch check \
   --parallel-prompts 4 --parallel-calls 2 --parallel-renders 1
 ```
 
+For Pod-managed submissions, pass `--submission-commit <admitted-40-character-commit>`
+and the approved worker image digest as `--renderer-id`. Candidate renders and the
+final JS or explicit `None` are saved on the witness Pod; `--renderer-url` is optional
+in this mode. The runner checkpoints returned bytes before final-save delivery.
+Retry the same batch output directory after a lost acknowledgement or Pod replacement;
+it resumes final saving without rerunning completed generation. Infrastructure failures
+remain pending. The gateway must have matching [artifact configuration](../witness-gateway/ARTIFACTS_POC.md).
+
 `check` verifies the frozen inputs and settings and prints the planned call,
 render and concurrency counts. It does not load credentials or contact services.
-Use `run` in place of `check` to execute. Supply the exact SHA256 of the admitted
-miner source archive. A 128-prompt successful workflow has 896 model calls and
+Use `run` in place of `check` to execute. A 128-prompt successful workflow has 896 model calls and
 640 grid renders. Invalid or refused candidates are excluded; no valid initial
 candidate or an invalid selection returns `None`. There is no paid repair loop.
 
@@ -273,9 +280,9 @@ meshes, pretrained-weight downloads and baked image textures cannot supply asset
 ## Budget
 
 Each prompt has a nominal **5,000,000-credit budget and a 60-call cap**, shared across
-all models and every generation, refinement, criticism and comparison step.
+all models and the generation, refinement, criticism and comparison calls consumed by its replay.
 One credit represents $0.000001 of Standard API usage, so the allowance is equivalent
-to $5. Rejected and discarded attempts count too. Exactly 5,000,000 credits and
+to $5. Rejected and discarded candidates count when their calls are consumed. Exactly 5,000,000 credits and
 exactly 60 calls are within the nominal limits. Restarts, credentials and model
 switches do not reset them.
 
@@ -378,36 +385,36 @@ reproduced and verified before its original recorded result is returned. Replay
 has no live inference access. Calls, their order and final JavaScript bytes or
 `None` must match the recorded run.
 
-The runtime owns one durable ordered log per prompt, shared by both clients.
-It saves requests and model exchange handles before external dispatch, then saves
-complete responses/errors and PNGs/rejections before returning them to Python.
-Recordings, expected outputs, credentials and recovery state stay outside the sandbox;
-public records exclude credentials and private transport diagnostics.
-Only one owner may dispatch for a prompt. A log position identifies the same
-operation across attempts; identical calls within one run occupy distinct positions.
-Whole-round witness reconciliation prevents omitted, multiply attributed or
-double-charged exchanges.
+The execution host keeps witness observations outside miner scratch space. Logical
+model calls are identified by provider, canonical request body, `request_id` and
+optional subscription routing header inside the authenticated miner/round scope.
+Identical keys reuse a captured outcome across prompts; generation seed is not a
+model-call identifier or an OpenAI randomness seed. Causal entry/delivery order
+and per-key occurrences reproduce visible results, failures and stream use without
+using a global ordinal as the logical request identity.
 
-Replay compares the route and every model request field using the pinned witness
-serializer/decoder, including images, tools, reasoning, array order and missing
-versus null values. Render calls compare exact source, normalized options and
-renderer identity. Missing, extra, changed, reordered or unconsumed calls, invalid
-evidence and output discrepancies are validation findings. Request normalization
-and record format are fixed with the environment.
+The validator attributes budget by executing the expected prompt. Reuse of one
+captured call inside that replay charges once. A different prompt consuming the
+same call is independently charged the full verified cost. Unrelated captured work
+need not be consumed. Known paid failures count; missing usage remains unknown and
+cannot pass budget acceptance. Proven non-dispatch has no paid charge. The live
+witness permits other work during the round's access window and does not enforce
+prompt labels or a prompt-hash allowlist.
 
-Recovery is automatic. A generation restart replays the saved prefix through one
-shared cursor and recovers pending work before appending new calls. A model call
-that may have been dispatched must recover its original exchange. Fresh dispatch
-for that operation is allowed only when non-dispatch is proven. Completed work is
-never replaced by fresh inference. SDK retries that would repeat inference are
-disabled. Validation never appends calls or switches to live dispatch.
+Replay compares normalized requests, stream operations, causal observations and
+final output against verified evidence. It never issues inference or fabricates
+missing work. Renders still require exact source/options/build behavior and their
+own reproducible outcomes. The witness helpers do not implement the sandbox,
+renderer replay or control arbitrary Python scheduling. These remain requirements
+of the complete runtime described here, not evidence of its deployment.
 
-Verified provider rejections, refusals, incomplete responses, argument errors and
-JavaScript/render resource rejections retain their complete outcomes in both modes.
-Miners may handle those outcomes and try another candidate within their budget.
-Transport timeouts, renderer crashes and transient service failures remain
-infrastructure failures, regardless of HTTP status. Unsettled work stops the run
-as unresolved; the runtime does not turn it into a miner-declared failure.
+Recovery joins ambiguously dispatched calls and permits replacement only after
+proven non-dispatch. A process restart restores saved observations; a top-level
+aborted attempt retains its trace separately and can retry using saved calls.
+Completed executions keep their original visible errors even if a later delivery
+would succeed. Provider HTTP failures use SDK exceptions; failed/incomplete
+Responses remain typed objects. Infrastructure failures remain separate and can
+leave usage unknown. See the [complete capture/replay contract](../witness-gateway/PODS.md#execution-and-replay-contract).
 
 The default retry policy is **three attempts per prompt per phase** (generation
 and validation), with delays of **one second, then two seconds**. Verification,

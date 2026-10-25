@@ -9,7 +9,7 @@ class Submission(BaseModel):
     reveal_block: int = Field(..., ge=0, description="Block number at which commit SHA was revealed")
     repo: str = Field(..., pattern=r"^[\w-]+/[\w-]+$", description="GitHub repo of winning solution")
     commit: str = Field(..., pattern=r"^[a-f0-9]{40}$", description="Git commit SHA")
-    cdn_url: HttpUrl = Field(..., description="CDN URL of the directory with generated Three.js modules")
+    cdn_url: HttpUrl | None = Field(default=None, description="CDN URL of generated Three.js modules")
 
 
 def parse_commitment(
@@ -17,6 +17,7 @@ def parse_commitment(
     commitment: tuple[tuple[int, str], ...],
     earliest_block: int,
     latest_block: int,
+    require_cdn: bool = True,
 ) -> Submission | None:
     """Parse data from a revealed commitment.
 
@@ -49,14 +50,13 @@ def parse_commitment(
             logger.debug(f"Failed to parse data for {hotkey} at block {block}: {e}")
             continue
 
-    if not all([repo_commits, commit_commits, cdn_url_commits]):
+    if not repo_commits or not commit_commits or (require_cdn and not cdn_url_commits):
         logger.debug(f"Missing repo, commit, or cdn_url for {hotkey}")
         return None
 
     _, repo = max(repo_commits)
     latest_commit_block, commit = max(commit_commits)
-    _, cdn_url = max(cdn_url_commits)
-    cdn_url = cdn_url.rstrip("/")
+    cdn_url = max(cdn_url_commits)[1].rstrip("/") if require_cdn and cdn_url_commits else None
 
     try:
         return Submission(hotkey=hotkey, reveal_block=latest_commit_block, repo=repo, commit=commit, cdn_url=cdn_url)

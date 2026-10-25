@@ -1,68 +1,39 @@
 # Witness client development
 
-The [sequence diagrams](SEQUENCE.md) trace generation reservation, TLS setup,
+The [sequence diagrams](SEQUENCE.md) trace call reservation, TLS setup,
 credential disclosure and response capture. See [TIMINGS.md](TIMINGS.md) for
 monotonic diagnostics and the [Pod guide](../witness-gateway/PODS.md) for lifecycle,
 recording and recovery contracts.
 
-A generation binds frozen prompt bytes, the submitted source archive and a seed.
-Each invocation records its start and delivery positions. An exchange captures
-one provider request and response; identical requests can share that exchange.
-
-Start with these files:
-
-1. [client.py](src/witness_client/client.py): generation-bound requests, proofs and recovery.
-2. [calls.py](src/witness_client/calls.py): generation identity and request normalization.
-3. [pods.py](src/witness_client/pods.py): Pod reservation, dispatch, snapshots and recorded delivery.
-4. [gateway.py](src/witness_client/gateway.py) and [tunnel.py](src/witness_client/tunnel.py): signed HTTP access and bounded WebSockets.
-5. [request.py](src/witness_client/request.py): provider request preparation and the credential boundary.
-6. [delivery.py](src/witness_client/delivery.py): bounded HTTP reads and transient retries.
-7. [transport.py](src/witness_client/transport.py): TLS record isolation and disclosure.
-8. [proof.py](src/witness_client/proof.py) and [native/](native/): the native credential proof.
-9. [runtime.py](src/witness_client/runtime.py) and [replay.py](src/witness_client/replay.py): trusted runner integration and recorded replay.
+Logical requests are allocation-scoped and independent of execution inputs.
+`calls.py` defines canonical identities, `client.py`/`pods.py` handle capture and
+recovery, and `observations.py` records the execution-host boundary.
+`runtime.py` invokes the submitted function; `replay.py` consumes a verified bundle
+without an inference client. See the [full contract](../witness-gateway/PODS.md#execution-and-replay-contract).
 
 ## Client reference
 
-### Settings and credentials
-
 Pin `round`, `witness_url` and matching `proof_parameters` in `WitnessConfig`.
-The client uses witness Pods. The trusted runner binds the generation
-before passing a client to miner code. The client verifies session identity,
-provider route and proof-key hash before sending credentials. HTTPS and provider
-TLS use the system trust store.
+Allocation/reconnect checks the round once; model requests carry no round field.
+Pass the caller's loaded sr25519 `hotkey`. The private key stays local.
+`openai_api_key` and `subscription="codex"` are mutually exclusive. `codex_home`
+and `codex` select subscription credential storage/refresh. Provider TLS uses
+system certificate verification; direct Pod access uses the authenticated
+allocation's certificate, address, server name and expiring scoped grant.
 
-Pass an already loaded sr25519 keypair as `hotkey=...`. Set `codex_home` or `codex`
-to select a local subscription login directory or executable. API keys must
-contain 64–4096 characters from `A-Z`, `a-z`, `0-9`, or `._~+/=-`. Subscription
-refresh requires at least five minutes of remaining token validity.
+`responses.create()` accepts `ResponseCreateParamsBase` model arguments and returns
+an SDK `Response` by default or buffered typed events for `stream=True`. Provider
+HTTP errors use SDK exceptions; failed/incomplete Responses remain objects.
+`request_id` selects fresh capture identity, and optional subscription `session_id`
+is a verified routing header. Background generation is rejected. Subscription
+normalization forces `store=false`. Request bodies are bounded to 8 MiB.
 
-Generation-bound `create()` uses OpenAI's `ResponseCreateParamsStreaming` through
-`Unpack`, with `stream=True`, and returns a complete typed `result.response` plus
-`output_text` and `usage`. Background generation is rejected. Subscription
-requests use `store=false`. Serialized request bodies are limited to 8 MiB.
-
-The package includes full type annotations and `py.typed`. Public types include
-`WitnessConfig`, `WitnessResult` and `Usage`.
-
-### Recovery outcomes
-
-`WitnessError.exchange_id` identifies an attempt for recovery or inspection.
-`source` identifies `client`, `gateway` or `provider`; `status_code` and `code`
-retain service failures. Provider errors can retain `provider_code`, `param`,
-`provider_message` and the typed `error.response` with recorded usage.
-
-`resume()` requires the saved invocation in the original state directory. It
-polls the same exchange and returns its durable result. Repeating a generation
-consumes its existing recorded prefix and preserves delivery order. A pending
-capture stays pending; delivery recovery does not start another inference.
-`release()` retires a stuck capture without resetting usage or erasing its data.
-
-### Timeouts and retention
-
-Each delivery phase retries temporary failures for up to `delivery_timeout`
-seconds (default 600), with a 30-second timeout per HTTP attempt. The setting must
-be finite and positive. It does not extend the operator's generation deadline or
-evidence retention. Preserve local recovery state and unresolved accounting.
+`WitnessError.exchange_id` identifies an attempt for recovery. `resume()` polls
+that exchange using saved local job state and retrieves its durable Response.
+`release()` can retire an unclaimed capture; it cannot repeat inference or erase
+uncertain usage. `delivery_timeout` is a positive per-phase retry window (default
+600 seconds), independent of the server's access/capture deadlines and retention.
+Keep local state private/persistent. No SDK inference retry is enabled.
 
 ## Build and verification
 

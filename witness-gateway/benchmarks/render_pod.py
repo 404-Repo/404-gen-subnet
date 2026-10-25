@@ -220,7 +220,7 @@ async def main():
             token=capability(secret,scope,START),origin='https://localhost:8004',proof_hash=PROOF,round_end=END,
             spool=ROOT/'spool',max_captures=12,selection=selection)
         witness_tls,RUNTIME.certificate=pod_context(ROOT/'pod-tls')
-        service=Witness(RUNTIME,frozenset(body['prompts']),STORE.url)
+        service=Witness(RUNTIME,STORE.url)
         WITNESS_RUNNER=web.AppRunner(service.application(),access_log=None);await WITNESS_RUNNER.setup()
         await web.TCPSite(WITNESS_RUNNER,'0.0.0.0',8000,ssl_context=witness_tls).start()
         app['records'],app['budget'],app['scope']=records,budget,scope
@@ -256,14 +256,19 @@ async def main():
         else:raise web.HTTPBadRequest()
         event('fault',kind=kind,count=count);return web.json_response({'count':count})
     async def export(request):
-        generation=(await request.json())['generation']
-        if len(generation)!=64 or any(c not in '0123456789abcdef' for c in generation):raise web.HTTPBadRequest()
-        output=ROOT/'bundles'/generation;output.parent.mkdir(exist_ok=True)
+        from witness_client.observations import Execution
+        execution=Execution.model_validate((await request.json())['execution'])
+        key=execution.inputs.id
+        path=ROOT/'executions'/f'{key}.json';path.parent.mkdir(exist_ok=True)
+        raw=execution.model_dump_json().encode()
+        if path.exists() and path.read_bytes()!=raw:raise web.HTTPConflict()
+        path.write_bytes(raw)
+        output=ROOT/'bundles'/key;output.parent.mkdir(exist_ok=True)
         if output.exists():return web.json_response({'verified':True,'saved':True})
-        await asyncio.to_thread(export_bundle,records=app['records'],evidence=STORE,scope=app['scope'],generation_id=generation,
-            output=output,proof_hash=PROOF,pricing_hash=app['budget'].pricing_hash,
+        await asyncio.to_thread(export_bundle,records=app['records'],evidence=STORE,scope=app['scope'],execution=path,
+            output=output,proof_hash=PROOF,pricing=PRICING,
             verify=native_verifier(Path('/app/witness-server/worker/verify.mjs'),worker.PARAMETERS))
-        event('bundle_verified',generation=generation);return web.json_response({'verified':True})
+        event('bundle_verified',execution=key);return web.json_response({'verified':True})
     async def download(request):
         proc=await asyncio.create_subprocess_exec('tar','czf','-','--exclude=ca.pem','--exclude=cert.pem','--exclude=key.pem',
             '--exclude=pod-tls',

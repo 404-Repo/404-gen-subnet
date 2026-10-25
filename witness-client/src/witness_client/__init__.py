@@ -1,6 +1,6 @@
-from .client import WitnessClient, WitnessResult
-from .errors import ExchangePending, WitnessError
-from .replay import ReplayMismatch, ReplayWitness
+from .client import WitnessClient
+from .errors import ExchangePending, ReplayMismatch, WitnessError
+from .replay import ReplayWitness
 from .runtime import run_generation, run_replay
 from .types import JSONValue, Usage, WitnessConfig
 
@@ -13,7 +13,6 @@ __all__ = [
     "WitnessClient",
     "WitnessConfig",
     "WitnessError",
-    "WitnessResult",
     "run_generation",
     "run_replay",
 ]

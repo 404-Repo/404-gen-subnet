@@ -251,7 +251,7 @@ class OutputTokenDetails(TypedDict, total=False):
 
 
 class Usage(TypedDict, total=False):
-    """OpenAI's reported token counts, exposed as WitnessResult.usage.
+    """OpenAI's reported token counts in captured usage evidence.
 
     Attributes:
         input_tokens: Total input tokens, including cached input.

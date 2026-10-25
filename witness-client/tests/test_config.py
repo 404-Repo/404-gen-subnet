@@ -45,38 +45,6 @@ def test_configuration_is_copied_or_loaded_as_utf8(
         assert client._config["codex_home"] == "учётная-запись"
 
 
-@pytest.mark.parametrize("close_mode", ["direct", "context"])
-def test_generation_close_preserves_parent_connections(
-    config: WitnessConfig, key: Keypair, monkeypatch: pytest.MonkeyPatch, close_mode: str,
-) -> None:
-    http_client = httpx.Client
-    transport = httpx.MockTransport(lambda _: httpx.Response(200, content=b"available"))
-    monkeypatch.setattr("witness_client.client.Prover", lambda _: Mock())
-    monkeypatch.setattr("witness_client.client.httpx.Client", lambda **kwargs: http_client(transport=transport, **kwargs))
-    parent = WitnessClient(config, openai_api_key=TOKEN, hotkey=key)
-    gateway = parent._gateway
-    direct = http_client(base_url="https://pod.test", transport=transport)
-    gateway._connections.append(direct)
-    try:
-        bound = parent.for_generation(b"prompt", 1)
-        sibling = parent.for_generation(b"prompt", 2)
-        if close_mode == "direct":
-            bound.close()
-        else:
-            with bound:
-                pass
-        assert parent._http.get("/health").content == b"available"
-        assert sibling._http.get("/health").content == b"available"
-        assert direct.get("/health").content == b"available"
-        assert gateway._artifacts.http.get("https://artifacts.test/evidence").content == b"available"
-    finally:
-        parent.close()
-    for connection in (parent._http, direct, gateway._artifacts.http):
-        assert connection.is_closed
-        with pytest.raises(RuntimeError, match="closed"):
-            connection.get("https://witness.test/health")
-
-
 @pytest.mark.parametrize("xdg", [None, "", "relative", "absolute"])
 @pytest.mark.parametrize("explicit", [False, True])
 def test_state_directory_selection_and_permissions(

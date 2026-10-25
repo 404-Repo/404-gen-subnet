@@ -2,8 +2,10 @@ import asyncio
 import json
 import secrets
 from collections.abc import Awaitable, Callable
+from contextlib import AsyncExitStack
 from datetime import UTC, datetime, timedelta
 from hashlib import blake2b
+from typing import Literal
 
 import bittensor as bt
 import httpx
@@ -16,6 +18,7 @@ from subnet_common.git_batcher import GitBatcher
 from subnet_common.github import GitHubClient
 from subnet_common.r2_client import R2Client
 
+from submission_collector.artifacts import WitnessArtifacts
 from submission_collector.discord import NULL_DISCORD_NOTIFIER, DiscordNotifier
 from submission_collector.download import DownloadPipeline
 from submission_collector.prompts import select_prompts
@@ -82,9 +85,26 @@ async def run_collection_iteration(
                     r2_endpoint=settings.r2_endpoint.get_secret_value(),
                 ) as r2,
                 httpx.AsyncClient(timeout=httpx.Timeout(60, connect=10)) as http_client,
+                AsyncExitStack() as stack,
             ):
+                artifacts = None
+                if settings.witness_artifacts is not None:
+                    private_r2 = await stack.enter_async_context(
+                        R2Client(
+                            access_key_id=settings.r2_access_key_id.get_secret_value(),
+                            secret_access_key=settings.r2_secret_access_key.get_secret_value(),
+                            r2_endpoint=settings.r2_endpoint.get_secret_value(),
+                            bucket=settings.witness_artifacts.bucket,
+                        )
+                    )
+                    artifacts = WitnessArtifacts(private_r2, settings.witness_artifacts)
                 pipeline = DownloadPipeline(
-                    git_batcher=git_batcher, r2=r2, http_client=http_client, settings=settings, discord=discord
+                    git_batcher=git_batcher,
+                    r2=r2,
+                    http_client=http_client,
+                    settings=settings,
+                    discord=discord,
+                    artifacts=artifacts,
                 )
                 return await pipeline.run(state=state, ref=ref)
 
@@ -208,7 +228,11 @@ async def _collect_submissions(
     if block < schedule.latest_reveal_block:
         return _get_block_eta(current_block=block, target_block=schedule.latest_reveal_block)
 
-    submissions = await _read_submissions_from_chain(get_commitments=get_commitments, schedule=schedule)
+    submissions = await _read_submissions_from_chain(
+        get_commitments=get_commitments,
+        schedule=schedule,
+        require_cdn=settings.submission_source == "cdn",
+    )
     committed_count = len(submissions)
     submissions = await _filter_by_conviction_lock(
         submissions=submissions,
@@ -238,7 +262,11 @@ async def _collect_submissions(
             f"{round_dir}/seed.json": json.dumps({"seed": seed}),
             f"{round_dir}/prompts.txt": "\n".join(prompts),
             f"{round_dir}/submissions.json": _serialize_submissions(
-                submissions=submissions, config=config, round_num=state.current_round, seed=seed
+                submissions=submissions,
+                config=config,
+                round_num=state.current_round,
+                seed=seed,
+                storage=settings.submission_source,
             ),
         },
         message=f"Seed, prompts and submissions for round {state.current_round}",
@@ -307,6 +335,7 @@ async def _handle_downloading(
 async def _read_submissions_from_chain(
     get_commitments: Callable[[], Awaitable[dict]],
     schedule: RoundSchedule,
+    require_cdn: bool = True,
 ) -> list[Submission]:
     """Fetch and parse revealed commitments from a chain within the reveal window.
     Returns submissions sorted by reveal block (earliest first).
@@ -321,6 +350,7 @@ async def _read_submissions_from_chain(
                 commitment=commitment,
                 earliest_block=schedule.earliest_reveal_block,
                 latest_block=schedule.latest_reveal_block,
+                require_cdn=require_cdn,
             )
         )
     ]
@@ -371,13 +401,20 @@ async def _filter_by_conviction_lock(
     return kept
 
 
-def _serialize_submissions(submissions: list[Submission], config: CompetitionConfig, round_num: int, seed: int) -> str:
+def _serialize_submissions(
+    submissions: list[Submission],
+    config: CompetitionConfig,
+    round_num: int,
+    seed: int,
+    storage: Literal["cdn", "witness"] = "cdn",
+) -> str:
     """Convert submissions to JSON for storage in git."""
     data = {
         s.hotkey: {
             "repo": s.repo,
             "commit": s.commit,
-            "cdn_url": str(s.cdn_url),
+            "cdn_url": str(s.cdn_url) if s.cdn_url is not None else None,
+            "storage": storage,
             "revealed_at_block": s.reveal_block,
             "tie_breaker": blake2b(f"{seed}:{s.hotkey}".encode()).hexdigest(),
             "round": f"{config.name}-{round_num}",

@@ -159,6 +159,7 @@ class Gateway:
             {
                 "session": session.to_dict(),
                 "witness": await self._endpoint(scope, session),
+                "round": self.round,
                 "ready": session.pod_id is not None
                 and self.registry.ready(session.pod_id)
                 and self.registry.peers[session.pod_id].certificate is not None,

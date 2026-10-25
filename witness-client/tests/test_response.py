@@ -1,7 +1,6 @@
 import json
 
 import pytest
-
 from witness_client import WitnessError
 from witness_client.response import completed_response, http_body, provider_error
 from witness_client.types import CompletedResponse, OutputItem, ResponseEvent
@@ -300,3 +299,20 @@ def test_nested_stream_error_preserves_provider_diagnostics() -> None:
     assert failure.value.provider_code == "credit_balance_exhausted"
     assert failure.value.provider_message == "No API credits remaining"
     assert failure.value.param is None
+
+
+def test_model_stream_preserves_events_then_raises_the_original_sdk_error() -> None:
+    import openai
+    from witness_client.response import ModelStream, model_result
+    body = (b'data: {"type":"response.output_text.delta","output_index":0,"content_index":0,"delta":"part"}\n\n'
+            b'data: {"type":"error","code":"server_error","message":"Interrupted"}\n\n')
+    for _ in range(2):
+        stream = model_result(200, body, "api", stream=True)
+        assert isinstance(stream, ModelStream)
+        event = next(stream)
+        assert event.type == "response.output_text.delta" and event.delta == "part"
+        with pytest.raises(openai.APIError) as failure:
+            next(stream)
+        assert failure.value.code == "server_error"
+        with pytest.raises(StopIteration):
+            next(stream)

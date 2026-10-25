@@ -23,6 +23,32 @@ from tests.conftest import (
 HOTKEY = "5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty"
 
 
+async def test_witness_admission_does_not_require_cdn_or_unselected_prompt_configuration(
+    git: MockGitHubClient,
+    settings: Settings,
+) -> None:
+    settings = settings.model_copy(update={"submission_source": "witness", "witness_artifacts": None})
+    add_state(git, stage=RoundStage.OPEN)
+    add_schedule(git)
+    add_config(git)
+    add_prompts(
+        git, ["https://prompts.test/chair.png", "https://prompts.test/table.png", "https://prompts.test/lamp.png"]
+    )
+    reveal = ((150, json.dumps({"repo": "owner/repo", "commit": "c" * 40})),)
+    await collection_iteration(
+        git=git,
+        get_block=make_get_block(200),
+        get_commitments=make_get_commitments({HOTKEY: reveal}),
+        get_hotkey_owners=make_get_hotkey_owners({HOTKEY: "coldkey"}),
+        get_locked_alpha=make_get_locked_alpha(),
+        download_fn=SpyDownloadFn(),
+        settings=settings,
+    )
+    submission = json.loads(git.committed["rounds/1/submissions.json"])[HOTKEY]
+    assert submission["storage"] == "witness" and submission["cdn_url"] is None
+    assert CompetitionState.model_validate_json(git.committed["state.json"]).stage == RoundStage.MINER_GENERATION
+
+
 @pytest.mark.parametrize(
     "stage",
     [RoundStage.DUELS, RoundStage.FINALIZING, RoundStage.FINISHED, RoundStage.PAUSED],

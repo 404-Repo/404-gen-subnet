@@ -2,7 +2,6 @@
 
 import base64
 import hashlib
-import json
 import ssl
 import tempfile
 from pathlib import Path
@@ -30,9 +29,10 @@ def worker_spec(settings: Settings) -> PodSpec:
             "WITNESS_PRICING_SHA256": hashlib.sha256(settings.pricing_path.read_bytes()).hexdigest(),
             "WITNESS_IDLE_SECONDS": settings.pod_environment.get("WITNESS_IDLE_SECONDS", "1800"),
             "WITNESS_MAX_CAPTURES": settings.pod_environment.get("WITNESS_MAX_CAPTURES", "2"),
-            "WITNESS_PROMPT_HASHES": json.dumps(sorted(settings.prompts)),
         }
     )
+    if settings.artifacts is not None:
+        environment["WITNESS_ARTIFACTS"] = settings.artifacts
     return PodSpec(
         settings.image,
         cpu_id=settings.worker_cpu_id,
@@ -54,7 +54,6 @@ def gateway_spec(settings: Settings) -> PodSpec:
             "WITNESS_GATEWAY_URL",
             "WITNESS_MASTER_KEY",
             "WITNESS_ROUND_END",
-            "WITNESS_PROMPT_HASHES",
             "WITNESS_IMAGE",
             "GATEWAY_RUNPOD_API_KEY",
             "R2_ENDPOINT",
@@ -78,6 +77,7 @@ def gateway_spec(settings: Settings) -> PodSpec:
         "WITNESS_TEST_HOTKEY",
         "WITNESS_REGISTRY",
         "RUNPOD_MIN_REQUEST_INTERVAL",
+        "WITNESS_ARTIFACTS",
     ):
         if name in settings.pod_environment:
             # RunPod reserves RUNPOD_* names in Pod environments.

@@ -3,8 +3,13 @@
 import json
 import re
 from collections.abc import Iterator
+from types import TracebackType
+from typing import Any, Literal, Self, cast
 
-from openai.types.responses import Response
+import httpx
+import openai
+from openai._models import construct_type
+from openai.types.responses import Response, ResponseStreamEvent
 
 from .errors import WitnessError
 from .types import CompletedResponse, OutputItem, ResponseEvent
@@ -113,7 +118,9 @@ def sse_events(body: bytes) -> Iterator[ResponseEvent]:
         yield value
 
 
-def completed_response(body: bytes) -> tuple[str, Response]:
+def completed_response(
+    body: bytes, *, raise_failed: bool = True
+) -> tuple[str, Response]:
     completed: CompletedResponse | None = None
     items: dict[int, OutputItem] = {}
     texts: dict[tuple[int, int], str] = {}
@@ -163,7 +170,7 @@ def completed_response(body: bytes) -> tuple[str, Response]:
     if any("".join(parts) != texts.get(key) for key, parts in deltas.items()):
         raise ValueError("Missing/inconsistent completed output text")
     response = Response.model_construct(**completed)
-    if response.status != "completed":
+    if raise_failed and response.status != "completed":
         raise WitnessError(
             f"OpenAI response {response.status}; inference was not retried",
             source="provider",
@@ -173,3 +180,101 @@ def completed_response(body: bytes) -> tuple[str, Response]:
             response=response,
         )
     return "".join(texts[key] for key in sorted(texts)), response
+
+
+class ModelStream(Iterator[ResponseStreamEvent]):
+    """Typed, buffered SSE; evidence is sealed before any event is exposed."""
+
+    def __init__(self, body: bytes, provider: Literal["api", "codex"]) -> None:
+        self.events = iter(sse_events(body))
+        self.provider = provider
+        self.closed = False
+
+    def __iter__(self) -> Self:
+        return self
+
+    def __next__(self) -> ResponseStreamEvent:
+        if self.closed:
+            raise StopIteration
+        try:
+            value = next(self.events)
+            if value.get("type") == "error" or value.get("error"):
+                details = value.get("error", value)
+                raise openai.APIError(
+                    "OpenAI streaming error",
+                    cast(Any, _provider_request(self.provider)),
+                    body=details,
+                )
+            return cast(
+                ResponseStreamEvent,
+                construct_type(type_=ResponseStreamEvent, value=value),
+            )
+        except BaseException:
+            self.close()
+            raise
+
+    def close(self) -> None:
+        self.closed = True
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        self.close()
+
+
+def _provider_request(provider: Literal["api", "codex"]) -> httpx.Request:
+    from .request import PROVIDERS
+
+    host, path = PROVIDERS[provider]
+    return httpx.Request("POST", f"https://{host}{path}")
+
+
+def model_result(
+    status: int, body: bytes, provider: Literal["api", "codex"], *, stream: bool = False
+) -> Response | ModelStream:
+    """Expose Responses values and SDK errors, using retained provider bytes."""
+    if status != 200:
+        try:
+            value = json.loads(body)
+        except ValueError:
+            value = None
+        details = value.get("error", value) if isinstance(value, dict) else value
+        classes: dict[int, type[openai.APIStatusError]] = {
+            400: openai.BadRequestError,
+            401: openai.AuthenticationError,
+            403: openai.PermissionDeniedError,
+            404: openai.NotFoundError,
+            409: openai.ConflictError,
+            422: openai.UnprocessableEntityError,
+            429: openai.RateLimitError,
+        }
+        error_type = classes.get(
+            status,
+            openai.InternalServerError if status >= 500 else openai.APIStatusError,
+        )
+        raise error_type(
+            f"OpenAI returned HTTP {status}",
+            response=cast(
+                Any,
+                httpx.Response(
+                    status, content=body, request=_provider_request(provider)
+                ),
+            ),
+            body=details,
+        )
+    if stream:
+        return ModelStream(body, provider)
+    try:
+        return completed_response(body, raise_failed=False)[1]
+    except WitnessError as error:
+        raise openai.APIError(
+            error.provider_message or str(error),
+            cast(Any, _provider_request(provider)),
+            body={"code": error.provider_code, "param": error.param},
+        ) from error

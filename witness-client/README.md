@@ -62,7 +62,7 @@ configuration works with an OpenAI API key or a ChatGPT subscription.
 
 The gateway authenticates registration and returns the assigned Pod's public IP,
 mapped TCP port, verified TLS name and scoped access grant. Calls, proofs,
-recording state and rendering use that Pod directly. An active assignment is
+call state and rendering use that Pod directly. An active assignment is
 reused across transport reconnects and client restarts. Gateway control traffic
 does not carry generation payloads.
 
@@ -81,29 +81,29 @@ Python and other non-Go allocations. See the
 
 ## Generate
 
-The trusted runner supplies miner code with `generate(image, seed, witness,
-renderer)`. Its `witness` is already bound to the frozen image and generation seed. See the [miner reference](../miner-reference/README.md) for
-the submission interface, batch runner, rendering and budgets.
-
-Inside `generate()`, use the supplied client:
+The runtime supplies `generate(image, seed, witness, renderer)` with frozen inputs
+and clients. Model calls work without prompt binding or recording lifecycle APIs:
 
 ```python
-result = witness.responses.create(
-    stream=True,
-    model=model,
-    input=prompt,
-    instructions="Return JavaScript.",
-)
-source = result.output_text
+response = witness.responses.create(model=model, input=prompt, instructions="Return JavaScript.")
+source = response.output_text
 ```
 
-Streaming is enabled internally. The client returns a completed `WitnessResult`.
-`result.response` preserves the typed OpenAI response, including tools, refusals
-and reasoning. `result.usage` contains token counts. Additional Responses
-settings use the OpenAI SDK's types. Background generation is unsupported.
+The default result is an OpenAI `Response`, including output items and typed usage.
+Failed/incomplete Responses retain their status. Provider HTTP failures use SDK
+status exceptions. `stream=True` returns typed SSE events with close/context-manager
+support, buffered until the capture is sealed; it does not expose token timing.
+Background generation and raw SDK transport options are unsupported. Infrastructure
+failures use `WitnessError`/`ExchangePending` and never automatically repeat an
+ambiguously dispatched paid request.
 
-The trusted runner creates the bound client with `for_generation()` or wraps the
-function using `run_generation()`:
+A direct `WitnessClient.responses.create()` also works for other work during the
+round's access window. Equal provider/body/`request_id`/subscription-`session_id`
+keys reuse a saved outcome throughout the miner's allocation scope. Use a stable,
+different `request_id` for intentionally fresh inference. It is distinct from the
+generation seed and is not sent to OpenAI as a randomness seed.
+
+The development execution host automatically observes the supplied function:
 
 ```python
 from witness_client import WitnessClient, run_generation
@@ -112,46 +112,27 @@ with WitnessClient("witness.json", hotkey=hotkey, subscription="codex") as clien
     source = run_generation(generate, frozen_png, seed, client, renderer)
 ```
 
-The trusted runner binds the frozen prompt and generation seed outside miner
-execution. A direct `client.create()` requires a generation binding.
-To use an API key, replace `subscription="codex"` with
-`openai_api_key=os.environ["OPENAI_API_KEY"]`.
+The function manages no recordings. The host keeps execution observations under
+`state_directory/executions/<allocation namespace>/<input identity>/execution.json`.
+Keep those files and the replay engine outside miner access. This helper does not
+implement process isolation or freeze code, environment, external content or
+renderer behavior. See the complete [contract and field inventory](../witness-gateway/PODS.md#execution-and-replay-contract).
 
-For the assigned Pod's packaged renderer, the trusted runner supplies its pinned
-renderer identity and uses the witness's authenticated transport:
-
-```python
-from renderer_client import RendererClient
-
-with WitnessClient("witness.json", hotkey=hotkey, subscription="codex") as client:
-    with RendererClient("https://witness.internal", renderer_id=renderer_image_digest,
-                        transport=client.renderer_transport()) as renderer:
-        source = run_generation(generate, frozen_png, seed, client, renderer)
-```
-
-Subscription users sign in locally through Codex with file credential storage.
-For a machine without a browser, use the supported device-login flow. The client
-refreshes the local login when needed, including after waiting for a worker.
-Provider credentials stay hidden by the credential proof.
-
-Identical requests within a generation share a recorded response, including
-concurrent duplicates. A different `request_id` requests a fresh exchange for
-otherwise identical input. Restarting the same generation consumes the saved
-prefix before appending new work; changed requests in that prefix are rejected.
+Use `openai_api_key=os.environ["OPENAI_API_KEY"]` instead of `subscription="codex"`
+for API authentication. Subscription credentials are refreshed locally and stay
+hidden by the credential proof. For the Pod's packaged renderer, construct
+`RendererClient` with its pinned renderer identity and `transport=client.renderer_transport()`.
 
 ## Concurrency
 
 `WitnessClient(..., parallel_preparations=3)` bounds simultaneous call
-preparations across generations. The default is three and the range is 1 through
+preparations across calls. The default is three and the range is 1 through
 32. A slot covers dispatch, TLS, credential proving and durable authorization;
 it becomes available while the provider runs. Native proving remains serialized.
 
-The trusted runner separately bounds active captures with a shared `call_slots`
-semaphore passed to `for_generation()`. The batch runner sets this from
-`--parallel-calls`. For three preparations and twelve captures, use the default
-client setting and `--parallel-calls 12` with a Pod sized for twelve captures.
-The capture limit includes preparation. Saved-response and recorded-order waits
-do not occupy either limit.
+The execution host can separately bound active captures using a shared `call_slots`
+semaphore supplied to `WitnessClient`. The batch runner sets it from
+`--parallel-calls`. Saved response reuse does not occupy a capture slot.
 
 ## Recovery and replay
 
@@ -162,37 +143,33 @@ retries reuse saved data.
 
 The authenticated Pod supplies trusted completion metadata and expected evidence
 hashes. Normal completion verifies the request and response bytes already held
-by the client. Missing response or recording bytes download directly from signed,
+by the client. Missing provider evidence bytes download directly from signed,
 exchange-scoped R2 URLs and are checked against those hashes. Keep the bucket
 private; an object fetched from an arbitrary CDN URL alone is insufficient.
 
 Keep the original configuration, state directory, hotkey and authentication mode.
 A `WitnessError.exchange_id` identifies the attempt. Retrieve it with
-`client.resume(exchange_id)` during the active generation phase. A repeated
-`run_generation()` also resumes the existing generation prefix. Do not change
-its frozen inputs or identity to recover it.
+`client.resume(exchange_id)` during the access window. Repeated `run_generation()` restores completed observations and pending logical calls. A top-level aborted attempt retains its trace separately; another attempt recovers the saved calls.
 
 `client.release(exchange_id)` releases a stuck capture without resetting usage.
 A request already running may still finish and save evidence. Preserve its
 recovery files and unresolved accounting. Releasing does not start another
 provider request.
 
-The validator exports and native-verifies recordings, then supplies retained
-responses during replay. It checks invocation order, delivery order and output
-bytes. The [Pod guide](../witness-gateway/PODS.md) describes verified offline
+The validator combines host observations with native-verified captures, then supplies retained responses during replay. It matches per-key occurrences, causal delivery order, stream operations and output bytes. The [Pod guide](../witness-gateway/PODS.md) describes verified offline
 replay, storage layout and lifecycle.
 
 ## Usage and evidence
 
-The gateway enforces the operator's frozen per-prompt allowance across generation
-seeds, source revisions, credentials and Pod replacements. All input tokens count
-at their full configured weight, including cached input; output includes reasoning
-once. Possible dispatches consume call allowance, and unknown usage stays pending.
-Provider rejections and interrupted attempts retain their evidence.
+The validator checks the frozen per-prompt allowance during replay, using distinct
+captured calls consumed by the expected prompt. Reuse within one replay charges
+once; each prompt consuming that call is charged independently. Other round work
+need not be consumed. All input tokens use their full frozen weight, including
+cached input; output includes reasoning once. Unknown usage remains unknown and
+prevents budget acceptance. Proven non-dispatch failures have no paid charge.
 
-Private evidence is grouped under `rounds/<round>/<hotkey>/`, including per-exchange
-requests, responses and manifests and generation recordings. Submit the generated
-result and miner hotkey according to the competition's runner contract.
+Private provider evidence remains under `rounds/<round>/<hotkey>/<exchange>/`.
+Execution observations belong to the host, separate from those captures.
 
 See the [client reference](DEVELOPMENT.md#client-reference) for settings, recovery
 and timeouts, and [TIMINGS.md](TIMINGS.md) for diagnostics. The client is
@@ -203,6 +180,6 @@ and timeouts, and [TIMINGS.md](TIMINGS.md) for diagnostics. The client is
 
 For subscription requests, an optional `session_id` sends a nonsecret routing
 header across related calls. It is separate from `request_id` and
-`prompt_cache_key`; it does not change recorded request identity.
+`prompt_cache_key`; it participates in request matching and is checked against TLS evidence.
 `ExchangePending` reports an unresolved capture that should be resumed without
 starting another inference.

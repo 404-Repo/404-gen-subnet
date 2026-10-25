@@ -1,3 +1,5 @@
+from typing import Literal
+
 from pydantic import BaseModel, Field, TypeAdapter
 
 from subnet_common.github import GitHubClient
@@ -8,7 +10,8 @@ class MinerSubmission(BaseModel):
 
     repo: str = Field(..., description="GitHub repository in format 'owner/repo'")
     commit: str = Field(..., description="Git commit SHA")
-    cdn_url: str = Field(..., description="CDN URL for downloading generated Three.js modules")
+    cdn_url: str | None = Field(default=None, description="CDN URL for downloading generated Three.js modules")
+    storage: Literal["cdn", "witness"] = "cdn"
     revealed_at_block: int = Field(..., description="Block number when miner's submission was revealed")
     tie_breaker: str = Field(
         ...,

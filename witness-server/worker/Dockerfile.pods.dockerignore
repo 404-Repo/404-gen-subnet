@@ -62,3 +62,11 @@ miner-reference/miner_reference/**
 !render-service-js/native/
 render-service-js/native/**
 !render-service-js/native/*.c
+
+!renderer-client/
+renderer-client/**
+!renderer-client/src/
+renderer-client/src/**
+!renderer-client/src/renderer_client/
+renderer-client/src/renderer_client/**
+!renderer-client/src/renderer_client/*.py

@@ -22,8 +22,9 @@ def main() -> None:
     export = commands.add_parser(
         "export", help="read and verify an offline replay bundle"
     )
-    for name in ("deployment", "round", "hotkey", "generation"):
+    for name in ("deployment", "round", "hotkey"):
         export.add_argument("--" + name, required=True)
+    export.add_argument("--execution", type=Path, required=True)
     export.add_argument("--output", type=Path, required=True)
     root = Path(__file__).resolve().parents[2]
     export.add_argument(
@@ -64,12 +65,12 @@ def main() -> None:
             records=CallRecords(state),
             evidence=state,
             scope=Scope(args.deployment, args.round, args.hotkey),
-            generation_id=args.generation,
+            execution=args.execution,
             output=args.output,
             proof_hash=hashlib.sha256(
                 (args.parameters / "verifying.bin").read_bytes()
             ).hexdigest(),
-            pricing_hash=hashlib.sha256(args.pricing.read_bytes()).hexdigest(),
+            pricing=args.pricing.read_bytes(),
             verify=native_verifier(args.verifier, args.parameters),
         )
     elif role == "worker":

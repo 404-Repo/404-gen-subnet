@@ -1,5 +1,9 @@
+from typing import Literal
+
 from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from submission_collector.artifacts import ArtifactSettings
 
 
 class Settings(BaseSettings):
@@ -69,6 +73,8 @@ class Settings(BaseSettings):
     r2_access_key_id: SecretStr = Field(..., alias="R2_ACCESS_KEY_ID", description="R2 access key ID")
     r2_secret_access_key: SecretStr = Field(..., alias="R2_SECRET_ACCESS_KEY", description="R2 secret access key")
     r2_endpoint: SecretStr = Field(..., alias="R2_ENDPOINT", description="R2 endpoint")
+    witness_artifacts: ArtifactSettings | None = Field(default=None, alias="WITNESS_ARTIFACTS_COLLECTION")
+    submission_source: Literal["cdn", "witness"] = Field(default="cdn", alias="SUBMISSION_SOURCE")
 
     render_service_url: str = Field(
         default="http://localhost:8000", alias="RENDER_URL", description="Render service base URL"

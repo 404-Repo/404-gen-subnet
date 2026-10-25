@@ -1,76 +1,45 @@
-# Witness request and recovery sequence
-
-The trusted runner binds miner code to frozen generation inputs. The Python
-gateway authenticates registration and allocates ordinary CPU Pods. Durable R2
-claims prevent duplicate provider dispatch; recordings preserve invocation and
-delivery order.
+# Witness capture and replay
 
 ```mermaid
 sequenceDiagram
-    participant M as Generation-bound client
-    participant G as Python gateway
-    participant W as Assigned Pod TLS service
-    participant R as Private R2
-    participant O as OpenAI
-    M->>G: Resolve allocation with signed hotkey request
-    G-->>M: Public TCP mapping, verified TLS name/CA, scoped grant
-    G->>R: Fence selected exact Pod allocation
-    G->>W: Lifecycle activation
-    M->>W: Reserve invocation directly over authenticated TLS
-    W->>R: Reserve call identity and invocation position
-    alt Recorded response exists
-        W-->>M: Trusted completion hashes and signed evidence URLs
-        M->>R: Download missing bytes directly and verify hashes
-    else Capture required
-        M->>W: Assign and open direct authenticated WebSocket
-        W->>R: Check allocation fence and claim exchange
-        W->>O: TLS handshake and fixed probe
-        W-->>M: Handshake records and disclosure request
-        M->>W: Credential proof and request disclosure
-        W->>R: Persist authorization and dispatch allowance
-        W->>O: Release billable request bytes
-        O-->>W: Encrypted response
-        W->>R: Persist immutable evidence, usage and completed call
-        W-->>M: Deliver response and trusted completion metadata directly
-        M->>M: Check received bytes against completion hashes
-    end
-    M->>W: Record delivery receipt and generation output
-    W->>R: Save recording
+    participant M as Submitted generate()
+    participant H as Execution-host witness boundary
+    participant W as Authenticated witness Pod
+    participant P as OpenAI
+    participant R as Private evidence store
+    M->>H: responses.create(parameters, request_id)
+    H->>H: Save per-key occurrence and entry observation
+    H->>W: Reserve logical key (allocation supplies miner/round)
+    W-->>H: Existing capture or one claimed attempt
+    H->>W: TLS handshake and hidden credential proof
+    W->>R: Authorize and fence possible dispatch durably
+    W->>P: Release one verified provider request
+    P-->>W: Provider response/failure
+    W->>R: Save TLS evidence, usage, manifest and settlement
+    W-->>H: Durable result or witness failure
+    H->>H: Save exit/outcome before exposing it
+    H-->>M: Response, buffered events or original error
 ```
 
-The worker saves authorization before releasing billable bytes. After release,
-provider capture and persistence continue independently of the miner connection.
-Upload retries use the saved spool. A disconnected or timed-out client keeps the
-same exchange and generation identity.
+An already issued key returns its retained result without provider inference.
+Only proven non-dispatch permits another capture attempt. A lost dispatch
+acknowledgement or partial authorized response remains uncertain.
 
 ```mermaid
 sequenceDiagram
-    participant M as Client after interruption
-    participant G as Python gateway
-    participant W as Assigned Pod TLS service
-    participant R as Private R2
-    opt Endpoint requires resolution or grant renewal
-        M->>G: Resolve existing allocation or safely replace a lost Pod
-        G-->>M: Verified direct endpoint and scoped grant
-    end
-    M->>W: Resume saved exchange or repeat generation prefix
-    W->>R: Read durable call state
-    alt Capture is unresolved
-        W-->>M: Wait or report pending state
-    else Recording is issued
-        W-->>M: Trusted completion hashes and signed object URLs
-        M->>R: Download original response directly
-        M->>M: Verify binding, size and hashes
-        M->>W: Consume original delivery receipt
-    end
+    participant V as Validator execution host
+    participant E as Trusted verified bundle
+    participant M as Same submitted generate()
+    V->>E: Verify capture TLS, bindings and frozen pricing
+    V->>M: Same image, seed and reproducible renderer
+    M->>E: Model call / stream operation
+    E->>E: Match logical key + occurrence and causal observations
+    E-->>M: Retained Response/event/error
+    M-->>V: Final JavaScript or None
+    V->>V: Compare output; charge distinct consumed calls
 ```
 
-The revivor can replace a failed gateway while workers finish their captures.
-RunPod is authoritative for Pod ownership and lifecycle; R2 retains inference
-claims, attempts and usage. See [PODS.md](../witness-gateway/PODS.md) for fencing,
-replacement and unresolved-usage rules.
-
-Offline replay uses native-verified recordings and retained provider responses.
-It checks request identity, invocation order, delivery order and generated output
-without provider access. Renderer replay uses the pinned renderer and unchanged
-validation rules.
+Unrelated round captures are not required by this execution. Replay never issues
+inference, fills evidence gaps or treats unknown usage as zero. Boundary order
+cannot control arbitrary Python scheduling; isolation and deterministic external
+inputs remain execution-host prerequisites.

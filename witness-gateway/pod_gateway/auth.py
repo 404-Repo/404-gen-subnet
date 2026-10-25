@@ -49,15 +49,20 @@ class Membership:
         netuid: int,
         round_number: str,
         test_hotkey: str | None = None,
+        *,
+        admitted_hotkeys: frozenset[str] | None = None,
     ) -> None:
         if not 0 <= netuid <= 65535 or (
             test_hotkey is not None and round_number not in {"test-0", "test-1", "test-2"}
         ):
             raise ValueError("Invalid membership configuration")
         self.netuid, self.test_hotkey = netuid, test_hotkey
+        self.admitted_hotkeys = admitted_hotkeys
         self.snapshot: dict[str, object] | None = None
 
     def require(self, hotkey: str) -> None:
+        if self.admitted_hotkeys is not None and hotkey not in self.admitted_hotkeys:
+            raise AuthRejected("hotkey_not_admitted", 403)
         value = self.snapshot
         if value is None:
             raise AuthRejected("membership_unavailable", 503)

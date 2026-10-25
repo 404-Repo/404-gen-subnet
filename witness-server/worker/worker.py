@@ -283,10 +283,6 @@ def relay(
             metadata = verifier("finish", directory)
         metadata.update(
             {
-                "verified_at": time.time(),
-                "client_bytes": len(client),
-                "server_bytes": len(server),
-                "prefix": prefix,
                 "round": round_number,
                 "hotkey": hotkey,
                 "exchange_id": prefix.rsplit("/", 1)[1],
@@ -311,15 +307,7 @@ def relay(
                             "authorized": True,
                             "usage": metadata.get("usage"),
                             "provider_status": metadata["provider_status"],
-                            "usage_state": (
-                                "rejected"
-                                if metadata["provider_rejected"]
-                                else (
-                                    "recorded"
-                                    if metadata.get("usage") is not None
-                                    else "unknown"
-                                )
-                            ),
+                            "usage_state": "recorded" if metadata.get("usage") is not None else "unknown",
                             "evidence_expires": int((time.time() + 7 * 86400) * 1000),
                         }
                     ),

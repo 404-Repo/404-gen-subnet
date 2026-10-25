@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import signal
 import subprocess
@@ -11,10 +12,31 @@ import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager, suppress
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import httpx
 
+from .models import json_bytes
+
+if TYPE_CHECKING:
+    from .artifacts import ArtifactProfile
+
 READY_SECONDS = 60
+
+
+def renderer_profile_sha256(root: Path) -> str:
+    """Identify the packaged JavaScript renderer and its locked dependencies."""
+    paths = sorted(path for path in (root / "src").rglob("*") if path.suffix in {".js", ".html"})
+    if not paths:
+        raise ValueError("Packaged renderer sources are missing")
+    paths.append(root / "package-lock.json")
+    manifest = {str(path.relative_to(root)): hashlib.sha256(path.read_bytes()).hexdigest() for path in paths}
+    return hashlib.sha256(json_bytes(manifest)).hexdigest()
+
+
+def require_artifact_profile(profile: ArtifactProfile, root: Path) -> None:
+    if profile.bootstrap_sha256 is not None or profile.validation_sha256 != renderer_profile_sha256(root):
+        raise ValueError("Artifact profile differs from the packaged renderer")
 
 
 @contextmanager

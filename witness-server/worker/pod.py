@@ -29,7 +29,7 @@ from storage import Store
 from timing import identify_exchange, measure, timed
 from websockets.sync.client import connect
 from websockets.sync.connection import Connection
-from witness_client.calls import Invocation
+from witness_client.calls import RequestKey
 from witness_client.gateway import _GatewayConnection
 from witness_client.state import save
 from worker import PARAMETERS, PROVIDERS, relay, verify
@@ -122,7 +122,7 @@ class PodRuntime:
             return (self.accepting and not self.draining and (self.selection is None or
                     self.selection.selected(self.scope, self.start_id, self.pod_id)))
 
-    def start_capture(self, invocation: Invocation, call: Call, channel: Channel) -> bool:
+    def start_capture(self, invocation: RequestKey, call: Call, channel: Channel) -> bool:
         with self.lock:
             if call.exchange_id in self.active:
                 return False
@@ -137,7 +137,6 @@ class PodRuntime:
                 call.pod_id != self.pod_id
                 or call.start_id != self.start_id
                 or call.capture_id is None
-                or invocation.generation.round != self.scope.round
             ):
                 return False
             directory = self.spool / identifier(call.exchange_id)
@@ -180,12 +179,10 @@ class PodRuntime:
                 flush=True,
             )
 
-    def _binding(self, invocation: Invocation, call: Call) -> dict[str, object]:
+    def _binding(self, invocation: RequestKey, call: Call) -> dict[str, object]:
         return {
-            "generation": invocation.generation.model_dump(),
-            "generation_id": invocation.generation.id,
-            "request_key": invocation.request.model_dump(),
-            "call_id": invocation.request.id,
+            "request_key": invocation.model_dump(),
+            "call_id": invocation.id,
             "pod_id": self.pod_id,
             "pod_start_id": self.start_id,
             "proof_key_sha256": self.proof_hash,
@@ -245,17 +242,13 @@ class PodRuntime:
             # Finishing retained TLS bytes cannot open a provider connection.
             if call.authorized:
                 try:
-                    metadata = verify("finish", directory, provider=invocation.request.provider)
+                    metadata = verify("finish", directory, provider=invocation.provider)
                     metadata.update(
                         {
                             **self._binding(invocation, call),
-                            "prefix": f"rounds/{self.scope.round}/{self.scope.hotkey}/{exchange_id}",
                             "round": self.scope.round,
                             "hotkey": self.scope.hotkey,
                             "exchange_id": exchange_id,
-                            "verified_at": time.time(),
-                            "client_bytes": (directory / "client.bin").stat().st_size,
-                            "server_bytes": (directory / "server.bin").stat().st_size,
                         }
                     )
                 except Exception as error:  # noqa: BLE001 - retain partial evidence on interrupted TLS
@@ -309,13 +302,13 @@ class PodRuntime:
         return metadata
 
     @timed("pod_capture")
-    def _capture(self, invocation: Invocation, call: Call, channel: Channel) -> None:
+    def _capture(self, invocation: RequestKey, call: Call, channel: Channel) -> None:
         identify_exchange(call.exchange_id)
         assert call.capture_id is not None
         directory = self.spool / identifier(call.exchange_id)
         directory.mkdir(mode=0o700, exist_ok=True)
         prefix = f"rounds/{self.scope.round}/{self.scope.hotkey}/{call.exchange_id}"
-        host, path = PROVIDERS[invocation.request.provider]
+        host, path = PROVIDERS[invocation.provider]
         session = {
             "id": call.exchange_id,
             "protocol": 2,
@@ -352,6 +345,9 @@ class PodRuntime:
                         raise RuntimeError("Pod is fenced before provider release")
                     if not self.selected():
                         raise RuntimeError("RunPod allocation is no longer selected")
+                    authorization = json.loads((directory / "authorization.json").read_bytes())
+                    if authorization.get("sessionId") != invocation.session_id:
+                        raise ValueError("Verified routing header differs from reserved call")
                     # An uncertain reservation write can still become durable.
                     not_dispatched = False
                     try:
@@ -375,7 +371,7 @@ class PodRuntime:
                 prefix,
                 time.monotonic() + call.deadline - time.time(),
                 directory,
-                partial(verify, provider=invocation.request.provider),
+                partial(verify, provider=invocation.provider),
                 channel,
                 round_number=self.scope.round,
                 hotkey=self.scope.hotkey,
@@ -394,22 +390,14 @@ class PodRuntime:
             ).is_file():
                 with suppress(Exception):
                     metadata = verify(
-                        "finish", directory, provider=invocation.request.provider
+                        "finish", directory, provider=invocation.provider
                     )
                     metadata.update(
                         {
                             **self._binding(invocation, call),
-                            "prefix": prefix,
                             "round": self.scope.round,
                             "hotkey": self.scope.hotkey,
                             "exchange_id": call.exchange_id,
-                            "verified_at": time.time(),
-                            "client_bytes": (directory / "client.bin")
-                            .stat()
-                            .st_size,
-                            "server_bytes": (directory / "server.bin")
-                            .stat()
-                            .st_size,
                         }
                     )
         if not finalized:
@@ -418,7 +406,7 @@ class PodRuntime:
             channel.finish()
 
     def _finalize(
-        self, invocation: Invocation, call: Call, metadata: dict[str, object] | None, failure: str, *,
+        self, invocation: RequestKey, call: Call, metadata: dict[str, object] | None, failure: str, *,
         not_dispatched: bool = False,
     ) -> None:
         directory = self.spool / identifier(call.exchange_id)
@@ -591,6 +579,7 @@ class PodRuntime:
 
 def main() -> None:
     from aiohttp import web
+    from pod_gateway.artifacts import ArtifactConfig, ArtifactRepository
     from pod_gateway.certs import pod_context
     from pod_gateway.direct import Witness
     from pod_gateway.state import R2StateStore
@@ -631,9 +620,22 @@ def main() -> None:
     signal.signal(signal.SIGTERM, lambda *_: runtime.drain())
     signal.signal(signal.SIGINT, lambda *_: runtime.drain())
     tls, runtime.certificate = pod_context(runtime.spool.parent / "tls")
+    artifact_store = None
+    if artifact_config := os.environ.get("WITNESS_ARTIFACTS"):
+        from pod_gateway.renderer import require_artifact_profile
+
+        config = ArtifactConfig.model_validate_json(artifact_config)
+        if os.environ.get("WITNESS_RENDERER_ENABLED") != "1":
+            raise ValueError("Artifact storage requires the packaged renderer")
+        require_artifact_profile(config.profile, Path("/opt/renderer"))
+        artifact_store = ArtifactRepository(
+            state, evidence, runtime.scope, config.profile, config.limits,
+            seed=config.seed, submission_commit=config.commits[runtime.scope.hotkey],
+            prompt_hashes=config.prompt_hashes,
+        )
 
     async def serve() -> None:
-        service = Witness(runtime, frozenset(json.loads(os.environ["WITNESS_PROMPT_HASHES"])), evidence.url)
+        service = Witness(runtime, evidence.url, artifacts=artifact_store)
         runner = web.AppRunner(service.application(), handler_cancellation=False)
         await runner.setup()
         site = web.TCPSite(runner, "0.0.0.0", int(os.environ.get("WITNESS_PORT", "8000")), ssl_context=tls)

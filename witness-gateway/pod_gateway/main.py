@@ -13,6 +13,7 @@ import httpx
 from aiohttp import web
 
 from .admission import Admission
+from .artifacts import ArtifactConfig
 from .auth import Authenticator, Membership, MembershipRefresher
 from .control import DrainControl, Registry
 from .lifecycle import Allocator
@@ -52,6 +53,11 @@ async def application(settings: GatewaySettings, worker_spec: PodSpec) -> web.Ap
         settings.netuid,
         settings.round,
         settings.test_hotkey,
+        admitted_hotkeys=(
+            frozenset(ArtifactConfig.model_validate_json(settings.artifacts).commits)
+            if settings.artifacts is not None
+            else None
+        ),
     )
     rpc = httpx.Client(timeout=45, follow_redirects=False)
     refresher = MembershipRefresher(membership, rpc, settings.subtensor_rpc_url)

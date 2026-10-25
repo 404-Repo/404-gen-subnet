@@ -3,7 +3,7 @@ import { readFileSync, writeFileSync, accessSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { authorizeHandshake, authorizeRequest, finishAuthorizedResponse } from '../verifier/verify.mjs';
-import { ClientHelloGate, responseUsage, providerRejected } from '../verifier/gate.mjs';
+import { ClientHelloGate, responseUsage } from '../verifier/gate.mjs';
 import { DEFAULT_BINARY } from '../verifier/worker.mjs';
 import { measure, timing } from '../verifier/timing.mjs';
 
@@ -41,7 +41,8 @@ export async function run(mode, directory, params, provider, overrides = {}) {
     writeFileSync(join(directory, 'request.json'), result.requestBody);
     writeFileSync(join(directory, 'response.sse'), result.responseBody);
     return {request_sha256: result.request_sha256, response_sha256: result.response_sha256,
-      provider_status: result.responseStatus, provider_rejected: providerRejected(result.responseStatus),
+      session_id: authorization.sessionId ?? null,
+      provider_status: result.responseStatus,
       usage: result.responseStatus === 200 ? responseUsage(result.responseBody) : null};
   }
   if (mode === 'hello') {
@@ -79,7 +80,8 @@ export async function run(mode, directory, params, provider, overrides = {}) {
   });
   writeFileSync(join(directory, 'response.sse'), result.responseBody);
   return { request_sha256: result.request_sha256, response_sha256: result.response_sha256,
-    provider_status: result.responseStatus, provider_rejected: providerRejected(result.responseStatus),
+    session_id: saved.sessionId ?? null,
+    provider_status: result.responseStatus,
     usage: result.responseStatus === 200 ? responseUsage(result.responseBody) : null,
     certificate_time_unix_ns: saved.certificateTimeUnixNs };
 }
