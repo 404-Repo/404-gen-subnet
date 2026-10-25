@@ -160,7 +160,7 @@ final JS or explicit `None` are saved on the witness Pod; `--renderer-url` is op
 in this mode. The runner checkpoints returned bytes before final-save delivery.
 Retry the same batch output directory after a lost acknowledgement or Pod replacement;
 it resumes final saving without rerunning completed generation. Infrastructure failures
-remain pending. The gateway must have matching [artifact configuration](../witness-gateway/ARTIFACTS_POC.md).
+remain pending. The gateway must have matching [artifact configuration](../witness-gateway/README.md#artifact-storage).
 
 `check` verifies the frozen inputs and settings and prints the planned call,
 render and concurrency counts. It does not load credentials or contact services.
@@ -194,7 +194,7 @@ Outside `generate`, the runner checkpoints the returned JavaScript or explicit
 those bytes after a lost acknowledgement or Pod replacement. The collector reads
 the saved choice directly from the existing public R2 bucket. Replay validation compares
 the reproduced return with this independent submission; a storage receipt does
-not establish source reproducibility. See the [artifact guide](../witness-gateway/ARTIFACTS_POC.md).
+not establish source reproducibility.
 
 ## Generated JavaScript
 

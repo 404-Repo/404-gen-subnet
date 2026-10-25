@@ -40,5 +40,42 @@ client, proof parameters and configuration in the
 
 ## Artifact storage
 
-See [ARTIFACTS_POC.md](ARTIFACTS_POC.md) for artifact saving in the existing public bucket, runner use,
-submission-collector configuration, recovery and offline checks.
+Candidate JavaScript, previews and final choices are saved in the existing public
+`404-gen` bucket under `artifacts/v1/<deployment>/<round>/<hotkey>/<prompt-sha256>/`.
+Pods use `R2_BUCKET`; miners receive no storage credentials. The
+[runner](../miner-reference/README.md#run-several-prompts-concurrently) checkpoints the returned JavaScript
+or explicit `None` before saving the final choice and retries those same bytes
+after a lost acknowledgement.
+
+Set `WITNESS_ARTIFACTS` to JSON in the gateway/revivor environment:
+
+```json
+{
+  "profile": {
+    "image_digest": "sha256:REPLACE_WITH_WORKER_IMAGE_DIGEST",
+    "validation_sha256": "REPLACE_WITH_RENDERER_PROFILE_SHA256",
+    "bootstrap_sha256": null
+  },
+  "limits": {"max_renders": 16, "max_bytes": 268435456},
+  "seed": 42,
+  "prompt_hashes": ["REPLACE_WITH_FROZEN_PROMPT_SHA256"],
+  "commits": {"REPLACE_WITH_ADMITTED_HOTKEY": "REPLACE_WITH_40_CHARACTER_SOURCE_COMMIT"}
+}
+```
+
+Use the immutable `WITNESS_IMAGE` digest, frozen round seed and prompt hashes, and
+admitted source commits. Only the packaged renderer is supported;
+`bootstrap_sha256` must be null. Compute its profile hash from the exact build
+context, from the repository root:
+
+```sh
+PYTHONPATH=witness-gateway python -c 'from pathlib import Path; from pod_gateway.renderer import renderer_profile_sha256; print(renderer_profile_sha256(Path("render-service-js")))'
+```
+
+The artifact API is disabled when `WITNESS_ARTIFACTS` is absent. Completed artifacts
+survive Pod replacement and cutoff; new renders and final choices require the
+selected Pod and an open round. Retain the artifact prefix through judging,
+replay validation and the operator's evidence retention period.
+
+See the [collector configuration](../submission-collector/README.md#artifact-configuration)
+for collecting final choices and preparing judging images.

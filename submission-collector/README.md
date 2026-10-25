@@ -16,7 +16,7 @@ judging outputs. Configure the approved renderer profiles and round bindings bef
 DOWNLOADING. The collector verifies the saved final choice and exact source
 bytes, reuses compatible grids, and saves judging images for retries. Storage,
 render-service and embedding outages keep collection pending. See
-[artifact configuration and recovery](../witness-gateway/ARTIFACTS_POC.md#submission-collector).
+[artifact configuration](#artifact-configuration).
 
 ## Algorithm
 
@@ -40,6 +40,37 @@ Reads and writes to the competition Git repository:
 | `rounds/{n}/prompts.txt` | W | Selected prompts for the round         |
 | `rounds/{n}/submissions.json` | W | Admitted repo, exact commit, reveal block and round |
 | `rounds/{n}/{hotkey}/submitted.json` | W | JS URL, preview prefix, size and failure status |
+
+## Artifact configuration
+
+Set `WITNESS_ARTIFACTS_COLLECTION` to JSON after the round inputs are selected and
+before DOWNLOADING:
+
+```json
+{
+  "deployment": "REPLACE_WITH_DEPLOYMENT",
+  "round": "REPLACE_WITH_FULL_ROUND_NAME",
+  "round_end": 2000000000,
+  "prompt_hashes": ["REPLACE_WITH_FROZEN_PROMPT_SHA256"],
+  "profile": {
+    "image_digest": "sha256:REPLACE_WITH_WORKER_IMAGE_DIGEST",
+    "validation_sha256": "REPLACE_WITH_RENDERER_PROFILE_SHA256",
+    "bootstrap_sha256": null
+  },
+  "judging_profile": {
+    "image_digest": "sha256:REPLACE_WITH_JUDGING_RENDERER_IMAGE_DIGEST",
+    "validation_sha256": "REPLACE_WITH_JUDGING_RENDERER_PROFILE_SHA256",
+    "bootstrap_sha256": null
+  },
+  "collection_delay_seconds": 300
+}
+```
+
+`profile` must match the [Pod artifact configuration](../witness-gateway/README.md#artifact-storage).
+`judging_profile` describes the approved immutable build served by `RENDER_URL`.
+`round_end` must equal the witness cutoff; collection waits for the settlement
+delay before sealing final choices. Artifact reads, sealing and judging-image
+writes use the existing R2 client and credentials. Result URLs use the existing CDN.
 
 ## Development
 ```bash
