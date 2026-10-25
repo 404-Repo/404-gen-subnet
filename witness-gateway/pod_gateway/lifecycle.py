@@ -11,6 +11,7 @@ from typing import Protocol
 from .admission import Admission
 from .models import Pod, PodSpec, Scope, Session, identifier
 from .runpod import CreateRejected, PodProvider, ProviderUnavailable
+from .selection import Selection
 
 
 class AllocationConflict(RuntimeError):
@@ -50,9 +51,11 @@ class Allocator:
         admission: Admission | None = None,
         create_grace: float = 600,
         clock: Callable[[], float] = time.time,
+        selection: Selection | None = None,
     ) -> None:
         self.provider, self.control, self.spec = provider, control, spec
         self.admission, self.create_grace, self.clock = admission, create_grace, clock
+        self.selection = selection
         self.lock = threading.RLock()
         self.operations: dict[Scope, Operation] = {}
 
@@ -171,6 +174,8 @@ class Allocator:
             if pod.scope() != scope or pod.markers["WITNESS_START_ID"] != start_id:
                 raise InventoryConflict("Cannot retire a different Pod")
             original = pod.session()
+            if self.selection is not None:
+                self.selection.update(pod, active=False)
             if pod.lifecycle != "drained":
                 pod = self._rename(pod, "draining")
                 if pod.status not in ("EXITED", "ERROR") and not self.control.drain(pod):
@@ -200,7 +205,8 @@ class Allocator:
                     != winner.markers["WITNESS_START_ID"]
                 ):
                     blocked |= retired.phase != "retired"
-        if winner.lifecycle in ("draining", "drained") or winner.status in ("EXITED", "ERROR"):
+        if (winner.lifecycle in ("draining", "drained") or winner.status in ("EXITED", "ERROR")
+                or (self.selection is not None and self.selection.revoked(winner))):
             return self.retire(scope, winner.markers["WITNESS_START_ID"], winner.id)
         if winner.lifecycle == "pending":
             if blocked:
@@ -211,6 +217,8 @@ class Allocator:
             ):
                 return self.retire(scope, winner.markers["WITNESS_START_ID"], winner.id)
             winner = self._rename(winner, "active")
+        if self.selection is not None:
+            self.selection.update(winner, active=True)
         return winner.session()
 
     def reconcile(self, scope: Scope) -> Session | None:

@@ -212,6 +212,22 @@ def test_cleanup_adopts_a_late_worker_instead_of_deleting_it() -> None:
     assert provider.creates == 1
 
 
+def test_after_round_recovery_pod_survives_cleanup_until_its_idle_drain() -> None:
+    provider = Provider()
+    workers = Allocator(provider, Drain(), SPEC, clock=lambda: 20)
+    old = provider.create(SPEC.body(SCOPE, "00000000-0000-4000-8000-000000000001", epoch_ns=1))
+    supervisor = Revivor(
+        provider=provider, gateway=Allocator(provider, GatewayDrain(GATEWAY), SPEC), workers=workers,
+        scope=GATEWAY, active_round="test-0", publisher=Published(), probe=lambda _: True,
+        round_end=10, clock=lambda: 20,
+    )
+    supervisor.cleanup_workers()
+    assert old.id not in provider.pods
+    recovery = workers.acquire(SCOPE, "00000000-0000-4000-8000-000000000002")
+    supervisor.cleanup_workers()
+    assert recovery.pod_id in provider.pods
+
+
 def test_cleanup_removes_only_drained_duplicates_and_old_round_workers() -> None:
     provider = Provider()
     workers = Allocator(provider, Drain(), SPEC)
@@ -243,7 +259,7 @@ def test_cleanup_drains_a_unique_late_create_that_exceeds_actual_capacity() -> N
         provider,
         drain,
         SPEC,
-        admission=Admission(max_pods=1, hourly_ceiling="0.07", per_pod_ceiling="0.07"),
+        admission=Admission(max_pods=1),
     )
     active = workers.acquire(SCOPE, "00000000-0000-4000-8000-000000000001")
     other = replace(SCOPE, hotkey="6" * 48)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
@@ -16,22 +17,22 @@ from functools import partial
 from pathlib import Path
 from urllib.parse import urlsplit
 
-import httpx
-from channel import WorkerChannel
+from channel import Channel
+from pod_gateway.budget import Budget, BudgetNotReserved
+from pod_gateway.models import Scope, identifier, json_bytes, object_dict
+from pod_gateway.records import Call, CallRecords
+from pod_gateway.recovery import recover_issued
+from pod_gateway.renderer import render_service
+from pod_gateway.selection import Selection
+from pod_gateway.state import WriteUncertain
 from storage import Store
 from timing import identify_exchange, measure, timed
 from websockets.sync.client import connect
 from websockets.sync.connection import Connection
 from witness_client.calls import Invocation
 from witness_client.gateway import _GatewayConnection
+from witness_client.state import save
 from worker import PARAMETERS, PROVIDERS, relay, verify
-
-from pod_gateway.budget import Budget, BudgetNotReserved
-from pod_gateway.models import Scope, identifier, json_bytes, object_dict
-from pod_gateway.records import Call, CallRecords
-from pod_gateway.recovery import recover_issued
-from pod_gateway.renderer import render_service
-from pod_gateway.security import capture_token
 
 
 class PodRuntime:
@@ -52,6 +53,7 @@ class PodRuntime:
         max_captures: int = 2,
         idle_seconds: int = 1800,
         clock: Callable[[], float] = time.monotonic,
+        selection: Selection | None = None,
     ) -> None:
         url = urlsplit(origin)
         if (
@@ -75,11 +77,14 @@ class PodRuntime:
             idle_seconds,
         )
         self.clock = clock
+        self.selection = selection
+        self.certificate: str | None = None
         self.lock = threading.RLock()
         self.executor = ThreadPoolExecutor(
             max_workers=max_captures, thread_name_prefix="witness-capture"
         )
         self.active: dict[str, Future[None] | None] = {}
+        self.rendering = 0
         self.accepting = self.draining = False
         self.last_used = self.clock()
         self.born = self.last_used
@@ -106,22 +111,26 @@ class PodRuntime:
     def tick(self) -> bool:
         """True only after permanent local drain; pending uploads count as busy."""
         with self.lock:
-            if time.time() >= self.round_end or (
-                not self.active and self.clock() - self.last_used >= self.idle_seconds
-            ):
+            if not self.active and not self.rendering and self.clock() - self.last_used >= self.idle_seconds:
                 self.accepting, self.draining = False, True
-            if self.draining and not self.active:
+            if self.draining and not self.active and not self.rendering:
                 return True
         return False
 
-    def start_capture(self, invocation: Invocation, call: Call) -> bool:
+    def selected(self) -> bool:
+        with self.lock:
+            return (self.accepting and not self.draining and (self.selection is None or
+                    self.selection.selected(self.scope, self.start_id, self.pod_id)))
+
+    def start_capture(self, invocation: Invocation, call: Call, channel: Channel) -> bool:
         with self.lock:
             if call.exchange_id in self.active:
-                return True
+                return False
             if (
-                not self.accepting
+                not self.selected()
                 or self.draining
                 or len(self.active) >= self.max_captures
+                or time.time() >= self.round_end
             ):
                 return False
             if (
@@ -131,14 +140,25 @@ class PodRuntime:
                 or invocation.generation.round != self.scope.round
             ):
                 return False
+            directory = self.spool / identifier(call.exchange_id)
+            directory.mkdir(mode=0o700, exist_ok=True)
+            save(directory / "pending-claim", call.capture_id.encode())
+            recover = False
+            try:
+                if not self.records.claim(self.scope, invocation, self.pod_id, call.capture_id):
+                    self._cleanup(call.exchange_id)
+                    return False
+            except WriteUncertain:
+                recover = True
             self.active[call.exchange_id] = None
             self.last_used = self.clock()
-            future = self.executor.submit(self._capture, invocation, call)
+            future = (self.executor.submit(self._recover, call.exchange_id) if recover
+                      else self.executor.submit(self._capture, invocation, call, channel))
             self.active[call.exchange_id] = future
             future.add_done_callback(
                 lambda result: self._done(call.exchange_id, result)
             )
-            return True
+            return not recover
 
     @timed("pod_capture_done")
     def _done(self, exchange_id: str, result: Future[None]) -> None:
@@ -208,11 +228,18 @@ class PodRuntime:
             if call.phase in ("issued", "failed"):
                 self._cleanup(exchange_id)
                 return
+            directory = self.spool / exchange_id
+            pending = directory / "pending-claim"
+            not_dispatched = pending.is_file() and pending.read_text() == call.capture_id
+            if not_dispatched and call.phase == "assigned":
+                assert call.capture_id is not None
+                if not self.records.claim(self.scope, invocation, self.pod_id, call.capture_id):
+                    raise RuntimeError("Capture claim changed during recovery")
+                call = call.model_copy(update={"phase": "capturing"})
             if call.phase == "assigned":
                 return
             if call.phase != "capturing":
                 raise RuntimeError("Spool has no claimed capture")
-            directory = self.spool / exchange_id
             metadata: dict[str, object] | None = None
             failure = "CaptureInterrupted"
             # Finishing retained TLS bytes cannot open a provider connection.
@@ -233,7 +260,18 @@ class PodRuntime:
                     )
                 except Exception as error:  # noqa: BLE001 - retain partial evidence on interrupted TLS
                     metadata, failure = None, type(error).__name__
-            self._finalize(invocation, call, metadata, failure)
+                if metadata is None:
+                    # A dead process cannot establish how much of a paid response
+                    # was lost. Keep this attempt pending so it cannot be retried.
+                    self.evidence.put(
+                        f"rounds/{self.scope.round}/{self.scope.hotkey}/{exchange_id}/status.json",
+                        json_bytes({
+                            "status": "running", "authorized": True,
+                            "usage_state": "unknown", "error_type": failure,
+                        }),
+                    )
+                    return
+            self._finalize(invocation, call, metadata, failure, not_dispatched=not_dispatched)
 
         self._retry_upload(recover)
 
@@ -244,8 +282,34 @@ class PodRuntime:
 
         self._retry_upload(remove)
 
+    PUBLIC_EVIDENCE = frozenset({
+        "client.bin", "server.bin", "authorization-server.bin", "claim.json", "authorization.json",
+        "handshake.json", "request.json", "response.sse", "session.json",
+    })
+
+    def artifact_key(self, exchange_id: str, name: str, digest: str) -> str:
+        if (name not in self.PUBLIC_EVIDENCE | {"manifest.json"} or len(digest) != 64
+                or any(c not in "0123456789abcdef" for c in digest)):
+            raise ValueError("Invalid public evidence object")
+        return (f"evidence/v1/{self.scope.deployment}/{self.scope.round}/{self.scope.hotkey}/"
+                f"{identifier(exchange_id)}/{digest}/{name}")
+
+    def publish(self, exchange_id: str, metadata: dict[str, object]) -> dict[str, object]:
+        prefix = f"rounds/{self.scope.round}/{self.scope.hotkey}/{identifier(exchange_id)}/"
+        objects = {}
+        for name in sorted(self.PUBLIC_EVIDENCE):
+            raw = self.evidence.get(prefix + name)
+            if raw is None:
+                continue
+            digest = hashlib.sha256(raw).hexdigest()
+            key = self.artifact_key(exchange_id, name, digest)
+            self.evidence.put(key, raw)
+            objects[name] = {"key": key, "sha256": digest, "size": len(raw)}
+        metadata["artifacts"] = objects
+        return metadata
+
     @timed("pod_capture")
-    def _capture(self, invocation: Invocation, call: Call) -> None:
+    def _capture(self, invocation: Invocation, call: Call, channel: Channel) -> None:
         identify_exchange(call.exchange_id)
         assert call.capture_id is not None
         directory = self.spool / identifier(call.exchange_id)
@@ -260,117 +324,98 @@ class PodRuntime:
             "round": self.scope.round,
             "miner": self.scope.hotkey,
         }
-        token = capture_token(self.token, call.exchange_id, call.capture_id)
-        # No automatic reconnect of a capture socket. Its durable claim is single-use.
-        socket = connect(
-            f"{self.origin}/worker/exchanges/{call.exchange_id}",
-            additional_headers={
-                "Authorization": "Bearer " + token,
-                "x-witness-hotkey": self.scope.hotkey,
-            },
-            compression=None,
-            proxy=None,
-            max_size=2 * 1024 * 1024,
-            max_queue=16,
-            open_timeout=30,
-            close_timeout=5,
-            create_connection=_GatewayConnection,
-        )
-        with socket:
-            channel = WorkerChannel(socket)
-            metadata: dict[str, object] | None = None
-            failure = "CaptureFailed"
-            not_dispatched = True
-            try:
+        metadata: dict[str, object] | None = None
+        failure = "CaptureFailed"
+        not_dispatched = True
+        finalized = False
+        try:
+            # No provider connection may open while a pending claim can be recovered as unstarted.
+            (directory / "pending-claim").unlink(missing_ok=True)
 
-                def ready() -> None:
-                    self.evidence.put(prefix + "/session.json", json_bytes(session))
-                    self.evidence.put(
-                        prefix + "/status.json",
-                        json_bytes({"status": "running", "authorized": False}),
-                    )
-
-                self._retry_upload(ready)
-                socket.send(json_bytes({"type": "ready", "session": session}).decode())
-
-                def authorize(body: bytes) -> None:
-                    nonlocal not_dispatched
-                    with self.lock:
-                        if (
-                            self.draining
-                            or not self.accepting
-                            or time.time() >= self.round_end
-                        ):
-                            raise RuntimeError("Pod is fenced before provider release")
-                        selected = httpx.get(
-                            self.origin.replace("wss://", "https://", 1)
-                            + f"/worker/exchanges/{call.exchange_id}/selection",
-                            headers={
-                                "Authorization": "Bearer " + token,
-                                "x-witness-hotkey": self.scope.hotkey,
-                            },
-                            timeout=10,
-                            trust_env=False,
-                        )
-                        selected.raise_for_status()
-                        if selected.json().get("selected") is not True:
-                            raise RuntimeError(
-                                "RunPod allocation is no longer selected"
-                            )
-                        # An uncertain reservation write can still become durable.
-                        not_dispatched = False
-                        try:
-                            self.budget.reserve(
-                                self.scope, invocation, call.exchange_id, body
-                            )
-                        except BudgetNotReserved:
-                            not_dispatched = True
-                            raise
-                        self.records.authorize(self.scope, invocation, self.pod_id, exchange_id=call.exchange_id)
-                        if time.time() >= self.round_end:
-                            raise RuntimeError("Round ended before provider release")
-
-                metadata = relay(
-                    self.evidence,
-                    prefix,
-                    time.monotonic() + call.deadline - time.time(),
-                    directory,
-                    partial(verify, provider=invocation.request.provider),
-                    channel,
-                    round_number=self.scope.round,
-                    hotkey=self.scope.hotkey,
-                    host=host,
-                    before_release=authorize,
-                    extra_metadata=self._binding(invocation, call),
+            def ready() -> None:
+                self.evidence.put(prefix + "/session.json", json_bytes(session))
+                self.evidence.put(
+                    prefix + "/status.json",
+                    json_bytes({"status": "running", "authorized": False}),
                 )
-            except Exception as error:  # noqa: BLE001 - seal a captured outcome before cleanup
-                failure = type(error).__name__
-                # R2 can fail after the full provider response was captured. Finish
-                # from that local spool, never by opening a new provider connection.
-                if (directory / "authorization.json").is_file() and (
-                    directory / "server.bin"
-                ).is_file():
-                    with suppress(Exception):
-                        metadata = verify(
-                            "finish", directory, provider=invocation.request.provider
+
+            self._retry_upload(ready)
+
+            def authorize(body: bytes) -> None:
+                nonlocal not_dispatched
+                with self.lock:
+                    if (
+                        self.draining
+                        or not self.accepting
+                        or time.time() >= self.round_end
+                    ):
+                        raise RuntimeError("Pod is fenced before provider release")
+                    if not self.selected():
+                        raise RuntimeError("RunPod allocation is no longer selected")
+                    # An uncertain reservation write can still become durable.
+                    not_dispatched = False
+                    try:
+                        self.budget.reserve(
+                            self.scope, invocation, call.exchange_id, body
                         )
-                        metadata.update(
-                            {
-                                **self._binding(invocation, call),
-                                "prefix": prefix,
-                                "round": self.scope.round,
-                                "hotkey": self.scope.hotkey,
-                                "exchange_id": call.exchange_id,
-                                "verified_at": time.time(),
-                                "client_bytes": (directory / "client.bin")
-                                .stat()
-                                .st_size,
-                                "server_bytes": (directory / "server.bin")
-                                .stat()
-                                .st_size,
-                            }
-                        )
+                    except BudgetNotReserved:
+                        not_dispatched = True
+                        raise
+                    self.records.authorize(self.scope, invocation, self.pod_id, exchange_id=call.exchange_id)
+                    if time.time() >= self.round_end or not self.selected():
+                        raise RuntimeError("Round ended before provider release")
+
+            def complete(final: dict[str, object]) -> None:
+                nonlocal finalized
+                self._finalize(invocation, call, final, failure)
+                finalized = True
+
+            metadata = relay(
+                self.evidence,
+                prefix,
+                time.monotonic() + call.deadline - time.time(),
+                directory,
+                partial(verify, provider=invocation.request.provider),
+                channel,
+                round_number=self.scope.round,
+                hotkey=self.scope.hotkey,
+                host=host,
+                before_release=authorize,
+                extra_metadata=self._binding(invocation, call),
+                seal=partial(self.publish, call.exchange_id),
+                before_delivery=complete,
+            )
+        except Exception as error:  # noqa: BLE001 - seal a captured outcome before cleanup
+            failure = type(error).__name__
+            # R2 can fail after the full provider response was captured. Finish
+            # from that local spool, never by opening a new provider connection.
+            if (directory / "authorization.json").is_file() and (
+                directory / "server.bin"
+            ).is_file():
+                with suppress(Exception):
+                    metadata = verify(
+                        "finish", directory, provider=invocation.request.provider
+                    )
+                    metadata.update(
+                        {
+                            **self._binding(invocation, call),
+                            "prefix": prefix,
+                            "round": self.scope.round,
+                            "hotkey": self.scope.hotkey,
+                            "exchange_id": call.exchange_id,
+                            "verified_at": time.time(),
+                            "client_bytes": (directory / "client.bin")
+                            .stat()
+                            .st_size,
+                            "server_bytes": (directory / "server.bin")
+                            .stat()
+                            .st_size,
+                        }
+                    )
+        if not finalized:
             self._finalize(invocation, call, metadata, failure, not_dispatched=not_dispatched)
+        with suppress(OSError):
+            channel.finish()
 
     def _finalize(
         self, invocation: Invocation, call: Call, metadata: dict[str, object] | None, failure: str, *,
@@ -406,6 +451,7 @@ class PodRuntime:
                 )
                 if recovered.phase == "issued":
                     return
+                self.publish(call.exchange_id, final)
                 manifest = json_bytes(final)
                 self.evidence.put(prefix + "/manifest.json", manifest)
                 self.evidence.put(
@@ -507,19 +553,6 @@ class PodRuntime:
                                             "drained": False,
                                         },
                                     )
-                                elif kind == "capture":
-                                    accepted = self.start_capture(
-                                        Invocation.model_validate(value["invocation"]),
-                                        Call.model_validate(value["call"]),
-                                    )
-                                    self._send(
-                                        socket,
-                                        {
-                                            "type": "reply",
-                                            "id": value["id"],
-                                            "accepted": accepted,
-                                        },
-                                    )
                                 else:
                                     raise ValueError("Unknown control command")
                             except TimeoutError:
@@ -533,14 +566,13 @@ class PodRuntime:
                                     {
                                         "type": "heartbeat",
                                         "ready": self.accepting and not self.draining,
-                                        "active": len(self.active),
+                                        "certificate": self.certificate,
+                                        "active": len(self.active) + self.rendering,
                                         "proof_key_sha256": self.proof_hash,
                                         "pricing_sha256": self.budget.pricing_hash,
                                     },
                                 )
                 except Exception as error:  # noqa: BLE001 - reconnect without replaying capture
-                    with self.lock:
-                        self.accepting = False
                     print(
                         json.dumps(
                             {
@@ -558,9 +590,11 @@ class PodRuntime:
 
 
 def main() -> None:
-    from storage import R2Store
-
+    from aiohttp import web
+    from pod_gateway.certs import pod_context
+    from pod_gateway.direct import Witness
     from pod_gateway.state import R2StateStore
+    from storage import R2Store
 
     state = R2StateStore.connect(
         endpoint=os.environ["R2_ENDPOINT"],
@@ -571,8 +605,9 @@ def main() -> None:
     pricing = Path(os.environ["WITNESS_PRICING_FILE"]).read_bytes()
     if hashlib.sha256(pricing).hexdigest() != os.environ["WITNESS_PRICING_SHA256"]:
         raise ValueError("Witness image has different frozen pricing bytes")
+    evidence = R2Store()
     runtime = PodRuntime(
-        evidence=R2Store(),
+        evidence=evidence,
         records=CallRecords(state),
         budget=Budget(state, pricing),
         scope=Scope(
@@ -591,11 +626,25 @@ def main() -> None:
         spool=Path(os.environ.get("WITNESS_SPOOL", "/var/lib/witness/spool")),
         max_captures=int(os.environ.get("WITNESS_MAX_CAPTURES", "2")),
         idle_seconds=int(os.environ.get("WITNESS_IDLE_SECONDS", "1800")),
+        selection=Selection(state),
     )
     signal.signal(signal.SIGTERM, lambda *_: runtime.drain())
     signal.signal(signal.SIGINT, lambda *_: runtime.drain())
+    tls, runtime.certificate = pod_context(runtime.spool.parent / "tls")
+
+    async def serve() -> None:
+        service = Witness(runtime, frozenset(json.loads(os.environ["WITNESS_PROMPT_HASHES"])), evidence.url)
+        runner = web.AppRunner(service.application(), handler_cancellation=False)
+        await runner.setup()
+        site = web.TCPSite(runner, "0.0.0.0", int(os.environ.get("WITNESS_PORT", "8000")), ssl_context=tls)
+        await site.start()
+        try:
+            await asyncio.to_thread(runtime.run)
+        finally:
+            await runner.cleanup()
+
     with render_service(runtime.drain):
-        runtime.run()
+        asyncio.run(serve())
 
 
 if __name__ == "__main__":

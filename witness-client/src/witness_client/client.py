@@ -31,7 +31,7 @@ from websockets.exceptions import WebSocketException
 from . import request as openai_request
 from .calls import Generation, Invocation, RequestKey
 from .errors import ExchangePending, WitnessError
-from .gateway import GatewayClient
+from .pods import PodGatewayClient
 from .proof import Prover
 from .response import completed_response, provider_error
 from .state import save as _save
@@ -111,8 +111,7 @@ class WitnessClient:
         else:
             self._config = json.loads(Path(config).read_text(encoding="utf-8"))
         if self._config.get("transport", "pods-v1") != "pods-v1":
-            raise ValueError("Unknown witness transport")
-        self._config["transport"] = "pods-v1"
+            raise ValueError("Only witness Pods are supported; use a Pod gateway and omit 'transport'")
         if re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", self._config.get("round", "")) is None:
             raise ValueError("Pod transport requires a pinned competition round")
         if (
@@ -169,9 +168,7 @@ class WitnessClient:
                 follow_redirects=False,
                 trust_env=False,
             )
-        from .pods import PodGatewayClient
-
-        self._gateway: GatewayClient = PodGatewayClient(
+        self._gateway = PodGatewayClient(
             self._http,
             self._hotkey,
             self._state,
@@ -183,6 +180,7 @@ class WitnessClient:
 
     def close(self) -> None:
         """Close HTTP connections, keeping saved state available for recovery."""
+        self._gateway.close()
         self._http.close()
 
     def __enter__(self) -> Self:
@@ -217,6 +215,10 @@ class WitnessClient:
         """
         self._gateway.release(str(uuid.UUID(exchange_id)))
 
+    def renderer_transport(self) -> httpx.BaseTransport:
+        """Authenticate RendererClient requests to this miner's assigned Pod."""
+        return httpx.MockTransport(self._gateway.render)
+
     def for_generation(
         self,
         image: bytes,
@@ -232,8 +234,6 @@ class WitnessClient:
         Shared call slots bound active captures across generations; reservation
         and recorded delivery waits do not occupy a slot.
         """
-        if self._config.get("transport") != "pods-v1":
-            raise ValueError("Generation recording requires transport='pods-v1'")
         return GenerationWitness(
             self,
             Generation.from_prompt(
@@ -258,9 +258,6 @@ class WitnessClient:
         """
         identifier = str(uuid.UUID(exchange_id))
         identify_exchange(identifier)
-        from .pods import PodGatewayClient
-
-        assert isinstance(self._gateway, PodGatewayClient)
         job = json.loads((self._state / identifier / "job.json").read_bytes())
         invocation = Invocation.model_validate(job["invocation"])
         if invocation.request.provider != self._mode:
@@ -269,8 +266,13 @@ class WitnessClient:
         while True:
             snapshot = self._gateway.snapshot(identifier)
             if snapshot.call.phase == "issued":
+                saved_request = self._state / identifier / "request.json"
+                request = None
+                if saved_request.is_file():
+                    with saved_request.open("rb") as local:
+                        request = local.read(8 * 1024 * 1024 + 1)
                 session, recorded_status, response = self._gateway.recorded(
-                    invocation, snapshot.call, self._prover.verifying_key_sha256
+                    invocation, snapshot.call, self._prover.verifying_key_sha256, request=request,
                 )
                 return recorded_result(
                     session["miner"], identifier, recorded_status, response
@@ -358,6 +360,9 @@ class GenerationWitness(WitnessClient):
         self._delivery_cursor = 0
         self._unresolved = False
 
+    def close(self) -> None:
+        """Keep shared connections open until the parent WitnessClient closes."""
+
     def create(
         self,
         *,
@@ -366,9 +371,6 @@ class GenerationWitness(WitnessClient):
         session_id: str | None = None,
         **params: Unpack[ResponseCreateParamsBase],
     ) -> WitnessResult:
-        from .pods import PodGatewayClient
-
-        assert isinstance(self._gateway, PodGatewayClient)
         openai_request.validate_session_id(session_id, self._mode)
         normalized = cast(
             ResponseCreateParamsStreaming, {"service_tier": "default", **params, "stream": stream}
@@ -377,6 +379,7 @@ class GenerationWitness(WitnessClient):
         key = RequestKey.from_body(self._mode, body, request_id)
         identifier: str | None = None
         retries = 0
+        raw_response: bytes | None = None
         try:
             # Serialize reservation only. TLS, inference and result waiting remain
             # concurrent, including multiple invocations of the same request.
@@ -483,6 +486,7 @@ class GenerationWitness(WitnessClient):
                         }))
                         deadline = time.monotonic() + snapshot.call.deadline - time.time()
                         attempted = False
+                        raw_response = None
                         preparation.close()
                         if (invocation.ordinal == snapshot.call.owner_ordinal
                                 and snapshot.call.phase in ("reserved", "assigned")):
@@ -534,7 +538,7 @@ class GenerationWitness(WitnessClient):
                                         self._authorize(tunnel, disclosure)
                                         preparation.close()
 
-                                    exchange(
+                                    raw_response = exchange(
                                         tunnel,
                                         request.host,
                                         request.chunks,
@@ -551,9 +555,11 @@ class GenerationWitness(WitnessClient):
                                 WitnessError,
                                 TLSAbruptCloseError,
                             ):
-                                # The worker may already be paying/capturing. Recover
-                                # this exact exchange, without another TLS connection.
+                                # Recover a claimed exchange that may already be paying/capturing.
                                 snapshot = self._gateway.snapshot(identifier)
+                                if snapshot.call.phase == "assigned":
+                                    # An unclaimed exchange can reconnect when admission becomes available.
+                                    attempted = False
                     if time.monotonic() >= deadline:
                         raise ExchangePending(
                             "Capture remains unresolved; restart with the same generation", identifier
@@ -569,7 +575,8 @@ class GenerationWitness(WitnessClient):
                     source="gateway",
                 )
             session, status, response = self._gateway.recorded(
-                invocation, snapshot.call, self._prover.verifying_key_sha256
+                invocation, snapshot.call, self._prover.verifying_key_sha256,
+                request=body, raw_response=raw_response,
             )
             result: WitnessResult | None = None
             failure: WitnessError | None = None
@@ -619,9 +626,6 @@ class GenerationWitness(WitnessClient):
             ) from error
 
     def finish(self, output: str | None) -> None:
-        from .pods import PodGatewayClient
-
-        assert isinstance(self._gateway, PodGatewayClient)
         if self._unresolved:
             raise WitnessError(
                 "An infrastructure failure left this attempt unresolved",

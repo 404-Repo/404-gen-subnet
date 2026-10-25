@@ -5,7 +5,7 @@ credential disclosure and response capture. See [TIMINGS.md](TIMINGS.md) for
 monotonic diagnostics and the [Pod guide](../witness-gateway/PODS.md) for lifecycle,
 recording and recovery contracts.
 
-A generation binds frozen prompt bytes and a seed.
+A generation binds frozen prompt bytes, the submitted source archive and a seed.
 Each invocation records its start and delivery positions. An exchange captures
 one provider request and response; identical requests can share that exchange.
 
@@ -26,7 +26,7 @@ Start with these files:
 ### Settings and credentials
 
 Pin `round`, `witness_url` and matching `proof_parameters` in `WitnessConfig`.
-`pods-v1` is the default transport. The trusted runner binds the generation
+The client uses witness Pods. The trusted runner binds the generation
 before passing a client to miner code. The client verifies session identity,
 provider route and proof-key hash before sending credentials. HTTPS and provider
 TLS use the system trust store.
@@ -36,8 +36,8 @@ to select a local subscription login directory or executable. API keys must
 contain 64–4096 characters from `A-Z`, `a-z`, `0-9`, or `._~+/=-`. Subscription
 refresh requires at least five minutes of remaining token validity.
 
-Generation-bound `create()` uses OpenAI's `ResponseCreateParamsBase` through
-`Unpack`, with streaming enabled internally, and returns a complete typed `result.response` plus
+Generation-bound `create()` uses OpenAI's `ResponseCreateParamsStreaming` through
+`Unpack`, with `stream=True`, and returns a complete typed `result.response` plus
 `output_text` and `usage`. Background generation is rejected. Subscription
 requests use `store=false`. Serialized request bodies are limited to 8 MiB.
 

@@ -23,7 +23,9 @@ from .control import DrainControl
 from .lifecycle import Allocator, InventoryConflict
 from .models import Pod, PodSpec, Scope, Session
 from .runpod import PodProvider, RunPodClient
+from .selection import Selection
 from .settings import RevivorSettings
+from .state import R2StateStore
 
 
 class Publisher(Protocol):
@@ -199,14 +201,15 @@ class Revivor:
                 continue
             try:
                 pods = self.workers.owned(inventory, scope)
-                if scope.round != self.active_round or (
-                    self.round_end is not None and self.clock() >= self.round_end
-                ):
-                    for pod in pods:
+                ended = self.round_end is not None and self.clock() >= self.round_end
+                for pod in pods:
+                    if scope.round != self.active_round or (
+                        ended and pod.epoch_ns < (self.round_end or 0) * 1_000_000_000
+                    ):
                         self.workers.retire(
                             scope, pod.markers["WITNESS_START_ID"], pod.id
                         )
-                else:
+                if scope.round == self.active_round:
                     # Adopt the sole valid late create, retain an active winner,
                     # and retire only actual superseded/duplicate RunPod Pods.
                     self.workers.reconcile(scope)
@@ -246,16 +249,18 @@ def _run(settings: RevivorSettings, worker_spec: PodSpec, gateway_spec: PodSpec)
             GatewayDrain(settings.gateway_scope),
             gateway_spec,
         )
-        admission = Admission(
-            max_pods=settings.max_pods,
-            hourly_ceiling=str(settings.worker_budget),
-            per_pod_ceiling=str(settings.pod_ceiling),
-        )
+        admission = Admission(max_pods=settings.max_pods)
         workers = Allocator(
             provider,
             DrainControl(),
             worker_spec,
             admission=admission,
+            selection=Selection(R2StateStore.connect(
+                endpoint=settings.r2_endpoint.get_secret_value(),
+                access_key=settings.r2_access_key_id.get_secret_value(),
+                secret_key=settings.r2_secret_access_key.get_secret_value(),
+                bucket=settings.r2_bucket,
+            )),
         )
 
         def probe(pod: Pod) -> bool:

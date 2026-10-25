@@ -10,7 +10,7 @@ from .errors import WitnessError
 from .types import CompletedResponse, OutputItem, ResponseEvent
 
 
-def http_body(raw: bytes) -> bytes:
+def http_body(raw: bytes, *, allow_error: bool = False) -> bytes:
     head, separator, body = raw.partition(b"\r\n\r\n")
     if not separator or len(head) > 32768:
         raise ValueError("Invalid HTTP response headers")
@@ -38,7 +38,7 @@ def http_body(raw: bytes) -> bytes:
             or int(content_length) != len(body)
         ):
             raise ValueError("Incomplete/additional HTTP body")
-        if status[1] != "200":
+        if status[1] != "200" and not allow_error:
             raise provider_error(int(status[1]), body)
         return body
     if headers.get("transfer-encoding") != "chunked":
@@ -60,7 +60,7 @@ def http_body(raw: bytes) -> bytes:
         if length == 0:
             if chunk_end + 2 != len(body):
                 raise ValueError("Extra HTTP response bytes")
-            if status[1] != "200":
+            if status[1] != "200" and not allow_error:
                 raise provider_error(int(status[1]), bytes(output))
             return bytes(output)
         output.extend(body[chunk_start:chunk_end])

@@ -122,7 +122,7 @@ configured and sized for 12 concurrent captures. The Pod default is two.
 
 Use the pinned `witness_client` and `renderer_client` packages supplied by your
 runtime. From this checkout, put `miner-reference` on `PYTHONPATH`. The witness
-configuration must use `transport: "pods-v1"`, a pinned `round`, proof parameters,
+configuration must include a pinned `round`, proof parameters,
 and a persistent private `state_directory`; see the [CPU Pod guide](../witness-gateway/PODS.md).
 The renderer URL and identity refer to an existing renderer. Authentication uses
 the named local wallet and Codex subscription, or `--api` with `OPENAI_API_KEY`.

@@ -180,7 +180,8 @@ def resumed_generation(
             # Completed captures remain reusable after their original deadline.
             return Snapshot(call=call.model_copy(update={"deadline": 1}), round="test-0", hotkey="5" * 48, session=None)
 
-        def recorded(self, invocation: Invocation, call: CallView, proof_hash: str) -> tuple[Session, int, bytes]:
+        def recorded(self, invocation: Invocation, call: CallView, proof_hash: str,
+                     **kwargs: object) -> tuple[Session, int, bytes]:
             session: Session = {
                 "id": call.exchange_id, "miner": "5" * 48, "round": "test-0", "protocol": 2,
                 "proof_key_sha256": proof_hash, "provider": "https://api.openai.com/v1/responses",

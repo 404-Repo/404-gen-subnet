@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import asyncio, contextlib, hashlib, json, os, secrets, signal, ssl, subprocess, threading, time
-from types import SimpleNamespace
 from decimal import Decimal
 from pathlib import Path
 from aiohttp import web, ClientSession, ClientTimeout
@@ -16,11 +15,12 @@ from pod_gateway.replay import export_bundle, native_verifier
 from pod_gateway.security import capability
 from pod_gateway.state import R2StateStore
 from pod_gateway.server import Gateway
+from pod_gateway.direct import Witness
+from pod_gateway.certs import pod_context
+from pod_gateway.selection import Selection
 from storage import R2Store
 from pod import PodRuntime
 import worker, timing
-import pod as pod_module
-import httpx
 
 os.umask(0o077)
 ROUND = os.environ.get('BENCH_ROUND', 'test-0')
@@ -43,6 +43,7 @@ RENDERER = None
 STORE = None
 MEMBERSHIP = None
 GATEWAY_RUNNER = None
+WITNESS_RUNNER = None
 PRICING = Path('/app/config/pricing.json').read_bytes()
 PROOF = hashlib.sha256((worker.PARAMETERS/'verifying.bin').read_bytes()).hexdigest()
 
@@ -95,6 +96,8 @@ class Storage:
         event('r2_evidence_put',seconds=time.monotonic()-started,bytes=len(data))
     def delete(self, key):
         self.check(key);self.evidence.delete(key)
+    def url(self, key):
+        self.check(key);return self.evidence.url(key)
 
 class CappedBudget(Budget):
     def reserve(self, *args):
@@ -179,7 +182,7 @@ async def renderer_ready(http):
     raise TimeoutError('Renderer readiness deadline reached')
 
 async def main():
-    global STORE,RUNTIME,MEMBERSHIP,GATEWAY_RUNNER,PHASE
+    global STORE,RUNTIME,MEMBERSHIP,GATEWAY_RUNNER,WITNESS_RUNNER,PHASE
     http=ClientSession(timeout=ClientTimeout(total=45))
     @web.middleware
     async def auth(request,handler):
@@ -189,37 +192,37 @@ async def main():
     admin=web.AppRunner(app,access_log=None)
 
     async def boot(request):
-        global STORE,RUNTIME,MEMBERSHIP,GATEWAY_RUNNER,PHASE
+        global STORE,RUNTIME,MEMBERSHIP,GATEWAY_RUNNER,WITNESS_RUNNER,PHASE
         if RUNTIME is not None:raise web.HTTPConflict()
         body=await request.json()
         for key in ('R2_ENDPOINT','R2_ACCESS_KEY_ID','R2_SECRET_ACCESS_KEY','R2_BUCKET'):os.environ[key]=body['storage'][key]
         for name in ('ca.pem','cert.pem','key.pem'):
             p=ROOT/name;p.write_text(body['tls'][name]);p.chmod(0o600)
         os.environ['SSL_CERT_FILE']=str(ROOT/'ca.pem')
-        local_trust=ssl.create_default_context(cafile=str(ROOT/'ca.pem'))
-        def selection_get(url, **kwargs):
-            if not url.startswith('https://localhost:8000/worker/exchanges/'):
-                raise RuntimeError('Unexpected benchmark selection origin')
-            return httpx.get(url,verify=local_trust,**kwargs)
-        pod_module.httpx=SimpleNamespace(get=selection_get)
         tls=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER);tls.load_cert_chain(ROOT/'cert.pem',ROOT/'key.pem')
         renderer_start()
         await renderer_ready(http)
         STORE=Storage();records=CallRecords(STORE);budget=CappedBudget(STORE,PRICING)
         secret=secrets.token_bytes(32);scope=Scope(DEPLOYMENT,ROUND,HOTKEY);spec=PodSpec(IMAGE,capability_secret=secret)
-        pod=Pod(POD,scope.name(START)+'-active',IMAGE,'RUNNING',scope.markers(START,spec.fingerprint,time.time_ns()),hourly_cost=str(body['hourly']))
-        registry=Registry();allocator=Allocator(FixedProvider(pod),DrainControl(registry),spec)
+        pod=Pod(POD,scope.name(START)+'-active',IMAGE,'RUNNING',scope.markers(START,spec.fingerprint,time.time_ns()),
+            tcp={8000:(os.environ['RUNPOD_PUBLIC_IP'],int(os.environ['RUNPOD_TCP_PORT_8000']))},hourly_cost=str(body['hourly']))
+        selection=Selection(STORE);selection.update(pod,active=True)
+        registry=Registry();allocator=Allocator(FixedProvider(pod),DrainControl(registry),spec,selection=selection)
         MEMBERSHIP=Membership(DEPLOYMENT,17,ROUND,HOTKEY);now=int(time.time()*1000)
         MEMBERSHIP.snapshot=dict(version=1,network='finney',netuid=17,block=0,fetched_at=now,block_time=now,hotkeys=[])
-        gateway=Gateway(allocator=allocator,records=records,budget=budget,auth=Authenticator(MEMBERSHIP),registry=registry,
-            evidence=STORE,deployment=DEPLOYMENT,round_number=ROUND,round_end=END,secret=secret,proof_hash=PROOF,
-            prompts=frozenset(body['prompts']),fence=lambda:True,pricing_hash=hashlib.sha256(PRICING).hexdigest())
+        gateway=Gateway(allocator=allocator,auth=Authenticator(MEMBERSHIP),registry=registry,
+            deployment=DEPLOYMENT,round_number=ROUND,round_end=END,secret=secret,proof_hash=PROOF,
+            fence=lambda:True,pricing_hash=hashlib.sha256(PRICING).hexdigest())
         GATEWAY_RUNNER=web.AppRunner(gateway.application(),access_log=None);await GATEWAY_RUNNER.setup()
-        await web.TCPSite(GATEWAY_RUNNER,'0.0.0.0',8000,ssl_context=tls).start()
+        await web.TCPSite(GATEWAY_RUNNER,'0.0.0.0',8004,ssl_context=tls).start()
         await web.TCPSite(admin,'0.0.0.0',8443,ssl_context=tls).start()
         RUNTIME=PodRuntime(evidence=STORE,records=records,budget=budget,scope=scope,start_id=START,pod_id=POD,
-            token=capability(secret,scope,START),origin='https://localhost:8000',proof_hash=PROOF,round_end=END,
-            spool=ROOT/'spool',max_captures=12)
+            token=capability(secret,scope,START),origin='https://localhost:8004',proof_hash=PROOF,round_end=END,
+            spool=ROOT/'spool',max_captures=12,selection=selection)
+        witness_tls,RUNTIME.certificate=pod_context(ROOT/'pod-tls')
+        service=Witness(RUNTIME,frozenset(body['prompts']),STORE.url)
+        WITNESS_RUNNER=web.AppRunner(service.application(),access_log=None);await WITNESS_RUNNER.setup()
+        await web.TCPSite(WITNESS_RUNNER,'0.0.0.0',8000,ssl_context=witness_tls).start()
         app['records'],app['budget'],app['scope']=records,budget,scope
         threading.Thread(target=RUNTIME.run,daemon=True).start();PHASE=body['phase']
         event('ready',python=os.sys.version.split()[0],node=subprocess.check_output(['node','--version'],text=True).strip(),
@@ -263,6 +266,7 @@ async def main():
         event('bundle_verified',generation=generation);return web.json_response({'verified':True})
     async def download(request):
         proc=await asyncio.create_subprocess_exec('tar','czf','-','--exclude=ca.pem','--exclude=cert.pem','--exclude=key.pem',
+            '--exclude=pod-tls',
             '--exclude=objects/rounds','-C',str(ROOT),'.',stdout=asyncio.subprocess.PIPE,stderr=asyncio.subprocess.DEVNULL)
         response=web.StreamResponse(headers={'Content-Type':'application/gzip'});await response.prepare(request)
         while data:=await proc.stdout.read(256*1024):await response.write(data)
@@ -276,5 +280,6 @@ async def main():
     if RUNTIME is not None:RUNTIME.drain()
     event('deadline_reached');await http.close();await admin.cleanup()
     if GATEWAY_RUNNER is not None:await GATEWAY_RUNNER.cleanup()
+    if WITNESS_RUNNER is not None:await WITNESS_RUNNER.cleanup()
 
 asyncio.run(main())

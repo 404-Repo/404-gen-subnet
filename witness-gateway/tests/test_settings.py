@@ -1,5 +1,4 @@
 import time
-from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -68,9 +67,6 @@ def values(tmp_path: Path) -> dict[str, object]:
         "WITNESS_MASTER_KEY": "ab" * 32,
         "WITNESS_PROMPT_HASHES": '["' + "a" * 64 + '"]',
         "GATEWAY_RUNPOD_API_KEY": "fixture-runpod",
-        "WITNESS_MAX_FLEET_HOURLY": "40.00",
-        "GATEWAY_HOURLY_CEILING": "0.15",
-        "WITNESS_POD_HOURLY_CEILING": "0.070",
         "WITNESS_IMAGE": "registry/witness@sha256:" + "a" * 64,
         "R2_ENDPOINT": "https://r2.test",
         "R2_ACCESS_KEY_ID": "fixture-id",
@@ -95,8 +91,6 @@ def test_typed_settings_build_equivalent_pod_specs(values: dict[str, object]) ->
             "R2_ENDPOINT": SecretStr("https://r2.test"),
             "R2_ACCESS_KEY_ID": SecretStr("fixture-id"),
             "R2_SECRET_ACCESS_KEY": SecretStr("fixture-secret"),
-            "WITNESS_MAX_FLEET_HOURLY": Decimal("40.00"),
-            "WITNESS_POD_HOURLY_CEILING": Decimal("0.070"),
             "WITNESS_PROMPT_HASHES": frozenset({"a" * 64}),
             "WITNESS_DATA_CENTERS": ("EU-RO-1", "EU-CZ-1"),
             "WITNESS_MAX_PODS": 20,

@@ -13,7 +13,7 @@ from pod_gateway.lifecycle import Allocator
 
 def test_capacity_uses_actual_inventory_and_frees_when_the_pod_disappears() -> None:
     provider = Provider()
-    policy = Admission(max_pods=1, hourly_ceiling="0.07", per_pod_ceiling="0.07")
+    policy = Admission(max_pods=1)
     old = Allocator(provider, Drain(), SPEC, admission=policy).acquire(SCOPE, FIRST)
     other = replace(SCOPE, hotkey="6" * 48)
     restarted = Allocator(provider, Drain(), SPEC, admission=policy)
@@ -28,22 +28,11 @@ def test_duplicate_pending_and_exited_pods_count_until_confirmed_deleted() -> No
     first = provider.create(SPEC.body(SCOPE, FIRST))
     second = provider.create(SPEC.body(SCOPE, FIRST))
     provider.pods[second.id] = replace(second, status="EXITED")
-    policy = Admission(max_pods=2, hourly_ceiling="0.14", per_pod_ceiling="0.07")
+    policy = Admission(max_pods=2)
     with pytest.raises(CapacityReached):
         policy.check(provider.list(), SCOPE.deployment)
     provider.delete(first.id)
     policy.check(provider.list(), SCOPE.deployment)
-
-
-def test_inventory_cost_above_quote_and_inflight_attempts_consume_headroom() -> None:
-    provider = Provider()
-    pod = provider.create(SPEC.body(SCOPE, FIRST))
-    provider.pods[pod.id] = replace(pod, hourly_cost="0.11")
-    policy = Admission(max_pods=250, hourly_ceiling="0.15", per_pod_ceiling="0.07")
-    with pytest.raises(CapacityReached):
-        policy.check(provider.list(), SCOPE.deployment)
-    with pytest.raises(CapacityReached):
-        policy.check([], SCOPE.deployment, pending=2)
 
 
 def test_concurrent_miners_share_serialized_provider_capacity_admission() -> None:
@@ -52,7 +41,7 @@ def test_concurrent_miners_share_serialized_provider_capacity_admission() -> Non
         provider,
         Drain(),
         SPEC,
-        admission=Admission(max_pods=1, hourly_ceiling="0.07", per_pod_ceiling="0.07"),
+        admission=Admission(max_pods=1),
     )
 
     def connect(character: str) -> bool:

@@ -32,7 +32,6 @@ class WitnessConfig(TypedDict):
         codex_home: Subscription login directory; defaults to CODEX_HOME or
             ~/.codex.
         codex: Codex executable name or path for login refresh; defaults to codex.
-        transport: "pods-v1" for persistent CPU Pods (the default).
         round: Pinned competition round.
     """
 
@@ -41,7 +40,6 @@ class WitnessConfig(TypedDict):
     state_directory: NotRequired[str]
     codex_home: NotRequired[str]
     codex: NotRequired[str]
-    transport: NotRequired[Literal["pods-v1"]]
     round: str
 
 

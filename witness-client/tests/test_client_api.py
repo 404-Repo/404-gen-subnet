@@ -66,7 +66,7 @@ def test_pod_calls_bound_preparation_and_capture_concurrency(
     config: WitnessConfig, monkeypatch: pytest.MonkeyPatch, preparations: int, call_limit: int
 ) -> None:
     key = Keypair.create_from_mnemonic(Keypair.generate_mnemonic())
-    config = {**config, "transport": "pods-v1", "round": "test-0"}
+    config = {**config, "round": "test-0"}
     reserved, preparation_full, inference_full, excess, allow_authorization, allow_completion = (
         Event() for _ in range(6)
     )
@@ -151,7 +151,7 @@ def test_pod_calls_bound_preparation_and_capture_concurrency(
         return b""
 
     def recorded(
-        invocation: Invocation, call: CallView, proof_hash: str
+        invocation: Invocation, call: CallView, proof_hash: str, **kwargs: object
     ) -> tuple[Session, int, bytes]:
         return (
             session(call.exchange_id),
@@ -211,7 +211,7 @@ def test_pod_calls_bound_preparation_and_capture_concurrency(
 def test_pod_failed_capture_without_non_dispatch_proof_remains_unresolved(
     config: WitnessConfig, monkeypatch: pytest.MonkeyPatch, authorized: bool, not_dispatched: bool,
 ) -> None:
-    config = {**config, "transport": "pods-v1", "round": "test-0"}
+    config = {**config, "round": "test-0"}
     key = Keypair.create_from_mnemonic(Keypair.generate_mnemonic())
     identifier = str(uuid.uuid4())
     clock = [1000.0]
@@ -281,7 +281,7 @@ def test_invalid_session_id_fails_before_credentials_or_allocation(
         pytest.fail("Invalid session_id must fail before loading credentials")
 
     monkeypatch.setattr("witness_client.request.load_credentials", unexpected_credentials)
-    options: WitnessConfig = {**config, "transport": "pods-v1", "round": "test-0"}
+    options: WitnessConfig = {**config, "round": "test-0"}
     with WitnessClient(
         options,
         openai_api_key="x" * 80 if mode == "api" else None,

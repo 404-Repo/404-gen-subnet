@@ -14,12 +14,11 @@ from aiohttp import web
 
 from .admission import Admission
 from .auth import Authenticator, Membership, MembershipRefresher
-from .budget import Budget
 from .control import DrainControl, Registry
 from .lifecycle import Allocator
 from .models import PodSpec
-from .records import CallRecords
 from .runpod import RunPodClient
+from .selection import Selection
 from .server import Gateway
 from .settings import GatewaySettings
 from .state import R2StateStore
@@ -40,16 +39,13 @@ async def application(settings: GatewaySettings, worker_spec: PodSpec) -> web.Ap
         min_interval=settings.min_request_interval,
         cache_seconds=2,
     )
-    admission = Admission(
-        max_pods=settings.max_pods,
-        hourly_ceiling=str(settings.worker_budget),
-        per_pod_ceiling=str(settings.pod_ceiling),
-    )
+    admission = Admission(max_pods=settings.max_pods)
     allocator = Allocator(
         provider,
         DrainControl(registry),
         worker_spec,
         admission=admission,
+        selection=Selection(state),
     )
     membership = Membership(
         settings.deployment,
@@ -69,17 +65,13 @@ async def application(settings: GatewaySettings, worker_spec: PodSpec) -> web.Ap
 
     gateway = Gateway(
         allocator=allocator,
-        records=CallRecords(state),
-        budget=Budget(state, settings.pricing_path.read_bytes()),
         auth=Authenticator(membership),
         registry=registry,
-        evidence=state,
         deployment=settings.deployment,
         round_number=settings.round,
         round_end=settings.round_end,
         secret=settings.secret,
         proof_hash=hashlib.sha256((settings.parameters / "verifying.bin").read_bytes()).hexdigest(),
-        prompts=settings.prompts,
         fence=fence,
         pricing_hash=hashlib.sha256(settings.pricing_path.read_bytes()).hexdigest(),
     )
@@ -110,8 +102,6 @@ async def application(settings: GatewaySettings, worker_spec: PodSpec) -> web.Ap
             with suppress(asyncio.CancelledError):
                 await task
             await registry.close()
-            for bridge in list(gateway.bridges.values()):
-                await bridge.worker.close()
             http.close()
             rpc.close()
 

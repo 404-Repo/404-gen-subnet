@@ -1,7 +1,8 @@
 # Python witness gateway and ordinary CPU Pods
 
 The Python gateway authenticates miners, allocates one current witness Pod per
-miner, and forwards bounded WebSockets. Witness Pods perform verification and
+miner, and returns its direct TLS endpoint. Witness Pods own call reservation,
+authorization, recovery, delivery ordering and generation recording. They perform verification and
 provider capture; they never execute miner programs. An independent revivor
 restores the gateway and cleans up exactly owned Pods. RunPod owns Pod identity,
 lifecycle and capacity. Private R2 objects retain model-call records, usage and
@@ -45,7 +46,6 @@ Use a fresh round namespace for a recording-format cutover.
 from witness_client import WitnessClient, run_generation
 
 config = {
-    "transport": "pods-v1",
     "round": "test-0",
     "witness_url": "https://witness.example.org",
     "proof_parameters": "/runtime/params",
@@ -95,10 +95,14 @@ and partial evidence remain available. A late attempt cannot authorize or replac
 its successor's response. Delivered outcomes cannot be retried.
 
 An authorized attempt with missing response evidence retains unknown usage and
-consumes its dispatch allowance. A replacement is another possible dispatch and
-can consume model allowance again. A Pod/host failure while a capture is still
-unresolved is joined rather than automatically repeated. Exhausted retries leave
+consumes its dispatch allowance. Only durable evidence that an attempt did not
+dispatch permits replacement inference. A Pod/host failure while a capture is still
+unresolved is joined. Exhausted retries leave
 the generation pending; restarting consumes its saved prefix and completed work.
+After a worker process restarts, an incomplete authorized capture stays unresolved
+with unknown usage and its original deadline. Its spool is retained. A complete
+saved capture can be finalized without another provider request. Losing the Pod's
+ephemeral spool also loses bytes that have not reached durable evidence storage.
 
 `WITNESS_TIMINGS=1` enables connection diagnostics across the client, gateway and
 worker. Records include call IDs, message kinds, byte counts, send/receive times,
@@ -124,7 +128,7 @@ sampling thread.
 Miner HTTP requests and WebSocket upgrades use `btauth/1`, canonical sr25519
 hotkeys, ten-second nonces and ownership checks. A Python refresher checks the
 Finney genesis, one finalized block, its timestamp and every subnet hotkey. The
-complete membership snapshot and nonce cache stay in gateway memory.
+complete membership snapshot and gateway nonce cache stay in gateway memory.
 Absent/stale membership fails closed. The optional test hotkey is restricted to
 `test-0`, `test-1`, and `test-2`.
 
@@ -133,7 +137,7 @@ Lifecycle states are suffixes of the RunPod name: pending, active, draining and
 drained. Immutable environment markers include ownership, the connection epoch,
 predecessor, pinned specification and dormant boot policy.
 
-Replacement marks the actual old resource as draining before asking the worker
+Replacement revokes the durable R2 selection fence and marks the actual old resource as draining before asking the worker
 to stop accepting work. Capture and evidence uploads must finish before an
 authenticated worker reports permanent drain. Only then is the resource marked
 drained and deleted. EXITED and unrecoverable ERROR Pods do not require a worker
@@ -144,8 +148,9 @@ The gateway serializes worker create admission and retains only short-lived
 in-flight attempts in memory. A lost create reply is joined for up to ten minutes;
 an expired attempt reports lost rather than claiming a Pod exists. On restart,
 RunPod inventory is queried directly. The client also recovers when its previous
-Pod ID returns 404. There is no R2 Pod inventory, capacity reservation ledger,
-drain seal, health counter or cleanup journal to repair.
+Pod ID returns 404. A healthy current allocation is reattached across client
+restarts and transport reconnects. R2 retains a small selection fence; RunPod
+inventory remains authoritative for identity, capacity and lifecycle.
 
 A restarted coordinator can repeat a create whose result is still invisible.
 Physical Pod creation is therefore not claimed to be exactly once. All copies
@@ -154,13 +159,57 @@ connection; newer connection epochs supersede older ones. Cleanup adopts a sole
 valid late create, and drains superseded or duplicate resources before deleting
 them. Durable R2 inference claims still prevent another paid dispatch of a call.
 
-New Pods start dormant and connect outbound using a per-start capability. Only
-the selected exact Pod ID may receive inference work; draining Pods retain control
+New Pods start dormant and connect outbound for lifecycle control using a per-start
+capability. The gateway durably selects the exact Pod ID. The Pod checks this
+selection before claiming a capture and before releasing a provider request;
+draining Pods retain control
 access to report completion. Readiness requires the expected proof-key
 and frozen-pricing hashes. RunPod credentials stay on the gateway/revivor;
 witness Pods receive a per-start control capability and private evidence-storage
 credentials. The miner's OpenAI credentials remain hidden by the existing
 credential proof.
+
+The worker listens on `8000/tcp` with its own private CA and certificate for
+`witness.internal`. The gateway returns that CA through authenticated HTTPS,
+along with the provider-reported public IP and mapped external port from an
+exact-ID Pod GET. HTTP and WebSocket clients connect to that address while
+verifying `witness.internal` through SNI. The client receives a ten-minute
+allocation grant bound to deployment, round, miner, start and Pod, and signs
+every direct request with its hotkey. The grant cannot authenticate Pod control.
+Current registration is rechecked when the grant is renewed.
+
+Calls and proof messages use the direct Pod port. Outbound control messages carry
+activation, readiness and drain only. A control reconnect does not cancel a paid
+capture or revoke an otherwise selected healthy Pod. New calls stop at the round
+deadline. Pre-deadline Pods drain then; allocations acquired after the deadline
+serve recovery only and drain after inactivity. Old-round cleanup retires all
+exactly owned Pods.
+
+RunPod's [CPU create contract](https://docs.runpod.io/api-reference-v2/pods/create-a-pod)
+accepts TCP ports with CPU compute; the [port guide](https://docs.runpod.io/pods/configuration/expose-ports)
+describes public-IP forwarding and dynamic external ports. The selected shape is
+Secure Cloud `cpu3c`, two vCPUs, with `8000/tcp`. A missing public mapping keeps the
+allocation unready. This path requires direct TCP; it does not use RunPod's HTTP
+proxy. Validate the exact image, shape, datacenter and mapped port on RunPod
+before deployment; documentation and local fixtures do not establish live reachability.
+
+## Evidence downloads
+
+Private journals and spool uploads use the existing `rounds/<round>/<hotkey>/<exchange>/`
+paths. Completed public evidence has immutable, content-addressed copies under
+`evidence/v1/<deployment>/<round>/<hotkey>/<exchange>/<sha256>/<name>`. Sanitized
+recordings use generation- and hash-scoped keys under the same evidence prefix.
+The Pod returns the trusted manifest and expected hashes through its authenticated
+TLS service and issues short-lived, object-specific signed R2 GET URLs. The client
+downloads directly from R2, with a separate HTTP client that sends no hotkey or
+allocation credentials, and verifies size, SHA256 and invocation bindings.
+
+Normal completion checks the locally held request and received HTTP response
+against the trusted manifest after durable accounting and evidence completion.
+It does not download either payload again. Recovery downloads only missing bytes
+from the artifact origin. Private capabilities, TLS keys, credentials, call/usage
+journals and pending spools are never included in public evidence. Keep the bucket
+private; signed object access does not require a public bucket or a gateway relay.
 
 Pods permanently drain after at least 30 minutes without work, once capture and
 upload counts reach zero. The gateway/revivor confirms provider termination;
@@ -184,8 +233,9 @@ Caddy's upstream. Both public HTTPS/WSS and upstream TLS verify certificates.
 Capacity admission counts actual managed RunPod workers, including pending,
 duplicate, draining and EXITED resources until deletion is confirmed. It uses
 fresh inventory at admission plus temporary headroom for unresolved creates in
-that gateway process. Configured gateway headroom is reserved in the hourly
-ceiling. No capacity slot survives as a phantom R2 reservation after Pod loss.
+that gateway process. `WITNESS_MAX_PODS` sets the worker count limit. RunPod hourly
+costs remain available as reporting metadata. No capacity slot survives as a
+phantom R2 reservation after Pod loss.
 
 One gateway coordinates worker creation; a host file lock allows one revivor
 process on the independent host. Multiple supervisor hosts are not supported.
@@ -193,12 +243,10 @@ Read-only selection checks share a two-second in-memory RunPod inventory cache;
 create admission and cleanup explicitly refresh it. Mutable names are updated
 with name-only PATCH requests; worker secrets and container settings are preserved.
 
-Worker activation above its compute price ceiling is rejected. Quote ceilings
-are not account limit changes or atomic provider quotas. Creates hidden across
-a coordinator restart can temporarily exceed admission headroom before appearing
-in inventory. Cleanup drains excess resources, preferring dormant copies over
-active workers, and continues counting them until confirmed deletion. RunPod
-stock, storage/network costs and numeric Pod-count quota are not guaranteed.
+Creates hidden across a coordinator restart can temporarily exceed the Pod-count
+limit before appearing in inventory. Cleanup drains excess resources, preferring
+dormant copies over active workers, and continues counting them until confirmed
+deletion. RunPod stock and numeric Pod-count quota are not guaranteed.
 Fleet FIFO/priority queuing remains
 separate; busy workers provide bounded local backpressure.
 
@@ -327,8 +375,13 @@ apply. Use a fresh deployment, start ID and hotkey for each run.
 
 The authenticated admin API listens on port 8001. `POST /boot` accepts the private
 TLS files, R2 configuration, prompt hashes, hourly price and phase; it waits for
-renderer readiness before starting capture. The miner gateway then listens on
-TLS port 8000 and the admin API is also available on TLS port 8443. Node runs as
+renderer readiness before starting capture. The allocation gateway listens on
+TLS port 8004, the direct witness on TLS port 8000, and the admin API is also
+available on TLS port 8443. Expose `8004/tcp` and `8000/tcp`; the direct mapping
+uses `RUNPOD_PUBLIC_IP` and `RUNPOD_TCP_PORT_8000`. Point the miner's gateway
+configuration at the public mapping of 8004. These benchmark roles share a Pod
+and do not establish shared gateway scaling or production networking acceptance.
+Node runs as
 UID 1001 without the Python process's storage credentials. Node and Chromium load
 a scoped SwiftShader affinity wrapper that preserves the assigned CPU list for
 the driver's default CPU-count mask. The benchmark sets only `ThreadCount` in
@@ -337,7 +390,7 @@ build continues to start `python -m pod_gateway`.
 
 Publish through the operator's release process and configure the immutable image
 digest in [deploy/revivor.env.example](deploy/revivor.env.example). Set the actual
-deadline, canonical operator hotkey, frozen prompt hashes, rate ceilings, keys and
+deadline, canonical operator hotkey, frozen prompt hashes, capacity limits, keys and
 HTTPS origin. Keep the deployment namespace/master key stable for the round.
 Both roles must use the image's frozen pricing bytes. Images must use digests.
 Gateway and worker state protocols must match. Finish active captures and replace

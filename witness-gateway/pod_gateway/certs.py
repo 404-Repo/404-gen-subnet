@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ssl
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -11,7 +12,7 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
 
-def create(directory: Path) -> None:
+def create(directory: Path, server_name: str = "gateway.internal") -> None:
     directory.mkdir(mode=0o700, parents=False, exist_ok=False)
     now = datetime.now(UTC)
     ca_key, gateway_key = (
@@ -40,7 +41,7 @@ def create(directory: Path) -> None:
     leaf = (
         x509.CertificateBuilder()
         .subject_name(
-            x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "gateway.internal")])
+            x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, server_name)])
         )
         .issuer_name(ca_name)
         .public_key(gateway_key.public_key())
@@ -50,7 +51,7 @@ def create(directory: Path) -> None:
         .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
         .add_extension(x509.AuthorityKeyIdentifier.from_issuer_public_key(ca_key.public_key()), critical=False)
         .add_extension(
-            x509.SubjectAlternativeName([x509.DNSName("gateway.internal")]),
+            x509.SubjectAlternativeName([x509.DNSName(server_name)]),
             critical=False,
         )
         .add_extension(
@@ -77,3 +78,14 @@ def create(directory: Path) -> None:
         leaf.public_bytes(serialization.Encoding.PEM)
         + ca.public_bytes(serialization.Encoding.PEM)
     )
+
+
+def pod_context(directory: Path) -> tuple[ssl.SSLContext, str]:
+    if not directory.exists():
+        create(directory, "witness.internal")
+    if directory.is_symlink() or directory.stat().st_mode & 0o077:
+        raise ValueError("Pod TLS directory must be private")
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
+    context.load_cert_chain(directory / "gateway.pem", directory / "gateway.key")
+    return context, (directory / "ca.pem").read_text()

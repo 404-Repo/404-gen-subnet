@@ -50,7 +50,6 @@ operator. Save the configuration as `witness.json`, replacing the paths:
 
 ```json
 {
-  "transport": "pods-v1",
   "round": "test-0",
   "witness_url": "https://witness.example.org",
   "proof_parameters": "/home/miner/404-subnet/witness-server/verifier/params",
@@ -58,8 +57,14 @@ operator. Save the configuration as `witness.json`, replacing the paths:
 }
 ```
 
-`pods-v1` is the default transport. A pinned `round` is required. The same
+The client uses witness Pods. A pinned `round` is required. The same
 configuration works with an OpenAI API key or a ChatGPT subscription.
+
+The gateway authenticates registration and returns the assigned Pod's public IP,
+mapped TCP port, verified TLS name and scoped access grant. Calls, proofs,
+recording state and rendering use that Pod directly. An active assignment is
+reused across transport reconnects and client restarts. Gateway control traffic
+does not carry generation payloads.
 
 Use absolute paths. Keep `state_directory` on persistent storage with mode 0700;
 recovery files use mode 0600. The default directory is
@@ -112,6 +117,18 @@ execution. A direct `client.create()` requires a generation binding.
 To use an API key, replace `subscription="codex"` with
 `openai_api_key=os.environ["OPENAI_API_KEY"]`.
 
+For the assigned Pod's packaged renderer, the trusted runner supplies its pinned
+renderer identity and uses the witness's authenticated transport:
+
+```python
+from renderer_client import RendererClient
+
+with WitnessClient("witness.json", hotkey=hotkey, subscription="codex") as client:
+    with RendererClient("https://witness.internal", renderer_id=renderer_image_digest,
+                        transport=client.renderer_transport()) as renderer:
+        source = run_generation(generate, frozen_png, seed, client, renderer)
+```
+
 Subscription users sign in locally through Codex with file credential storage.
 For a machine without a browser, use the supported device-login flow. The client
 refreshes the local login when needed, including after waiting for a worker.
@@ -142,6 +159,12 @@ Before the provider receives billable request bytes, the worker verifies the
 credential proof and saves authorization. It then captures and persists the
 response independently of the live client connection. Delivery waits and upload
 retries reuse saved data.
+
+The authenticated Pod supplies trusted completion metadata and expected evidence
+hashes. Normal completion verifies the request and response bytes already held
+by the client. Missing response or recording bytes download directly from signed,
+exchange-scoped R2 URLs and are checked against those hashes. Keep the bucket
+private; an object fetched from an arbitrary CDN URL alone is insufficient.
 
 Keep the original configuration, state directory, hotkey and authentication mode.
 A `WitnessError.exchange_id` identifies the attempt. Retrieve it with

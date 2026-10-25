@@ -1,8 +1,9 @@
 # Witness gateway
 
 The Python gateway authenticates Bittensor miners, assigns ordinary RunPod CPU
-Pods and forwards bounded WebSocket connections. Workers capture and verify
-OpenAI exchanges, then save evidence and usage in private R2 storage. A separate
+Pods and returns their direct TCP/TLS endpoints with scoped miner access.
+Miners send calls, proofs and renderer requests directly to the assigned Pod.
+Workers capture and verify OpenAI exchanges, then save evidence and usage in private R2 storage. A separate
 revivor restores the gateway and drains resources owned by the deployment.
 
 See [PODS.md](PODS.md) for configuration, lifecycle, recovery, budgets, replay and
@@ -15,6 +16,10 @@ The [client](../witness-client/README.md) binds requests to a frozen generation.
 releasing provider requests and persists responses before delivery. R2 contains
 the durable inference claims and recordings; RunPod remains the source of truth
 for Pod identity and lifecycle.
+
+Completion metadata comes from the authenticated Pod. Saved evidence and recording
+downloads use signed R2 URLs with size and SHA256 checks. The gateway carries
+allocation and lifecycle control messages only.
 
 ## Local checks
 

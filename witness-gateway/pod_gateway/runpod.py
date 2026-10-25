@@ -165,7 +165,8 @@ class RunPodClient:
                         ):
                             raise ValueError("Invalid TCP port mapping")
                         address = str(ipaddress.ip_address(string(mapping["ip"])))
-                        tcp[private] = (address, public)
+                        if ipaddress.ip_address(address).is_global:
+                            tcp[private] = (address, public)
             return Pod(
                 string(value["id"]),
                 string(value["name"]),

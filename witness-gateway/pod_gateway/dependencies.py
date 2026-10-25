@@ -2,6 +2,7 @@
 
 import base64
 import hashlib
+import json
 import ssl
 import tempfile
 from pathlib import Path
@@ -29,6 +30,7 @@ def worker_spec(settings: Settings) -> PodSpec:
             "WITNESS_PRICING_SHA256": hashlib.sha256(settings.pricing_path.read_bytes()).hexdigest(),
             "WITNESS_IDLE_SECONDS": settings.pod_environment.get("WITNESS_IDLE_SECONDS", "1800"),
             "WITNESS_MAX_CAPTURES": settings.pod_environment.get("WITNESS_MAX_CAPTURES", "2"),
+            "WITNESS_PROMPT_HASHES": json.dumps(sorted(settings.prompts)),
         }
     )
     return PodSpec(
@@ -55,9 +57,6 @@ def gateway_spec(settings: Settings) -> PodSpec:
             "WITNESS_PROMPT_HASHES",
             "WITNESS_IMAGE",
             "GATEWAY_RUNPOD_API_KEY",
-            "WITNESS_MAX_FLEET_HOURLY",
-            "WITNESS_POD_HOURLY_CEILING",
-            "GATEWAY_HOURLY_CEILING",
             "R2_ENDPOINT",
             "R2_ACCESS_KEY_ID",
             "R2_SECRET_ACCESS_KEY",

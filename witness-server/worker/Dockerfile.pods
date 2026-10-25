@@ -28,7 +28,7 @@ COPY witness-gateway/pod_gateway/ /app/witness-gateway/pod_gateway/
 COPY miner-reference/budgets/pricing.json /app/config/pricing.json
 ENV PYTHONPATH=/app/witness-client/src:/app/witness-gateway:/app/witness-server/worker \
     PYTHONUNBUFFERED=1 WITNESS_TIMINGS=1 WITNESS_PRICING_FILE=/app/config/pricing.json
-EXPOSE 8443
+EXPOSE 8000 8443
 ENTRYPOINT ["python", "-m", "pod_gateway"]
 
 FROM proof AS renderer-affinity-build

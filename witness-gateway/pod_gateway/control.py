@@ -21,6 +21,7 @@ class Peer:
     pod_id: str
     ready: bool = False
     drained: bool = False
+    certificate: str | None = None
     seen: float = field(default_factory=time.monotonic)
     replies: dict[str, asyncio.Future[dict[str, object]]] = field(default_factory=dict)
 

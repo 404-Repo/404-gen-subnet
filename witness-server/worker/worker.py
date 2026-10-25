@@ -87,6 +87,8 @@ def relay(
     port: int = 443,
     before_release: Callable[[bytes], None] | None = None,
     extra_metadata: dict[str, object] | None = None,
+    seal: Callable[[dict[str, object]], object] | None = None,
+    before_delivery: Callable[[dict[str, object]], None] | None = None,
 ) -> dict[str, object]:
     """Finish TLS promptly, then hold HTTP until a durable authorization exists.
 
@@ -296,6 +298,8 @@ def relay(
             stage = "evidence_persist"
             for name in ("request.json", "response.sse"):
                 store.put(prefix + "/" + name, (directory / name).read_bytes())
+            if seal is not None:
+                seal(metadata)
             with measure("manifest_persistence"):
                 store.put(prefix + "/manifest.json", json_bytes(metadata))
             with measure("final_status_persistence"):
@@ -321,6 +325,8 @@ def relay(
                     ),
                 )
         issued = True
+        if before_delivery is not None:
+            before_delivery(metadata)
         # Capture is durable before delivery. A disconnected miner can recover it.
         with measure("delivery"), suppress(OSError, WebSocketException):
             channel.send(bytes(server[handshake_bytes:]))

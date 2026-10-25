@@ -8,30 +8,28 @@ import ssl
 import subprocess
 import time
 import uuid
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
-from collections.abc import Callable
 from pathlib import Path
 from typing import cast
 
 import httpx
 import pytest
 from bittensor_wallet import Keypair
-from conftest import MemoryStore, certificates, connected_channels
-from witness_client import WitnessClient, WitnessConfig, WitnessError
-from witness_client.calls import Generation, Invocation, RequestKey
-from witness_client.pods import CallView, PodGatewayClient, Snapshot
-from witness_client.types import Session
-from witness_client.response import completed_response, http_body
-from witness_client.transport import exchange
-from witness_client.types import EarlyDisclosure, HandshakeDisclosure
-from websockets.exceptions import ConnectionClosedError, ConnectionClosedOK
-from websockets.frames import Close
-
 from channel import WorkerChannel
-
+from conftest import MemoryStore, certificates, connected_channels
 from identity import Provider, miner_prefix
 from storage import json_bytes
+from websockets.exceptions import ConnectionClosedError, ConnectionClosedOK
+from websockets.frames import Close
+from witness_client import WitnessClient, WitnessConfig, WitnessError
+from witness_client.calls import Generation, Invocation, RequestKey
+from witness_client.gateway import GatewayClient
+from witness_client.pods import CallView, PodGatewayClient, Snapshot
+from witness_client.response import completed_response, http_body
+from witness_client.transport import exchange
+from witness_client.types import EarlyDisclosure, HandshakeDisclosure, Session
 from worker import PROVIDERS, relay
 
 WITNESS = Path(__file__).resolve().parents[2] / "verifier"
@@ -303,7 +301,7 @@ def test_real_tls_gate_records_large_exchange_even_when_miner_leaves(
             finally:
                 tunnel.close()
             metadata = observed.result(timeout=90)
-            assert client._gateway.response(identifier) == response_body
+            assert GatewayClient(http, hotkey, client._state, 180).response(identifier) == response_body
             if session_id is not None:
                 invocation = Invocation(
                     generation=Generation.from_prompt(b"PNG", 42, round_number="1"),
@@ -328,7 +326,7 @@ def test_real_tls_gate_records_large_exchange_even_when_miner_leaves(
                     patch.setattr(client._gateway, "snapshot", lambda _: Snapshot(
                         call=call, round="1", hotkey=hotkey.ss58_address, session=dict(session),
                     ))
-                    patch.setattr(client._gateway, "recorded", lambda *_: (session, provider_status, response_body))
+                    patch.setattr(client._gateway, "recorded", lambda *_, **__: (session, provider_status, response_body))
                     assert client.resume(identifier).output_text == text
             assert (
                 actual_request.result(timeout=10)

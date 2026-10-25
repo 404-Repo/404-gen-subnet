@@ -2,7 +2,6 @@
 
 import json
 from collections.abc import Mapping
-from decimal import Decimal
 from functools import cached_property
 from pathlib import Path
 from types import MappingProxyType
@@ -36,9 +35,6 @@ class Settings(BaseSettings):
 
     runpod_api_key: SecretStr = Field(..., alias="GATEWAY_RUNPOD_API_KEY")
     runpod_min_request_interval: float = Field(default=1.1, alias="RUNPOD_MIN_REQUEST_INTERVAL")
-    max_fleet_hourly: Decimal = Field(..., alias="WITNESS_MAX_FLEET_HOURLY")
-    gateway_hourly_ceiling: Decimal = Field(..., alias="GATEWAY_HOURLY_CEILING", gt=0)
-    pod_ceiling: Decimal = Field(..., alias="WITNESS_POD_HOURLY_CEILING", gt=0)
     max_pods: int = Field(default=250, alias="WITNESS_MAX_PODS", ge=1, le=1000)
     max_captures: int = Field(default=2, alias="WITNESS_MAX_CAPTURES", ge=1, le=32)
     idle_seconds: int = Field(default=1800, alias="WITNESS_IDLE_SECONDS", ge=1800)
@@ -153,8 +149,6 @@ class Settings(BaseSettings):
         public_key(self.gateway_owner_hotkey)
         if len(self.secret) < 32 or self.round == "gateway":
             raise ValueError("Invalid master key or round deadline")
-        if self.worker_budget <= 0:
-            raise ValueError("Invalid hourly fleet budget")
         return self
 
     @cached_property
@@ -164,10 +158,6 @@ class Settings(BaseSettings):
     @property
     def gateway_scope(self) -> Scope:
         return Scope(self.deployment, "gateway", self.gateway_owner_hotkey)
-
-    @property
-    def worker_budget(self) -> Decimal:
-        return self.max_fleet_hourly - self.gateway_hourly_ceiling
 
     @property
     def pod_environment(self) -> Mapping[str, str]:

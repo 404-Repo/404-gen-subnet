@@ -1,11 +1,14 @@
 """Bounded HTTP and one retry policy for witness delivery, never inference."""
 
+import hashlib
 import json
 import random
+import ssl
 import time
 import uuid
 from collections.abc import Callable
 from typing import Literal, TypeAlias, TypeVar
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -23,9 +26,10 @@ def request(
     *,
     headers: dict[str, str],
     limit: int = 32768,
+    extensions: dict[str, object] | None = None,
 ) -> bytes:
     """Perform exactly one bounded request; callers own its retry deadline."""
-    with http.stream(method, path, content=body, headers=headers) as response:
+    with http.stream(method, path, content=body, headers=headers, extensions=extensions) as response:
         result = bytearray()
         bound = limit if response.is_success else 32768
         for chunk in response.iter_bytes():
@@ -89,3 +93,29 @@ def wait_for_retry(
         raise error
     delay = random.uniform(1, min(10, 2 ** min(attempt + 1, 4)))
     time.sleep(min(remaining, delay))
+
+
+class ArtifactClient:
+    """Own unsigned evidence downloads and verify their trusted descriptors."""
+
+    def __init__(self) -> None:
+        self.http = httpx.Client(
+            verify=ssl.create_default_context(), timeout=30, follow_redirects=False, trust_env=False,
+        )
+
+    def close(self) -> None:
+        self.http.close()
+
+    def download(self, link: object, limit: int, *, delivery_timeout: float) -> bytes:
+        if not isinstance(link, dict):
+            raise WitnessError("Missing artifact descriptor", code="invalid_recording", source="gateway")
+        url = urlsplit(str(link.get("url", "")))
+        size = link.get("size")
+        if (url.scheme != "https" or not url.hostname or url.username or url.fragment
+                or type(size) is not int or not 0 <= size <= limit):
+            raise WitnessError("Invalid artifact descriptor", code="invalid_recording", source="gateway")
+        raw = retry(lambda: request(self.http, "GET", str(link["url"]), headers={}, limit=limit),
+                    deadline=time.monotonic() + delivery_timeout)
+        if len(raw) != size or hashlib.sha256(raw).hexdigest() != link.get("sha256"):
+            raise WitnessError("Downloaded evidence hash differs", code="invalid_recording", source="gateway")
+        return raw

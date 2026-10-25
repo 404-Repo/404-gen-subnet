@@ -30,6 +30,7 @@ class S3(Protocol):
     def get_object(self, **kwargs: object) -> dict[str, object]: ...
     def put_object(self, **kwargs: object) -> object: ...
     def delete_object(self, **kwargs: object) -> object: ...
+    def generate_presigned_url(self, operation: str, **kwargs: object) -> str: ...
 
 
 class R2Store:
@@ -85,6 +86,11 @@ class R2Store:
 
     def delete(self, key: str) -> None:
         self.client.delete_object(Bucket=self.bucket, Key=key)
+
+    def url(self, key: str) -> str:
+        return str(self.client.generate_presigned_url(
+            "get_object", Params={"Bucket": self.bucket, "Key": key}, ExpiresIn=600,
+        ))
 
 
 def json_bytes(value: object) -> bytes:

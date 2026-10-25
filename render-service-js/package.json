@@ -13,7 +13,8 @@
     "test:postval": "node test/post-validate.test.mjs",
     "test:endpoint": "node test/endpoint.test.mjs",
     "test:pmrem": "node --test test/pmrem-readback.test.mjs && node --test test/pmrem-http-recovery.test.mjs && node test/pmrem-equivalence.test.mjs",
-    "test:software-rendering": "node --import ./src/software-rendering.js test/software-rendering.test.mjs"
+    "test:software-rendering": "node --import ./src/software-rendering.js test/software-rendering.test.mjs",
+    "test:browser-recovery": "node --import ./src/software-rendering.js test/browser-crash.test.mjs"
   },
   "dependencies": {
     "@babel/parser": "^7.24.0",

@@ -1,4 +1,4 @@
-"""Live connection from a queued RunPod worker to the gateway."""
+"""Bounded TLS and proof messages between an assigned miner and its witness."""
 
 from __future__ import annotations
 
@@ -8,7 +8,6 @@ from typing import Protocol
 
 from storage import CHUNK_BYTES, MAX_BYTES, json_bytes
 from timing import exchange_id, progress, transport
-from websockets.sync.connection import Connection
 
 
 class Channel(Protocol):
@@ -19,10 +18,15 @@ class Channel(Protocol):
     def finish(self) -> None: ...
 
 
+class Socket(Protocol):
+    def recv(self, timeout: float | None = None) -> str | bytes: ...
+    def send(self, data: str | bytes) -> None: ...
+
+
 class WorkerChannel:
     """TLS bytes and two verification claims on a single assigned connection."""
 
-    def __init__(self, socket: Connection) -> None:
+    def __init__(self, socket: Socket) -> None:
         self.socket = socket
         self.claims: dict[str, bytes] = {}
         self.received_bytes = self.received_messages = 0

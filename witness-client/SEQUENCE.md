@@ -1,7 +1,7 @@
 # Witness request and recovery sequence
 
 The trusted runner binds miner code to frozen generation inputs. The Python
-gateway authenticates the hotkey and coordinates ordinary CPU Pods. Durable R2
+gateway authenticates registration and allocates ordinary CPU Pods. Durable R2
 claims prevent duplicate provider dispatch; recordings preserve invocation and
 delivery order.
 
@@ -9,30 +9,33 @@ delivery order.
 sequenceDiagram
     participant M as Generation-bound client
     participant G as Python gateway
-    participant W as Pod worker
+    participant W as Assigned Pod TLS service
     participant R as Private R2
     participant O as OpenAI
-    M->>G: Reserve invocation with signed hotkey request
-    G->>R: Reserve call identity and invocation position
+    M->>G: Resolve allocation with signed hotkey request
+    G-->>M: Public TCP mapping, verified TLS name/CA, scoped grant
+    G->>R: Fence selected exact Pod allocation
+    G->>W: Lifecycle activation
+    M->>W: Reserve invocation directly over authenticated TLS
+    W->>R: Reserve call identity and invocation position
     alt Recorded response exists
-        G->>R: Read verified recording
-        G-->>M: Deliver in recorded order
+        W-->>M: Trusted completion hashes and signed evidence URLs
+        M->>R: Download missing bytes directly and verify hashes
     else Capture required
-        M->>G: Dispatch to selected exact Pod
-        G->>W: Assign exchange
-        M->>G: Open authenticated WebSocket
-        G->>W: Forward TLS records and proof messages
+        M->>W: Assign and open direct authenticated WebSocket
+        W->>R: Check allocation fence and claim exchange
         W->>O: TLS handshake and fixed probe
         W-->>M: Handshake records and disclosure request
-        M->>W: Credential proof and request disclosure through gateway
+        M->>W: Credential proof and request disclosure
         W->>R: Persist authorization and dispatch allowance
         W->>O: Release billable request bytes
         O-->>W: Encrypted response
-        W->>R: Persist transcript, verified usage and manifest
-        W-->>M: Deliver retained response through gateway
-        M->>G: Record delivery receipt and generation output
-        G->>R: Save recording
+        W->>R: Persist immutable evidence, usage and completed call
+        W-->>M: Deliver response and trusted completion metadata directly
+        M->>M: Check received bytes against completion hashes
     end
+    M->>W: Record delivery receipt and generation output
+    W->>R: Save recording
 ```
 
 The worker saves authorization before releasing billable bytes. After release,
@@ -44,16 +47,21 @@ same exchange and generation identity.
 sequenceDiagram
     participant M as Client after interruption
     participant G as Python gateway
-    participant W as Existing Pod capture
+    participant W as Assigned Pod TLS service
     participant R as Private R2
-    M->>G: Resume saved exchange or repeat generation prefix
-    G->>R: Read durable call state
+    opt Endpoint requires resolution or grant renewal
+        M->>G: Resolve existing allocation or safely replace a lost Pod
+        G-->>M: Verified direct endpoint and scoped grant
+    end
+    M->>W: Resume saved exchange or repeat generation prefix
+    W->>R: Read durable call state
     alt Capture is unresolved
-        G->>W: Join existing capture when available
-        G-->>M: Wait or report pending state
+        W-->>M: Wait or report pending state
     else Recording is issued
-        G->>R: Read and verify retained response
-        G-->>M: Return original response in recorded order
+        W-->>M: Trusted completion hashes and signed object URLs
+        M->>R: Download original response directly
+        M->>M: Verify binding, size and hashes
+        M->>W: Consume original delivery receipt
     end
 ```
 

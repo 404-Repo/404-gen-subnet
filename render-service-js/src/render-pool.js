@@ -2,13 +2,13 @@
  * Render slot pool.
  *
  * Manages bounded concurrency for browser-based rendering. Each render
- * gets a fresh BrowserContext. On failure only that context is closed;
- * the browser is restarted only if the process itself died.
+ * gets a fresh BrowserContext. The browser is replaced if it dies or
+ * context cleanup cannot finish within the rendering deadline.
  *
- * Pool size: RENDER_POOL_SIZE env var (default 2).
+ * Pool size: RENDER_POOL_SIZE env var (default 1).
  */
 
-import { ensureBrowser, isBrowserHealthy, restartBrowser } from './browser.js';
+import { ensureBrowser, isBrowserHealthy, terminateBrowser } from './browser.js';
 import { STATIC_PORT } from './static-server.js';
 import { getCachedPmrem } from './pmrem-cache.js';
 import { SAFE_THREE_BROWSER_BUNDLE } from './safeThree.js';
@@ -79,44 +79,49 @@ class RenderPool {
   }
 
   async _executeInContext(source, params, mode) {
-    if (!isBrowserHealthy()) {
-      console.log('[render-pool] browser not healthy, restarting...');
-      await restartBrowser();
-    }
+    const deadline = performance.now() + RENDER_TIMEOUT_MS;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      let browser;
+      let context;
+      let contextClosed = false;
+      let finished = false;
+      try {
+        const result = await withTimeout((async () => {
+          browser = await ensureBrowser();
+          if (finished) return;
+          try {
+            context = await browser.createBrowserContext();
+            if (finished) return;
+            const page = await context.newPage();
+            page.on('pageerror', (err) => console.error(`[browser error] ${err.message}`));
+            await page.goto(PAGE_URL, { waitUntil: 'domcontentloaded' });
+            await page.waitForFunction('window.__ready === true', { timeout: 10_000 });
+            await page.setOfflineMode(true);
 
-    const browser = await ensureBrowser();
-    const context = await browser.createBrowserContext();
-    let page;
-    try {
-      page = await context.newPage();
-      page.on('pageerror', (err) => console.error(`[browser error] ${err.message}`));
-      await page.goto(PAGE_URL, { waitUntil: 'domcontentloaded' });
-      await page.waitForFunction('window.__ready === true', { timeout: 10_000 });
-      await page.setOfflineMode(true);
+            const environment = await getCachedPmrem(browser, params.lighting);
+            return await page.evaluate(
+              renderInPage,
+              source,
+              params,
+              mode,
+              SAFE_THREE_CONFIG,
+              SAFE_THREE_BROWSER_BUNDLE,
+              environment,
+            );
+          } finally {
+            try { await context?.close(); contextClosed = true; } catch {}
+          }
+        })(), Math.max(0, deadline - performance.now()));
 
-      const result = await withTimeout(
-        getCachedPmrem(browser, params.lighting).then((environment) => page.evaluate(
-          renderInPage,
-          source,
-          params,
-          mode,
-          SAFE_THREE_CONFIG,
-          SAFE_THREE_BROWSER_BUNDLE,
-          environment,
-        )),
-        RENDER_TIMEOUT_MS,
-      );
-
-      if (result.error) throw new Error(result.error);
-      return result.data;
-    } catch (err) {
-      try { await context.close(); } catch {}
-      if (!isBrowserHealthy()) {
-        console.log('[render-pool] browser died during render, will restart on next request');
+        if (result.error) throw new Error(result.error);
+        return result.data;
+      } catch (err) {
+        if (attempt > 0 || isBrowserHealthy() || performance.now() >= deadline) throw err;
+        console.log('[render-pool] browser died, retrying within the rendering deadline');
+      } finally {
+        finished = true;
+        if (browser && !contextClosed) terminateBrowser(browser);
       }
-      throw err;
-    } finally {
-      try { await context.close(); } catch {}
     }
   }
 }
@@ -440,7 +445,7 @@ async function renderInPage(source, params, mode, safeThreeConfig, safeThreeBund
 function withTimeout(promise, ms) {
   let timer;
   const timeout = new Promise((_, reject) => {
-    timer = setTimeout(() => reject(new Error(`render timed out after ${ms}ms`)), ms);
+    timer = setTimeout(() => reject(new Error(`render timed out after ${RENDER_TIMEOUT_MS}ms`)), ms);
   });
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }

@@ -390,7 +390,7 @@ def test_check_command_validates_frozen_inputs_without_loading_credentials(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     config = tmp_path / "witness.json"
-    config.write_text(json.dumps({"transport": "pods-v1", "round": "test-0"}))
+    config.write_text(json.dumps({"round": "test-0"}))
     manifest = tmp_path / "manifest.json"
     manifest.write_text(
         json.dumps(

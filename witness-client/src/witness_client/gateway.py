@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import socket
+import ssl
 import threading
 import time
 from collections.abc import Iterator
@@ -20,9 +21,10 @@ from websockets.sync.client import ClientConnection, connect
 from .auth import hotkey_headers
 from .delivery import request, retry
 from .errors import ExchangePending, WitnessError
+from .state import remaining_seconds
 from .timing import measure, timed
 from .tunnel import MAX_BYTES, WebSocketTunnel
-from .types import ExchangeStatus, JSONObject
+from .types import ExchangeStatus
 
 
 class _GatewayConnection(ClientConnection):
@@ -50,14 +52,109 @@ class _GatewayConnection(ClientConnection):
         super().close_socket()
 
 
-class GatewayClient:
-    """Exchange data with witness workers through the gateway.
+class SignedTransport:
+    """Signed requests to one endpoint; the caller owns its HTTP connection."""
 
-    WitnessClient uses this to connect to its assigned worker and retrieve
-    recorded evidence and responses. Gateway requests are signed with the
-    miner's hotkey. Each ``identifier`` is the exchange UUID in Session's ``id``
-    field.
-    """
+    def __init__(
+        self,
+        http: httpx.Client,
+        hotkey: Keypair,
+        delivery_timeout: float,
+        *,
+        headers: dict[str, str] | None = None,
+        tls: ssl.SSLContext | None = None,
+        server_name: str | None = None,
+    ) -> None:
+        self.http, self.hotkey, self.delivery_timeout = http, hotkey, delivery_timeout
+        self.headers = {} if headers is None else headers
+        self.tls, self.server_name = tls, server_name
+
+    def _headers(self, method: str, path: str, body: bytes) -> dict[str, str]:
+        headers = hotkey_headers(self.hotkey, body, method=method, path=path)
+        headers.update(self.headers)
+        return headers
+
+    @contextmanager
+    def tunnel(self, identifier: str) -> Iterator[WebSocketTunnel]:
+        """Connect to the assigned worker for one TLS exchange, closing on exit."""
+        path = f"/exchanges/{identifier}/connect"
+        headers = self._headers("GET", path, b"")
+        url = (
+            str(self.http.base_url).rstrip("/").replace("https://", "wss://", 1) + path
+        )
+        try:
+            with measure("websocket_connect"):
+                socket = connect(
+                    url,
+                    additional_headers=headers,
+                    proxy=None,
+                    compression=None,
+                    max_size=256 * 1024,
+                    max_queue=16,
+                    open_timeout=30,
+                    close_timeout=5,
+                    create_connection=_GatewayConnection,
+                    ssl=self.tls,
+                    server_hostname=self.server_name,
+                )
+            with socket:
+                yield WebSocketTunnel(socket, identifier)
+        except (WebSocketException, OSError, TimeoutError) as error:
+            raise WitnessError(
+                "Worker connection lost; recover the result or release the allocation",
+                identifier,
+                code="connection_lost",
+                source="gateway",
+            ) from error
+
+    def _request_once(
+        self, method: str, path: str, body: bytes = b"", *, limit: int = 32768
+    ) -> bytes | None:
+        # Sign each attempt afresh. Retried jobs and objects keep the same bytes.
+        headers = self._headers(method, path, body)
+        try:
+            return request(self.http, method, path, body, headers=headers, limit=limit,
+                           extensions={"sni_hostname": self.server_name} if self.server_name else None)
+        except WitnessError as error:
+            if error.status_code == 404 and error.code == "object_not_ready":
+                return None
+            raise
+
+    def _request_with_retry(
+        self,
+        method: str,
+        path: str,
+        body: bytes = b"",
+        *,
+        limit: int = 32768,
+        deadline: float | None = None,
+    ) -> bytes | None:
+        return retry(
+            lambda: self._request_once(method, path, body, limit=limit),
+            deadline=(
+                deadline
+                if deadline is not None
+                else time.monotonic() + self.delivery_timeout
+            ),
+        )
+
+    def render(self, request: httpx.Request) -> httpx.Response:
+        """Send one renderer request, preserving its caller's timeout."""
+        path = request.url.raw_path.decode("ascii")
+        if request.method != "POST" or request.url.path != "/render/grid":
+            raise ValueError("Unknown renderer route")
+        body = request.read()
+        headers = self._headers("POST", path, body)
+        headers["Content-Type"] = "application/json"
+        message = self.http.build_request("POST", path, content=body, headers=headers, timeout=150)
+        if "timeout" in request.extensions:
+            message.extensions["timeout"] = request.extensions["timeout"]
+        message.extensions["sni_hostname"] = self.server_name
+        return self.http.send(message)
+
+
+class GatewayClient(SignedTransport):
+    """Signed endpoint requests with per-exchange recovery helpers."""
 
     def __init__(
         self,
@@ -66,16 +163,8 @@ class GatewayClient:
         state: Path,
         delivery_timeout: float,
     ) -> None:
-        """Configure gateway access and local job storage.
-
-        Args:
-            http: HTTP client with the gateway base_url; the caller closes it.
-            hotkey: Miner key used to sign gateway requests.
-            state: Existing private directory for per-exchange recovery files.
-            delivery_timeout: Retry window in seconds for each delivery phase.
-        """
-        self.http, self.hotkey = http, hotkey
-        self.state, self.delivery_timeout = state, delivery_timeout
+        super().__init__(http, hotkey, delivery_timeout)
+        self.state = state
 
     def get(
         self,
@@ -107,21 +196,7 @@ class GatewayClient:
         self._request_with_retry("POST", f"/release/{identifier}")
 
     def remaining_seconds(self, identifier: str) -> float:
-        """Return seconds left before the exchange's job deadline.
-
-        Read the gateway deadline from ``state/<identifier>/job.json``. It covers both
-        preparation and execution. Raise WitnessError if the deadline has passed.
-        """
-        job: JSONObject = json.loads(
-            (self.state / identifier / "job.json").read_bytes()
-        )
-        remaining = float(str(job.get("expires", job["deadline"]))) - time.time()
-        if remaining <= 0:
-            raise WitnessError(
-                "Queued exchange deadline reached", identifier, source="gateway"
-            )
-        return remaining
-
+        return remaining_seconds(self.state, identifier)
 
     def status(self, identifier: str) -> ExchangeStatus:
         """Fetch one snapshot of the worker's progress as ExchangeStatus.
@@ -190,67 +265,6 @@ class GatewayClient:
                 identifier,
                 source="gateway",
             ) from error
-
-    @contextmanager
-    def tunnel(self, identifier: str) -> Iterator[WebSocketTunnel]:
-        """Connect to the assigned worker for one TLS exchange, closing on exit."""
-        path = f"/exchanges/{identifier}/connect"
-        headers = hotkey_headers(self.hotkey, b"", method="GET", path=path)
-        url = (
-            str(self.http.base_url).rstrip("/").replace("https://", "wss://", 1) + path
-        )
-        try:
-            with measure("websocket_connect"):
-                socket = connect(
-                    url,
-                    additional_headers=headers,
-                    proxy=None,
-                    compression=None,
-                    max_size=256 * 1024,
-                    max_queue=16,
-                    open_timeout=30,
-                    close_timeout=5,
-                    create_connection=_GatewayConnection,
-                )
-            with socket:
-                yield WebSocketTunnel(socket, identifier)
-        except (WebSocketException, OSError, TimeoutError) as error:
-            raise WitnessError(
-                "Worker connection lost; recover the result or release the allocation",
-                identifier,
-                code="connection_lost",
-                source="gateway",
-            ) from error
-
-    def _request_once(
-        self, method: str, path: str, body: bytes = b"", *, limit: int = 32768
-    ) -> bytes | None:
-        # Sign each attempt afresh. Retried jobs and objects keep the same bytes.
-        headers = hotkey_headers(self.hotkey, body, method=method, path=path)
-        try:
-            return request(self.http, method, path, body, headers=headers, limit=limit)
-        except WitnessError as error:
-            if error.status_code == 404 and error.code == "object_not_ready":
-                return None
-            raise
-
-    def _request_with_retry(
-        self,
-        method: str,
-        path: str,
-        body: bytes = b"",
-        *,
-        limit: int = 32768,
-        deadline: float | None = None,
-    ) -> bytes | None:
-        return retry(
-            lambda: self._request_once(method, path, body, limit=limit),
-            deadline=(
-                deadline
-                if deadline is not None
-                else time.monotonic() + self.delivery_timeout
-            ),
-        )
 
 
 def _json_object(raw: bytes, identifier: str) -> dict[str, object]:

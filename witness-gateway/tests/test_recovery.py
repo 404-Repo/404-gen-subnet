@@ -11,6 +11,7 @@ from unittest.mock import MagicMock
 
 import pytest
 from botocore.exceptions import EndpointConnectionError
+from channel import WorkerChannel
 from pod import PodRuntime
 from support import MemoryState
 from test_recording import BODY, PRICING, SCOPE, invocation
@@ -241,6 +242,39 @@ def test_unclaimed_capture_spool_is_retained(tmp_path: Path) -> None:
     assert located is not None and located[1].phase == "assigned"
 
 
+@pytest.mark.parametrize("committed", [False, True])
+def test_restart_recovers_interrupted_claim_without_consuming_a_dispatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, committed: bool,
+) -> None:
+    state, item = MemoryState(), invocation()
+    records, budget = CallRecords(state), Budget(state, PRICING)
+    original = records.reserve(SCOPE, item)
+    assigned = records.assign(SCOPE, item, START, "pod-one")
+    worker = runtime(state, records, budget, tmp_path / "spool")
+    worker.accepting = True
+    claim = records.claim
+
+    def interrupted(*_args: object) -> bool:
+        if committed:
+            claim(SCOPE, item, "pod-one", assigned.capture_id or "")
+        raise SystemExit("Fixture stopped before claim acknowledgement")
+
+    monkeypatch.setattr(records, "claim", interrupted)
+    try:
+        with pytest.raises(SystemExit):
+            worker.start_capture(item, assigned, WorkerChannel(MagicMock()))
+    finally:
+        worker.executor.shutdown(wait=True)
+    monkeypatch.setattr(records, "claim", claim)
+    restarted = runtime(state, records, budget, worker.spool)
+    restarted.executor.shutdown(wait=True)
+    located = records.locate(SCOPE, original.exchange_id)
+    assert located is not None and located[1].phase == "failed" and located[1].not_dispatched
+    retried = records.retry(SCOPE, item, original.exchange_id)
+    assert retried.phase == "reserved" and retried.exchange_id != original.exchange_id
+    assert budget.summary(SCOPE, item)["possible_dispatches"] == 0
+
+
 @pytest.mark.parametrize("already_issued", [False, True])
 def test_failed_finalization_preserves_a_durable_response(tmp_path: Path, already_issued: bool) -> None:
     state = MemoryState()
@@ -319,10 +353,9 @@ def test_capture_retry_requires_proven_failure_before_dispatch_reservation(
         raise TimeoutError("Fixture failed after authorization")
 
     monkeypatch.setattr("pod.connect", lambda *args, **kwargs: MagicMock())
-    monkeypatch.setattr("pod.httpx.get", lambda *args, **kwargs: MagicMock(json=lambda: {"selected": True}))
     monkeypatch.setattr("pod.relay", relay)
     try:
-        worker._capture(item, call)
+        worker._capture(item, call, MagicMock())
     finally:
         worker.executor.shutdown(wait=True)
     located = records.locate(SCOPE, original.exchange_id)
@@ -375,10 +408,9 @@ def test_capture_retries_rejected_budget_writes_but_not_uncertain_writes(
         raise TimeoutError("Fixture failed after provider release")
 
     monkeypatch.setattr("pod.connect", lambda *args, **kwargs: MagicMock())
-    monkeypatch.setattr("pod.httpx.get", lambda *args, **kwargs: MagicMock(json=lambda: {"selected": True}))
     monkeypatch.setattr("pod.relay", relay)
     try:
-        worker._capture(item, call)
+        worker._capture(item, call, MagicMock())
     finally:
         worker.executor.shutdown(wait=True)
 

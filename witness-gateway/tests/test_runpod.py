@@ -50,6 +50,16 @@ def test_cpu_create_uses_v2_and_returns_no_secrets() -> None:
     assert "offline-runpod-key" not in repr(pod)
 
 
+def test_direct_cpu_endpoint_uses_public_ip_and_mapped_tcp_port() -> None:
+    reply = {**pod_json(), "runtime": {"ports": [
+        {"private": 8000, "public": 41000, "ip": "10.0.0.4", "type": "tcp"},
+        {"private": 8000, "public": 45123, "ip": "1.1.1.1", "type": "tcp"},
+        {"private": 8001, "public": 45124, "ip": "1.1.1.1", "type": "http"},
+    ]}}
+    pod = client(lambda _: httpx.Response(200, json=reply)).get("cpu-pod")
+    assert pod is not None and pod.tcp == {8000: ("1.1.1.1", 45123)}
+
+
 @pytest.mark.parametrize("status", [400, 401, 403, 404, 422, 429])
 def test_explicit_create_rejection_is_not_retried_or_echoed(status: int) -> None:
     calls = 0

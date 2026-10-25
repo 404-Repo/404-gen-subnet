@@ -1,7 +1,9 @@
 # Witness worker
 
-The worker runs on an ordinary CPU Pod and connects outbound to the Python
-gateway. It relays the miner's TLS connection to OpenAI. The verifier checks the
+The worker runs on an ordinary CPU Pod with a direct authenticated TLS service on
+`8000/tcp`. The gateway supplies the miner with its public mapped endpoint,
+certificate authority and scoped allocation grant. Outbound gateway connections
+carry lifecycle control. The Pod owns per-call state and relays the miner's TLS connection to OpenAI. The verifier checks the
 handshake, credential proof, request and response.
 
 The worker saves authorization and the request before forwarding billable bytes.
@@ -17,6 +19,13 @@ exchange deadline bounds capture and the configured generation phase.
 Evidence lives under `rounds/<round>/<hotkey>/<exchange-id>/`. Generation
 recordings retain invocation and delivery order. Durable claims and usage live in
 R2; Pod identity, ownership and lifecycle come from RunPod.
+
+Content-addressed completed evidence lives under `evidence/v1/`. The Pod returns
+expected hashes and object-specific signed R2 URLs through authenticated TLS;
+the miner downloads saved bytes directly from R2. Private journals, pending
+spools, allocation capabilities and TLS keys remain private. The direct listener
+verifies the assigned hotkey and allocation grant, and checks the durable R2
+selection fence before capturing and authorizing new calls.
 
 ## Reading order
 
