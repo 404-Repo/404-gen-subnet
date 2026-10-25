@@ -169,6 +169,14 @@ def completed_response(
     texts = final_texts or texts
     if any("".join(parts) != texts.get(key) for key, parts in deltas.items()):
         raise ValueError("Missing/inconsistent completed output text")
+    if not completed.get("output") and texts:
+        recovered: dict[int, OutputItem] = {}
+        for (output_index, _), text in sorted(texts.items()):
+            item = recovered.setdefault(
+                output_index, {"type": "message", "content": []}
+            )
+            item["content"].append({"type": "output_text", "text": text})
+        completed["output"] = list(recovered.values())
     response = Response.model_construct(**completed)
     if raise_failed and response.status != "completed":
         raise WitnessError(

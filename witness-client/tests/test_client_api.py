@@ -16,6 +16,7 @@ import pytest
 from bittensor_wallet import Keypair
 from witness_client import WitnessClient, WitnessConfig, WitnessError
 from witness_client.calls import RequestKey
+from witness_client.client import CapturedResponse
 from witness_client.pods import CallView, Snapshot
 from witness_client.tunnel import WebSocketTunnel
 from witness_client.types import (
@@ -58,6 +59,52 @@ def event(response: dict[str, object]) -> bytes:
         ).encode()
         + b"\n\n"
     )
+
+
+@pytest.mark.parametrize(
+    "parts, expected",
+    [
+        ([(0, 0, "original")], "original"),
+        ([(1, 0, "second"), (0, 1, " part"), (0, 0, "first")], "first partsecond"),
+    ],
+)
+def test_responses_create_preserves_text_missing_from_terminal_output(
+    config: WitnessConfig,
+    monkeypatch: pytest.MonkeyPatch,
+    parts: list[tuple[int, int, str]],
+    expected: str,
+) -> None:
+    body = b"".join(
+        b"data: " + json.dumps({
+            "type": "response.output_text.done",
+            "output_index": output_index,
+            "content_index": content_index,
+            "text": text,
+        }).encode() + b"\n\n"
+        for output_index, content_index, text in parts
+    ) + event({
+        "id": "resp_text",
+        "status": "completed",
+        "output": [],
+        "usage": {"input_tokens": 3, "output_tokens": 2, "total_tokens": 5},
+    })
+
+    def resolve(
+        _: WitnessClient, key: RequestKey, request: bytes, session_id: str | None
+    ) -> CapturedResponse:
+        return CapturedResponse(str(uuid.uuid4()), 200, body)
+
+    monkeypatch.setattr(WitnessClient, "_resolve", resolve)
+    key = Keypair.create_from_mnemonic(Keypair.generate_mnemonic())
+    with WitnessClient(config, hotkey=key, openai_api_key="x" * 80) as witness:
+        response = witness.responses.create(model="fixture", input="image")
+
+    assert response.output_text == expected
+    assert response.id == "resp_text"
+    assert response.usage is not None
+    assert response.usage.input_tokens == 3
+    assert response.usage.output_tokens == 2
+    assert response.usage.total_tokens == 5
 
 
 @pytest.mark.parametrize("preparations, call_limit", [(1, 4), (3, 4), (3, 2)])
