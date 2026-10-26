@@ -635,7 +635,13 @@ def main() -> None:
         )
 
     async def serve() -> None:
-        service = Witness(runtime, evidence.url, artifacts=artifact_store)
+        from pod_gateway.judging import Judging
+
+        judging = (
+            Judging(artifact_store, "http://127.0.0.1:8002", os.environ["DINOV3_REVISION"], os.environ.get("HF_TOKEN"))
+            if artifact_store is not None else None
+        )
+        service = Witness(runtime, evidence.url, artifacts=artifact_store, judging=judging)
         runner = web.AppRunner(service.application(), handler_cancellation=False)
         await runner.setup()
         site = web.TCPSite(runner, "0.0.0.0", int(os.environ.get("WITNESS_PORT", "8000")), ssl_context=tls)

@@ -8,6 +8,7 @@ import hashlib
 import json
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -25,7 +26,9 @@ from pod_gateway.artifacts import (
     ArtifactProfile,
     ArtifactRepository,
     SubmissionContext,
+    publish_round,
 )
+from pod_gateway.judging import Judging
 from pod_gateway.models import Scope
 from pod_gateway.state import Snapshot, WriteRejected
 
@@ -41,13 +44,18 @@ async def enable(fixture: Harness, *, limits: ArtifactLimits = LIMITS, png: byte
 
     async def backend(request: web.Request) -> web.Response:
         source = (await request.json())["source"]
-        rendered.append(source)
+        if request.path == "/render/grid" and request.query:
+            rendered.append(source)
         if source == "invalid":
             return web.json_response({"error": "validation_failed", "failures": []}, status=422)
+        if request.path == "/render":
+            count = len(request.query["thetas"].split(","))
+            return web.json_response({"images": [base64.b64encode(png).decode()] * count})
         return web.Response(body=png, content_type="image/png")
 
     app = web.Application()
     app.router.add_post("/render/grid", backend)
+    app.router.add_post("/render", backend)
     origin = await fixture.listen(app, None)
     runtime, service = fixture.runtimes[-1], fixture.services[-1]
     service.renderer_url = origin + "/render/grid"
@@ -61,6 +69,16 @@ async def enable(fixture: Harness, *, limits: ArtifactLimits = LIMITS, png: byte
         submission_commit=COMMIT,
         prompt_hashes=frozenset({hashlib.sha256(fixture.image).hexdigest()}),
     )
+    service.judging = Judging(service.artifacts, origin, "fixture-revision", None)
+    fixture.monkeypatch.setattr("pod_gateway.judging.build_embeddings_npz", AsyncMock(return_value=b"fixture embeddings"))
+    metadata = fixture.state.get(f"artifacts/v1/rounds/{runtime.scope.round}.json")
+    if metadata is not None:
+        runtime.round_end = service.round_end = json.loads(metadata)["round_end"]
+    publish_round(
+        fixture.state, deployment=runtime.scope.deployment, round_number=runtime.scope.round,
+        round_end=runtime.round_end, profile=PROFILE, embedding_revision="fixture-revision",
+        seed=service.artifacts.seed, prompt_hashes=service.artifacts.prompt_hashes,
+    )
     return rendered
 
 
@@ -70,6 +88,7 @@ def client(fixture: Harness, transport: httpx.BaseTransport, *, seed: int = 42) 
         renderer_id=PROFILE.image_digest,
         round=fixture.scope.round,
         prompt_sha256=hashlib.sha256(fixture.image).hexdigest(),
+        prompt_image=fixture.image,
         seed=seed,
         submission_commit=COMMIT,
         transport=transport,
@@ -663,7 +682,8 @@ def test_runner_requires_a_private_checkpoint_directory(tmp_path: Path) -> None:
                 "https://witness.internal",
                 renderer_id=PROFILE.image_digest,
                 round="test-0",
-                prompt_sha256="a" * 64,
+                prompt_sha256=hashlib.sha256(b"prompt").hexdigest(),
+                prompt_image=b"prompt",
                 seed=42,
                 submission_commit=COMMIT,
             ) as renderer,
@@ -767,5 +787,63 @@ def test_managed_batch_recovers_final_save_on_replacement_without_generation(
                 store = fixture.services[-1].artifacts
                 assert store is not None
                 assert store.collect_final(prompts[0].sha256)[1] == generated[0].encode()
+
+    asyncio.run(scenario())
+
+
+def test_saved_final_finishes_its_judging_bundle_after_embedding_failure_and_cutoff(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        fixture = Harness(tmp_path, monkeypatch)
+        async with fixture.running():
+            with fixture.client() as witness:
+                await asyncio.to_thread(witness._gateway.ensure_pod)
+                await enable(fixture)
+                embeddings = AsyncMock(side_effect=OSError("embedding service unavailable"))
+                monkeypatch.setattr("pod_gateway.judging.build_embeddings_npz", embeddings)
+                service = fixture.services[-1]
+                assert service.artifacts is not None and service.judging is not None
+                with client(fixture, witness.renderer_transport()) as renderer:
+                    with pytest.raises(ArtifactUnavailable) as pending:
+                        await asyncio.to_thread(renderer.save_final, SOURCE)
+                    assert pending.value.status == 503
+                    saved, source, _ = service.artifacts.collect_final(hashlib.sha256(fixture.image).hexdigest())
+                    assert source == SOURCE.encode()
+                    bundle_root = service.judging.root(saved)
+                    images = {key: value.data for key, value in fixture.state.objects.items() if key.startswith(
+                        f"{bundle_root}/objects/"
+                    ) and key.endswith(".png")}
+                    assert images
+                    service.round_end = service.runtime.round_end = 0
+                    embeddings.side_effect = None
+                    embeddings.return_value = b"recovered prompt and view embeddings"
+                    completed = await asyncio.to_thread(renderer.save_final, SOURCE)
+                    assert completed["revision"] == saved.revision
+                    assert fixture.state.get(f"{bundle_root}/embeddings.npz") == embeddings.return_value
+                    assert fixture.state.get(f"{bundle_root}/white/front_left.png") == PNG
+                    assert fixture.state.get(f"{bundle_root}/gray/front_above.png") == PNG
+                    assert fixture.state.get(f"{bundle_root}/grid.png") == PNG
+                    assert all(fixture.state.get(key) == value for key, value in images.items())
+                    assert fixture.paid == 0
+
+    asyncio.run(scenario())
+
+
+def test_final_save_rejects_prompt_bytes_from_another_input(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def scenario() -> None:
+        fixture = Harness(tmp_path, monkeypatch)
+        async with fixture.running():
+            with fixture.client() as witness:
+                await asyncio.to_thread(witness._gateway.ensure_pod)
+                await enable(fixture)
+                with client(fixture, witness.renderer_transport()) as renderer:
+                    renderer.prompt_image = base64.b64encode(b"another prompt").decode()
+                    with pytest.raises(ArtifactUnavailable) as rejected:
+                        await asyncio.to_thread(renderer.save_final, SOURCE)
+                    assert rejected.value.status == 400
+                store = fixture.services[-1].artifacts
+                assert store is not None
+                assert store.load_final(hashlib.sha256(fixture.image).hexdigest()) is None
 
     asyncio.run(scenario())

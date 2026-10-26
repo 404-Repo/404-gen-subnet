@@ -16,7 +16,6 @@ from subnet_common.git_batcher import GitBatcher
 from subnet_common.github import GitHubClient
 from subnet_common.r2_client import R2Client
 
-from submission_collector.artifacts import ArtifactReadError, WitnessArtifacts
 from submission_collector.discord import NULL_DISCORD_NOTIFIER, DiscordNotifier
 from submission_collector.download import DownloadPipeline
 from submission_collector.prompts import select_prompts
@@ -76,8 +75,6 @@ async def run_collection_iteration(
         async def download_fn(
             git_batcher: GitBatcher, state: CompetitionState, ref: str, settings: Settings
         ) -> dict[str, GenerationsMap]:
-            if settings.witness_artifacts is None:
-                raise ArtifactReadError("Collection requires frozen witness artifact configuration")
             async with (
                 R2Client(
                     access_key_id=settings.r2_access_key_id.get_secret_value(),
@@ -86,13 +83,11 @@ async def run_collection_iteration(
                 ) as r2,
                 httpx.AsyncClient(timeout=httpx.Timeout(60, connect=10)) as http_client,
             ):
-                artifacts = WitnessArtifacts(r2, settings.witness_artifacts)
                 pipeline = DownloadPipeline(
                     git_batcher=git_batcher,
                     r2=r2,
                     http_client=http_client,
                     settings=settings,
-                    artifacts=artifacts,
                 )
                 return await pipeline.run(state=state, ref=ref)
 
@@ -127,7 +122,7 @@ async def collection_iteration(
     Handles three stages of the round lifecycle:
     - OPEN: Waits for latest_reveal_block, collects submissions from chain, saves to git
     - MINER_GENERATION: Waits for generation_deadline_block, then transitions
-    - DOWNLOADING: Collects saved Pod submissions, prepares judging images, saves to git
+    - DOWNLOADING: Collects completed Pod judging bundles and saves their URLs to git
 
     Transitions to DUELS stage when downloading completes.
 

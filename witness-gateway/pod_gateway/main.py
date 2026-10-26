@@ -13,7 +13,7 @@ import httpx
 from aiohttp import web
 
 from .admission import Admission
-from .artifacts import ArtifactConfig
+from .artifacts import ArtifactConfig, publish_round
 from .auth import Authenticator, Membership, MembershipRefresher
 from .control import DrainControl, Registry
 from .lifecycle import Allocator
@@ -32,6 +32,14 @@ async def application(settings: GatewaySettings, worker_spec: PodSpec) -> web.Ap
         secret_key=settings.r2_secret_access_key.get_secret_value(),
         bucket=settings.r2_bucket,
     )
+    if settings.artifacts is not None:
+        config = ArtifactConfig.model_validate_json(settings.artifacts)
+        assert settings.embedding_revision is not None
+        await asyncio.to_thread(
+            publish_round, state, deployment=settings.deployment, round_number=settings.round,
+            round_end=settings.round_end, profile=config.profile, embedding_revision=settings.embedding_revision,
+            seed=config.seed, prompt_hashes=config.prompt_hashes,
+        )
     registry = Registry()
     http = RunPodClient.http_client()
     provider = RunPodClient(

@@ -133,6 +133,7 @@ def test_artifact_configuration_reaches_both_pod_roles_and_pins_the_worker_image
         }
     )
     values["WITNESS_ARTIFACTS"] = config
+    values["DINOV3_REVISION"] = "fixture-revision"
     settings = Settings.model_validate(values)
     assert gateway_spec(settings).env["WITNESS_ARTIFACTS"] == config
     assert worker_spec(settings).env["WITNESS_ARTIFACTS"] == config

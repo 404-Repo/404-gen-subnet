@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+import json
 import random
 from collections.abc import Awaitable, Sequence
 from pathlib import Path
@@ -7,6 +8,7 @@ from typing import Any, TypeVar
 
 import httpx
 from loguru import logger
+from subnet_common.competition.config import require_competition_config
 from subnet_common.competition.generations import (
     GenerationResult,
     GenerationsMap,
@@ -17,10 +19,8 @@ from subnet_common.competition.prompts import require_prompts
 from subnet_common.competition.seed import require_seed_from_git
 from subnet_common.competition.state import CompetitionState
 from subnet_common.competition.submissions import MinerSubmission, require_submissions
-from subnet_common.embeddings import build_embeddings_npz
 from subnet_common.git_batcher import GitBatcher
 from subnet_common.r2_client import R2Client
-from subnet_common.render import GRAY_BG, GRAY_VIEWS, WHITE_BG, WHITE_VIEWS, render_grid, render_views
 
 from submission_collector.artifacts import (
     ArtifactReadError,
@@ -45,7 +45,7 @@ async def _join(group: Awaitable[_T], tasks: Sequence[asyncio.Future[Any]]) -> _
 
 
 class DownloadPipeline:
-    """Collect selected witness outputs and prepare judging bundles."""
+    """Collect selected outputs and completed judging bundles saved by the Pod."""
 
     def __init__(
         self,
@@ -53,18 +53,17 @@ class DownloadPipeline:
         r2: R2Client,
         http_client: httpx.AsyncClient,
         settings: Settings,
-        artifacts: WitnessArtifacts,
     ) -> None:
         self.git_batcher = git_batcher
         self.r2 = r2
         self.http_client = http_client
         self.settings = settings
         self.semaphore = asyncio.Semaphore(settings.max_concurrent_downloads)
-        self.artifacts = artifacts
+        self.artifacts: WitnessArtifacts | None = None
         self._seed: int | None = None
 
     async def run(self, state: CompetitionState, ref: str) -> dict[str, GenerationsMap]:
-        """Collect generated sources, prepare previews, and upload to R2.
+        """Collect saved sources and judging-bundle URLs from R2.
 
         Processes submissions in random order to avoid bias.
         Supports resume - skips already completed generations.
@@ -76,18 +75,22 @@ class DownloadPipeline:
         prompt_urls = await require_prompts(git=self.git_batcher.git, round_num=state.current_round, ref=ref)
         prompts = [Path(url).stem for url in prompt_urls]
         self._seed = await require_seed_from_git(self.git_batcher.git, state.current_round, ref)
-        # Freeze each prompt image once for artifact bindings and embeddings across miners.
+        config = await require_competition_config(git=self.git_batcher.git, ref=ref)
+        round_name = f"{config.name}-{state.current_round}"
+        self.artifacts = await WitnessArtifacts.for_round(self.r2, round_name)
+        # Read each current-round prompt once to verify the saved input binding.
         prompt_bytes = await self._fetch_prompt_images(prompt_urls)
         if any(prompt not in prompt_bytes for prompt in prompts):
             raise ArtifactReadError("A frozen prompt image is unavailable")
-        expected_hashes = set(self.artifacts.settings.prompt_hashes)
         actual_hashes = {hashlib.sha256(image).hexdigest() for image in prompt_bytes.values()}
+        prompt_set_hash = hashlib.sha256(json.dumps(sorted(actual_hashes), separators=(",", ":")).encode()).hexdigest()
         if (
-            actual_hashes != expected_hashes
+            self._seed != self.artifacts.round.seed
+            or prompt_set_hash != self.artifacts.round.prompt_hashes_sha256
             or len(actual_hashes) != len(prompts)
-            or any(submission.round != self.artifacts.settings.round for submission in submissions.values())
+            or any(s.round != round_name for s in submissions.values())
         ):
-            raise ArtifactReadError("Collector configuration differs from the frozen round or prompts")
+            raise ArtifactReadError("Saved inputs differ from the frozen current round")
 
         hotkeys = list(submissions.keys())
         random.shuffle(hotkeys)
@@ -157,12 +160,10 @@ class DownloadPipeline:
         else:
             logger.info(f"Processing {len(prompts_to_process)}/{len(prompts)} prompts for {hotkey[:10]}")
 
-            # No return_exceptions: `_fetch_render_upload` catches per-prompt failures
-            # internally and persists them as failure_reason. Anything escaping is a
-            # `persist()` git-write failure or an unhandled bug — both warrant an
-            # iteration restart rather than a silent missing-prompt entry.
+            # Terminal outcomes are saved as data. Storage, incomplete-bundle and
+            # git failures restart the iteration so pending outputs remain retryable.
             tasks = [
-                self._fetch_render_upload(
+                self._collect_prompt(
                     hotkey=hotkey,
                     submission=submission,
                     prompt=prompt,
@@ -177,7 +178,7 @@ class DownloadPipeline:
 
         return {p: generations[p] for p in prompts if p in generations}
 
-    async def _fetch_render_upload(
+    async def _collect_prompt(
         self,
         hotkey: str,
         submission: MinerSubmission,
@@ -186,21 +187,8 @@ class DownloadPipeline:
         round_num: int,
         generations: GenerationsMap,
     ) -> None:
-        """Fetch .js, render 12 views + grid, compute embeddings, upload everything to R2.
-
-        Storage and service failures propagate for retry. Terminal delivery outcomes
-        and validation rejections persist a categorical failure_reason.
-
-        generations: Mutable dict updated in-place with results. Used as a shared state
-            across concurrent tasks - each task writes its prompt's result and persists
-            the entire dict, enabling crash recovery.
-        """
-        log_id = f"{hotkey[:10]} / {prompt}"
-        template = self.settings.storage_key_template
+        """Verify the Pod's completed bundle and persist its URLs for judging."""
         selected = SelectedOutput()
-
-        def key_for(filename: str) -> str:
-            return template.format(round=round_num, hotkey=hotkey, filename=filename)
 
         async def persist(
             *,
@@ -224,144 +212,20 @@ class DownloadPipeline:
                 generations=generations,
             )
 
-        render_key = self.settings.render_api_key.get_secret_value() if self.settings.render_api_key else None
-
         if self.settings.download_jitter_seconds > 0:
             jitter = random.uniform(0, self.settings.download_jitter_seconds)  # nosec B311 # noqa: S311
             await asyncio.sleep(jitter)
 
         async with self.semaphore:
-            # Phase 1: resolve the admitted output source.
-            if prompt_image is None or self._seed is None:
-                raise ArtifactReadError("Frozen generation inputs are unavailable")
+            if prompt_image is None or self._seed is None or self.artifacts is None:
+                raise ArtifactReadError("Current round inputs are unavailable")
             selected = await self.artifacts.selected(
-                hotkey,
-                submission,
-                prompt_image,
-                self._seed,
-                self.settings.max_js_size_bytes,
+                hotkey, submission, prompt_image, self._seed, self.settings.max_js_size_bytes
             )
-            js_data, fetch_failure = selected.source, selected.failure_reason
-            if js_data is None:
-                await persist(failure_reason=fetch_failure)
-                return
-            size = len(js_data)
-
-            # Phase 2: publish the selected JavaScript.
-            js_url = await _upload_to_r2(
-                self.r2, key_for(f"{prompt}.js"), js_data, "application/javascript", log_id, self.settings.cdn_url
+            cdn = self.settings.cdn_url
+            await persist(
+                js=f"{cdn}/{selected.source_key}" if selected.source_key else None,
+                views=f"{cdn}/{selected.views_key}" if selected.views_key else None,
+                size=len(selected.source) if selected.source is not None else 0,
+                failure_reason=selected.failure_reason,
             )
-
-            if selected.failure_reason is not None:
-                await persist(js=js_url, size=size, failure_reason=selected.failure_reason)
-                return
-
-            # Phase 3: render views + grid in parallel. Any None here means a render
-            # service / preview pipeline problem — distinct from miner failures.
-            async def render_previews() -> tuple[dict[str, bytes] | None, dict[str, bytes] | None, bytes | None]:
-                white_task = asyncio.create_task(
-                    render_views(
-                        client=self.http_client,
-                        endpoint=self.settings.render_service_url,
-                        js_content=js_data,
-                        views=WHITE_VIEWS,
-                        bg_color=WHITE_BG,
-                        log_id=log_id,
-                        api_key=render_key,
-                        raise_errors=True,
-                    )
-                )
-                gray_task = asyncio.create_task(
-                    render_views(
-                        client=self.http_client,
-                        endpoint=self.settings.render_service_url,
-                        js_content=js_data,
-                        views=GRAY_VIEWS,
-                        bg_color=GRAY_BG,
-                        log_id=log_id,
-                        api_key=render_key,
-                        raise_errors=True,
-                    )
-                )
-                grid_task = asyncio.create_task(
-                    asyncio.sleep(0, result=selected.grid)
-                    if selected.grid is not None
-                    else render_grid(
-                        client=self.http_client,
-                        endpoint=self.settings.render_service_url,
-                        js_content=js_data,
-                        log_id=log_id,
-                        api_key=render_key,
-                        raise_errors=True,
-                    )
-                )
-                return await _join(asyncio.gather(white_task, gray_task, grid_task), (white_task, gray_task, grid_task))
-
-            async def complete_previews() -> dict[str, bytes]:
-                white_result, gray_result, grid_result = await render_previews()
-                if white_result is None or gray_result is None or grid_result is None:
-                    raise ArtifactReadError("Judging render did not produce a complete bundle")
-                return (
-                    {f"white/{v.name}": white_result[v.name] for v in WHITE_VIEWS}
-                    | {f"gray/{v.name}": gray_result[v.name] for v in GRAY_VIEWS}
-                    | {"grid": grid_result}
-                )
-
-            try:
-                white: dict[str, bytes] | None
-                gray: dict[str, bytes] | None
-                grid: bytes | None
-                if selected.source_sha256 is None:
-                    raise ArtifactReadError("Selected source has no digest")
-                images = await self.artifacts.previews(
-                    submission,
-                    hotkey,
-                    prompt_image,
-                    selected.source_sha256,
-                    complete_previews,
-                )
-                white = {v.name: images[f"white/{v.name}"] for v in WHITE_VIEWS}
-                gray = {v.name: images[f"gray/{v.name}"] for v in GRAY_VIEWS}
-                grid = images["grid"]
-            except httpx.HTTPStatusError as error:
-                if error.response.status_code != 422:
-                    raise
-                await persist(js=js_url, size=size, failure_reason="render_rejected")
-                return
-            if white is None or gray is None or grid is None:
-                raise ArtifactReadError("Judging render did not produce a complete bundle")
-
-            # Phase 4a: embeddings.
-            hf_token = self.settings.hf_token.get_secret_value() if self.settings.hf_token else None
-            npz_bytes = await build_embeddings_npz(
-                prompt_image, white, log_id, revision=self.settings.dinov3_revision, hf_token=hf_token
-            )
-
-            # Phase 4b: bundle upload. Atomic — every PNG and the npz upload, or none.
-            bundle = (
-                [(key_for(f"{prompt}/white/{view.name}.png"), white[view.name], "image/png") for view in WHITE_VIEWS]
-                + [(key_for(f"{prompt}/gray/{view.name}.png"), gray[view.name], "image/png") for view in GRAY_VIEWS]
-                + [
-                    (key_for(f"{prompt}/grid.png"), grid, "image/png"),
-                    (key_for(f"{prompt}/embeddings.npz"), npz_bytes, "application/octet-stream"),
-                ]
-            )
-            upload_start = asyncio.get_running_loop().time()
-            uploads = [
-                asyncio.create_task(_upload_to_r2(self.r2, key, data, ctype, log_id, self.settings.cdn_url))
-                for key, data, ctype in bundle
-            ]
-            await _join(asyncio.gather(*uploads), uploads)
-            upload_elapsed = asyncio.get_running_loop().time() - upload_start
-            bundle_kb = sum(len(data) for _, data, _ in bundle) / 1024
-            logger.debug(
-                f"{log_id}: uploaded {len(bundle)} files in {upload_elapsed:.1f}s, {bundle_kb:.1f}KB total"
-            )
-
-            await persist(js=js_url, views=f"{self.settings.cdn_url}/{key_for(prompt)}", size=size)
-
-
-async def _upload_to_r2(r2: R2Client, key: str, data: bytes, content_type: str, log_id: str, cdn_url: str) -> str:
-    """Upload data to R2 and return the CDN URL."""
-    await r2.upload(key=key, data=data, content_type=content_type)
-    return f"{cdn_url}/{key}"

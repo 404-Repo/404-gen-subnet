@@ -41,7 +41,7 @@ class MemoryState:
     def get(self, key: str, limit: int = 16 * 1024 * 1024) -> bytes | None:
         return self.read(key, limit)
 
-    def put(self, key: str, data: bytes) -> None:
+    def put(self, key: str, data: bytes, content_type: str = "application/octet-stream") -> None:
         with self.lock:
             current = self.load(key)
             self.save(key, data, current.etag if current else None)

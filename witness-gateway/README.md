@@ -45,8 +45,14 @@ Candidate JavaScript, previews and final choices are saved in the existing publi
 Pods use `R2_BUCKET`; miners receive no storage credentials. The
 [runner](../miner-reference/README.md#run-several-prompts-concurrently) checkpoints the returned JavaScript
 or explicit `None` before saving the final choice and retries those same bytes
-after a lost acknowledgement.
+after a lost acknowledgement. The Pod saves the final choice before rendering the
+12 canonical judging views and grid and calculating prompt/view embeddings. Saved
+views and embeddings are reused on retry. An explicit `None` needs no judging bundle.
+Final-save delivery completes after the bundle is available; a processing failure
+leaves the saved source available for retry, including after cutoff.
 
+Set `DINOV3_REVISION` to the approved embedding-model commit and supply `HF_TOKEN`
+for the gated DINOv3 model. These settings are forwarded to witness Pods.
 Set `WITNESS_ARTIFACTS` to JSON in the gateway/revivor environment:
 
 ```json
@@ -77,5 +83,8 @@ survive Pod replacement and cutoff; new renders and final choices require the
 selected Pod and an open round. Retain the artifact prefix through judging,
 replay validation and the operator's evidence retention period.
 
-See the [collector configuration](../submission-collector/README.md#artifact-configuration)
-for collecting final choices and preparing judging images.
+The gateway publishes the round's cutoff, renderer identity, embedding revision,
+seed and prompt-set digest
+at `artifacts/v1/rounds/<full-round-name>.json`. The
+[collector](../submission-collector/README.md) discovers this metadata from the
+current round and records completed bundle URLs.

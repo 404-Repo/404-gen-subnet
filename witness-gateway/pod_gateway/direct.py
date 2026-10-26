@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import json
 import queue
@@ -25,10 +26,12 @@ from .artifacts import (
     ArtifactLimit,
     ArtifactPending,
     ArtifactRepository,
+    FinalChoice,
     RenderArtifact,
     SubmissionContext,
 )
 from .auth import Authenticator, AuthRejected, Membership
+from .judging import Judging
 from .models import Scope, identifier
 from .records import Call, RecordingConflict
 from .recovery import recover_issued
@@ -65,6 +68,7 @@ class SaveChoice(StrictInput):
     submission_commit: str = Field(pattern=r"^[0-9a-f]{40}$")
     source_sha256: Digest | None
     expected_revision: Digest | None = None
+    prompt_image: str | None = Field(default=None, max_length=12 * 1024 * 1024)
 
 
 class AssignedMiner(Membership):
@@ -83,6 +87,7 @@ class Witness:
         artifact_url: Callable[[str], str],
         *,
         artifacts: ArtifactRepository | None = None,
+        judging: Judging | None = None,
     ) -> None:
         self.runtime, self.artifact_url = runtime, artifact_url
         self.records, self.budget, self.evidence = runtime.records, runtime.budget, runtime.evidence
@@ -91,7 +96,9 @@ class Witness:
         self.renderer_url = "http://127.0.0.1:8002/render/grid"
         if artifacts is not None and artifacts.scope != runtime.scope:
             raise ValueError("Artifact storage belongs to another miner")
-        self.artifacts = artifacts
+        self.artifacts, self.judging = artifacts, judging
+        self.judging_slots = asyncio.Semaphore(1)
+        self.judging_tasks: dict[str, asyncio.Task[None]] = {}
 
     @web.middleware
     async def middleware(
@@ -103,7 +110,7 @@ class Witness:
             body = await request.read()
             if request.method == "GET" and body:
                 raise ValueError("Unexpected request body")
-            if not (request.path.startswith("/render/") or request.path == "/artifacts/render") and len(body) > 16384:
+            if not (request.path.startswith("/render/") or request.path in ("/artifacts/render", "/submissions")) and len(body) > 16384:
                 raise ValueError("Invalid body size")
             for name in (
                 "x-bittensor-version",
@@ -433,6 +440,40 @@ class Witness:
         finally:
             self._artifact_done()
 
+    async def _complete_choice(self, choice: FinalChoice) -> None:
+        if choice.output_is_none:
+            return
+        if self.judging is None:
+            raise ArtifactPending("Pod judging is unavailable")
+        if await asyncio.to_thread(self.judging.ready, choice):
+            return
+        key = choice.operation_id
+        task = self.judging_tasks.get(key)
+        if task is None:
+            with self.runtime.lock:
+                if self.runtime.draining:
+                    raise ArtifactPending("Pod is draining")
+                self.runtime.rendering += 1
+
+            async def complete() -> None:
+                try:
+                    async with self.judging_slots:
+                        assert self.judging is not None
+                        await self.judging.prepare(choice)
+                finally:
+                    self._artifact_done()
+
+            task = asyncio.create_task(complete())
+            self.judging_tasks[key] = task
+
+            def done(finished: asyncio.Task[None]) -> None:
+                self.judging_tasks.pop(key, None)
+                if not finished.cancelled():
+                    finished.exception()
+
+            task.add_done_callback(done)
+        await asyncio.shield(task)
+
     async def save_choice(self, request: web.Request) -> web.Response:
         data = SaveChoice.model_validate_json(await request.read())
         store = self._artifacts(data.generation)
@@ -442,6 +483,7 @@ class Witness:
         previous = await asyncio.to_thread(store.load_final, data.generation.prompt_sha256)
         operation = store.operation(data.generation, data.source_sha256)
         if previous is not None and previous.operation_id == operation:
+            await self._complete_choice(previous)
             return web.json_response({"submission": previous.model_dump(mode="json")})
         if (previous.revision if previous else None) != data.expected_revision:
             raise ArtifactConflict("Final choice changed")
@@ -452,6 +494,10 @@ class Witness:
                 artifact = await asyncio.to_thread(store.find_render, data.generation, data.source_sha256)
                 if artifact is None:
                     raise AuthRejected("source_not_saved", 404)
+                if data.prompt_image is None:
+                    raise ValueError("Final source requires the frozen prompt image")
+                image = base64.b64decode(data.prompt_image, validate=True)
+                await asyncio.to_thread(store.save_prompt, data.generation, image)
             saved = await asyncio.to_thread(
                 store.save_final,
                 data.generation,
@@ -461,6 +507,7 @@ class Witness:
                 accepted_at=accepted_at,
                 round_end=self.round_end,
             )
+            await self._complete_choice(saved)
             return web.json_response(
                 {"submission": saved.model_dump(mode="json")}, headers={"Cache-Control": "no-store"}
             )
@@ -475,10 +522,11 @@ class Witness:
         saved = await asyncio.to_thread(store.load_final, prompt)
         if saved is None:
             raise AuthRejected("submission_not_found", 404)
+        await self._complete_choice(saved)
         return web.json_response({"submission": saved.model_dump(mode="json")}, headers={"Cache-Control": "no-store"})
 
     def application(self) -> web.Application:
-        app = web.Application(middlewares=[self.middleware], client_max_size=6 * 1024 * 1024 + 4096)
+        app = web.Application(middlewares=[self.middleware], client_max_size=16 * 1024 * 1024 + 4096)
         app.add_routes(
             [
                 web.post("/calls", self.reserve),

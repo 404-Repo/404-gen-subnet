@@ -167,7 +167,7 @@ class Harness:
                 "witness_url": self.origin,
                 "proof_parameters": str(Path(__file__).resolve().parents[2] / "witness-server/verifier/params"),
                 "state_directory": str(self.directory / state),
-                "round": "test-0",
+                "round": self.scope.round,
             },
             hotkey=self.key,
             openai_api_key="fixture-" + "a" * 80,

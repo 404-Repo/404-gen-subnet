@@ -41,7 +41,7 @@ class ArtifactLimit(RuntimeError):
 
 class Objects(Protocol):
     def get(self, key: str, limit: int = ...) -> bytes | None: ...
-    def put(self, key: str, data: bytes) -> None: ...
+    def put(self, key: str, data: bytes, content_type: str = "application/octet-stream") -> None: ...
 
 
 class Frozen(BaseModel):
@@ -151,6 +151,18 @@ class FinalChoice(Frozen):
         return self
 
 
+class JudgingBundle(Frozen):
+    version: Literal[1] = 1
+    scope_key: str
+    generation: SubmissionContext
+    submission_commit: str
+    source_sha256: Digest
+    profile: ArtifactProfile
+    embedding_revision: str
+    files: dict[str, ObjectRef]
+    failure_reason: Literal["render_rejected"] | None = None
+
+
 class RenderSlot(Frozen):
     generation_id: Digest
     source_sha256: Digest
@@ -210,6 +222,12 @@ class ArtifactRepository:
                 # R2 limits writes to one key per second. Preconditions remain intact.
                 time.sleep(1.1 * (attempt + 1))
         raise ArtifactPending("Artifact storage is busy")
+
+    def save_prompt(self, generation: SubmissionContext, image: bytes) -> None:
+        self._generation(generation)
+        if not image or len(image) > 8 * 1024 * 1024 or hashlib.sha256(image).hexdigest() != generation.prompt_sha256:
+            raise ValueError("Prompt bytes differ from the frozen input")
+        self._put(f"{self.prefix(generation.prompt_sha256)}/prompt", image)
 
     def identity(self, generation: SubmissionContext, source: str, options: RenderOptions) -> str:
         self._generation(generation)
@@ -500,3 +518,25 @@ class ArtifactRepository:
                 return current
             raise ArtifactConflict("Another final choice won the conditional write") from None
         return choice
+
+
+def publish_round(
+    state: StateStore, *, deployment: str, round_number: str, round_end: int,
+    profile: ArtifactProfile, embedding_revision: str, seed: int, prompt_hashes: frozenset[str],
+) -> None:
+    """Publish the deployed round's artifact identity before miners can allocate."""
+    key = f"artifacts/v1/rounds/{round_number}.json"
+    raw = canonical({
+        "deployment": deployment, "round": round_number, "round_end": round_end,
+        "profile": profile.model_dump(), "embedding_revision": embedding_revision,
+        "seed": seed, "prompt_hashes_sha256": hashlib.sha256(canonical(sorted(prompt_hashes))).hexdigest(),
+    })
+    saved = state.load(key)
+    if saved is None:
+        try:
+            state.save(key, raw, None)
+            return
+        except StateConflict:
+            saved = state.load(key)
+    if saved is None or saved.data != raw:
+        raise ArtifactConflict("Published artifact round differs from this deployment")

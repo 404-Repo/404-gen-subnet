@@ -168,6 +168,7 @@ def run_batch(
                     renderer_id=renderer.renderer_id,
                     round=str(witness._config["round"]),
                     prompt_sha256=prompt.sha256,
+                    prompt_image=image,
                     seed=settings.seed,
                     submission_commit=settings.submission_commit,
                     transport=witness.renderer_transport(),

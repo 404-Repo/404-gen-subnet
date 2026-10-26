@@ -40,6 +40,8 @@ class Settings(BaseSettings):
 
     image: str = Field(..., alias="WITNESS_IMAGE")
     artifacts: str | None = Field(default=None, alias="WITNESS_ARTIFACTS")
+    embedding_revision: str | None = Field(default=None, alias="DINOV3_REVISION", min_length=1)
+    hf_token: SecretStr | None = Field(default=None, alias="HF_TOKEN")
     registry: str | None = Field(default=None, alias="WITNESS_REGISTRY")
     worker_cpu_id: str = Field(default="cpu3c", alias="WITNESS_CPU_ID")
     worker_vcpu_count: int = Field(default=2, alias="WITNESS_VCPU")
@@ -132,6 +134,8 @@ class Settings(BaseSettings):
         if len(self.secret) < 32 or self.round == "gateway":
             raise ValueError("Invalid master key or round deadline")
         if self.artifacts is not None:
+            if not self.embedding_revision:
+                raise ValueError("Artifact saving requires DINOV3_REVISION")
             config = ArtifactConfig.model_validate_json(self.artifacts)
             if self.image.rsplit("@", 1)[-1] != config.profile.image_digest:
                 raise ValueError("Artifact renderer profile must match the pinned worker image")

@@ -7,3 +7,12 @@ openai>=3.24.0,<4
 pydantic>=2,<3
 tlslite-ng>=0.8.2,<0.9
 cryptography>=50.0.2,<51
+
+--extra-index-url https://download.pytorch.org/whl/cpu
+loguru==0.7.3
+numpy==2.4.4
+pillow==11.3.0
+tenacity==9.1.2
+torch==2.10.0+cpu
+torchvision==0.25.0+cpu
+transformers==5.6.2

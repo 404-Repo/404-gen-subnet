@@ -19,10 +19,8 @@ from subnet_common.r2_client import R2Client
 from subnet_common.testing import MockGitHubClient
 
 from submission_collector.artifacts import (
-    GRID_OPTIONS,
     ArtifactReadError,
-    ArtifactSettings,
-    WitnessArtifacts,
+    RoundArtifacts,
 )
 from submission_collector.download import DownloadPipeline
 from submission_collector.settings import Settings
@@ -51,9 +49,6 @@ def digest(value: bytes) -> str:
 class MemoryR2:
     def __init__(self) -> None:
         self.objects: dict[str, bytes] = {}
-        self.uploads: dict[str, bytes] = {}
-        self.fail_public = False
-        self.lose_manifest_ack = False
         self.lose_final_ack = False
         self.before_final_seal = None
 
@@ -64,13 +59,6 @@ class MemoryR2:
         if limit is not None and len(raw) > limit:
             raise ValueError("Object exceeds the read limit")
         return raw
-
-    async def create(self, key: str, data: bytes, content_type: str = "application/json") -> bool:
-        created = await self.compare_and_swap(key, data, None, content_type)
-        if created and self.lose_manifest_ack and key.endswith("images.json"):
-            self.lose_manifest_ack = False
-            raise OSError("Lost image-manifest acknowledgement")
-        return created
 
     async def download_version(self, key: str, limit: int) -> tuple[bytes, str]:
         raw = await self.download(key, limit)
@@ -91,24 +79,20 @@ class MemoryR2:
             raise OSError("Lost final-seal acknowledgement")
         return True
 
-    async def upload(self, key: str, data: bytes, content_type: str = "application/octet-stream") -> str:
-        if self.fail_public:
-            raise OSError("Public bucket is unavailable")
-        self.uploads[key] = data
-        return key
 
 
 class Collection:
     def __init__(self, settings: Settings, monkeypatch: pytest.MonkeyPatch) -> None:
-        self.config = ArtifactSettings(
+        self.round = RoundArtifacts(
             deployment="competition",
             round="test-1",
             round_end=int(time.time()) - 600,
             profile=PROFILE,
-            judging_profile=PROFILE,
-            prompt_hashes=[digest(IMAGE)],
+            embedding_revision="fixture-revision",
+            seed=42,
+            prompt_hashes_sha256=digest(canonical([digest(IMAGE)])),
         )
-        self.settings = settings.model_copy(update={"witness_artifacts": self.config})
+        self.settings = settings
         self.r2 = MemoryR2()
         self.git = MockGitHubClient()
         self.git.files["rounds/1/seed.json"] = '{"seed":42}'
@@ -125,26 +109,18 @@ class Collection:
             }
         )
         self.root = f"artifacts/v1/competition/test-1/{HOTKEY}/{digest(IMAGE)}"
-        self.rendered: list[str] = []
-        self.render_status = 200
+        self.git.files["config.json"] = json.dumps({
+            "name": "test", "description": "fixture", "first_evaluation_date": "2025-01-01",
+            "last_competition_date": "2025-12-31", "generation_stage_minutes": 180,
+            "win_margin": 0.05, "prompts_per_round": 1, "carryover_prompts": 0,
+        })
 
         async def http(request: httpx.Request) -> httpx.Response:
             if request.url == "https://prompts.test/chair.png":
                 return httpx.Response(200, content=IMAGE)
-            assert request.url.host == "renderer.test"
-            assert json.loads(request.content)["source"].encode() == SOURCE
-            self.rendered.append(request.url.path)
-            if self.render_status != 200:
-                return httpx.Response(self.render_status, json={"error": "fixture_failure"})
-            if request.url.path == "/render/grid":
-                return httpx.Response(200, content=PNG)
-            count = len(request.url.params["thetas"].split(","))
-            return httpx.Response(200, json={"images": [base64.b64encode(PNG).decode()] * count})
+            return httpx.Response(404)
 
         self.http = httpx.AsyncClient(transport=httpx.MockTransport(http))
-        self.settings = self.settings.model_copy(update={"render_service_url": "https://renderer.test"})
-        self.embeddings = AsyncMock(return_value=b"embedding bytes")
-        monkeypatch.setattr("submission_collector.download.build_embeddings_npz", self.embeddings)
 
         self.choice, self.artifact = self.install()
 
@@ -175,7 +151,7 @@ class Collection:
                     "request": {
                         "renderer_id": PROFILE["image_digest"],
                         "source_sha256": source["sha256"],
-                        "options": options or GRID_OPTIONS,
+                        "options": options or {},
                     },
                 }
             )
@@ -191,7 +167,7 @@ class Collection:
             "validation": "passed",
             "rejection_json": None,
             "profile": PROFILE,
-            "options": options or GRID_OPTIONS,
+            "options": options or {},
         }
         choice = {
             "version": 1,
@@ -207,7 +183,7 @@ class Collection:
                     }
                 )
             ),
-            "accepted_at": float(self.config.round_end - 1),
+            "accepted_at": float(self.round.round_end - 1),
             "output_is_none": output_none,
             "artifact_id": None if output_none else artifact_id,
             "source": None if output_none else source,
@@ -216,18 +192,39 @@ class Collection:
         self.r2.objects[png["key"]] = PNG
         self.r2.objects[f"{self.root}/renders/{artifact_id}.json"] = canonical(artifact)
         self.r2.objects[f"{self.root}/final.json"] = canonical(choice)
+        binding = digest(canonical({
+            "profile": digest(canonical(PROFILE)), "embedding_revision": self.round.embedding_revision,
+        }))
+        self.bundle_root = f"{self.root}/judging/{source['sha256']}/{binding}"
+        names = {f"white/{name}.png" for name in (
+            "front_left", "front_right", "front_below", "front_above", "right", "back", "left", "top_down",
+        )} | {f"gray/{name}.png" for name in ("front_left", "front_right", "front_below", "front_above")} | {
+            "grid.png", "embeddings.npz",
+        }
+        self.bundle_files = {}
+        for name in names:
+            data = b"fixture embeddings" if name == "embeddings.npz" else PNG
+            key = f"{self.bundle_root}/{name}"
+            self.r2.objects[key] = data
+            self.bundle_files[name] = {"key": key, "sha256": digest(data), "size": len(data)}
+        self.bundle = {
+            "version": 1, "scope_key": choice["scope_key"], "generation": generation,
+            "submission_commit": COMMIT, "source_sha256": source["sha256"], "profile": PROFILE,
+            "embedding_revision": self.round.embedding_revision, "files": self.bundle_files, "failure_reason": None,
+        }
+        self.r2.objects[f"{self.bundle_root}/bundle.json"] = canonical(self.bundle)
         return choice, artifact
 
     def save_choice(self) -> None:
         self.r2.objects[f"{self.root}/final.json"] = canonical(self.choice)
 
     async def run(self):
+        self.r2.objects["artifacts/v1/rounds/test-1.json"] = self.round.model_dump_json().encode()
         pipeline = DownloadPipeline(
             GitBatcher(git=self.git, base_sha="ref", branch=self.settings.github_branch),
             self.r2,
             self.http,
             self.settings,
-            artifacts=WitnessArtifacts(self.r2, self.config),
         )
         return await pipeline.run(CompetitionState(current_round=1, stage=RoundStage.DOWNLOADING), "ref")
 
@@ -244,29 +241,15 @@ async def collection(settings: Settings, monkeypatch: pytest.MonkeyPatch):
         await instance.http.aclose()
 
 
-async def test_collects_exact_saved_source_and_reuses_only_matching_grid(
-    collection: Collection,
-) -> None:
+async def test_collects_pod_source_and_completed_bundle_from_the_current_round(collection: Collection) -> None:
     await collection.run()
     result = collection.result()
-    assert result.js and result.views and result.failure_reason is None
+    assert result.js == f"{collection.settings.cdn_url}/{collection.artifact['source']['key']}"
+    assert result.views == f"{collection.settings.cdn_url}/{collection.bundle_root}"
+    assert result.failure_reason is None
     assert result.source_sha256 == digest(SOURCE) and result.submission_revision == "e" * 64
-    assert collection.r2.uploads[f"rounds/1/{HOTKEY}/submitted/chair.js"] == SOURCE
-    assert len(collection.r2.uploads) == 15
-    assert collection.rendered == ["/render", "/render"]
-    assert collection.embeddings.call_args.args[0] == IMAGE
-
-
-@pytest.mark.parametrize("mismatch", ["lighting", "renderer"])
-async def test_incompatible_grid_is_rendered_for_judging(collection: Collection, mismatch: str) -> None:
-    if mismatch == "lighting":
-        collection.choice, collection.artifact = collection.install(options={**GRID_OPTIONS, "lighting": "neutral"})
-    else:
-        profile = collection.config.judging_profile.model_copy(update={"image_digest": "sha256:" + "f" * 64})
-        collection.config = collection.config.model_copy(update={"judging_profile": profile})
-    await collection.run()
-    assert collection.rendered.count("/render/grid") == 1
-    assert collection.result().views
+    assert collection.r2.objects[collection.artifact["source"]["key"]] == SOURCE
+    assert collection.r2.objects[f"{collection.bundle_root}/embeddings.npz"] == b"fixture embeddings"
 
 
 @pytest.mark.parametrize(
@@ -287,9 +270,11 @@ async def test_unresolved_provenance_never_becomes_a_miner_failure(collection: C
     elif field == "commit":
         collection.choice["submission_commit"] = value
     elif field == "late":
-        collection.choice["accepted_at"] = float(collection.config.round_end + value)
+        collection.choice["accepted_at"] = float(collection.round.round_end + value)
     elif field == "key":
         collection.choice["source"]["key"] = value
+    elif field == "png":
+        collection.r2.objects[collection.bundle_files["grid.png"]["key"]] = value
     else:
         collection.r2.objects[collection.artifact[field]["key"]] = value
     collection.save_choice()
@@ -298,35 +283,20 @@ async def test_unresolved_provenance_never_becomes_a_miner_failure(collection: C
     assert f"rounds/1/{HOTKEY}/submitted.json" not in collection.git.committed
 
 
-@pytest.mark.parametrize("failure", ["embeddings", "public_upload", "lost_manifest_ack", "renderer"])
-async def test_infrastructure_failure_is_retryable_and_saved_views_survive(
-    collection: Collection, failure: str
-) -> None:
-    if failure == "embeddings":
-        collection.embeddings.side_effect = RuntimeError("DINO unavailable")
-    elif failure == "public_upload":
-        collection.r2.fail_public = True
-    elif failure == "lost_manifest_ack":
-        collection.r2.lose_manifest_ack = True
-    else:
-        collection.render_status = 401
-    with pytest.raises((OSError, RuntimeError, httpx.HTTPStatusError)):
+async def test_waits_for_a_pending_pod_bundle_then_collects_it(collection: Collection) -> None:
+    key = f"{collection.bundle_root}/bundle.json"
+    saved = collection.r2.objects.pop(key)
+    with pytest.raises(ArtifactReadError, match="not complete"):
         await collection.run()
     assert f"rounds/1/{HOTKEY}/submitted.json" not in collection.git.committed
-    first_renders = len(collection.rendered)
-    collection.embeddings.side_effect = None
-    collection.r2.fail_public = False
-    collection.render_status = 200
+    collection.r2.objects[key] = saved
     await collection.run()
-    assert collection.result().views and collection.result().failure_reason is None
-    if failure in ("embeddings", "lost_manifest_ack"):
-        assert len(collection.rendered) == first_renders
+    assert collection.result().views == f"{collection.settings.cdn_url}/{collection.bundle_root}"
 
 
-async def test_canonical_validation_rejection_is_a_terminal_result(
-    collection: Collection,
-) -> None:
-    collection.render_status = 422
+async def test_collects_the_pod_canonical_rejection(collection: Collection) -> None:
+    collection.bundle.update({"failure_reason": "render_rejected", "files": {}})
+    collection.r2.objects[f"{collection.bundle_root}/bundle.json"] = canonical(collection.bundle)
     await collection.run()
     result = collection.result()
     assert result.js and result.views is None and result.failure_reason == "render_rejected"
@@ -342,14 +312,12 @@ async def test_missing_and_declared_failures_do_not_select_old_renders(collectio
     result = collection.result()
     assert result.js is None and result.views is None
     assert result.failure_reason == ("generation_failed" if none else "not_submitted")
-    assert not collection.rendered and not collection.r2.uploads
 
 
 async def test_collection_waits_for_witness_cutoff(collection: Collection) -> None:
-    collection.config = collection.config.model_copy(update={"round_end": int(time.time())})
+    collection.round = collection.round.model_copy(update={"round_end": int(time.time())})
     with pytest.raises(ArtifactReadError, match="collection boundary"):
         await collection.run()
-    assert not collection.r2.uploads
 
 
 async def test_sealed_absence_prevents_a_late_inflight_submission(collection: Collection) -> None:
@@ -376,7 +344,7 @@ async def test_collection_observes_the_final_choice_that_wins_the_sealing_race(c
     collection.r2.before_final_seal = lambda: collection.install(output_none=True)
     await collection.run()
     assert collection.result().failure_reason == "generation_failed"
-    assert collection.result().js is None and not collection.r2.uploads
+    assert collection.result().js is None
 
 
 async def test_lost_seal_acknowledgement_recovers_the_same_choice(collection: Collection) -> None:
@@ -395,7 +363,9 @@ async def test_failed_collection_joins_other_prompt_work_before_retry(
 ) -> None:
     collection.git.files["rounds/1/prompts.txt"] += "\nhttps://prompts.test/table.png"
     second_image = IMAGE + b"second"
-    collection.config = collection.config.model_copy(update={"prompt_hashes": [digest(IMAGE), digest(second_image)]})
+    collection.round = collection.round.model_copy(
+        update={"prompt_hashes_sha256": digest(canonical(sorted([digest(IMAGE), digest(second_image)])))}
+    )
     started, stopped = asyncio.Event(), asyncio.Event()
 
     async def prompt(**kwargs):
@@ -411,7 +381,7 @@ async def test_failed_collection_joins_other_prompt_work_before_retry(
     monkeypatch.setattr(
         DownloadPipeline, "_fetch_prompt_images", AsyncMock(return_value={"chair": IMAGE, "table": second_image})
     )
-    monkeypatch.setattr(DownloadPipeline, "_fetch_render_upload", AsyncMock(side_effect=prompt))
+    monkeypatch.setattr(DownloadPipeline, "_collect_prompt", AsyncMock(side_effect=prompt))
     with pytest.raises(OSError):
         await collection.run()
     assert stopped.is_set()
@@ -461,3 +431,17 @@ async def test_skips_already_completed_prompts(collection: Collection) -> None:
     }
     collection.git.files[f"rounds/1/{HOTKEY}/submitted.json"] = GenerationsAdapter.dump_json(existing).decode()
     assert await collection.run() == {HOTKEY: existing}
+
+
+@pytest.mark.parametrize("changed", ["prompt", "seed"])
+async def test_changed_round_inputs_remain_pending(collection: Collection, changed: str) -> None:
+    if changed == "prompt":
+        await collection.http.aclose()
+        collection.http = httpx.AsyncClient(transport=httpx.MockTransport(
+            lambda request: httpx.Response(200, content=b"changed prompt bytes")
+        ))
+    else:
+        collection.git.files["rounds/1/seed.json"] = '{"seed":43}'
+    with pytest.raises(ArtifactReadError, match="frozen current round"):
+        await collection.run()
+    assert f"rounds/1/{HOTKEY}/submitted.json" not in collection.git.committed

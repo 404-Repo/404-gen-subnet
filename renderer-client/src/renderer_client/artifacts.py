@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import re
@@ -40,6 +41,7 @@ class ArtifactClient(RendererClient):
         renderer_id: str,
         round: str,
         prompt_sha256: str,
+        prompt_image: bytes,
         seed: int,
         submission_commit: str,
         transport: httpx.BaseTransport | None = None,
@@ -51,8 +53,15 @@ class ArtifactClient(RendererClient):
             raise ValueError("Expected a uint64 seed")
         if not re.fullmatch(r"[0-9a-f]{40}", submission_commit):
             raise ValueError("Expected the frozen source commit")
+        if (
+            not prompt_image
+            or len(prompt_image) > 8 * 1024 * 1024
+            or hashlib.sha256(prompt_image).hexdigest() != prompt_sha256
+        ):
+            raise ValueError("Prompt bytes differ from the frozen input")
         super().__init__(url, renderer_id=renderer_id, transport=transport, timeout=timeout)
         self.generation = {"round": round, "prompt_sha256": prompt_sha256, "seed": seed}
+        self.prompt_image = base64.b64encode(prompt_image).decode("ascii")
         self.submission_commit = submission_commit
         self._origin = self._url.removesuffix("/render/grid")
 
@@ -168,6 +177,7 @@ class ArtifactClient(RendererClient):
             "submission_commit": self.submission_commit,
             "source_sha256": source_hash,
             "expected_revision": expected_revision,
+            "prompt_image": self.prompt_image if output is not None else None,
         }
         try:
             raw, _, _ = self._exchange("POST", "/submissions", value)

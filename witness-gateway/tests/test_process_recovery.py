@@ -64,7 +64,7 @@ class DiskState(MemoryState):
             connection.execute("INSERT OR REPLACE INTO objects VALUES (?, ?, ?)", (key, data, etag))
         return Snapshot(etag, data)
 
-    def put(self, key: str, data: bytes) -> None:
+    def put(self, key: str, data: bytes, content_type: str = "application/octet-stream") -> None:
         with self.connect() as connection:
             connection.execute(
                 "INSERT OR REPLACE INTO objects VALUES (?, ?, ?)", (key, data, hashlib.sha256(data).hexdigest())
@@ -119,7 +119,7 @@ def child(directory: Path, mode: str, stage: str, origin: str) -> None:
                     pause("authorized")
             return result
 
-        def put(self, key: str, data: bytes) -> None:
+        def put(self, key: str, data: bytes, content_type: str = "application/octet-stream") -> None:
             super().put(key, data)
             if key.endswith("/response.sse"):
                 pause("response_saved")

@@ -70,3 +70,12 @@ renderer-client/src/**
 !renderer-client/src/renderer_client/
 renderer-client/src/renderer_client/**
 !renderer-client/src/renderer_client/*.py
+
+!shared/
+shared/**
+!shared/subnet_common/
+shared/subnet_common/**
+!shared/subnet_common/__init__.py
+!shared/subnet_common/embeddings.py
+!shared/subnet_common/render.py
+!NOTICE.md

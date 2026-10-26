@@ -160,7 +160,7 @@ def test_restarted_worker_retains_pending_upload_until_durable(
     blocked, release = threading.Event(), threading.Event()
 
     class PendingState(MemoryState):
-        def put(self, key: str, data: bytes) -> None:
+        def put(self, key: str, data: bytes, content_type: str = "application/octet-stream") -> None:
             blocked.set()
             if not release.wait(timeout=5):
                 raise AssertionError("Upload was never released")

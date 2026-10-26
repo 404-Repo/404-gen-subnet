@@ -157,7 +157,8 @@ PYTHONPATH=miner-reference python -m miner_reference.batch check \
 For Pod-managed submissions, pass `--submission-commit <admitted-40-character-commit>`
 and the approved worker image digest as `--renderer-id`. Candidate renders and the
 final JS or explicit `None` are saved on the witness Pod; `--renderer-url` is optional
-in this mode. The runner checkpoints returned bytes before final-save delivery.
+in this mode. The Pod prepares the judging views, grid and embeddings after saving
+the final choice. The runner checkpoints returned bytes before final-save delivery.
 Retry the same batch output directory after a lost acknowledgement or Pod replacement;
 it resumes final saving without rerunning completed generation. Infrastructure failures
 remain pending. The gateway must have matching [artifact configuration](../witness-gateway/README.md#artifact-storage).

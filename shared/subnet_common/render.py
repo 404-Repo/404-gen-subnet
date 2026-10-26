@@ -5,7 +5,7 @@ call renders N views in one shot — `thetas` and `phis` are pairwise lists, the
 response is `{"images": [base64, ...], "count": N, ...}`.
 
 The view sets and camera params here are the canonical contract used by both the
-generation orchestrator and the submission collector. The judge reads PNGs back from
+generation orchestrator and Pod judging pipeline. The judge reads PNGs back from
 the storage layout `{prefix}/white/{view}.png` and `{prefix}/gray/{view}.png`.
 """
 

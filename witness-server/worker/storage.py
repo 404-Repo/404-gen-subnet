@@ -70,13 +70,13 @@ class R2Store:
         return data
 
     @timed("r2_put")
-    def put(self, key: str, data: bytes) -> None:
+    def put(self, key: str, data: bytes, content_type: str = "application/octet-stream") -> None:
         try:
             self.client.put_object(
                 Bucket=self.bucket,
                 Key=key,
                 Body=data,
-                ContentType="application/octet-stream",
+                ContentType=content_type,
                 CacheControl="no-store",
             )
         except (ReadTimeoutError, ConnectionClosedError):

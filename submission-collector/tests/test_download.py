@@ -4,7 +4,6 @@ import httpx
 from subnet_common.git_batcher import GitBatcher
 from subnet_common.testing import MockGitHubClient, MockR2Client
 
-from submission_collector.artifacts import WitnessArtifacts
 from submission_collector.download import DownloadPipeline
 from submission_collector.settings import Settings
 
@@ -16,7 +15,6 @@ def _make_pipeline(git: MockGitHubClient, r2: MockR2Client, settings: Settings) 
         r2=r2,
         http_client=httpx.AsyncClient(),
         settings=settings,
-        artifacts=AsyncMock(spec=WitnessArtifacts),
     )
 
 

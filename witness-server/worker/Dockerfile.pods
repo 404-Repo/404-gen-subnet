@@ -27,7 +27,9 @@ COPY witness-client/src/witness_client/ /app/witness-client/src/witness_client/
 COPY renderer-client/src/renderer_client/ /app/renderer-client/src/renderer_client/
 COPY witness-gateway/pod_gateway/ /app/witness-gateway/pod_gateway/
 COPY miner-reference/budgets/pricing.json /app/config/pricing.json
-ENV PYTHONPATH=/app/witness-client/src:/app/renderer-client/src:/app/witness-gateway:/app/witness-server/worker \
+COPY shared/subnet_common/__init__.py shared/subnet_common/embeddings.py shared/subnet_common/render.py /app/shared/subnet_common/
+COPY NOTICE.md /app/licenses/NOTICE.md
+ENV PYTHONPATH=/app/shared:/app/witness-client/src:/app/renderer-client/src:/app/witness-gateway:/app/witness-server/worker \
     PYTHONUNBUFFERED=1 WITNESS_TIMINGS=1 WITNESS_PRICING_FILE=/app/config/pricing.json
 EXPOSE 8000 8443
 ENTRYPOINT ["python", "-m", "pod_gateway"]
@@ -50,7 +52,7 @@ ENV DEBIAN_FRONTEND=noninteractive PUPPETEER_SKIP_DOWNLOAD=true PUPPETEER_EXECUT
 RUN sed -i "s|http://deb.debian.org/debian-security|https://snapshot.debian.org/archive/debian-security/${DEBIAN_SNAPSHOT}|; s|http://deb.debian.org/debian|https://snapshot.debian.org/archive/debian/${DEBIAN_SNAPSHOT}|" /etc/apt/sources.list.d/debian.sources \
     && apt-get -o Acquire::Check-Valid-Until=false update && apt-get install -y --no-install-recommends \
     chromium=${CHROMIUM_VERSION} chromium-common=${CHROMIUM_VERSION} \
-    fonts-liberation fonts-noto-color-emoji util-linux \
+    fonts-liberation fonts-noto-color-emoji util-linux libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=renderer-affinity-build /affinity-artifacts/ /opt/witness-affinity/
 COPY --from=node /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/npm

@@ -33,6 +33,9 @@ def worker_spec(settings: Settings) -> PodSpec:
     )
     if settings.artifacts is not None:
         environment["WITNESS_ARTIFACTS"] = settings.artifacts
+        environment["DINOV3_REVISION"] = str(settings.embedding_revision)
+        if settings.hf_token is not None:
+            environment["HF_TOKEN"] = settings.hf_token.get_secret_value()
     return PodSpec(
         settings.image,
         cpu_id=settings.worker_cpu_id,
@@ -78,6 +81,8 @@ def gateway_spec(settings: Settings) -> PodSpec:
         "WITNESS_REGISTRY",
         "RUNPOD_MIN_REQUEST_INTERVAL",
         "WITNESS_ARTIFACTS",
+        "DINOV3_REVISION",
+        "HF_TOKEN",
     ):
         if name in settings.pod_environment:
             # RunPod reserves RUNPOD_* names in Pod environments.
