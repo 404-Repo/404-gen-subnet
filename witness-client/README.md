@@ -17,7 +17,7 @@ You need:
 - Linux x86_64 with Python 3.11+ and glibc 2.34 or newer.
 - A checkout of this repository, including the
   [proof parameters](../witness-server/verifier/params/).
-- Go 1.27.1 or newer and a C compiler to build the native proof library.
+- Go 1.27.3 or newer and a C compiler to build the native proof library.
 - A registered sr25519 hotkey in your local Bittensor wallet.
 - For subscriptions, [Codex CLI][codex-cli] installed on the same machine.
 

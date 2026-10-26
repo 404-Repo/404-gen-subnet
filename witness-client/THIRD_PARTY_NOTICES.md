@@ -6,7 +6,7 @@ Go runtime and the modules below. Their original licences and notices follow.
 They apply to their respective components; bundling does not relicense them.
 
 This inventory was checked against `go version -m` on the Linux x86_64 shared
-library built with Go 1.27.1, and `go list -deps -json` for its source packages.
+library built with Go 1.27.3, and `go list -deps -json` for its source packages.
 Module versions are from `native/go.mod` and `native/go.sum`. Source files are
 unmodified. The same module licences cover the standalone proof helper.
 
@@ -15,7 +15,7 @@ This wheel does not bundle their code, Node, or the C system libraries.
 
 | Component | Version | Licence |
 | --- | --- | --- |
-| Go runtime and standard library | go1.27.1 | BSD-3-Clause, with additional notices below |
+| Go runtime and standard library | go1.27.3 | BSD-3-Clause, with additional notices below |
 | `github.com/bits-and-blooms/bitset` | `v1.24.4` | BSD-3-Clause |
 | `github.com/blang/semver/v4` | `v4.0.0` | MIT |
 | `github.com/consensys/gnark` | `v0.15.0` | Apache-2.0 |
@@ -37,9 +37,9 @@ terms for fiat-crypto, SunPro terms for math routines, and the original Cephes
 notice (`LicenseRef-Go-Cephes`). The distribution's combined SPDX expression
 accounts for this bundled code. The client source remains MIT.
 
-## Go 1.27.1 — LICENSE
+## Go 1.27.3 — LICENSE
 
-Source: https://github.com/golang/go/blob/go1.27.1/LICENSE
+Source: https://github.com/golang/go/blob/go1.27.3/LICENSE
 
 ```text
 Copyright 2009 The Go Authors.
@@ -71,9 +71,9 @@ THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
-## Go 1.27.1 — PATENTS
+## Go 1.27.3 — PATENTS
 
-Source: https://github.com/golang/go/blob/go1.27.1/PATENTS
+Source: https://github.com/golang/go/blob/go1.27.3/PATENTS
 
 ```text
 Additional IP Rights Grant (Patents)
@@ -102,7 +102,7 @@ shall terminate as of the date such litigation is filed.
 
 ## Go-vendored golang.org/x/crypto — LICENSE
 
-Source: https://github.com/golang/go/blob/go1.27.1/src/vendor/golang.org/x/crypto/LICENSE
+Source: https://github.com/golang/go/blob/go1.27.3/src/vendor/golang.org/x/crypto/LICENSE
 
 ```text
 Copyright 2009 The Go Authors.
@@ -136,7 +136,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ## Go-vendored golang.org/x/crypto — PATENTS
 
-Source: https://github.com/golang/go/blob/go1.27.1/src/vendor/golang.org/x/crypto/PATENTS
+Source: https://github.com/golang/go/blob/go1.27.3/src/vendor/golang.org/x/crypto/PATENTS
 
 ```text
 Additional IP Rights Grant (Patents)
@@ -165,7 +165,7 @@ shall terminate as of the date such litigation is filed.
 
 ## Go-vendored golang.org/x/net — LICENSE
 
-Source: https://github.com/golang/go/blob/go1.27.1/src/vendor/golang.org/x/net/LICENSE
+Source: https://github.com/golang/go/blob/go1.27.3/src/vendor/golang.org/x/net/LICENSE
 
 ```text
 Copyright 2009 The Go Authors.
@@ -199,7 +199,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ## Go-vendored golang.org/x/net — PATENTS
 
-Source: https://github.com/golang/go/blob/go1.27.1/src/vendor/golang.org/x/net/PATENTS
+Source: https://github.com/golang/go/blob/go1.27.3/src/vendor/golang.org/x/net/PATENTS
 
 ```text
 Additional IP Rights Grant (Patents)
@@ -228,7 +228,7 @@ shall terminate as of the date such litigation is filed.
 
 ## Inferno-derived runtime code (MIT)
 
-Source: https://github.com/golang/go/blob/go1.27.1/src/runtime/memmove_amd64.s
+Source: https://github.com/golang/go/blob/go1.27.3/src/runtime/memmove_amd64.s
 
 ```text
 // Derived from Inferno's libkern/memmove-386.s (adapted for amd64)
@@ -259,7 +259,7 @@ Source: https://github.com/golang/go/blob/go1.27.1/src/runtime/memmove_amd64.s
 
 ## Go math SunPro notice (1993)
 
-Source: https://github.com/golang/go/blob/go1.27.1/src/math/acosh.go
+Source: https://github.com/golang/go/blob/go1.27.3/src/math/acosh.go
 
 ```text
 // Copyright (C) 1993 by Sun Microsystems, Inc. All rights reserved.
@@ -272,7 +272,7 @@ Source: https://github.com/golang/go/blob/go1.27.1/src/math/acosh.go
 
 ## Go math SunPro notice (2004)
 
-Source: https://github.com/golang/go/blob/go1.27.1/src/math/exp.go
+Source: https://github.com/golang/go/blob/go1.27.3/src/math/exp.go
 
 ```text
 // Copyright (C) 2004 by Sun Microsystems, Inc. All rights reserved.
@@ -284,7 +284,7 @@ Source: https://github.com/golang/go/blob/go1.27.1/src/math/exp.go
 
 ## Go math Cephes notice (LicenseRef-Go-Cephes)
 
-Source: https://github.com/golang/go/blob/go1.27.1/src/math/atan.go
+Source: https://github.com/golang/go/blob/go1.27.3/src/math/atan.go
 
 ```text
 // Cephes Math Library Release 2.8:  June, 2000
@@ -308,7 +308,7 @@ Source: https://github.com/golang/go/blob/go1.27.1/src/math/atan.go
 
 ## fiat-crypto scalar implementation (BSD-1-Clause)
 
-Source: https://github.com/golang/go/blob/go1.27.1/src/crypto/internal/fips140/edwards25519/scalar.go
+Source: https://github.com/golang/go/blob/go1.27.3/src/crypto/internal/fips140/edwards25519/scalar.go
 
 ```text
 //     Copyright (c) 2015-2020 The fiat-crypto Authors. All rights reserved.
@@ -336,7 +336,7 @@ Source: https://github.com/golang/go/blob/go1.27.1/src/crypto/internal/fips140/e
 
 ## fiat-crypto P-256 implementation (BSD-1-Clause)
 
-Source: https://github.com/golang/go/blob/go1.27.1/src/crypto/internal/fips140/nistec/p256_ordinv.go
+Source: https://github.com/golang/go/blob/go1.27.3/src/crypto/internal/fips140/nistec/p256_ordinv.go
 
 ```text
 //	 Copyright (c) 2015-2020 the fiat-crypto authors (see the AUTHORS file)

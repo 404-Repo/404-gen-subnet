@@ -65,7 +65,7 @@ tag, commit, artifact hashes, and verification results in [release.json](release
 Test and publish the same wheel. Each source change requires a new package version;
 released artifacts and tags are immutable.
 
-Maintainers build a wheel on the target OS/architecture, with Go 1.27.1, a C
+Maintainers build a wheel on the target OS/architecture, with Go 1.27.3, a C
 compiler, Python 3.11+, `build==1.6.1`, `setuptools==84.0.0`, and `wheel==0.48.0`:
 
 ```sh
@@ -73,9 +73,9 @@ cd witness-client
 python build_wheel.py
 ```
 
-Both native Docker builds pin the Go 1.27.1 image by digest and use
+Both native Docker builds pin the Go 1.27.3 image by digest and use
 `GOTOOLCHAIN=local` to prevent an implicit compiler switch. The module requires
-Go 1.27.1 or newer. Record `go version -m` for the actual shared library and CLI
+Go 1.27.3 or newer. Record `go version -m` for the actual shared library and CLI
 in each release manifest, and check Go's [supported release lines](https://go.dev/doc/devel/release#policy)
 before the next release. Updating the compiler does not require new proof parameters.
 

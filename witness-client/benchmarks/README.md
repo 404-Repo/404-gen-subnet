@@ -6,7 +6,7 @@ and matched before/after results.
 `prover.py` builds the native C ABI from an explicit checkout and generates
 synthetic, valid TLS credential records locally. It never calls a provider or
 gateway. Use the client's Python environment (including `cryptography`), a native
-Go 1.27.1 toolchain, a C compiler, and the published pinned parameters. Go modules
+Go 1.27.3 toolchain, a C compiler, and the published pinned parameters. Go modules
 must already be cached: builds use `GOTOOLCHAIN=local` and `GOPROXY=off`.
 
 The script separates source snapshots and builds, manifest collection, case

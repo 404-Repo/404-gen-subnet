@@ -1,6 +1,6 @@
 module subnet404/privateauth
 
-go 1.27.1
+go 1.27.3
 
 require github.com/consensys/gnark v0.15.0
 
