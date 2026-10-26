@@ -12,4 +12,8 @@ if TYPE_CHECKING:
 
 
 def generate(image: bytes, seed: int, witness: WitnessClient, renderer: Renderer) -> str | None:
+    """Generate JavaScript using the round seed for local candidate ordering.
+
+    Generation and replay receive the same seed to reproduce that ordering.
+    """
     return run(image, seed, witness.responses, renderer)

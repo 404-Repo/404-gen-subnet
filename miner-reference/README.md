@@ -71,12 +71,16 @@ def generate(image: bytes, seed: int, witness: WitnessClient, renderer: Renderer
 | `witness` | The `witness_client.WitnessClient` model-call interface |
 | `renderer` | The `renderer_client.Renderer` rendering interface |
 
+Use `seed` to initialize reproducible local randomness. The same value is supplied
+during generation and replay; this example uses it to shuffle candidate order.
+
 Return the final JavaScript string, or `None` to declare generation failure.
 An uncaught exception is a miner error. The runner checks the return type, UTF-8
 size and JavaScript rules.
 
-Use `witness.responses.create(...)` for model requests. It waits for
-the complete response and returns `output_text`, `response` and `usage`.
+By default, `witness.responses.create(...)` waits for the complete response and
+returns an OpenAI `Response` object. Read text from `result.output_text` and token
+usage from `result.usage`.
 `renderer.render(source, options)` returns PNG bytes or raises a structured
 `RenderRejected`. Send prompt images and rendered previews as PNG data URLs in
 `input_image` items. You may render, compare and refine candidates within the
