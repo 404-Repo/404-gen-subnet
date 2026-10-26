@@ -6,6 +6,7 @@ import hashlib
 import ipaddress
 import json
 import math
+import re
 import ssl
 import threading
 import time
@@ -61,8 +62,6 @@ class PodGatewayClient:
         hotkey: Keypair,
         state: Path,
         delivery_timeout: float,
-        *,
-        round_number: str,
     ) -> None:
         self.http, self.hotkey = http, hotkey
         self.state, self.delivery_timeout = state, delivery_timeout
@@ -75,9 +74,9 @@ class PodGatewayClient:
         self._snapshots: dict[str, Snapshot] = {}
         self._artifacts = ArtifactClient()
 
-        self.round_number = round_number
+        self.round_number: str | None = None
         digest = hashlib.sha256(
-            f"{self.http.base_url}/{self.hotkey.ss58_address}/{round_number}".encode()
+            f"{self.http.base_url}/{self.hotkey.ss58_address}".encode()
         ).hexdigest()[:24]
         self._connection = self.state / f"pod-connect-{digest}.json"
 
@@ -143,11 +142,12 @@ class PodGatewayClient:
         result = json.loads(raw or b"{}")
         if not isinstance(result, dict):
             raise WitnessError("Invalid allocation reply", source="gateway")
-        if result.get("round") != self.round_number:
-            raise WitnessError("Gateway competition round changed", code="round_changed", source="gateway")
         return result
 
     def _attach(self, reply: dict[str, object]) -> bool:
+        round_number = reply.get("round")
+        if not isinstance(round_number, str) or re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", round_number) is None:
+            raise WitnessError("Invalid gateway round metadata", source="gateway")
         session, endpoint = reply.get("session"), reply.get("witness")
         if (not isinstance(session, dict) or session.get("phase") != "allocated"
                 or not isinstance(endpoint, dict)):
@@ -171,6 +171,7 @@ class PodGatewayClient:
         self._connections.append(http)
         self._direct, self._expires = service, endpoint["expires"]
         self._start_id = str(uuid.UUID(str(session["start_id"])))
+        self.round_number = round_number
         return True
 
     def ensure_pod(self) -> str:
@@ -179,12 +180,12 @@ class PodGatewayClient:
                 assert self._start_id is not None
                 return self._start_id
             deadline = time.monotonic() + self.delivery_timeout
+            reply = self._allocation_json("GET", "/pods/current", deadline=deadline)
             allocation: dict[str, object] | None = None
             if self._connection.is_file():
                 value = json.loads(self._connection.read_bytes())
-                if isinstance(value, dict):
+                if isinstance(value, dict) and value.get("round") == reply.get("round"):
                     allocation = {"start_id": value["start_id"], "replaces": value.get("replaces")}
-            reply = self._allocation_json("GET", "/pods/current", deadline=deadline)
             current = reply.get("session")
             if not isinstance(current, dict) or current.get("phase") in ("rejected", "lost", "retired"):
                 if allocation is None or (
@@ -192,8 +193,8 @@ class PodGatewayClient:
                 ):
                     allocation = {"start_id": str(uuid.uuid4()), "replaces": current.get("start_id")
                                   if isinstance(current, dict) else None}
-                    save(self._connection, canonical(allocation))
-                reply = self._allocation_json("POST", "/pods/start", {"round": self.round_number, **allocation},
+                    save(self._connection, canonical({**allocation, "round": reply["round"]}))
+                reply = self._allocation_json("POST", "/pods/start", allocation,
                                                deadline=deadline)
             while True:
                 session = reply.get("session")
@@ -206,7 +207,7 @@ class PodGatewayClient:
                 accepted = {"start_id": start_id, "replaces": session.get("replaces")}
                 if allocation != accepted:
                     allocation = accepted
-                    save(self._connection, canonical(allocation))
+                    save(self._connection, canonical({**allocation, "round": reply["round"]}))
                 if self._attach(reply):
                     return start_id
                 hint = reply.get("retry_after", 1)

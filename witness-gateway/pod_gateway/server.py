@@ -34,7 +34,6 @@ class Evidence(Protocol):
 
 class Start(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
-    round: str
     start_id: str
     replaces: str | None = None
 
@@ -316,8 +315,6 @@ class Gateway:
 
     async def start(self, request: web.Request) -> web.Response:
         data = Start.model_validate_json(await request.read())
-        if data.round != self.round:
-            raise AuthRejected("round_changed", 409)
         identifier(data.start_id)
         if data.replaces is not None:
             identifier(data.replaces)

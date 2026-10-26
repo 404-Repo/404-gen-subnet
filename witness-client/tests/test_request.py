@@ -21,7 +21,6 @@ TOKEN = "sk-proj-" + "a" * 80
 def config() -> WitnessConfig:
     return {
         "witness_url": "https://witness.example",
-        "round": "1",
         "proof_parameters": "/unused",
     }
 

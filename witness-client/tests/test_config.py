@@ -25,7 +25,6 @@ def key() -> Keypair:
 def config(tmp_path: Path) -> WitnessConfig:
     return {
         "witness_url": "https://witness.example",
-        "round": "1",
         "proof_parameters": str(PARAMS),
         "state_directory": str(tmp_path / "state"),
     }

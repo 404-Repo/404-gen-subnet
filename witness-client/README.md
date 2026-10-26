@@ -45,20 +45,21 @@ for release builds or macOS.
 
 ## Configure
 
-Use the HTTPS gateway origin and pinned competition round supplied by the
-operator. Save the configuration as `witness.json`, replacing the paths:
+Use the HTTPS gateway origin supplied by the operator. Save the configuration
+as `witness.json`, replacing the paths:
 
 ```json
 {
-  "round": "test-0",
   "witness_url": "https://witness.example.org",
   "proof_parameters": "/home/miner/404-subnet/witness-server/verifier/params",
   "state_directory": "/home/miner/.local/state/404-witness-client"
 }
 ```
 
-The client uses witness Pods. A pinned `round` is required. The same
-configuration works with an OpenAI API key or a ChatGPT subscription.
+The gateway selects its current competition round and returns its metadata.
+The same configuration works across round changes and with an OpenAI API key or
+a ChatGPT subscription. Final checkpoint reuse checks the prompt hash, seed,
+renderer identity and approved source commit read from the authenticated Pod.
 
 The gateway authenticates registration and returns the assigned Pod's public IP,
 mapped TCP port, verified TLS name and scoped access grant. Calls, proofs,
@@ -156,7 +157,7 @@ with WitnessClient("witness.json", hotkey=hotkey, subscription="codex") as clien
 ```
 
 The function manages no recordings. The host keeps execution observations under
-`state_directory/executions/<allocation namespace>/<input identity>/execution.json`.
+`state_directory/executions/<namespace>/<input identity>/execution.json`.
 Keep those files and the replay engine outside miner access. This helper does not
 implement process isolation or freeze code, environment, external content or
 renderer behavior. See the complete [contract and field inventory](../witness-gateway/PODS.md#execution-and-replay-contract).

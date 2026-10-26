@@ -112,10 +112,10 @@ class Witness(WitnessClient):
     def __init__(self) -> None:
         self._state = Path(tempfile.mkdtemp(prefix="miner-witness-"))
         self._mode = "api"
-        self._config = {"round": "test-0", "witness_url": "https://witness.test", "proof_parameters": "unused"}
+        self._config = {"witness_url": "https://witness.test", "proof_parameters": "unused"}
         self._http = cast(httpx.Client, SimpleNamespace(base_url="https://witness.test"))
         self._hotkey = cast(Keypair, SimpleNamespace(ss58_address="hotkey"))
-        self._gateway = cast(PodGatewayClient, SimpleNamespace(delivery_timeout=5))
+        self._gateway = cast(PodGatewayClient, SimpleNamespace(delivery_timeout=5, round_number="test-0", ensure_pod=lambda: "fixture"))
         self._calls_lock = threading.Lock()
         self._calls = {}
         self._call_slots = None
@@ -124,6 +124,24 @@ class Witness(WitnessClient):
         self.active = self.peak = self.paid = 0
         self.first_pair: threading.Barrier | None = None
         self.lose_reply_once = False
+        self.submissions: dict[str, str | None] = {}
+
+    def renderer_transport(self) -> httpx.BaseTransport:
+        def submit(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/artifacts/context":
+                return httpx.Response(200, json={"submission_commit": "c" * 40})
+            value = json.loads(request.content)
+            source = value["source"]
+            with self.lock:
+                self.submissions[value["generation"]["prompt_sha256"]] = source
+            return httpx.Response(200, json={"submission": {
+                "js": None if source is None else "saved.js",
+                "views": None if source is None else "saved",
+                "failure_reason": "generation_failed" if source is None else None,
+                "size": 0 if source is None else len(source.encode()),
+            }})
+
+        return httpx.MockTransport(submit)
 
     def _capture(self, key: RequestKey, body: bytes, session_id: str | None) -> CapturedResponse:
         with self.lock:
@@ -364,7 +382,7 @@ def test_check_command_validates_frozen_inputs_without_loading_credentials(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     config = tmp_path / "witness.json"
-    config.write_text(json.dumps({"round": "test-0"}))
+    config.write_text(json.dumps({"witness_url": "https://witness.test", "proof_parameters": "unused"}))
     manifest = tmp_path / "manifest.json"
     manifest.write_text(
         json.dumps(
@@ -385,8 +403,6 @@ def test_check_command_validates_frozen_inputs_without_loading_credentials(
             str(config),
             "--output",
             str(tmp_path / "run"),
-            "--renderer-url",
-            "http://localhost:18040",
             "--renderer-id",
             "fixture",
         ],

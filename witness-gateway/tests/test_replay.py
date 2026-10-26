@@ -38,8 +38,8 @@ class Capture(WitnessClient):
         self._mode = "api"
         self._http = cast(httpx.Client, SimpleNamespace(base_url="https://fixture.test"))
         self._hotkey = cast(Keypair, SimpleNamespace(ss58_address=SCOPE.hotkey))
-        self._config = {"round": SCOPE.round, "witness_url": "https://fixture.test", "proof_parameters": "unused"}
-        self._gateway = cast(PodGatewayClient, SimpleNamespace(delivery_timeout=2))
+        self._config = {"witness_url": "https://fixture.test", "proof_parameters": "unused"}
+        self._gateway = cast(PodGatewayClient, SimpleNamespace(delivery_timeout=2, round_number=SCOPE.round, ensure_pod=lambda: START))
         self._calls_lock, self._calls = threading.Lock(), {}
         self._call_slots = None
         self.state = MemoryState()

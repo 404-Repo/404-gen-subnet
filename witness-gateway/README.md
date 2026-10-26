@@ -53,12 +53,12 @@ limit.
 
 The Pod publishes `rounds/<full-round-name>/<hotkey>/submitted.json`, mapping
 prompt hashes to records containing `js`, `views`, `failure_reason` and `size`;
-`js` and `views` are storage keys. A replacement removes the old entry before
-files are overwritten and publishes the new outcome after saving finishes.
+`js` and `views` are storage keys. A saved final output cannot be replaced;
+retrying the same output returns its saved result without rendering again.
 Conditional writes merge concurrent index updates without losing other prompts.
 An explicit `None` records `generation_failed`. A renderer rejection records
 `render_rejected` and returns HTTP 422. Storage, rendering and embedding failures
-return an error so the miner can retry saving. An incomplete replacement has no
+return an error so the runner can retry saving. An incomplete save has no
 completed result record.
 
 The runner checkpoints returned JavaScript or `None` locally before network

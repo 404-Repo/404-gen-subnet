@@ -17,7 +17,6 @@ class Frozen(BaseModel):
 
 
 class SubmissionContext(Frozen):
-    round: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{0,63}$")
     prompt_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     seed: int = Field(ge=0, lt=2**64)
 
@@ -49,6 +48,8 @@ class ArtifactConfig(Frozen):
 
 
 class Objects(Protocol):
+    def get(self, key: str, limit: int = 16 * 1024 * 1024) -> bytes | None: ...
+
     def put(self, key: str, data: bytes, content_type: str = "application/octet-stream") -> None: ...
 
 
@@ -68,13 +69,11 @@ class ArtifactRepository:
         self.index_key = f"rounds/{scope.round}/{scope.hotkey}/submitted.json"
         self._saved: Snapshot | None = None
 
-    def require(self, generation: SubmissionContext, commit: str) -> None:
-        if generation.round != self.scope.round or generation.seed != self.seed:
-            raise ValueError("Round or seed differs")
+    def require(self, generation: SubmissionContext) -> None:
+        if generation.seed != self.seed:
+            raise ValueError("Seed differs")
         if generation.prompt_sha256 not in self.prompt_hashes:
             raise ValueError("Prompt is not admitted")
-        if commit != self.submission_commit:
-            raise ValueError("Source submission differs")
 
     def prefix(self, prompt: str) -> str:
         if prompt not in self.prompt_hashes:
@@ -86,15 +85,12 @@ class ArtifactRepository:
         saved = self.index.load(self.index_key)
         return None if saved is None else GenerationsAdapter.validate_json(saved.data).get(prompt)
 
-    def update_result(self, prompt: str, result: GenerationResult | None) -> None:
+    def update_result(self, prompt: str, result: GenerationResult) -> None:
         self.prefix(prompt)
         saved = self._saved or self.index.load(self.index_key)
         for _ in range(16):
             results = {} if saved is None else GenerationsAdapter.validate_json(saved.data)
-            if result is None:
-                results.pop(prompt, None)
-            else:
-                results[prompt] = result
+            results[prompt] = result
             try:
                 self._saved = self.index.save(
                     self.index_key, GenerationsAdapter.dump_json(results), None if saved is None else saved.etag

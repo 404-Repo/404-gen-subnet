@@ -12,7 +12,6 @@ import threading
 import time
 from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from contextlib import nullcontext
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Unpack, cast
@@ -66,13 +65,10 @@ class BatchSettings:
     parallel_prompts: int = 4
     parallel_calls: int = 2
     parallel_renders: int = 1
-    submission_commit: str | None = None
 
     def __post_init__(self) -> None:
         if not all(1 <= n <= 32 for n in (self.parallel_prompts, self.parallel_calls, self.parallel_renders)):
             raise ValueError("Concurrency must be between 1 and 32")
-        if self.submission_commit is not None and not re.fullmatch(r"[0-9a-f]{40}", self.submission_commit):
-            raise ValueError("Expected the admitted source commit for managed submissions")
         if not 0 <= self.seed < 2**64:
             raise ValueError("Expected a uint64 generation seed")
 
@@ -124,7 +120,6 @@ def run_batch(
     identity = canonical(
         {
             "version": 2,
-            **({"submission_commit": settings.submission_commit} if settings.submission_commit else {}),
             "namespace": settings.namespace,
             "seed": settings.seed,
             "renderer_id": renderer.renderer_id,
@@ -161,24 +156,17 @@ def run_batch(
                     and hashlib.sha256(selected.read_bytes()).hexdigest() != result["sha256"]
                 ):
                     raise ValueError("Selected output changed")
-                return str(result["status"])
         try:
-            with (
-                ArtifactClient(
-                    "https://witness.internal",
-                    renderer_id=renderer.renderer_id,
-                    round=str(witness._config["round"]),
-                    prompt_sha256=prompt.sha256,
-                    prompt_image=image,
-                    seed=settings.seed,
-                    submission_commit=settings.submission_commit,
-                    transport=witness.renderer_transport(),
-                    timeout=240,
-                )
-                if settings.submission_commit is not None
-                else nullcontext(renderer)
-            ) as prompt_renderer:
-                previews = SavedRenderer(prompt_renderer, directory / "renders", render_slots)
+            with ArtifactClient(
+                "https://witness.internal",
+                renderer_id=renderer.renderer_id,
+                prompt_sha256=prompt.sha256,
+                prompt_image=image,
+                seed=settings.seed,
+                transport=witness.renderer_transport(),
+                timeout=240,
+            ) as submissions:
+                previews = SavedRenderer(renderer, directory / "renders", render_slots)
 
                 def execute(image: bytes, seed: int, client: WitnessClient, renderer: SavedRenderer) -> str | None:
                     calls = LimitedCalls(
@@ -186,16 +174,13 @@ def run_batch(
                     )
                     return pipeline.run(image, seed, calls, renderer)
 
-                if isinstance(prompt_renderer, ArtifactClient):
-                    final_checkpoint = directory / "final.json"
-                    run_and_save(
-                        lambda: run_generation(execute, image, settings.seed, witness, previews),
-                        prompt_renderer,
-                        final_checkpoint,
-                    )
-                    source = json.loads(final_checkpoint.read_bytes())["output"]
-                else:
-                    source = run_generation(execute, image, settings.seed, witness, previews)
+                final_checkpoint = directory / "final.json"
+                run_and_save(
+                    lambda: run_generation(execute, image, settings.seed, witness, previews),
+                    submissions,
+                    final_checkpoint,
+                )
+                source = json.loads(final_checkpoint.read_bytes())["output"]
         except Exception as error:
             code = error.code if isinstance(error, WitnessError) else type(error).__name__
             save(checkpoint, canonical({"execution_id": inputs.id, "status": "pending", "error": code}))
@@ -250,7 +235,6 @@ def main() -> None:
     parser.add_argument("--witness-config", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--renderer-url")
-    parser.add_argument("--submission-commit", help="Save final results on the witness Pod for this admitted commit")
     parser.add_argument("--renderer-id", required=True)
     parser.add_argument("--parallel-prompts", type=int, default=4)
     parser.add_argument("--parallel-calls", type=int, default=2)
@@ -260,14 +244,12 @@ def main() -> None:
     parser.add_argument("--wallet-path", default="~/.bittensor/wallets")
     parser.add_argument("--api", action="store_true", help="Use OPENAI_API_KEY instead of a local Codex subscription")
     args = parser.parse_args()
-    if args.renderer_url is None and args.submission_commit is None:
-        parser.error("--renderer-url is required without --submission-commit")
     manifest = json.loads(args.manifest.read_bytes())
     prompts = [Prompt(row["id"], Path(row["path"]), row["sha256"]) for row in manifest["prompts"]]
     check_prompts(prompts)
     config = cast(WitnessConfig, json.loads(args.witness_config.read_bytes()))
-    if config.get("transport", "pods-v1") != "pods-v1" or not config.get("round"):
-        parser.error("The batch runner requires a Pod gateway and a pinned round")
+    if config.get("transport", "pods-v1") != "pods-v1":
+        parser.error("The batch runner requires a Pod gateway")
     namespace = hashlib.sha256(
         canonical(
             {
@@ -284,7 +266,6 @@ def main() -> None:
         args.parallel_prompts,
         args.parallel_calls,
         args.parallel_renders,
-        args.submission_commit,
     )
     if args.action == "check":
         print(
@@ -328,6 +309,7 @@ def main() -> None:
             renderer_id=args.renderer_id,
             api_key=os.environ.get("RENDERER_API_KEY"),
             timeout=240,
+            transport=witness.renderer_transport() if args.renderer_url is None else None,
         ) as renderer,
     ):
         results = run_batch(prompts, settings, witness, renderer)

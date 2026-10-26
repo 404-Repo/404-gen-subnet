@@ -178,7 +178,6 @@ class Harness:
                 "witness_url": self.origin,
                 "proof_parameters": str(Path(__file__).resolve().parents[2] / "witness-server/verifier/params"),
                 "state_directory": str(self.directory / state),
-                "round": self.scope.round,
             },
             hotkey=self.key,
             openai_api_key="fixture-" + "a" * 80,
@@ -439,6 +438,47 @@ def test_direct_call_deduplication_recovery_and_replay(tmp_path: Path, monkeypat
             assert all(path.startswith(("/pods/", "/control/")) for path in fixture.gateway_paths)
     asyncio.run(scenario())
 
+
+@pytest.mark.parametrize("pending", [False, True])
+def test_client_reconnects_to_gateway_current_round(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pending: bool,
+) -> None:
+    async def scenario() -> None:
+        fixture = Harness(tmp_path, monkeypatch)
+        async with fixture.running():
+            with fixture.client() as witness:
+                gateway = witness._gateway
+                old_start = await asyncio.to_thread(gateway.ensure_pod)
+                first = await asyncio.to_thread(witness.create, model="fixture", input="image")
+                assert first.output_text == "answer-1" and fixture.paid == 1
+                namespace = witness.capture_context.namespace
+                if pending:
+                    gateway._connection.write_bytes(canonical({
+                        "start_id": old_start, "replaces": None,
+                        "round": fixture.scope.round,
+                    }))
+                fixture.scope = Scope(fixture.scope.deployment, "test-1", fixture.scope.hotkey)
+                fixture.gateway.round = fixture.scope.round
+                fixture.services[0].round_end = fixture.runtimes[0].round_end = int(time.time()) - 1
+                gateway._expires = 0
+                result = await asyncio.to_thread(witness.create, model="fixture", input="image")
+                new_start = await asyncio.to_thread(gateway.ensure_pod)
+                assert new_start != old_start
+                assert witness.capture_context.namespace != namespace
+                assert result.output_text == "answer-2" and fixture.paid == 2
+                current = fixture.records.load(fixture.scope, call_key().id)
+                assert current is not None and current.call.start_id == new_start
+                config_path = tmp_path / "stale-config.json"
+                config_path.write_bytes(canonical({**witness._config, "round": "test-0"}))
+            with WitnessClient(
+                config_path, hotkey=fixture.key, openai_api_key="fixture-" + "a" * 80,
+            ) as restarted:
+                assert await asyncio.to_thread(restarted._gateway.ensure_pod) == new_start
+                recovered = await asyncio.to_thread(restarted.create, model="fixture", input="image")
+                assert recovered.output_text == result.output_text
+                assert fixture.paid == 2 and fixture.provider.creates == 2
+
+    asyncio.run(scenario())
 
 
 @pytest.mark.parametrize("lost_response", [False, True])

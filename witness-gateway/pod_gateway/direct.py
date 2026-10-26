@@ -46,7 +46,6 @@ class Retry(StrictInput):
 
 class SaveChoice(StrictInput):
     generation: SubmissionContext
-    submission_commit: str = Field(pattern=r"^[0-9a-f]{40}$")
     source: str | None = Field(max_length=1024 * 1024)
     prompt_image: str | None = Field(default=None, max_length=12 * 1024 * 1024)
 
@@ -320,8 +319,6 @@ class Witness:
         if self.artifacts is None:
             raise AuthRejected("artifact_storage_disabled", 404)
         if generation is not None:
-            if generation.round != self.round:
-                raise AuthRejected("round_changed", 409)
             if generation.prompt_sha256 not in self.artifacts.prompt_hashes:
                 raise AuthRejected("unknown_round_prompt", 403)
         return self.artifacts
@@ -338,10 +335,16 @@ class Witness:
             self.runtime.rendering -= 1
             self.runtime.last_used = self.runtime.clock()
 
+    async def artifact_context(self, request: web.Request) -> web.Response:
+        store = self._artifacts()
+        return web.json_response(
+            {"submission_commit": store.submission_commit}, headers={"Cache-Control": "no-store"}
+        )
+
     async def save_choice(self, request: web.Request) -> web.Response:
         data = SaveChoice.model_validate_json(await request.read())
         store = self._artifacts(data.generation)
-        store.require(data.generation, data.submission_commit)
+        store.require(data.generation)
         image = None
         if data.source is not None:
             if data.prompt_image is None:
@@ -355,6 +358,17 @@ class Witness:
             raise AuthRejected("save_in_progress", 429)
         self.saving = True
         try:
+            previous = await asyncio.to_thread(store.result, data.generation.prompt_sha256)
+            if previous is not None:
+                if data.source is None:
+                    same = previous.js is None
+                else:
+                    same = previous.js is not None and await asyncio.to_thread(
+                        store.objects.get, previous.js, 1024 * 1024
+                    ) == data.source.encode()
+                if not same:
+                    raise RecordingConflict("Final output already saved")
+                return web.json_response({"submission": previous.model_dump()}, headers={"Cache-Control": "no-store"})
             await asyncio.to_thread(self._admit_artifact)
             try:
                 result = await self.judging.save(data.generation.prompt_sha256, data.source, image)
@@ -382,6 +396,7 @@ class Witness:
                 web.get("/status/{exchange_id}", self.exchange_status),
                 web.get("/exchanges/{exchange_id}/connect", self.miner_exchange),
                 web.post("/render/grid", self.render),
+                web.get("/artifacts/context", self.artifact_context),
                 web.post("/submissions", self.save_choice),
                 web.get("/submissions/{prompt}", self.get_choice),
             ]

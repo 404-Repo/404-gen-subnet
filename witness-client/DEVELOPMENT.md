@@ -14,8 +14,14 @@ bundle without an inference client. See the [full contract](../witness-gateway/P
 
 ## Client reference
 
-Pin `round`, `witness_url` and matching `proof_parameters` in `WitnessConfig`.
-Allocation/reconnect checks the round once; model requests carry no round field.
+Configure `witness_url` and matching `proof_parameters` in `WitnessConfig`.
+The gateway selects the round at allocation/reconnect; model requests carry no
+round field. `ArtifactClient.load_context()` reads the approved source commit
+from the authenticated Pod for checkpoint validation. The runner submits the returned
+JavaScript or `None` with the prompt hash and seed; the Pod assigns the round and
+makes the fixed final renders. Generation previews use `RendererClient` without
+Pod or R2 persistence. Final-save checkpoint reuse checks the prompt hash, seed,
+renderer and refreshed source commit.
 Pass the caller's loaded sr25519 `hotkey`. The private key stays local.
 `openai_api_key` and `subscription="codex"` are mutually exclusive. `codex_home`
 and `codex` select subscription credential storage/refresh. Provider TLS uses
@@ -39,7 +45,8 @@ Keep local state private/persistent. No SDK inference retry is enabled.
 Trusted hosts use `capture_context`, `capture_response(key, body)` and
 `saved_response(exchange_id)` for capture and recovery. The immutable
 `CaptureContext` supplies the provider, state directory, delivery timeout and a
-local namespace derived from the gateway origin, hotkey, round and provider.
+local namespace derived from the gateway origin, hotkey, assigned round and
+provider.
 `capture_response` returns a `CapturedResponse` with the exchange ID, HTTP status
 and retained response bytes; an existing logical call follows the same recovery
 path as `responses.create()`. `saved_response` only reads retained local bytes.

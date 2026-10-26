@@ -30,7 +30,8 @@ IMAGE = "sha256:" + "a" * 64
 COMMIT = "c" * 40
 
 
-async def enable(fixture: Harness, *, fail_first_render: bool = False) -> None:
+async def enable(fixture: Harness, *, fail_first_render: bool = False, commit: str = COMMIT) -> list[str]:
+    rendered: list[str] = []
     async def backend(request: web.Request) -> web.Response:
         nonlocal fail_first_render
         if fail_first_render:
@@ -42,6 +43,7 @@ async def enable(fixture: Harness, *, fail_first_render: bool = False) -> None:
         if request.path == "/render":
             count = len(request.query["thetas"].split(","))
             return web.json_response({"images": [base64.b64encode(PNG).decode()] * count})
+        rendered.append(source)
         return web.Response(body=PNG, content_type="image/png")
 
     app = web.Application()
@@ -55,24 +57,23 @@ async def enable(fixture: Harness, *, fail_first_render: bool = False) -> None:
         runtime.scope,
         index=fixture.state,
         seed=42,
-        submission_commit=COMMIT,
+        submission_commit=commit,
         prompt_hashes=frozenset({hashlib.sha256(fixture.image).hexdigest()}),
     )
     service.judging = Judging(service.artifacts, origin, "fixture-revision", None)
     fixture.monkeypatch.setattr(
         "pod_gateway.judging.build_embeddings_npz", AsyncMock(return_value=b"fixture embeddings")
     )
+    return rendered
 
 
 def client(fixture: Harness, transport: httpx.BaseTransport) -> ArtifactClient:
     return ArtifactClient(
         "https://witness.internal",
         renderer_id=IMAGE,
-        round=fixture.scope.round,
         prompt_sha256=hashlib.sha256(fixture.image).hexdigest(),
         prompt_image=fixture.image,
         seed=42,
-        submission_commit=COMMIT,
         transport=transport,
     )
 
@@ -110,6 +111,83 @@ def test_runner_saves_returned_source_and_all_judging_files(tmp_path: Path, monk
     asyncio.run(scenario())
 
 
+def test_final_checkpoint_resumes_after_round_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from miner_reference.submissions import run_and_save
+
+    generated: list[str] = []
+
+    def generate() -> str:
+        generated.append(SOURCE)
+        return SOURCE
+
+    async def scenario() -> None:
+        fixture = Harness(tmp_path, monkeypatch)
+        async with fixture.running():
+            with fixture.client() as witness:
+                await asyncio.to_thread(witness._gateway.ensure_pod)
+                first_renders = await enable(fixture)
+                with client(fixture, witness.renderer_transport()) as renderer:
+                    first = await asyncio.to_thread(
+                        run_and_save, generate, renderer, tmp_path / "final.json",
+                    )
+                    fixture.scope = Scope(fixture.scope.deployment, "test-1", fixture.scope.hotkey)
+                    fixture.gateway.round = fixture.scope.round
+                    witness._gateway._expires = 0
+                    await asyncio.to_thread(witness._gateway.ensure_pod)
+                    next_renders = await enable(fixture)
+                    saved = await asyncio.to_thread(
+                        run_and_save, generate, renderer, tmp_path / "final.json",
+                    )
+                    assert first["js"] != saved["js"]
+                    assert await asyncio.to_thread(renderer.get_submission) == saved
+                store = fixture.services[-1].artifacts
+                assert store is not None
+                assert fixture.state.get(str(saved["js"])) == SOURCE.encode() and fixture.paid == 0
+                assert first_renders == next_renders == [SOURCE]
+                assert generated == [SOURCE]
+
+    asyncio.run(scenario())
+
+
+def test_final_checkpoint_rejects_changed_source_commit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from miner_reference.submissions import run_and_save
+
+    generated: list[str] = []
+
+    def generate() -> str:
+        generated.append(SOURCE)
+        return SOURCE
+
+    async def scenario() -> None:
+        fixture = Harness(tmp_path, monkeypatch)
+        async with fixture.running():
+            with fixture.client() as witness:
+                await asyncio.to_thread(witness._gateway.ensure_pod)
+                first_renders = await enable(fixture)
+                first_store = fixture.services[-1].artifacts
+                assert first_store is not None
+
+                with client(fixture, witness.renderer_transport()) as renderer:
+                    def save() -> None:
+                        run_and_save(generate, renderer, tmp_path / "final.json")
+
+                    await asyncio.to_thread(save)
+                    next_renders = await enable(fixture, commit="d" * 40)
+                    with pytest.raises(ValueError, match="checkpoint context differs"):
+                        await asyncio.to_thread(save)
+                    prompt = hashlib.sha256(fixture.image).hexdigest()
+                    result = first_store.result(prompt)
+                    assert result is not None and fixture.state.get(str(result.js)) == SOURCE.encode()
+                    assert generated == first_renders == [SOURCE] and next_renders == []
+                    assert fixture.paid == 0
+
+    asyncio.run(scenario())
+
+
 def test_none_is_saved_as_a_generation_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     async def scenario() -> None:
         fixture = Harness(tmp_path, monkeypatch)
@@ -118,7 +196,6 @@ def test_none_is_saved_as_a_generation_failure(tmp_path: Path, monkeypatch: pyte
                 await asyncio.to_thread(witness._gateway.ensure_pod)
                 await enable(fixture)
                 with client(fixture, witness.renderer_transport()) as renderer:
-                    await asyncio.to_thread(renderer.save_final, SOURCE)
                     result = await asyncio.to_thread(renderer.save_final, None)
                     assert result == {"js": None, "views": None, "failure_reason": "generation_failed", "size": 0}
                     assert await asyncio.to_thread(renderer.get_submission) == result
@@ -126,19 +203,20 @@ def test_none_is_saved_as_a_generation_failure(tmp_path: Path, monkeypatch: pyte
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize("output", [SOURCE, None])
 def test_lost_final_acknowledgement_retries_saving_without_generating_again(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, output: str | None
 ) -> None:
     from miner_reference.submissions import run_and_save
 
-    generated: list[str] = []
+    generated: list[str | None] = []
 
     async def scenario() -> None:
         fixture = Harness(tmp_path, monkeypatch)
         async with fixture.running():
             with fixture.client() as witness:
                 await asyncio.to_thread(witness._gateway.ensure_pod)
-                await enable(fixture)
+                rendered = await enable(fixture)
                 inner = witness.renderer_transport()
                 lost = False
 
@@ -151,22 +229,27 @@ def test_lost_final_acknowledgement_retries_saving_without_generating_again(
                         raise httpx.ReadError("Lost final-save acknowledgement", request=request)
                     return response
 
-                def generate() -> str:
-                    generated.append(SOURCE)
-                    return SOURCE
+                def generate() -> str | None:
+                    generated.append(output)
+                    return output
 
                 with client(fixture, httpx.MockTransport(deliver)) as renderer:
                     checkpoint = tmp_path / "private/final.json"
                     with pytest.raises(RenderUnavailable, match="transport"):
                         await asyncio.to_thread(run_and_save, generate, renderer, checkpoint)
+                    fixture.services[-1].round_end = 0
                     result = await asyncio.to_thread(run_and_save, generate, renderer, checkpoint)
-                    assert fixture.state.get(str(result["js"])) == SOURCE.encode()
-                assert generated == [SOURCE] and fixture.paid == 0
+                    if output is not None:
+                        assert fixture.state.get(str(result["js"])) == output.encode()
+                    else:
+                        assert result["failure_reason"] == "generation_failed"
+                assert generated == [output] and fixture.paid == 0
+                assert rendered == ([] if output is None else [output])
 
     asyncio.run(scenario())
 
 
-def test_rejected_source_reports_an_error_and_can_be_replaced(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_rejected_source_reports_an_error_and_keeps_the_saved_output(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     async def scenario() -> None:
         fixture = Harness(tmp_path, monkeypatch)
         async with fixture.running():
@@ -179,14 +262,19 @@ def test_rejected_source_reports_an_error_and_can_be_replaced(tmp_path: Path, mo
                     rejected = await asyncio.to_thread(renderer.get_submission)
                     assert rejected["failure_reason"] == "render_rejected" and rejected["views"] is None
                     assert fixture.state.get(str(rejected["js"])) == b"invalid"
-                    result = await asyncio.to_thread(renderer.save_final, SOURCE)
-                    assert result["failure_reason"] is None and result["views"]
-                    assert fixture.state.get(str(result["js"])) == SOURCE.encode()
+                    assert await asyncio.to_thread(renderer.save_final, "invalid") == rejected
+                    with pytest.raises(ArtifactUnavailable) as conflict:
+                        await asyncio.to_thread(renderer.save_final, SOURCE)
+                    assert conflict.value.status == 409
+                    assert await asyncio.to_thread(renderer.get_submission) == rejected
 
     asyncio.run(scenario())
 
 
-def test_final_source_can_be_replaced(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("first,second", [(SOURCE, SOURCE + "\n// other"), (SOURCE, None), (None, SOURCE)])
+def test_saved_final_output_cannot_be_changed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, first: str | None, second: str | None
+) -> None:
     async def scenario() -> None:
         fixture = Harness(tmp_path, monkeypatch)
         async with fixture.running():
@@ -194,18 +282,19 @@ def test_final_source_can_be_replaced(tmp_path: Path, monkeypatch: pytest.Monkey
                 await asyncio.to_thread(witness._gateway.ensure_pod)
                 await enable(fixture)
                 with client(fixture, witness.renderer_transport()) as renderer:
-                    first = await asyncio.to_thread(renderer.save_final, SOURCE)
-                    replacement = SOURCE + "\n// replacement"
-                    result = await asyncio.to_thread(renderer.save_final, replacement)
-                    assert first["js"] == result["js"] and first["views"] == result["views"]
-                    assert fixture.state.get(str(result["js"])) == replacement.encode()
-                    assert result["size"] == len(replacement.encode())
+                    saved = await asyncio.to_thread(renderer.save_final, first)
+                    with pytest.raises(ArtifactUnavailable) as conflict:
+                        await asyncio.to_thread(renderer.save_final, second)
+                    assert conflict.value.status == 409
+                    assert await asyncio.to_thread(renderer.get_submission) == saved
+                    if first is not None:
+                        assert fixture.state.get(str(saved["js"])) == first.encode()
 
     asyncio.run(scenario())
 
 
 @pytest.mark.parametrize("suffix", [".js", "/white/front_left.png", "/embeddings.npz", ".json"])
-def test_failed_replacement_is_retryable_and_not_reported_as_complete(
+def test_failed_final_save_is_retryable_and_not_reported_as_complete(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, suffix: str
 ) -> None:
     async def scenario() -> None:
@@ -215,7 +304,6 @@ def test_failed_replacement_is_retryable_and_not_reported_as_complete(
                 await asyncio.to_thread(witness._gateway.ensure_pod)
                 await enable(fixture)
                 with client(fixture, witness.renderer_transport()) as renderer:
-                    await asyncio.to_thread(renderer.save_final, SOURCE)
                     original = fixture.state.put
                     original_save = fixture.state.save
                     prompt = hashlib.sha256(fixture.image).hexdigest()
@@ -236,17 +324,16 @@ def test_failed_replacement_is_retryable_and_not_reported_as_complete(
 
                     monkeypatch.setattr(fixture.state, "put", fail)
                     monkeypatch.setattr(fixture.state, "save", fail_index)
-                    replacement = SOURCE + "\n// replacement"
                     with pytest.raises(ArtifactUnavailable) as error:
-                        await asyncio.to_thread(renderer.save_final, replacement)
+                        await asyncio.to_thread(renderer.save_final, SOURCE)
                     assert error.value.status == 503
                     with pytest.raises(ArtifactUnavailable) as missing:
                         await asyncio.to_thread(renderer.get_submission)
                     assert missing.value.status == 404
                     monkeypatch.setattr(fixture.state, "put", original)
                     monkeypatch.setattr(fixture.state, "save", original_save)
-                    result = await asyncio.to_thread(renderer.save_final, replacement)
-                    assert fixture.state.get(str(result["js"])) == replacement.encode()
+                    result = await asyncio.to_thread(renderer.save_final, SOURCE)
+                    assert fixture.state.get(str(result["js"])) == SOURCE.encode()
                     assert fixture.state.get(f"{result['views']}/embeddings.npz") == b"fixture embeddings"
 
     asyncio.run(scenario())
@@ -326,13 +413,6 @@ def test_concurrent_result_index_updates_preserve_each_prompt(monkeypatch: pytes
     asyncio.run(publish())
     assert first.result(prompts[0]) == results[0]
     assert second.result(prompts[1]) == results[1]
-    first.update_result(prompts[0], None)
-    assert repository().result(prompts[0]) is None
-    assert repository().result(prompts[1]) == results[1]
-    replacement = GenerationResult(failure_reason="generation_failed")
-    first.update_result(prompts[0], replacement)
-    assert repository().result(prompts[0]) == replacement
-    assert repository().result(prompts[1]) == results[1]
 
 
 def test_only_one_final_save_runs_at_a_time(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -384,7 +464,7 @@ def test_new_final_saves_require_an_open_round(tmp_path: Path, monkeypatch: pyte
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize("field", ["seed", "round", "prompt_sha256", "submission_commit"])
+@pytest.mark.parametrize("field", ["seed", "prompt_sha256"])
 def test_final_saving_requires_the_admitted_input(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, field: str) -> None:
     async def scenario() -> None:
         fixture = Harness(tmp_path, monkeypatch)
@@ -393,10 +473,7 @@ def test_final_saving_requires_the_admitted_input(tmp_path: Path, monkeypatch: p
                 await asyncio.to_thread(witness._gateway.ensure_pod)
                 await enable(fixture)
                 with client(fixture, witness.renderer_transport()) as renderer:
-                    if field == "submission_commit":
-                        renderer.submission_commit = "d" * 40
-                    else:
-                        renderer.generation[field] = {"seed": 43, "round": "other", "prompt_sha256": "d" * 64}[field]
+                    renderer.generation[field] = {"seed": 43, "prompt_sha256": "d" * 64}[field]
                     with pytest.raises(ArtifactUnavailable) as rejected:
                         await asyncio.to_thread(renderer.save_final, None)
                     assert rejected.value.status in (400, 403, 409)
@@ -435,11 +512,9 @@ def test_runner_requires_a_private_checkpoint_directory(tmp_path: Path) -> None:
             ArtifactClient(
                 "https://witness.internal",
                 renderer_id=IMAGE,
-                round="test-0",
                 prompt_sha256=hashlib.sha256(b"prompt").hexdigest(),
                 prompt_image=b"prompt",
                 seed=42,
-                submission_commit=COMMIT,
             ) as renderer,
             pytest.raises(ValueError, match="must be private"),
         ):
@@ -471,7 +546,7 @@ def test_managed_batch_recovers_final_save_on_replacement_without_generation(
         path = tmp_path / "prompt.png"
         path.write_bytes(fixture.image)
         prompts = [Prompt("chair", path, hashlib.sha256(fixture.image).hexdigest())]
-        settings = BatchSettings(tmp_path / "batch", 42, "fixture", submission_commit=COMMIT)
+        settings = BatchSettings(tmp_path / "batch", 42, "fixture")
         async with fixture.running():
             with fixture.client() as witness:
                 await asyncio.to_thread(witness._gateway.ensure_pod)

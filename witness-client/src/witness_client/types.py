@@ -32,7 +32,6 @@ class WitnessConfig(TypedDict):
         codex_home: Subscription login directory; defaults to CODEX_HOME or
             ~/.codex.
         codex: Codex executable name or path for login refresh; defaults to codex.
-        round: Pinned competition round.
     """
 
     witness_url: str
@@ -40,7 +39,6 @@ class WitnessConfig(TypedDict):
     state_directory: NotRequired[str]
     codex_home: NotRequired[str]
     codex: NotRequired[str]
-    round: str
 
 
 class Session(TypedDict):

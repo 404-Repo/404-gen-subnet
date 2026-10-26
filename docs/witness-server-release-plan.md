@@ -41,7 +41,7 @@ recordings with the intended compatible replay path before cutover.
 | Recovery | Interrupt client/gateway connections before and after authorization, restart services and retry storage delivery. Recovery must use retained responses for started inference; unresolved usage remains unknown. Verify ownership and fencing of replacement attempts. |
 | Replay | Native-verify every recording, replay twice with network access denied, compare output bytes and delivery order, and freshly recompute renders with the pinned renderer. Investigate timeout or pixel disagreements without relaxing validation. |
 | Accounting | Use frozen pricing and exact recorded usage. Count cached input at the full input weight and reasoning within output once. Preserve failed attempts, possible dispatches and uncertain charges. |
-| Membership and round | Check finalized membership refresh, fail-closed stale membership, hotkey ownership and nonce checks. Match the pinned round across runner, client and services; verify access closes at the generation deadline. |
+| Membership and round | Check finalized membership refresh, fail-closed stale membership, hotkey ownership and nonce checks. Verify gateway-selected round metadata and server-side round bindings; verify access closes at the generation deadline. |
 | Lifecycle and capacity | Exercise gateway recovery, dormant/active/draining workers, lost create replies, duplicate resources and confirmed exact-ID deletion. Enforce configured compute ceilings using fresh RunPod inventory. |
 | Operations | Configure TLS, stable hostname/revivor, private R2 permissions, spool persistence and bounded concurrency. Check representative miner bursts, backpressure, resource limits and failure diagnostics. |
 

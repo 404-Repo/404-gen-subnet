@@ -182,7 +182,6 @@ def test_real_tls_gate_records_large_exchange_even_when_miner_leaves(
 
     config: WitnessConfig = {
         "witness_url": "https://witness.test",
-        "round": "1",
         "proof_parameters": str(WITNESS / "params"),
         "state_directory": str(tmp_path / "client"),
     }

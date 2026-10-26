@@ -127,7 +127,7 @@ by your runtime. The runner in `miner_runtime.runner` owns generation and recove
 execution observations; `miner_runtime.validator` owns offline replay and prompt
 budget acceptance. From this checkout, install `miner-runtime` with
 `python -m pip install -e miner-runtime` and put `miner-reference` on `PYTHONPATH`. The witness
-configuration must include a pinned `round`, proof parameters,
+configuration must include the gateway URL, proof parameters,
 and a persistent private `state_directory`; see the [CPU Pod guide](../witness-gateway/PODS.md).
 The renderer URL and identity refer to an existing renderer. Authentication uses
 the named local wallet and Codex subscription, or `--api` with `OPENAI_API_KEY`.
@@ -161,12 +161,13 @@ PYTHONPATH=miner-reference python -m miner_reference.batch check \
   --parallel-prompts 4 --parallel-calls 2 --parallel-renders 1
 ```
 
-For Pod-managed submissions, pass `--submission-commit <admitted-40-character-commit>`
-and the approved worker image digest as `--renderer-id`. Previews use the Pod renderer;
-`--renderer-url` is optional in this mode. Final saving sends the returned JavaScript
+Use the approved worker image digest as `--renderer-id`. Previews use the Pod renderer
+unless `--renderer-url` selects another preview renderer. Intermediate previews stay
+local to the runner; the Pod and R2 retain only the final submission. Final saving sends the returned JavaScript
 or explicit `None` to the Pod. The Pod saves the JavaScript, prepares and saves the
 judging views, grid and embeddings, then reports success. Saving errors are returned
-for retry; only one save runs at a time per Pod. The runner checkpoints returned bytes before final-save delivery.
+for retry; only one save runs at a time per Pod. The runner checkpoints returned bytes before final-save delivery. Reuse checks the
+prompt hash, seed, renderer identity and approved source commit read from the Pod.
 Retry the same batch output directory after a lost acknowledgement or Pod replacement;
 it resumes final saving without rerunning completed generation. Infrastructure failures
 remain pending. The gateway must have matching [artifact configuration](../witness-gateway/README.md#artifact-storage).
@@ -189,7 +190,7 @@ responses; those waits do not occupy inference capture slots.
 
 An infrastructure failure leaves that prompt `pending` while other prompts
 continue. Repeat the same command to resume saved model responses and render
-outcomes. Completed prompts are skipped. Saved output and PNG hashes are checked
+outcomes. Completed generation is reused and its final output is submitted again. Saved output and PNG hashes are checked
 before reuse, and one operator holds the output directory lock. The witness owns
 inference deduplication, shared prompt accounting and uncertain dispatches; a
 failed connection never permits this runner to buy a replacement inference.

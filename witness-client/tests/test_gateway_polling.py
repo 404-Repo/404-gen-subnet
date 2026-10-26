@@ -135,7 +135,7 @@ def test_queued_connection_keeps_the_accepted_id_within_its_deadline(
 
     with httpx.Client(base_url="https://witness.test", transport=httpx.MockTransport(handler)) as http:
         gateway = PodGatewayClient(http, Keypair.create_from_uri("//Alice"),
-                                   tmp_path, 65, round_number="test-1")
+                                   tmp_path, 65)
         try:
             with pytest.raises(WitnessError) as failure:
                 gateway.ensure_pod()

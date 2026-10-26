@@ -7,7 +7,6 @@ import hashlib
 import json
 import math
 import os
-import re
 import ssl
 import threading
 import time
@@ -90,7 +89,7 @@ class WitnessClient:
 
         Args:
             config: WitnessConfig mapping or path to its JSON file. Requires
-                witness_url (HTTPS origin), proof_parameters path, and pinned round.
+                witness_url (HTTPS origin) and proof_parameters path.
                 Set state_directory to keep recovery files on persistent
                 storage; otherwise the user's local state directory is used.
             hotkey: Miner signing key loaded and managed by the caller.
@@ -111,11 +110,6 @@ class WitnessClient:
             raise ValueError(
                 "Only witness Pods are supported; use a Pod gateway and omit 'transport'"
             )
-        if (
-            re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", self._config.get("round", ""))
-            is None
-        ):
-            raise ValueError("Pod transport requires a pinned competition round")
         if (
             not isinstance(parallel_preparations, int)
             or isinstance(parallel_preparations, bool)
@@ -180,7 +174,6 @@ class WitnessClient:
             self._hotkey,
             self._state,
             delivery_timeout,
-            round_number=self._config["round"],
         )
         # Preserve the familiar Responses API spelling without an extra layer.
         self.responses = self
@@ -188,9 +181,11 @@ class WitnessClient:
     @property
     def capture_context(self) -> CaptureContext:
         """Metadata for trusted callers using capture and recovery."""
+        self._gateway.ensure_pod()
+        assert self._gateway.round_number is not None
         namespace = hashlib.sha256(
             f"{self._http.base_url}/{self._hotkey.ss58_address}/"
-            f"{self._config['round']}/{self._mode}".encode()
+            f"{self._gateway.round_number}/{self._mode}".encode()
         ).hexdigest()
         return CaptureContext(
             namespace=namespace,
@@ -509,7 +504,6 @@ class WitnessClient:
                                     "provider": f"https://{host}{path}",
                                     "proof_key_sha256": self._prover.verifying_key_sha256,
                                     "miner": self._hotkey.ss58_address,
-                                    "round": self._config["round"],
                                 }.items()
                             ):
                                 raise WitnessError(

@@ -27,8 +27,6 @@ class Judging:
             raise ValueError("Source exceeds 1 MiB")
         result = GenerationResult(failure_reason="generation_failed")
         if data is not None:
-            # Overwriting files invalidates the previous result until saving finishes.
-            await asyncio.to_thread(self.store.update_result, prompt, None)
             await asyncio.to_thread(objects.put, f"{root}.js", data, "text/javascript")
             result = GenerationResult(js=f"{root}.js", size=len(data))
             try:

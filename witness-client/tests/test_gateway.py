@@ -186,7 +186,6 @@ def test_invalid_delivery_timeout_is_rejected_before_creating_resources(
     monkeypatch.setattr(httpx, "Client", forbidden)
     config: WitnessConfig = {
         "witness_url": "https://witness.test",
-        "round": "1",
         "proof_parameters": str(PARAMS),
         "state_directory": str(tmp_path / "state"),
     }

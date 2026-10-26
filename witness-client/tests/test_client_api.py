@@ -44,7 +44,6 @@ def isolated_client(monkeypatch: pytest.MonkeyPatch) -> None:
 def config(tmp_path: Path) -> WitnessConfig:
     return {
         "witness_url": "https://witness.test",
-        "round": "1",
         "proof_parameters": str(tmp_path / "parameters"),
         "state_directory": str(tmp_path / "state"),
         "codex_home": str(tmp_path / "missing-codex-login"),
@@ -112,7 +111,6 @@ def test_pod_calls_bound_preparation_and_capture_concurrency(
     config: WitnessConfig, monkeypatch: pytest.MonkeyPatch, preparations: int, call_limit: int
 ) -> None:
     key = Keypair.create_from_mnemonic(Keypair.generate_mnemonic())
-    config = {**config, "round": "test-0"}
     reserved, preparation_full, inference_full, excess, allow_authorization, allow_completion = (
         Event() for _ in range(6)
     )
@@ -243,7 +241,6 @@ def test_pod_calls_bound_preparation_and_capture_concurrency(
 def test_pod_failed_capture_without_non_dispatch_proof_remains_unresolved(
     config: WitnessConfig, monkeypatch: pytest.MonkeyPatch, authorized: bool, not_dispatched: bool,
 ) -> None:
-    config = {**config, "round": "test-0"}
     key = Keypair.create_from_mnemonic(Keypair.generate_mnemonic())
     identifier = str(uuid.uuid4())
     clock = [1000.0]
@@ -306,9 +303,8 @@ def test_invalid_session_id_fails_before_credentials_or_allocation(
         pytest.fail("Invalid session_id must fail before loading credentials")
 
     monkeypatch.setattr("witness_client.request.load_credentials", unexpected_credentials)
-    options: WitnessConfig = {**config, "round": "test-0"}
     with WitnessClient(
-        options,
+        config,
         openai_api_key="x" * 80 if mode == "api" else None,
         subscription="codex" if mode == "codex" else None,
         hotkey=key,

@@ -24,10 +24,11 @@ def run_and_save(
         raise ValueError("Final-save directory must be private (chmod 700)")
     with checkpoint.with_suffix(checkpoint.suffix + ".lock").open("a+b") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        context = client.load_context()
         identity = {
-            "generation": client.generation,
+            "generation": dict(client.generation),
             "renderer_id": client.renderer_id,
-            "submission_commit": client.submission_commit,
+            "submission_commit": context["submission_commit"],
         }
         if checkpoint.exists():
             saved = json.loads(checkpoint.read_bytes())

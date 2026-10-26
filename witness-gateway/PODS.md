@@ -68,9 +68,20 @@ including concurrent duplicates and reuse across prompts. A different identifier
 permits fresh inference for an otherwise identical request. Serialized request
 keys and call hashes use the `request_id` field.
 
-Round is pinned at allocation/reconnect. Per-call requests contain no round,
-prompt, image hash, generation seed, source hash, URL or global invocation ordinal.
+The gateway selects its current round at allocation/reconnect and returns it in
+allocation replies. `POST /pods/start` accepts a start UUID and optional predecessor;
+miners need no round configuration. Per-call requests contain no round, prompt,
+image hash, generation seed, source hash, URL or global invocation ordinal.
 The server owns round context for access deadlines, state and evidence.
+`ArtifactClient.load_context()` reads the approved source commit through the
+authenticated `GET /artifacts/context` endpoint.
+Preview requests supply source and preview options without creating stored
+artifacts. After `generate` returns, the runner submits its JavaScript or `None`
+with the prompt hash and seed. The Pod makes the fixed final renders and supplies
+the round in storage paths. The approved source commit is read for final checkpoint checks.
+Final-save checkpoint reuse checks the prompt hash, seed, renderer and refreshed
+approved source commit.
+Source, prompt, seed and checkpoint checks remain required.
 
 ### Capture, failures and restart
 

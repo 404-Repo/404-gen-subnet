@@ -144,7 +144,9 @@ class SignedTransport:
         path = request.url.raw_path.decode("ascii")
         allowed = (
             request.method == "POST" and request.url.path in ("/render/grid", "/submissions")
-            or request.method == "GET" and re.fullmatch(r"/submissions/[0-9a-f]{64}", path) is not None
+            or request.method == "GET" and (
+                path == "/artifacts/context" or re.fullmatch(r"/submissions/[0-9a-f]{64}", path) is not None
+            )
         )
         if not allowed:
             raise ValueError("Unknown renderer route")
