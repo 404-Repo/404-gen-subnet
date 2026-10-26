@@ -65,8 +65,8 @@ The logical key is `(provider, canonical-body SHA256, request_id, session_id)`
 inside an authenticated allocation scope `(deployment, round, miner)`.
 `request_id` is an integer, default zero. Equal keys reuse the retained outcome,
 including concurrent duplicates and reuse across prompts. A different identifier
-permits fresh inference for an otherwise identical request. The retained hash/wire
-spelling is `witness_seed`; there is no public parameter with that name.
+permits fresh inference for an otherwise identical request. Serialized request
+keys and call hashes use the `request_id` field.
 
 Round is pinned at allocation/reconnect. Per-call requests contain no round,
 prompt, image hash, generation seed, source hash, URL or global invocation ordinal.
@@ -157,7 +157,7 @@ The verified bundle and its descriptor must remain in trusted validator storage.
 |---|---|---|---|
 | deployment, round, miner/scope key | Authenticated allocator/operator | Scoped R2 keys, grants, session/manifest; gateway, worker, exporter | Cross-miner/round isolation, access deadline and evidence binding |
 | provider | Client claim, verified TLS host/path | RequestKey, execution, session; capture/replay | API and subscription requests could match different routes |
-| request_sha256, witness_seed, optional session_id | Client key; body/header verified before dispatch | Call records, manifest; deduplication/replay | Changed work could reuse a capture; identical fresh requests could not be distinguished |
+| request_sha256, request_id, optional session_id | Client key; body/header verified before dispatch | Call records, manifest; deduplication/replay | Changed work could reuse a capture; identical fresh requests could not be distinguished |
 | actual request JSON | TLS request verifier | Private request.json and authorized ciphertext; exporter | Cannot check full parameters or derive requested model and canonical hash |
 | exchange_id, historical attempts | Server UUID/CAS history | Call document/index and evidence directory; recovery/export | Cannot locate/fence a particular attempt or preserve safe retry history |
 | phase, authorized, not_dispatched, failure | Worker/control writes, never miner assertions | CAS call state; capture, recovery, export | Cannot distinguish reusable result, safe retry and ambiguous paid dispatch |

@@ -6,7 +6,7 @@ from decimal import Decimal
 
 import pytest
 from support import MemoryState
-from witness_client.calls import RequestKey, canonical
+from witness_client.calls import RequestKey, canonical, request_digest
 
 from pod_gateway.budget import Budget, BudgetRejected
 from pod_gateway.models import Scope
@@ -42,6 +42,27 @@ def test_equal_calls_reuse_captures_independently_of_arrival_order() -> None:
     fresh = records.reserve(SCOPE, invocation(request_id=1))
     assert fresh.exchange_id != first.exchange_id
     assert records.reserve(SCOPE, invocation()).exchange_id == first.exchange_id
+
+
+@pytest.mark.parametrize(
+    "session_id,call_id",
+    [
+        (None, "99d30116834befb768f9b4a51af7fc7e8378aa0650396098027e556fefeef6f8"),
+        ("fixture-session", "44b0b951058a9133cfd23e907f8ffd8db661106893ea5f1cd7fcc54ec21992f4"),
+    ],
+)
+def test_request_id_wire_key_round_trips_through_call_records(session_id: str | None, call_id: str) -> None:
+    wire: dict[str, object] = {"provider": "codex", "request_sha256": request_digest(BODY), "request_id": 7}
+    if session_id is not None:
+        wire["session_id"] = session_id
+    item = RequestKey.model_validate_json(canonical(wire))
+    assert item == RequestKey.from_body("codex", BODY, request_id=7, session_id=session_id)
+    assert item.id == call_id
+    state = MemoryState()
+    call = CallRecords(state).reserve(SCOPE, item)
+    saved = CallRecords(state).load(SCOPE, call_id)
+    assert saved is not None and saved.call.exchange_id == call.exchange_id
+    assert saved.call.request.model_dump() == wire
 
 
 def test_live_usage_has_no_per_prompt_admission_limit() -> None:

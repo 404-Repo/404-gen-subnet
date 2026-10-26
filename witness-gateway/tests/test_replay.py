@@ -53,14 +53,14 @@ class Capture(WitnessClient):
             return self._saved_response(call.exchange_id)
         assigned = self.records.assign(SCOPE, key, START, "pod")
         assert self.records.claim(SCOPE, key, "pod", assigned.capture_id or "")
-        failure = self.failures.pop(key.witness_seed, "")
+        failure = self.failures.pop(key.request_id, "")
         if failure == "before":
             self.records.failed(SCOPE, key, "pod", "BeforeDispatch", exchange_id=call.exchange_id, not_dispatched=True)
             raise WitnessError("Unavailable before dispatch", call.exchange_id, source="gateway", code="capture_failed")
         self.budget.reserve(SCOPE, key, call.exchange_id, body)
         self.records.authorize(SCOPE, key, "pod", exchange_id=call.exchange_id)
         self.paid += 1
-        if self.gate is not None and key.witness_seed == 0:
+        if self.gate is not None and key.request_id == 0:
             assert self.gate.wait(2)
         if failure == "unknown":
             self.budget.settle(SCOPE, key, None)
@@ -80,7 +80,7 @@ class Capture(WitnessClient):
                         "id": "resp_fixture",
                         "status": terminal,
                         "output": [
-                            {"type": "message", "content": [{"type": "output_text", "text": str(key.witness_seed)}]}
+                            {"type": "message", "content": [{"type": "output_text", "text": str(key.request_id)}]}
                         ],
                         "usage": usage,
                     },

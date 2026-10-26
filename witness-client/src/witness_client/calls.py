@@ -44,8 +44,7 @@ class RequestKey(BaseModel):
 
     provider: Literal["api", "codex"]
     request_sha256: Digest
-    # Retained call hashes and capture manifests use this wire spelling.
-    witness_seed: int = 0
+    request_id: int = 0
     session_id: str | None = None
 
     @model_serializer
@@ -53,7 +52,7 @@ class RequestKey(BaseModel):
         value: dict[str, object] = {
             "provider": self.provider,
             "request_sha256": self.request_sha256,
-            "witness_seed": self.witness_seed,
+            "request_id": self.request_id,
         }
         if self.session_id is not None:
             value["session_id"] = self.session_id
@@ -71,7 +70,7 @@ class RequestKey(BaseModel):
         return cls(
             provider=provider,
             request_sha256=request_digest(body),
-            witness_seed=request_id,
+            request_id=request_id,
             session_id=session_id,
         )
 

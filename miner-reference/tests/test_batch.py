@@ -140,7 +140,7 @@ class Witness(WitnessClient):
                 if barrier is not None:
                     barrier.wait(timeout=5)
                 params = json.loads(body)
-                response = Calls().create(request_id=key.witness_seed, **params)
+                response = Calls().create(request_id=key.request_id, **params)
                 identifier = str(uuid.uuid4())
                 (self._state / identifier).mkdir(mode=0o700)
                 captured = CapturedResponse(identifier, 200, b"data: " + json.dumps({
