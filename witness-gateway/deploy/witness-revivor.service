@@ -8,7 +8,7 @@ Type=simple
 User=witness
 Group=caddy
 WorkingDirectory=/opt/404-subnet/witness-gateway
-Environment=PYTHONPATH=/opt/404-subnet/witness-client/src
+Environment=PYTHONPATH=/opt/404-subnet/witness-client/src:/opt/404-subnet/renderer-client/src
 EnvironmentFile=/etc/witness/revivor.env
 ExecStart=/opt/404-subnet/.venv/bin/python -m pod_gateway revivor
 Restart=always

@@ -1,6 +1,11 @@
 from __future__ import annotations
 
+import shlex
 import ssl
+import subprocess
+import sysconfig
+import venv
+from configparser import ConfigParser
 from dataclasses import replace
 from pathlib import Path
 
@@ -22,6 +27,44 @@ SECRET = b"x" * 32
 SCOPE = Scope("competition", "test-0", "5" * 48)
 GATEWAY = replace(SCOPE, round="gateway")
 SPEC = PodSpec("registry/witness@sha256:" + "a" * 64)
+
+
+def test_standalone_service_reaches_revivor_configuration(tmp_path: Path) -> None:
+    root = Path(__file__).resolve().parents[2]
+    service = ConfigParser(interpolation=None)
+    service.read(root / "witness-gateway/deploy/witness-revivor.service", encoding="utf-8")
+    config = service["Service"]
+    environment = {
+        name: value.replace("/opt/404-subnet", str(root))
+        for name, value in (entry.split("=", 1) for entry in shlex.split(config["Environment"]))
+    }
+    environment.update(PYTHONNOUSERSITE="1", PYTHONDONTWRITEBYTECODE="1")
+
+    # Reuse installed dependencies without installed repository packages or editable paths.
+    virtualenv = tmp_path / "venv"
+    venv.EnvBuilder(with_pip=False).create(virtualenv)
+    packages = next((virtualenv / "lib").glob("python*/site-packages"))
+    for dependency in Path(sysconfig.get_path("purelib")).iterdir():
+        if dependency.suffix == ".pth" or dependency.name in {
+            "renderer_client", "witness_client", "miner_runtime", "pod_gateway",
+        }:
+            continue
+        (packages / dependency.name).symlink_to(dependency, target_is_directory=dependency.is_dir())
+
+    command = shlex.split(config["ExecStart"])
+    command[0] = str(virtualenv / "bin/python")
+    result = subprocess.run(
+        command,
+        cwd=config["WorkingDirectory"].replace("/opt/404-subnet", str(root)),
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "validation errors for RevivorSettings" in result.stderr, result.stderr
+    assert "GATEWAY_TLS_CA_FILE" in result.stderr
+    assert "CADDY_CONFIG_FILE" in result.stderr
 
 
 def test_generated_upstream_certificates_pass_strict_tls_verification(tmp_path: Path) -> None:

@@ -479,8 +479,10 @@ Gateway and worker state protocols must match. Finish active captures and replac
 both roles before resuming miner traffic with an updated state protocol.
 
 On the independent host, install `requirements-pods.txt` in a private virtualenv
-and put `witness-client/src` and `miner-runtime/src` on `PYTHONPATH`. Generate upstream
-TLS material offline with `python -m pod_gateway certs /etc/witness/tls`. Set the base64
+and put `witness-client/src`, `miner-runtime/src` and `renderer-client/src` on
+`PYTHONPATH`. Run commands from `witness-gateway`, as in the systemd example below.
+Generate upstream TLS material offline with
+`python -m pod_gateway certs /etc/witness/tls`. Set the base64
 certificate chain/private key in the private environment and provide Caddy and
 the revivor with the CA file. Leaf certificates last 30 days; renew them through
 a reviewed configuration update.
