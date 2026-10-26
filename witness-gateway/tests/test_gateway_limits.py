@@ -25,6 +25,7 @@ from pod_gateway.lifecycle import Allocator
 from pod_gateway.models import Pod, PodSpec, Scope, json_bytes
 from pod_gateway.runpod import CreateRejected, CreateUnknown
 from pod_gateway.selection import Selection
+from pod_gateway.security import capability
 from pod_gateway.server import Gateway
 from pod_gateway.state import Snapshot, WriteUncertain
 
@@ -60,6 +61,7 @@ class PausedProvider(Provider):
 @asynccontextmanager
 async def running(provider: Provider, state: MemoryState, *, interval: float = 0,
                   create_interval: float = 10,
+                  poll_seconds: float = 0.02,
                   clock: list[float] | None = None) -> AsyncIterator[tuple[Gateway, TestClient[web.Request, web.Application]]]:
     membership = Membership("test", 17, "test-1")
     now = int(time.time() * 1000)
@@ -73,7 +75,7 @@ async def running(provider: Provider, state: MemoryState, *, interval: float = 0
                       deployment="test", round_number="test-1", round_end=int(time.time()) + 86400,
                       secret=b"s" * 32, proof_hash="c" * 64, pricing_hash="d" * 64, fence=lambda: True,
                       request_interval=interval, create_interval=create_interval,
-                      poll_seconds=0.02, refresh_seconds=0.01, body_timeout=0.05)
+                      poll_seconds=poll_seconds, refresh_seconds=0.01, body_timeout=0.05)
     async with TestClient(TestServer(gateway.application())) as client:
         async with asyncio.timeout(2):
             while True:
@@ -89,10 +91,12 @@ async def running(provider: Provider, state: MemoryState, *, interval: float = 0
 
 
 async def request(client: TestClient[web.Request, web.Application], key: Keypair, method: str, path: str,
-                  value: dict[str, object] | None = None) -> ClientResponse:
+                  value: dict[str, object] | None = None, *, wait: int | None = None) -> ClientResponse:
     body = b"" if value is None else json_bytes(value)
-    return await client.request(method, path, data=body,
-                                headers=hotkey_headers(key, body, method=method, path=path))
+    headers = hotkey_headers(key, body, method=method, path=path)
+    if wait is not None:
+        headers["Prefer"] = f"wait={wait}"
+    return await client.request(method, path, data=body, headers=headers)
 
 
 @asynccontextmanager
@@ -192,6 +196,93 @@ def test_cached_status_and_unauthenticated_rejection_survive_a_stalled_provider(
                 response = await request(client, KEYS[1], "POST", "/pods/start",
                                          {"round": "test-1", "start_id": SECOND})
                 assert response.status == 202 and (await response.json())["session"]["start_id"] == SECOND
+            assert provider.creates == 1
+
+    asyncio.run(scenario())
+
+
+def test_start_waits_for_worker_readiness_without_blocking_other_miners() -> None:
+    async def scenario() -> None:
+        provider = PausedProvider()
+        async with running(provider, MemoryState(), poll_seconds=30) as (gateway, client):
+            gateway.max_requests = 1
+            allocation = asyncio.create_task(request(client, KEYS[0], "POST", "/pods/start",
+                                                     {"round": "test-1", "start_id": FIRST}, wait=20))
+            scope = gateway.scope(KEYS[0].ss58_address)
+            async with asyncio.timeout(2):
+                while scope not in gateway._current or not gateway._pods:
+                    await asyncio.sleep(0.01)
+            assert not allocation.done()
+            response = await request(client, KEYS[1], "GET", "/pods/current")
+            assert response.status == 200 and (await response.json())["session"] is None
+            response = await asyncio.wait_for(request(client, KEYS[1], "POST", "/pods/start",
+                                                      {"round": "test-1", "start_id": SECOND}, wait=1), 2)
+            assert response.status == 202 and (await response.json())["session"]["start_id"] == SECOND
+            assert (await client.get("/health")).status == 200
+            pod = next(iter(provider.pods.values()))
+            async with client.ws_connect(f"/control/{scope.hotkey}/{FIRST}", headers={
+                "Authorization": "Bearer " + capability(gateway.secret, scope, FIRST), "x-witness-pod": pod.id,
+            }) as socket:
+                assert (await socket.receive_json())["type"] == "activate"
+                await socket.send_json({"type": "ready", "ready": False, "certificate": "offline-ca",
+                                        "proof_key_sha256": gateway.proof_hash, "pricing_sha256": gateway.pricing_hash})
+                await asyncio.sleep(0.05)
+                assert not allocation.done()
+                await socket.send_json({"type": "ready", "ready": True, "certificate": "offline-ca",
+                                        "proof_key_sha256": gateway.proof_hash, "pricing_sha256": gateway.pricing_hash})
+                response = await asyncio.wait_for(allocation, 2)
+                ready = await response.json()
+                assert response.status == 200 and ready["ready"] is True
+                assert ready["witness"]["pod_id"] == pod.id
+                response = await request(client, KEYS[0], "GET", "/pods/current", wait=20)
+                assert (await response.json())["witness"]["pod_id"] == pod.id
+            assert provider.creates == 1
+
+    asyncio.run(scenario())
+
+
+def test_timed_out_start_wait_resumes_the_same_pod() -> None:
+    async def scenario() -> None:
+        provider = PausedProvider()
+        async with running(provider, MemoryState(), poll_seconds=30) as (gateway, client):
+            value: dict[str, object] = {"round": "test-1", "start_id": FIRST}
+            response = await asyncio.wait_for(request(client, KEYS[0], "POST", "/pods/start", value, wait=1), 2)
+            waiting = await response.json()
+            assert response.status == 202 and waiting["ready"] is False
+            assert waiting["retry_after"] == 0
+            pod = next(iter(provider.pods.values()))
+            scope = gateway.scope(KEYS[0].ss58_address)
+            gateway.registry.peers[pod.id] = Peer(cast(web.WebSocketResponse, SimpleNamespace(closed=False)),
+                                                 scope, FIRST, pod.id, ready=True, certificate="offline-ca")
+            response = await asyncio.wait_for(request(client, KEYS[0], "POST", "/pods/start", value, wait=1), 2)
+            assert response.status == 200 and (await response.json())["witness"]["pod_id"] == pod.id
+            assert provider.creates == 1
+
+    asyncio.run(scenario())
+
+
+def test_connection_does_not_reissue_access_to_a_revoked_pod() -> None:
+    async def scenario() -> None:
+        provider = PausedProvider()
+        async with running(provider, MemoryState(), poll_seconds=30) as (gateway, client):
+            response = await request(client, KEYS[0], "POST", "/pods/start",
+                                     {"round": "test-1", "start_id": FIRST})
+            assert response.status == 202
+            await response.read()
+            scope = gateway.scope(KEYS[0].ss58_address)
+            async with asyncio.timeout(2):
+                while scope not in gateway._current or not gateway._pods:
+                    await asyncio.sleep(0.01)
+            pod = next(iter(provider.pods.values()))
+            gateway.registry.peers[pod.id] = Peer(cast(web.WebSocketResponse, SimpleNamespace(closed=False)),
+                                                 scope, FIRST, pod.id, ready=True, certificate="offline-ca")
+            response = await request(client, KEYS[0], "GET", "/pods/current", wait=1)
+            assert (await response.json())["witness"]["pod_id"] == pod.id
+            assert gateway.allocator.selection is not None
+            gateway.allocator.selection.update(pod, active=False)
+            response = await asyncio.wait_for(request(client, KEYS[0], "GET", "/pods/current", wait=1), 2)
+            result = await response.json()
+            assert result["ready"] is False and result["witness"] is None
             assert provider.creates == 1
 
     asyncio.run(scenario())

@@ -66,6 +66,13 @@ call state and rendering use that Pod directly. An active assignment is
 reused across transport reconnects and client restarts. Gateway control traffic
 does not carry generation payloads.
 
+The first operation waits for the assigned Pod to become ready. Subsequent
+operations use that Pod directly; renewing its access grant keeps the same Pod.
+If startup exceeds `delivery_timeout`, retrying the connection resumes the saved
+allocation. The client retains its allocation ID across restarts and network
+failures. A missing cached assignment does not request another Pod. A confirmed
+terminal allocation permits a replacement.
+
 Use absolute paths. Keep `state_directory` on persistent storage with mode 0700;
 recovery files use mode 0600. The default directory is
 `$XDG_STATE_HOME/404-witness-client`, or `~/.local/state/404-witness-client` when

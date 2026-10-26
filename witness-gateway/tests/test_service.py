@@ -441,6 +441,60 @@ def test_direct_call_deduplication_recovery_and_replay(tmp_path: Path, monkeypat
 
 
 
+@pytest.mark.parametrize("lost_response", [False, True])
+def test_initial_connection_waits_once_then_reuses_its_pod(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, lost_response: bool,
+) -> None:
+    async def scenario() -> None:
+        fixture = Harness(tmp_path, monkeypatch)
+        async with fixture.running():
+            fixture.gateway.poll_seconds = 30
+            with fixture.client() as witness:
+                gateway = witness._gateway
+                posted: list[str] = []
+
+                def delivered(response: httpx.Response) -> None:
+                    if response.request.url.path == "/pods/start":
+                        posted.append(json.loads(response.request.content)["start_id"])
+                        if lost_response and len(posted) == 1:
+                            response.close()
+                            raise httpx.ReadError("Fixture lost the allocation response", request=response.request)
+
+                gateway.http.event_hooks["response"].append(delivered)
+                start_id = await asyncio.wait_for(asyncio.to_thread(gateway.ensure_pod), 4.5)
+                allocations = [path for path in fixture.gateway_paths if path.startswith("/pods/")]
+                assert allocations == ["/pods/current"] + ["/pods/start"] * (2 if lost_response else 1)
+                assert set(posted) == {start_id}
+                for _ in range(5):
+                    assert await asyncio.to_thread(gateway.ensure_pod) == start_id
+                assert [path for path in fixture.gateway_paths if path.startswith("/pods/")] == allocations
+                gateway._expires = 0
+                assert await asyncio.wait_for(asyncio.to_thread(gateway.ensure_pod), 3) == start_id
+            with fixture.client("restarted") as restarted:
+                assert await asyncio.wait_for(asyncio.to_thread(restarted._gateway.ensure_pod), 3) == start_id
+            assert fixture.provider.creates == 1
+
+    asyncio.run(scenario())
+
+
+def test_connection_keeps_its_pod_when_the_gateway_cache_is_empty(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        fixture = Harness(tmp_path, monkeypatch)
+        async with fixture.running():
+            with fixture.client() as witness:
+                gateway = witness._gateway
+                start_id = await asyncio.to_thread(gateway.ensure_pod)
+                gateway._expires = 0
+                with monkeypatch.context() as cache:
+                    cache.setattr(fixture.gateway, "_cached", lambda _: None)
+                    assert await asyncio.to_thread(gateway.ensure_pod) == start_id
+                assert fixture.provider.creates == 1
+
+    asyncio.run(scenario())
+
+
 def test_direct_authorization_and_certificate_identity(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     async def scenario() -> None:
         fixture = Harness(tmp_path, monkeypatch)

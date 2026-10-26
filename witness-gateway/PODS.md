@@ -236,6 +236,15 @@ current allocation through `GET /pods/current`; a new `POST /pods/start` request
 joins the queue for a fresh Pod. R2 retains the selection fence; RunPod inventory
 remains authoritative for identity, capacity and lifecycle.
 
+Allocation requests support `Prefer: wait=N` for a readiness wait of up to twenty
+seconds per HTTP request. The response returns as soon as the selected Pod reports
+ready and its direct TLS access grant is available. A pending response supplies
+zero in `retry_after`; the client continues waiting for the same allocation
+within its delivery timeout. Renewing access validates the current selection
+before returning an endpoint. Rate-limit errors retain their `Retry-After` header.
+Requests without this preference return immediately with the configured polling
+interval. Pod startup does not repeat for subsequent model calls or renders.
+
 All copies boot dormant. A confirmed active copy wins over a late dormant copy of
 the same connection; newer connection epochs supersede older ones. Cleanup adopts a sole
 valid late create, and drains superseded or duplicate resources before deleting
@@ -347,18 +356,21 @@ Read-only selection checks share a two-second in-memory RunPod inventory cache;
 create admission and cleanup explicitly refresh it. Mutable names are updated
 with name-only PATCH requests; worker secrets and container settings are preserved.
 
-Miner allocation and status handlers use cached inventory and grants; polling
-does not trigger provider or R2 work. Background reconciliation refreshes inventory
-and issues access grants. Gateway liveness probes remain responsive during a
-provider outage; `admission_ready` reports whether the admission fence is fresh.
+Allocation and status requests without a wait preference use cached inventory
+and grants. Readiness waits request access validation from background reconciliation,
+which refreshes inventory and issues access grants. Gateway liveness probes remain
+responsive during a provider outage; `admission_ready` requires loaded inventory
+and a fresh admission fence.
 Each authenticated hotkey receives two immediate requests, then one request per
 `GATEWAY_REQUEST_INTERVAL_SECONDS` (default 10). `GATEWAY_MAX_REQUESTS` bounds active
-miner requests (default 64); authentication has four slots and bounded replay
-tracking. Bodies are limited to 16 KiB with a five-second read deadline.
+body reads and authentication work (default 64); signature verification has four
+slots and bounded replay tracking. Each hotkey has at most one active request;
+readiness waits retain that slot after authentication. Bodies are limited to
+16 KiB with a five-second read deadline.
 
-Use the matching witness client: allocation replies advertise
-`GATEWAY_POLL_SECONDS` (default 30), and clients retain the accepted start ID and
-honor that interval and HTTP `Retry-After` within their delivery deadline. Healthy
+Allocation replies without a wait preference advertise `GATEWAY_POLL_SECONDS`
+(default 30). Clients retain the accepted start ID across network failures and
+honor HTTP `Retry-After` on rate-limit and temporary-unavailability errors. Healthy
 direct Pod calls continue independently of gateway polling. Busy workers provide
 bounded local backpressure. RunPod stock and numeric Pod-count quota are not
 guaranteed. Cleanup drains excess resources, preferring dormant copies over active

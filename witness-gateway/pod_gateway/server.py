@@ -81,6 +81,7 @@ class Gateway:
         self._grant_due: dict[Scope, float] = {}
         self._retiring: set[str] = set()
         self._wake = asyncio.Event()
+        self._changed = asyncio.Event()
         self._progress: dict[Scope, Session] = {}
         self._connecting: set[str] = set()
 
@@ -210,6 +211,9 @@ class Gateway:
             request["hotkey"] = owner
             if not self._live():
                 raise AuthRejected("gateway_fenced", 503)
+            # Authentication is complete; the hotkey slot bounds the remaining request.
+            self._active -= 1
+            admitted = False
             return await handler(request)
         except AuthRejected as error:
             return web.json_response(
@@ -270,19 +274,45 @@ class Gateway:
             self.allocator.spec.fingerprint, self.allocator.spec.image,
         )
 
-    async def _reply(self, scope: Scope, session: Session | None, *, status: int = 200) -> web.Response:
+    async def _reply(self, request: web.Request, scope: Scope, session: Session | None,
+                     *, status: int = 200) -> web.Response:
+        preference = request.headers.get("Prefer", "")
+        wait = (min(20, int(preference[5:])) if preference.startswith("wait=") and
+                len(preference) <= 7 and preference[5:].isdigit() else 0)
+        deadline = time.monotonic() + wait
+        if wait and session is not None and session.phase == "allocated":
+            self._grants.pop(scope, None)
+            self._grant_due.pop(scope, None)
+            self._wake.set()
+        while True:
+            changed = self._changed
+            endpoint = await self._endpoint(scope, session)
+            remaining = deadline - time.monotonic()
+            if (not wait or endpoint is not None or session is None or
+                    session.phase in ("rejected", "lost", "retired") or remaining <= 0):
+                break
+            if request.transport is None or request.transport.is_closing():
+                break
+            if not self._live():
+                raise AuthRejected("gateway_fenced", 503)
+            with suppress(TimeoutError):
+                await asyncio.wait_for(changed.wait(), remaining)
+            session = self._session(scope, session.start_id)
+        if wait and not self._live():
+            raise AuthRejected("gateway_fenced", 503)
         pending = self.queue.pending(scope)
-        endpoint = await self._endpoint(scope, session)
+        retry_after = 0 if wait else self.poll_seconds
         return web.json_response(
             {"session": None if session is None else session.to_dict(), "witness": endpoint, "ready": endpoint is not None,
-             "round": self.round, "retry_after": self.poll_seconds,
+             "round": self.round, "retry_after": retry_after,
              "next_eligible_at": None if pending is None else pending.eligible_at},
-            status=status, headers={"Cache-Control": "no-store", "Retry-After": str(max(1, math.ceil(self.poll_seconds)))},
+            status=200 if wait and endpoint is not None else status,
+            headers={"Cache-Control": "no-store", "Retry-After": str(math.ceil(retry_after))},
         )
 
     async def current(self, request: web.Request) -> web.Response:
         scope = self._scope(request)
-        return await self._reply(scope, self._cached(scope))
+        return await self._reply(request, scope, self._cached(scope))
 
     async def start(self, request: web.Request) -> web.Response:
         data = Start.model_validate_json(await request.read())
@@ -298,27 +328,33 @@ class Gateway:
             if pending.start_id == data.start_id and pending.replaces != data.replaces:
                 raise AllocationConflict("Connection ID has different parameters")
             await self._write(partial(self.queue.enqueue, scope, data.start_id, data.replaces))
-            return await self._reply(scope, current, status=202)
+            return await self._reply(request, scope, current, status=202)
         existing = self._sessions.get((scope, data.start_id))
         if existing is not None:
             if existing.replaces != data.replaces:
                 raise AllocationConflict("Connection ID has different parameters")
-            return await self._reply(scope, existing)
+            return await self._reply(request, scope, existing)
         previous = self.queue.attempt(scope, data.start_id)
         if previous is not None:
-            return await self._reply(scope, self._sessions.get((scope, previous.start_id)) or Session(
+            return await self._reply(request, scope, self._sessions.get((scope, previous.start_id)) or Session(
                 previous.start_id, None, "rejected" if previous.rejected else "lost",
                 self.allocator.spec.fingerprint, self.allocator.spec.image,
             ), status=202)
         await self._write(partial(self.queue.enqueue, scope, data.start_id, data.replaces))
         self._wake.set()
-        return await self._reply(scope, self._cached(scope), status=202)
+        return await self._reply(request, scope, self._cached(scope), status=202)
 
     async def pod_status(self, request: web.Request) -> web.Response:
         scope, start_id = (
             self._scope(request),
             identifier(request.match_info["start_id"]),
         )
+        session = self._session(scope, start_id)
+        if session is None:
+            raise AuthRejected("session_not_found", 404)
+        return await self._reply(request, scope, session)
+
+    def _session(self, scope: Scope, start_id: str) -> Session | None:
         pending = self.queue.pending(scope)
         session = (self._cached(scope) if pending is not None and pending.start_id == start_id else
                    self._sessions.get((scope, start_id)))
@@ -328,9 +364,7 @@ class Gateway:
                 previous.start_id, None, "rejected" if previous.rejected else "lost",
                 self.allocator.spec.fingerprint, self.allocator.spec.image,
             )
-        if session is None:
-            raise AuthRejected("session_not_found", 404)
-        return await self._reply(scope, session)
+        return session
 
     async def _endpoint(self, scope: Scope, session: Session | None) -> dict[str, object] | None:
         if session is None or session.phase != "allocated" or session.pod_id is None:
@@ -351,6 +385,7 @@ class Gateway:
                 session.pod_id == pod_id and pod is not None and pod.status == "RUNNING" and pod.lifecycle == "active")
 
     def _publish(self, inventory: list[Pod]) -> None:
+        previous = self._current
         grouped: dict[Scope, list[Pod]] = {}
         self._inventory = []
         for pod in inventory:
@@ -365,6 +400,8 @@ class Gateway:
         for scope, pods in grouped.items():
             winner = self.allocator.winner(pods)
             assert winner is not None
+            if scope not in previous or previous[scope].pod_id != winner.id:
+                self._grant_due.pop(scope, None)
             self._current[scope] = winner.session()
             for pod in pods:
                 key = (scope, pod.markers["WITNESS_START_ID"])
@@ -434,11 +471,14 @@ class Gateway:
                     journal_at = time.monotonic() + self.poll_seconds
                 if now >= refresh_at:
                     self._publish(await self._run(self._worker, self.allocator.provider.list))
+                    self._loaded = True
                     refresh_at = time.monotonic() + self.refresh_seconds
                 if self._live():
                     await self._step()
             except Exception:  # noqa: BLE001 - retain durable intents without request-driven retries
                 await asyncio.sleep(max(1, self.poll_seconds))
+            self._changed.set()
+            self._changed = asyncio.Event()
             with suppress(TimeoutError):
                 await asyncio.wait_for(self._wake.wait(), min(1, self.refresh_seconds))
 
@@ -533,7 +573,6 @@ class Gateway:
     async def _lifecycle(self, _: web.Application) -> AsyncIterator[None]:
         await self._run(self._journal, self.queue.load)
         await self._run(self._journal, partial(self.queue.discard_old, self.round))
-        self._loaded = True
         tasks = [asyncio.create_task(self._fences()), asyncio.create_task(self._work())]
         try:
             yield
@@ -603,6 +642,7 @@ class Gateway:
                         and data.get("proof_key_sha256") == self.proof_hash
                         and data.get("pricing_sha256") == self.pricing_hash
                     )
+                    self._wake.set()
                     if not selected and self._fence_at > 0:
                         await socket.send_json({"type": "drain", "id": "selection"})
                 elif data.get("type") == "reply":

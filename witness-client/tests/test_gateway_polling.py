@@ -110,8 +110,9 @@ def test_delivery_respects_retry_after_within_its_deadline(
             assert calls == [0, 30]
 
 
-def test_queued_connection_keeps_the_accepted_id_and_poll_interval(
-    tmp_path: Path, clock: list[float],
+@pytest.mark.parametrize("blocking", [False, True])
+def test_queued_connection_keeps_the_accepted_id_within_its_deadline(
+    tmp_path: Path, clock: list[float], blocking: bool,
 ) -> None:
     accepted = "00000000-0000-4000-8000-000000000001"
     posted: list[str] = []
@@ -125,9 +126,11 @@ def test_queued_connection_keeps_the_accepted_id_and_poll_interval(
         else:
             assert request.url.path == f"/pods/{accepted}"
             polls.append(clock[0])
+        if blocking:
+            clock[0] += int(request.headers["Prefer"].removeprefix("wait="))
         return httpx.Response(202 if request.method == "POST" else 200, json={
             "round": "test-1", "session": {"start_id": accepted, "replaces": None, "phase": "queued"},
-            "witness": None, "retry_after": 30,
+            "witness": None, "retry_after": 0 if blocking else 30,
         })
 
     with httpx.Client(base_url="https://witness.test", transport=httpx.MockTransport(handler)) as http:
@@ -137,13 +140,14 @@ def test_queued_connection_keeps_the_accepted_id_and_poll_interval(
             with pytest.raises(WitnessError) as failure:
                 gateway.ensure_pod()
             assert failure.value.code == "pod_provisioning_pending"
-            assert polls == [30, 60] and clock[0] == 65
+            expected = [20, 40, 60] if blocking else [30, 60]
+            assert polls == expected and clock[0] == 65
             gateway.delivery_timeout = 15
             with pytest.raises(WitnessError, match="remains unresolved"):
                 gateway.ensure_pod()
-            assert clock[0] == 80 and polls == [30, 60]
+            assert clock[0] == 80 and polls == expected
         finally:
             gateway.close()
     assert len(posted) == 2 and posted[0] != accepted and posted[1] == accepted
     saved = json.loads(next(tmp_path.glob("pod-connect-*.json")).read_bytes())
-    assert saved == {"start_id": accepted, "replaces": None, "pending": True}
+    assert saved["start_id"] == accepted and saved["replaces"] is None
