@@ -20,6 +20,7 @@ COPY --from=node /usr/local/bin/node /usr/local/bin/node
 COPY --from=node /witness/node_modules /app/witness-server/verifier/node_modules
 COPY --from=proof /privateauth /app/witness-client/native/privateauth
 COPY witness-client/LICENSE witness-client/THIRD_PARTY_NOTICES.md /app/licenses/
+COPY witness-server/verifier/THIRD_PARTY_NOTICES.md /app/licenses/VERIFIER_THIRD_PARTY_NOTICES.md
 COPY witness-server/verifier/*.mjs /app/witness-server/verifier/
 COPY witness-server/verifier/params/verifying.bin /app/witness-server/verifier/params/verifying.bin
 COPY witness-server/worker/*.py witness-server/worker/verify.mjs /app/witness-server/worker/

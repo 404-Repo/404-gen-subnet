@@ -30,6 +30,7 @@ def test_build_context_excludes_credentials_and_local_state(tmp_path: Path) -> N
         "witness-client/native/go.mod",
         "witness-client/native/go.sum",
         "miner-runtime/src/miner_runtime/runner.py",
+        "witness-server/verifier/THIRD_PARTY_NOTICES.md",
         "witness-server/verifier/verify.mjs",
         "witness-server/verifier/package.json",
         "witness-server/verifier/package-lock.json",
@@ -87,6 +88,9 @@ def test_worker_image_loads_runtime_and_matching_verification_key() -> None:
         ).hexdigest()
         for name in ("LICENSE", "THIRD_PARTY_NOTICES.md")
     }
+    licences["VERIFIER_THIRD_PARTY_NOTICES.md"] = hashlib.sha256(
+        (WORKER.parent / "verifier/THIRD_PARTY_NOTICES.md").read_bytes()
+    ).hexdigest()
     script = f"""
 import hashlib
 from pathlib import Path

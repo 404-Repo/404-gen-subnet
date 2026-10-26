@@ -27,6 +27,7 @@ witness-server/verifier/**
 !witness-server/verifier/*.mjs
 witness-server/verifier/*.test.mjs
 !witness-server/verifier/package*.json
+!witness-server/verifier/THIRD_PARTY_NOTICES.md
 !witness-server/verifier/params/
 witness-server/verifier/params/**
 !witness-server/verifier/params/verifying.bin
