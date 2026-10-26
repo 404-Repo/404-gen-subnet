@@ -12,8 +12,6 @@ if TYPE_CHECKING:
 
 
 def generate(image: bytes, seed: int, witness: WitnessClient, renderer: Renderer) -> str | None:
-    """Generate JavaScript using the round seed for local candidate ordering.
-
-    Generation and replay receive the same seed to reproduce that ordering.
-    """
+    # Use the round's seed for random choices. The validator gets the same seed
+    # when it runs the miner again, so it can make the same choices.
     return run(image, seed, witness.responses, renderer)
