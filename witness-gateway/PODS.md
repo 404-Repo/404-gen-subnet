@@ -32,9 +32,9 @@ thread scheduling and alternate network access must be controlled or excluded by
 the execution host. Witness metadata and TLS proofs do not make arbitrary Python
 code deterministic or attest that it worked on a particular prompt.
 
-`run_generation` and `run_replay` are development execution-host helpers, not a
-sandbox. The submitted function sees only the supplied clients. An actual trusted
-host must keep evidence, expected outputs, observation state and the replay engine
+`miner_runtime.runner.run_generation` and `miner_runtime.validator.run_replay`
+are development execution-host helpers, not a sandbox. The submitted function sees
+only the supplied clients. An actual trusted host must keep evidence, expected outputs, observation state and the replay engine
 outside miner access, including imports, native code and child processes. These
 helpers observe the witness boundary only; they do not implement that isolation,
 a shared renderer/model scheduler, or the competition's complete validation job.
@@ -479,8 +479,8 @@ Gateway and worker state protocols must match. Finish active captures and replac
 both roles before resuming miner traffic with an updated state protocol.
 
 On the independent host, install `requirements-pods.txt` in a private virtualenv
-and put `witness-client/src` on `PYTHONPATH`. Generate upstream TLS material
-offline with `python -m pod_gateway certs /etc/witness/tls`. Set the base64
+and put `witness-client/src` and `miner-runtime/src` on `PYTHONPATH`. Generate upstream
+TLS material offline with `python -m pod_gateway certs /etc/witness/tls`. Set the base64
 certificate chain/private key in the private environment and provide Caddy and
 the revivor with the CA file. Leaf certificates last 30 days; renew them through
 a reviewed configuration update.
@@ -507,8 +507,9 @@ the authorization snapshot, sealed certificate time and final ciphertext. It
 compares the actual request, response, status, routing header and usage. Failed
 infrastructure observations retain their operator call snapshot/partial evidence;
 they cannot invent a provider result. Unknown usage can be exported and replayed,
-but cannot pass prompt budget acceptance. `ReplayWitness(bundle)` has no network,
-prover or inference client. Supply it to `run_replay` with the expected frozen
+but cannot pass prompt budget acceptance. `miner_runtime.validator.ReplayWitness(bundle)`
+has no network, prover or inference client. Supply it to
+`miner_runtime.validator.run_replay` with the expected frozen
 image, seed, submitted code and reproducible renderer.
 
 ## Validation

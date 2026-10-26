@@ -13,13 +13,18 @@ from openai.types.responses import Response, ResponseStreamEvent
 from openai.types.responses.response_create_params import ResponseCreateParamsBase
 from pydantic import BaseModel, ConfigDict, Field
 
-from .calls import Digest, RequestKey, canonical
-from .client import CapturedResponse, WitnessClient
-from .errors import ExchangePending, ReplayMismatch, WitnessError
-from .response import ModelStream, model_result
-from .state import save
+from witness_client.calls import Digest, RequestKey, canonical
+from witness_client.client import CapturedResponse, WitnessClient
+from witness_client.errors import ExchangePending, WitnessError
+from witness_client.response import ModelStream, model_result
+from witness_client.state import save
 
 T = TypeVar("T")
+
+
+class ReplayMismatch(WitnessError):
+    def __init__(self, message: str) -> None:
+        super().__init__(message, code="replay_mismatch")
 
 
 class Inputs(BaseModel):

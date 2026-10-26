@@ -30,7 +30,7 @@ Install the client development tools and native proof library as described in
 ```sh
 python -m pip install -c constraints-pods.txt -r requirements-pods.txt
 python -m mypy
-PYTHONPATH=.:../witness-client/src:../witness-server/worker:../renderer-client/src:../miner-reference python -m pytest -q
+PYTHONPATH=.:../witness-client/src:../miner-runtime/src:../witness-server/worker:../renderer-client/src:../miner-reference python -m pytest -q
 ```
 
 The tests use local provider, RunPod and storage fixtures. They do not provision

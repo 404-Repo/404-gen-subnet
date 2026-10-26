@@ -29,6 +29,7 @@ def test_build_context_excludes_credentials_and_local_state(tmp_path: Path) -> N
         "witness-client/native/main.go",
         "witness-client/native/go.mod",
         "witness-client/native/go.sum",
+        "miner-runtime/src/miner_runtime/runner.py",
         "witness-server/verifier/verify.mjs",
         "witness-server/verifier/package.json",
         "witness-server/verifier/package-lock.json",

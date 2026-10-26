@@ -103,10 +103,13 @@ keys reuse a saved outcome throughout the miner's allocation scope. Use a stable
 different `request_id` for intentionally fresh inference. It is distinct from the
 generation seed and is not sent to OpenAI as a randomness seed.
 
-The development execution host automatically observes the supplied function:
+The [miner runtime](../miner-runtime/) provides the runner and validator execution
+hosts. Install it alongside this client (`python -m pip install -e miner-runtime`
+from the repository root). The runner automatically observes the supplied function:
 
 ```python
-from witness_client import WitnessClient, run_generation
+from miner_runtime.runner import run_generation
+from witness_client import WitnessClient
 
 with WitnessClient("witness.json", hotkey=hotkey, subscription="codex") as client:
     source = run_generation(generate, frozen_png, seed, client, renderer)

@@ -55,6 +55,16 @@ else:
 
 
 @dataclass(frozen=True)
+class CaptureContext:
+    """Local capture namespace, storage and delivery settings."""
+
+    namespace: str
+    provider: Literal["api", "codex"]
+    state_directory: Path
+    delivery_timeout: float
+
+
+@dataclass(frozen=True)
 class CapturedResponse:
     exchange_id: str
     status: int
@@ -174,6 +184,28 @@ class WitnessClient:
         )
         # Preserve the familiar Responses API spelling without an extra layer.
         self.responses = self
+
+    @property
+    def capture_context(self) -> CaptureContext:
+        """Metadata for trusted callers using capture and recovery."""
+        namespace = hashlib.sha256(
+            f"{self._http.base_url}/{self._hotkey.ss58_address}/"
+            f"{self._config['round']}/{self._mode}".encode()
+        ).hexdigest()
+        return CaptureContext(
+            namespace=namespace,
+            provider=self._mode,
+            state_directory=self._state,
+            delivery_timeout=self._gateway.delivery_timeout,
+        )
+
+    def capture_response(self, key: RequestKey, body: bytes) -> CapturedResponse:
+        """Capture or recover the logical call identified by its canonical request."""
+        return self._resolve(key, body, key.session_id)
+
+    def saved_response(self, exchange_id: str) -> CapturedResponse:
+        """Read retained capture bytes without issuing inference."""
+        return self._saved_response(exchange_id)
 
     def close(self) -> None:
         """Close HTTP connections, keeping saved state available for recovery."""

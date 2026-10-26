@@ -7,9 +7,10 @@ recording and recovery contracts.
 
 Logical requests are allocation-scoped and independent of execution inputs.
 `calls.py` defines canonical identities, `client.py`/`pods.py` handle capture and
-recovery, and `observations.py` records the execution-host boundary.
-`runtime.py` invokes the submitted function; `replay.py` consumes a verified bundle
-without an inference client. See the [full contract](../witness-gateway/PODS.md#execution-and-replay-contract).
+recovery. The separate [miner runtime](../miner-runtime/) owns execution:
+`miner_runtime.runner` invokes the submitted function, `miner_runtime.observations`
+records its model-call boundary, and `miner_runtime.validator` consumes a verified
+bundle without an inference client. See the [full contract](../witness-gateway/PODS.md#execution-and-replay-contract).
 
 ## Client reference
 
@@ -34,6 +35,16 @@ that exchange using saved local job state and retrieves its durable Response.
 uncertain usage. `delivery_timeout` is a positive per-phase retry window (default
 600 seconds), independent of the server's access/capture deadlines and retention.
 Keep local state private/persistent. No SDK inference retry is enabled.
+
+Trusted hosts use `capture_context`, `capture_response(key, body)` and
+`saved_response(exchange_id)` for capture and recovery. The immutable
+`CaptureContext` supplies the provider, state directory, delivery timeout and a
+local namespace derived from the gateway origin, hotkey, round and provider.
+`capture_response` returns a `CapturedResponse` with the exchange ID, HTTP status
+and retained response bytes; an existing logical call follows the same recovery
+path as `responses.create()`. `saved_response` only reads retained local bytes.
+`miner_runtime.runner.CaptureSource` defines this interface for trusted hosts; the
+runtime owns execution paths, locking and observations.
 
 ## Build and verification
 

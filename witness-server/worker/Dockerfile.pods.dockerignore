@@ -13,6 +13,13 @@ witness-client/src/**
 !witness-client/src/witness_client/
 witness-client/src/witness_client/**
 !witness-client/src/witness_client/*.py
+!miner-runtime/
+miner-runtime/**
+!miner-runtime/src/
+miner-runtime/src/**
+!miner-runtime/src/miner_runtime/
+miner-runtime/src/miner_runtime/**
+!miner-runtime/src/miner_runtime/*.py
 !witness-server/
 witness-server/**
 !witness-server/verifier/

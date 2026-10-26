@@ -11,8 +11,8 @@ import tempfile
 from collections.abc import Callable
 from pathlib import Path
 
+from miner_runtime.observations import Execution, Schedule
 from witness_client.calls import request_digest
-from witness_client.observations import Execution, Schedule
 
 from .models import Scope, json_bytes
 from .records import CallRecords

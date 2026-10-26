@@ -18,13 +18,14 @@ from pathlib import Path
 from typing import Unpack, cast
 
 from bittensor_wallet import Wallet
+from miner_runtime.observations import Inputs
+from miner_runtime.runner import run_generation
 from openai import APIError
 from openai.types.responses import Response
 from openai.types.responses.response_create_params import ResponseCreateParamsBase
 from renderer_client import ArtifactClient, Renderer, RendererClient
-from witness_client import WitnessClient, WitnessConfig, WitnessError, run_generation
+from witness_client import WitnessClient, WitnessConfig, WitnessError
 from witness_client.calls import canonical
-from witness_client.observations import Inputs
 from witness_client.state import save
 
 from . import images, pipeline

@@ -13,13 +13,15 @@ import httpx
 import openai
 import pytest
 from bittensor_wallet import Keypair
+from miner_runtime.accounting import BudgetRejected
+from miner_runtime.observations import Inputs, ReplayMismatch
+from miner_runtime.runner import run_generation
+from miner_runtime.validator import ReplayWitness, run_replay
 from support import MemoryState
 from test_recording import PRICING, SCOPE
-from witness_client import ReplayMismatch, ReplayWitness, WitnessClient, WitnessError, run_generation, run_replay
-from witness_client.accounting import BudgetRejected
+from witness_client import WitnessClient, WitnessError
 from witness_client.calls import RequestKey, canonical
 from witness_client.client import CapturedResponse
-from witness_client.observations import Inputs
 from witness_client.pods import PodGatewayClient
 
 from pod_gateway.budget import Budget

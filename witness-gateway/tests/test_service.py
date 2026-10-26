@@ -22,6 +22,8 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import make_mocked_request
 from bittensor_wallet import Keypair
+from miner_runtime.runner import run_generation
+from miner_runtime.validator import ReplayWitness, run_replay
 from channel import Channel, WorkerChannel
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
@@ -30,7 +32,7 @@ from cryptography.x509.oid import NameOID
 from pod import PodRuntime
 from support import MemoryState, Provider
 from test_recording import PRICING
-from witness_client import ReplayWitness, WitnessClient, WitnessError, run_generation
+from witness_client import WitnessClient, WitnessError
 from witness_client.auth import hotkey_headers
 from witness_client.calls import RequestKey, canonical
 from witness_client.pods import Snapshot
@@ -420,7 +422,6 @@ def test_direct_call_deduplication_recovery_and_replay(tmp_path: Path, monkeypat
                 export_bundle(records=fixture.records, evidence=fixture.state, scope=fixture.scope,
                     execution=execution, output=output, proof_hash=fixture.proof, pricing=PRICING,
                     verify=lambda _, path: json.loads((path / "manifest.json").read_bytes()))
-                from witness_client import run_replay
                 assert run_replay(generate, fixture.image, 42, ReplayWitness(output), None) == expected
                 assert fixture.paid == 1
             await asyncio.wait_for(asyncio.to_thread(run), 45)

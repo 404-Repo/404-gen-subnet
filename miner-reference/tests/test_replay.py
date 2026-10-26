@@ -4,12 +4,14 @@ import hashlib
 from pathlib import Path
 
 import pytest
+from miner_runtime.observations import Execution
+from miner_runtime.runner import run_generation
+from miner_runtime.validator import ReplayWitness, run_replay
 from renderer_client import RecordingRenderer, ReplayRenderer
 from renderer_client import Renderer as RendererProtocol
 from test_batch import PNG, Calls, Renderer, Witness
-from witness_client import ReplayWitness, WitnessClient, run_generation, run_replay
+from witness_client import WitnessClient
 from witness_client.calls import canonical
-from witness_client.observations import Execution
 from witness_client.pods import CallView
 
 from miner_reference.pipeline import normalize, run

@@ -118,8 +118,11 @@ Pod's configured `WITNESS_MAX_CAPTURES`, and `--parallel-renders` to renderer ca
 For example, eight prompt pipelines with a 12-call limit require a witness Pod
 configured and sized for 12 concurrent captures. The Pod default is two.
 
-Use the pinned `witness_client` and `renderer_client` packages supplied by your
-runtime. From this checkout, put `miner-reference` on `PYTHONPATH`. The witness
+Use the pinned `witness_client`, `renderer_client` and `miner_runtime` packages supplied
+by your runtime. The runner in `miner_runtime.runner` owns generation and recovery of
+execution observations; `miner_runtime.validator` owns offline replay and prompt
+budget acceptance. From this checkout, install `miner-runtime` with
+`python -m pip install -e miner-runtime` and put `miner-reference` on `PYTHONPATH`. The witness
 configuration must include a pinned `round`, proof parameters,
 and a persistent private `state_directory`; see the [CPU Pod guide](../witness-gateway/PODS.md).
 The renderer URL and identity refer to an existing renderer. Authentication uses

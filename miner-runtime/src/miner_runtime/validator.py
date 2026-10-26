@@ -4,14 +4,18 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Callable
 from pathlib import Path
+from typing import TypeVar
+
+from witness_client.calls import RequestKey
+from witness_client.client import CapturedResponse, WitnessClient
+from witness_client.pods import CallView
 
 from .accounting import PromptBudget
-from .calls import RequestKey
-from .client import CapturedResponse
-from .errors import ReplayMismatch
-from .observations import Execution, Observation, ObservedWitness, Schedule
-from .pods import CallView
+from .observations import Execution, Inputs, Observation, ObservedWitness, ReplayMismatch, Schedule
+
+R = TypeVar("R")
 
 
 class ReplayWitness(ObservedWitness):
@@ -76,3 +80,19 @@ class ReplayWitness(ObservedWitness):
                 not_dispatched=call.not_dispatched and not call.authorized,
             )
         self.budget.accept()
+
+
+def run_replay(
+    generate: Callable[[bytes, int, WitnessClient, R], str | None],
+    image: bytes,
+    seed: int,
+    witness: ReplayWitness,
+    renderer: R,
+) -> str | None:
+    if Inputs.supplied(image, seed) != witness.schedule.execution.inputs:
+        raise ReplayMismatch("Replay image or generation seed differs")
+    output = generate(image, seed, witness, renderer)
+    if output is not None and not isinstance(output, str):
+        raise ValueError("generate() must return JavaScript or None")
+    witness.finish(output)
+    return output

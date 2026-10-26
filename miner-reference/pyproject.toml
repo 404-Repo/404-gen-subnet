@@ -1,6 +1,6 @@
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = [".", "../witness-client/src"]
+pythonpath = [".", "../witness-client/src", "../miner-runtime/src"]
 
 [tool.ruff]
 target-version = "py311"
@@ -10,4 +10,4 @@ line-length = 120
 python_version = "3.11"
 strict = true
 files = ["main.py", "miner_reference", "tests"]
-mypy_path = ["../witness-client/src"]
+mypy_path = ["../witness-client/src", "../miner-runtime/src"]

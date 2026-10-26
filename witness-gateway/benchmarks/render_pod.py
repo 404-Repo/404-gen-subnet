@@ -256,7 +256,7 @@ async def main():
         else:raise web.HTTPBadRequest()
         event('fault',kind=kind,count=count);return web.json_response({'count':count})
     async def export(request):
-        from witness_client.observations import Execution
+        from miner_runtime.observations import Execution
         execution=Execution.model_validate((await request.json())['execution'])
         key=execution.inputs.id
         path=ROOT/'executions'/f'{key}.json';path.parent.mkdir(exist_ok=True)
