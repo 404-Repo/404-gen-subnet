@@ -11,7 +11,7 @@ from pod_gateway.admission import Admission, CapacityReached, CreateDeferred, St
 from pod_gateway.lifecycle import Allocator
 from pod_gateway.models import Pod
 from pod_gateway.runpod import CreateUnknown
-from pod_gateway.state import Snapshot, WriteUncertain
+from pod_gateway.state import Snapshot, StateConflict, WriteUncertain
 
 
 def test_capacity_uses_actual_inventory_and_frees_when_the_pod_disappears() -> None:
@@ -90,7 +90,7 @@ def test_concurrent_miners_share_serialized_provider_capacity_admission() -> Non
 
 
 def test_retries_with_fresh_ids_keep_one_fifo_allocation() -> None:
-    queue = StartQueue(MemoryState(), SCOPE.deployment, cooldown=1800, interval=0)
+    queue = StartQueue(MemoryState(), SCOPE.deployment, interval=0)
     provider = Provider()
     allocator = Allocator(provider, Drain(), SPEC)
     allocator.before_create = queue.authorize
@@ -106,25 +106,25 @@ def test_retries_with_fresh_ids_keep_one_fifo_allocation() -> None:
     assert provider.creates == 2
 
 
-def test_creation_cooldown_survives_restart_and_round_change() -> None:
+def test_fresh_allocations_share_only_global_pacing_across_restart_and_round_change() -> None:
     state, now = MemoryState(), [1000.0]
     queue = StartQueue(state, SCOPE.deployment, clock=lambda: now[0])
     queue.enqueue(SCOPE, FIRST, None)
     queue.authorize(SCOPE, FIRST)
     queue.complete(SCOPE, FIRST)
-    now[0] += 100
+    now[0] += 1
     restarted = StartQueue(state, SCOPE.deployment, clock=lambda: now[0])
     restarted.load()
     next_round = replace(SCOPE, round="test-1")
     restarted.enqueue(next_round, SECOND, FIRST)
     with pytest.raises(CreateDeferred) as waiting:
         restarted.authorize(next_round, SECOND)
-    assert waiting.value.retry_at == 2800
-    now[0] = 2800
+    assert waiting.value.retry_at == 1010
+    now[0] = 1010
     restarted.authorize(next_round, SECOND)
 
 
-def test_unknown_create_cannot_be_repeated_after_restart_or_cooldown() -> None:
+def test_unknown_create_cannot_be_repeated_after_restart_or_elapsed_time() -> None:
     class Unknown(Provider):
         def create(self, body: dict[str, object]) -> Pod:
             self.creates += 1
@@ -145,6 +145,35 @@ def test_unknown_create_cannot_be_repeated_after_restart_or_cooldown() -> None:
     with pytest.raises(CreateDeferred):
         allocator.acquire(SCOPE, FIRST)
     assert provider.creates == 1
+
+
+def test_older_completed_requests_cannot_create_again_after_restart() -> None:
+    state = MemoryState()
+    queue = StartQueue(state, SCOPE.deployment, interval=0)
+    for start_id in (FIRST, SECOND):
+        queue.enqueue(SCOPE, start_id, None)
+        queue.authorize(SCOPE, start_id)
+        queue.complete(SCOPE, start_id)
+    restarted = StartQueue(state, SCOPE.deployment, interval=0)
+    restarted.load()
+    assert restarted.attempt(SCOPE, FIRST) is not None
+    with pytest.raises(StateConflict):
+        restarted.enqueue(SCOPE, FIRST, None)
+
+
+def test_a_request_joined_to_a_pending_allocation_cannot_create_after_completion() -> None:
+    state = MemoryState()
+    queue = StartQueue(state, SCOPE.deployment, interval=0)
+    first = queue.enqueue(SCOPE, FIRST, None)
+    assert queue.enqueue(SCOPE, SECOND, None) == first
+    queue.authorize(SCOPE, FIRST)
+    queue.complete(SCOPE, FIRST)
+    restarted = StartQueue(state, SCOPE.deployment, interval=0)
+    restarted.load()
+    attempt = restarted.attempt(SCOPE, SECOND)
+    assert attempt is not None and attempt.start_id == FIRST and attempt.submitted
+    with pytest.raises(StateConflict):
+        restarted.enqueue(SCOPE, SECOND, None)
 
 
 def test_restored_unknown_create_still_occupies_capacity() -> None:

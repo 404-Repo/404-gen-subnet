@@ -86,7 +86,6 @@ async def application(settings: GatewaySettings, worker_spec: PodSpec) -> web.Ap
         proof_hash=hashlib.sha256((settings.parameters / "verifying.bin").read_bytes()).hexdigest(),
         fence=fence,
         pricing_hash=hashlib.sha256(settings.pricing_path.read_bytes()).hexdigest(),
-        create_cooldown=settings.create_cooldown,
         create_interval=settings.create_interval,
         request_interval=settings.request_interval,
         poll_seconds=settings.poll_seconds,

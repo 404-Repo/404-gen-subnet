@@ -358,7 +358,7 @@ class Harness:
             proof_hash=self.proof,
             fence=lambda: True,
             pricing_hash=hashlib.sha256(PRICING).hexdigest(),
-            request_interval=0, poll_seconds=0.05, create_cooldown=0, create_interval=0, refresh_seconds=0.02,
+            request_interval=0, poll_seconds=0.05, create_interval=0, refresh_seconds=0.02,
         )
 
         @web.middleware
@@ -611,38 +611,6 @@ def test_direct_renderer_finishes_before_drain_ack(tmp_path: Path, monkeypatch: 
                 release.set()
                 assert await asyncio.wait_for(result, 5) == b"render completed"
                 assert runtime.rendering == 0 and runtime.tick()
-
-    asyncio.run(scenario())
-
-
-def test_deliberate_replacement_waits_for_capture_without_repeating_it(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    async def scenario() -> None:
-        fixture = Harness(tmp_path, monkeypatch)
-        async with fixture.running():
-            with fixture.client() as witness:
-                gateway = witness._gateway
-                gateway.delivery_timeout = gateway._allocation.delivery_timeout = 20
-                old_start = await asyncio.to_thread(gateway.ensure_pod)
-                fixture.allow_response.clear()
-                call = asyncio.create_task(
-                    asyncio.to_thread(witness.create, model="fixture", input="image")
-                )
-                assert await asyncio.to_thread(fixture.dispatched.wait, 5)
-                await asyncio.to_thread(fixture.gateway.queue.enqueue, fixture.scope,
-                                        "00000000-0000-4000-8000-000000000002", old_start)
-                replacement = await asyncio.to_thread(
-                    fixture.allocator.acquire, fixture.scope, "00000000-0000-4000-8000-000000000002", replaces=old_start
-                )
-                assert replacement.phase == "draining" and fixture.provider.creates == 1
-                assert not fixture.runtimes[0].selected() and not fixture.runtimes[0].tick()
-                fixture.allow_response.set()
-                result = await asyncio.wait_for(call, 25)
-                gateway._expires = 0
-                assert await asyncio.to_thread(gateway.ensure_pod) != old_start
-                assert (await asyncio.to_thread(witness.resume, exchange_id(witness))).output_text == result.output_text
-                assert fixture.provider.creates == 2 and fixture.paid == 1
 
     asyncio.run(scenario())
 

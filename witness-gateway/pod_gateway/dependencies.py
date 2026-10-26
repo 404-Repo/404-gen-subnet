@@ -76,7 +76,6 @@ def gateway_spec(settings: Settings) -> PodSpec:
         "WITNESS_MAX_PODS",
         "WITNESS_MAX_CAPTURES",
         "WITNESS_IDLE_SECONDS",
-        "WITNESS_CREATE_COOLDOWN_SECONDS",
         "GATEWAY_CREATE_INTERVAL_SECONDS",
         "GATEWAY_REQUEST_INTERVAL_SECONDS",
         "GATEWAY_POLL_SECONDS",

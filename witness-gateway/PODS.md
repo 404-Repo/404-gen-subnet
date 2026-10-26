@@ -220,25 +220,24 @@ Lifecycle states are suffixes of the RunPod name: pending, active, draining and
 drained. Immutable environment markers include ownership, the connection epoch,
 predecessor, pinned specification and dormant boot policy.
 
-Replacement revokes the durable R2 selection fence and marks the actual old resource as draining before asking the worker
+Idle retirement revokes the durable R2 selection fence and marks the actual old resource as draining before asking the worker
 to stop accepting work. Capture and evidence uploads must finish before an
-authenticated worker reports permanent drain. Only then is the resource marked
-drained and deleted. EXITED and unrecoverable ERROR Pods do not require a worker
-drain acknowledgement; their unresolved calls stay unresolved. Replacement
+authenticated worker reports permanent drain. Only then is an idle resource marked
+drained and deleted. A new miner allocation revokes and terminates that miner's
+existing worker Pods, including previous rounds, without waiting for a worker drain
+acknowledgement. Unresolved calls stay unresolved. Creation of the replacement
 requires an exact-ID GET 404 after DELETE.
 
-The gateway serializes worker create admission and retains only short-lived
-in-flight attempts in memory. A lost create reply is joined for up to ten minutes;
-an expired attempt reports lost rather than claiming a Pod exists. On restart,
-RunPod inventory is queried directly. The client also recovers when its previous
-Pod ID returns 404. A healthy current allocation is reattached across client
-restarts and transport reconnects. R2 retains a small selection fence; RunPod
-inventory remains authoritative for identity, capacity and lifecycle.
+The gateway serializes worker create admission and records requests in R2 before
+creating Pods. Delivery retries join the same allocation across gateway restarts.
+On restart, RunPod inventory is queried directly. The client also recovers when
+its previous Pod ID returns 404. Installed clients can discover and reattach the
+current allocation through `GET /pods/current`; a new `POST /pods/start` request
+joins the queue for a fresh Pod. R2 retains the selection fence; RunPod inventory
+remains authoritative for identity, capacity and lifecycle.
 
-A restarted coordinator can repeat a create whose result is still invisible.
-Physical Pod creation is therefore not claimed to be exactly once. All copies
-boot dormant. A confirmed active copy wins over a late dormant copy of the same
-connection; newer connection epochs supersede older ones. Cleanup adopts a sole
+All copies boot dormant. A confirmed active copy wins over a late dormant copy of
+the same connection; newer connection epochs supersede older ones. Cleanup adopts a sole
 valid late create, and drains superseded or duplicate resources before deleting
 them. Durable R2 inference claims still prevent another paid dispatch of a call.
 
@@ -320,10 +319,10 @@ worker count limit. RunPod hourly costs remain available as reporting metadata.
 
 Each registered hotkey has at most one queued connection intent. Repeated starts,
 including fresh IDs from other clients, return that intent without changing its
-FIFO position. Starts for a healthy current Pod return that Pod. New creates and
-known provider rejections consume a per-hotkey allowance for
-`WITNESS_CREATE_COOLDOWN_SECONDS` (default 1800), including across gateway restarts
-and round changes. Eligible intents share a global minimum create interval of
+FIFO position. When its turn arrives, an intent terminates the miner's existing
+worker Pods and creates a fresh Pod, regardless of their health. There is no
+per-miner replacement budget or cooldown. Intents share a global minimum create
+interval of
 `GATEWAY_CREATE_INTERVAL_SECONDS` (default 10). `GATEWAY_MAX_QUEUE` bounds waiting
 intents (default 1024).
 
@@ -335,11 +334,12 @@ starts do not postpone ready workers or access renewal.
 The R2 journal at `pod-admission/v1/<deployment>.json` records authorization before
 the provider POST. If the POST or authorization write has an uncertain outcome, the
 gateway waits for the original Pod to appear; it never repeats the create merely
-because a timeout, cooldown or restart elapsed. That unresolved create continues
+because a timeout or restart elapsed. That unresolved create continues
 to count against capacity. An operator must reconcile provider inventory before
 manually clearing an unresolved admission record. Confirmed lost Pods release
-their physical capacity, while their hotkey's creation cooldown still applies.
-Known terminal outcomes retry journal completion without another provider POST.
+their physical capacity. Known terminal outcomes retry journal completion without
+another provider POST. Request IDs, including requests joined to an existing queue
+entry, remain idempotent for the round after later allocations and gateway restarts.
 
 One gateway coordinates worker creation; a host file lock allows one revivor
 process on the independent host. Multiple supervisor hosts are not supported.

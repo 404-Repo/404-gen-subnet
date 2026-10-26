@@ -83,6 +83,7 @@ class CreateAttempt(BaseModel):
     start_id: str
     at: int = Field(ge=0)
     rejected: bool = False
+    submitted: bool = True
 
 
 class QueueState(BaseModel):
@@ -95,18 +96,18 @@ class QueueState(BaseModel):
     last_create_at: int | None = None
     pending: dict[str, PendingStart] = Field(default_factory=dict)
     attempts: dict[str, CreateAttempt] = Field(default_factory=dict)
+    history: dict[str, dict[str, CreateAttempt]] = Field(default_factory=dict)
 
 
 class StartQueue:
-    """One durable FIFO intent and creation allowance per registered hotkey."""
+    """One durable FIFO intent per hotkey, with idempotent create attempts."""
 
-    def __init__(self, store: StateStore, deployment: str, *, cooldown: float = 1800,
-                 interval: float = 10, capacity: int = 1024,
+    def __init__(self, store: StateStore, deployment: str, *, interval: float = 10, capacity: int = 1024,
                  clock: Callable[[], float] = time.time) -> None:
-        if cooldown < 0 or interval < 0 or not 1 <= capacity <= 4096:
+        if interval < 0 or not 1 <= capacity <= 4096:
             raise ValueError("Invalid allocation queue bounds")
         self.store, self.deployment = store, deployment
-        self.cooldown, self.interval, self.capacity, self.clock = cooldown, interval, capacity, clock
+        self.interval, self.capacity, self.clock = interval, capacity, clock
         self.key = f"pod-admission/v1/{deployment}.json"
         self._state = QueueState(deployment=deployment)
         self._read_lock, self._write_lock = threading.Lock(), threading.Lock()
@@ -121,9 +122,16 @@ class StartQueue:
             identifier(entry.start_id)
             if entry.replaces is not None:
                 identifier(entry.replaces)
+            state.pending[hotkey] = entry.model_copy(update={"eligible_at": min(entry.eligible_at, int(self.clock()))})
         for hotkey, attempt in state.attempts.items():
             Scope(self.deployment, attempt.round, hotkey)
             identifier(attempt.start_id)
+            state.history.setdefault(hotkey, {}).setdefault(attempt.start_id, attempt)
+        for hotkey, attempts in state.history.items():
+            for start_id, attempt in attempts.items():
+                Scope(self.deployment, attempt.round, hotkey)
+                identifier(start_id)
+                identifier(attempt.start_id)
         return state, None if saved is None else saved.etag
 
     def load(self) -> None:
@@ -157,9 +165,14 @@ class StartQueue:
             entry = self._state.pending.get(scope.hotkey)
             return entry if entry is not None and entry.round == scope.round else None
 
-    def attempt(self, scope: Scope) -> CreateAttempt | None:
+    def attempt(self, scope: Scope, start_id: str | None = None) -> CreateAttempt | None:
         with self._read_lock:
-            attempt = self._state.attempts.get(scope.hotkey)
+            attempt = (self._state.attempts.get(scope.hotkey) if start_id is None else
+                       self._state.history.get(scope.hotkey, {}).get(start_id))
+            if attempt is not None and attempt.round != scope.round:
+                return None
+            if attempt is not None and start_id is not None:
+                attempt = self._state.history.get(scope.hotkey, {}).get(attempt.start_id, attempt)
             return attempt if attempt is not None and attempt.round == scope.round else None
 
     def unresolved(self) -> set[tuple[Scope, str]]:
@@ -170,7 +183,7 @@ class StartQueue:
         if replaces is not None:
             identifier(replaces)
         cached = self.pending(scope)
-        if cached is not None:
+        if cached is not None and (cached.start_id == start_id or self.attempt(scope, start_id) is not None):
             return cached
 
         def change(state: QueueState) -> PendingStart:
@@ -178,19 +191,26 @@ class StartQueue:
             if current is not None:
                 if current.round != scope.round:
                     raise CreateDeferred(self.clock() + 60)
+                previous = state.history.get(scope.hotkey, {}).get(start_id)
+                if previous is None or previous.round != scope.round:
+                    state.history.setdefault(scope.hotkey, {})[start_id] = CreateAttempt(
+                        round=scope.round, start_id=current.start_id, at=math.ceil(self.clock()), submitted=False,
+                    )
                 return current
             if len(state.pending) >= self.capacity:
                 raise CapacityReached("Allocation queue is full")
-            previous = state.attempts.get(scope.hotkey)
-            if previous is not None and (previous.round, previous.start_id) == (scope.round, start_id):
+            previous = state.history.get(scope.hotkey, {}).get(start_id)
+            if previous is not None and previous.round == scope.round:
                 raise StateConflict("Connection has already been attempted")
             state.sequence += 1
             entry = PendingStart(
                 round=scope.round, start_id=start_id, replaces=replaces, sequence=state.sequence,
-                eligible_at=max(int(self.clock()), 0 if previous is None or self.cooldown == 0 else
-                                math.ceil(previous.at + self.cooldown)),
+                eligible_at=int(self.clock()),
             )
             state.pending[scope.hotkey] = entry
+            state.history.setdefault(scope.hotkey, {})[start_id] = CreateAttempt(
+                round=scope.round, start_id=start_id, at=math.ceil(self.clock()), submitted=False,
+            )
             return entry
 
         return self._change(change)
@@ -201,15 +221,15 @@ class StartQueue:
             now = self.clock()
             if entry is None or (entry.round, entry.start_id) != (scope.round, start_id) or entry.submitted:
                 raise CreateDeferred(now + 60)
-            previous = state.attempts.get(scope.hotkey)
-            due = max(entry.eligible_at, 0 if previous is None or self.cooldown == 0 else previous.at + self.cooldown,
-                      0 if state.last_create_at is None or self.interval == 0 else state.last_create_at + self.interval)
+            previous = state.history.get(scope.hotkey, {}).get(start_id)
+            due = 0 if state.last_create_at is None or self.interval == 0 else state.last_create_at + self.interval
             if now < due:
                 raise CreateDeferred(due)
-            if previous is not None and (previous.round, previous.start_id) == (scope.round, start_id):
+            if previous is not None and previous.round == scope.round and previous.submitted:
                 raise StateConflict("Connection has already been attempted")
             state.pending[scope.hotkey] = entry.model_copy(update={"submitted": True})
             state.attempts[scope.hotkey] = CreateAttempt(round=scope.round, start_id=start_id, at=math.ceil(now))
+            state.history.setdefault(scope.hotkey, {})[start_id] = state.attempts[scope.hotkey]
             state.last_create_at = math.ceil(now)
 
         self._change(change)
@@ -222,6 +242,7 @@ class StartQueue:
             previous = state.attempts.get(scope.hotkey)
             if rejected and previous is not None and (previous.round, previous.start_id) == (scope.round, start_id):
                 state.attempts[scope.hotkey] = previous.model_copy(update={"rejected": True})
+                state.history.setdefault(scope.hotkey, {})[start_id] = state.attempts[scope.hotkey]
 
         self._change(change)
 
@@ -242,6 +263,9 @@ class StartQueue:
             state.pending = {hotkey: entry for hotkey, entry in state.pending.items()
                              if entry.round == round_number or entry.submitted}
             state.attempts = {hotkey: attempt for hotkey, attempt in state.attempts.items()
-                              if attempt.round == round_number or self.clock() < attempt.at + self.cooldown}
+                              if attempt.round == round_number}
+            state.history = {hotkey: {start_id: attempt for start_id, attempt in attempts.items()
+                                     if attempt.round == round_number}
+                             for hotkey, attempts in state.history.items()}
 
         self._change(change)

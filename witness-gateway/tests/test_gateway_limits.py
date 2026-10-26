@@ -59,6 +59,7 @@ class PausedProvider(Provider):
 
 @asynccontextmanager
 async def running(provider: Provider, state: MemoryState, *, interval: float = 0,
+                  create_interval: float = 10,
                   clock: list[float] | None = None) -> AsyncIterator[tuple[Gateway, TestClient[web.Request, web.Application]]]:
     membership = Membership("test", 17, "test-1")
     now = int(time.time() * 1000)
@@ -71,7 +72,8 @@ async def running(provider: Provider, state: MemoryState, *, interval: float = 0
     gateway = Gateway(allocator=allocator, auth=Authenticator(membership), registry=registry,
                       deployment="test", round_number="test-1", round_end=int(time.time()) + 86400,
                       secret=b"s" * 32, proof_hash="c" * 64, pricing_hash="d" * 64, fence=lambda: True,
-                      request_interval=interval, poll_seconds=0.02, refresh_seconds=0.01, body_timeout=0.05)
+                      request_interval=interval, create_interval=create_interval,
+                      poll_seconds=0.02, refresh_seconds=0.01, body_timeout=0.05)
     async with TestClient(TestServer(gateway.application())) as client:
         async with asyncio.timeout(2):
             while True:
@@ -187,6 +189,9 @@ def test_cached_status_and_unauthenticated_rejection_survive_a_stalled_provider(
                 assert response.status == 401
                 assert (await client.get("/health")).status == 200
                 assert (await request(client, KEYS[1], "GET", "/pods/current")).status == 200
+                response = await request(client, KEYS[1], "POST", "/pods/start",
+                                         {"round": "test-1", "start_id": SECOND})
+                assert response.status == 202 and (await response.json())["session"]["start_id"] == SECOND
             assert provider.creates == 1
 
     asyncio.run(scenario())
@@ -209,28 +214,36 @@ def test_retries_from_multiple_clients_preserve_fifo_and_create_one_pod_each() -
                                      {"round": "test-1", "start_id": SECOND})
             assert response.status == 202
             await response.read()
+            ids = [str(uuid.uuid4()) for _ in range(12)]
             retries = await asyncio.gather(*(request(client, KEYS[0], "POST", "/pods/start",
-                {"round": "test-1", "start_id": str(uuid.uuid4())}) for _ in range(12)))
-            for response in retries:
+                {"round": "test-1", "start_id": start_id}) for start_id in ids))
+            joined = []
+            for start_id, response in zip(ids, retries, strict=True):
                 assert response.status in (202, 429)
                 reply = await response.json()
                 if response.status == 202:
                     assert reply["session"]["start_id"] == FIRST
+                    joined.append(start_id)
             provider.release.set()
             async with asyncio.timeout(12):
                 while provider.creates != 2:
                     await asyncio.sleep(0.01)
             assert [pod.markers["WITNESS_HOTKEY"] for pod in provider.pods.values()] == [key.ss58_address for key in KEYS]
+            assert joined
+            for start_id in joined:
+                response = await request(client, KEYS[0], "POST", "/pods/start",
+                                         {"round": "test-1", "start_id": start_id})
+                assert (await response.json())["session"]["start_id"] == FIRST
             for _ in range(3):
                 response = await request(client, KEYS[0], "POST", "/pods/start",
-                                         {"round": "test-1", "start_id": str(uuid.uuid4()), "replaces": FIRST})
+                                         {"round": "test-1", "start_id": FIRST})
                 assert (await response.json())["session"]["start_id"] == FIRST
             assert provider.creates == 2
 
     asyncio.run(scenario())
 
 
-def test_a_lost_pod_waits_for_the_creation_cooldown() -> None:
+def test_a_lost_pod_can_be_replaced_at_the_next_global_create_slot() -> None:
     async def scenario() -> None:
         provider, clock = Provider(), [1000.0]
         async with running(provider, MemoryState(), clock=clock) as (_, client):
@@ -254,13 +267,95 @@ def test_a_lost_pod_waits_for_the_creation_cooldown() -> None:
             response = await request(client, KEYS[0], "POST", "/pods/start",
                                      {"round": "test-1", "start_id": SECOND, "replaces": FIRST})
             reply = await response.json()
-            assert reply["session"]["phase"] == "queued" and reply["next_eligible_at"] == 2800
+            assert reply["session"]["phase"] == "queued" and reply["next_eligible_at"] == 1000
             await asyncio.sleep(0.05)
             assert provider.creates == 1
-            clock[0] = 2800
+            clock[0] = 1010
             async with asyncio.timeout(2):
                 while provider.creates != 2:
                     await asyncio.sleep(0.01)
+
+    asyncio.run(scenario())
+
+
+def test_new_requests_replace_running_pods_and_old_delivery_retries_survive_restart() -> None:
+    async def scenario() -> None:
+        provider, state = Provider(), MemoryState()
+        async with running(provider, state, create_interval=0) as (_, client):
+            for start_id in (FIRST, SECOND):
+                response = await request(client, KEYS[0], "POST", "/pods/start",
+                                         {"round": "test-1", "start_id": start_id})
+                assert response.status == 202 and (await response.json())["session"]["start_id"] == start_id
+                async with asyncio.timeout(2):
+                    while True:
+                        response = await request(client, KEYS[0], "GET", f"/pods/{start_id}")
+                        if (await response.json())["session"]["phase"] == "allocated":
+                            break
+                        await asyncio.sleep(0.01)
+            assert provider.creates == 2 and len(provider.pods) == 1
+            assert next(iter(provider.pods.values())).markers["WITNESS_START_ID"] == SECOND
+        async with running(provider, state, create_interval=0) as (_, client):
+            response = await request(client, KEYS[0], "POST", "/pods/start",
+                                     {"round": "test-1", "start_id": FIRST})
+            reply = await response.json()
+            assert response.status == 202 and reply["session"]["start_id"] == FIRST
+            assert reply["session"]["phase"] == "lost"
+            response = await request(client, KEYS[0], "GET", f"/pods/{FIRST}")
+            assert response.status == 200 and (await response.json())["session"]["phase"] == "lost"
+            response = await request(client, KEYS[0], "POST", "/pods/start",
+                                     {"round": "test-1", "start_id": SECOND})
+            assert response.status == 200 and (await response.json())["session"]["start_id"] == SECOND
+            assert provider.creates == 2 and len(provider.pods) == 1
+
+    asyncio.run(scenario())
+
+
+def test_a_previous_round_pod_releases_capacity_for_the_same_miner() -> None:
+    async def scenario() -> None:
+        provider, clock = Provider(), [1000.0]
+        async with coordinator(provider, MemoryState(), clock) as gateway:
+            gateway.allocator.admission = Admission(max_pods=1)
+            scope = gateway.scope(KEYS[0].ss58_address)
+            old = provider.create(gateway.allocator.spec.body(replace(scope, round="test-0"), FIRST))
+            gateway._publish(provider.list())
+            gateway.queue.enqueue(scope, SECOND, None)
+            await gateway._step()
+            assert old.id not in provider.pods
+            assert [pod.scope() for pod in provider.pods.values()] == [scope]
+
+    asyncio.run(scenario())
+
+
+def test_replacement_keeps_fifo_while_old_pod_deletion_is_unconfirmed() -> None:
+    class SlowDelete(Provider):
+        hold = True
+
+        def delete(self, pod_id: str) -> None:
+            if not self.hold:
+                super().delete(pod_id)
+
+    async def scenario() -> None:
+        provider, clock = SlowDelete(), [1000.0]
+        async with coordinator(provider, MemoryState(), clock) as gateway:
+            first, second = (gateway.scope(key.ss58_address) for key in KEYS)
+            old = provider.create(gateway.allocator.spec.body(first, FIRST))
+            gateway._publish(provider.list())
+            gateway.queue.enqueue(first, SECOND, None)
+            gateway.queue.enqueue(second, FIRST, None)
+            await gateway._step()
+            clock[0] += 1
+            gateway._publish(provider.list())
+            await gateway._step()
+            assert provider.creates == 1 and old.id in provider.pods
+            provider.hold = False
+            clock[0] = 1030
+            gateway._publish(provider.list())
+            await gateway._step()
+            assert old.id not in provider.pods and provider.creates == 2
+            clock[0] += 10
+            gateway._publish(provider.list())
+            await gateway._step()
+            assert [pod.scope() for pod in provider.pods.values()] == [first, second]
 
     asyncio.run(scenario())
 

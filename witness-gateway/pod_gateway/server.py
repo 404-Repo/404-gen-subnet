@@ -43,7 +43,7 @@ class Gateway:
     def __init__(self, *, allocator: Allocator, auth: Authenticator, registry: Registry,
                  deployment: str, round_number: str, round_end: int, secret: bytes,
                  proof_hash: str, fence: Callable[[], bool], pricing_hash: str,
-                 create_cooldown: float = 1800, create_interval: float = 10,
+                 create_interval: float = 10,
                  request_interval: float = 10, poll_seconds: float = 30,
                  max_requests: int = 64, max_queue: int = 1024,
                  refresh_seconds: float = 2, body_timeout: float = 5) -> None:
@@ -56,7 +56,7 @@ class Gateway:
         if (request_interval < 0 or poll_seconds <= 0 or refresh_seconds <= 0 or
                 body_timeout <= 0 or max_requests < 1):
             raise ValueError("Invalid gateway request bounds")
-        self.queue = StartQueue(allocator.selection.store, deployment, cooldown=create_cooldown,
+        self.queue = StartQueue(allocator.selection.store, deployment,
                                 interval=create_interval, capacity=max_queue, clock=allocator.clock)
         allocator.before_create = self._authorize_create
         allocator.pending_creates = self.queue.unresolved
@@ -81,7 +81,6 @@ class Gateway:
         self._grant_due: dict[Scope, float] = {}
         self._retiring: set[str] = set()
         self._wake = asyncio.Event()
-        self._booted = time.monotonic()
         self._progress: dict[Scope, Session] = {}
         self._connecting: set[str] = set()
 
@@ -298,21 +297,19 @@ class Gateway:
         if pending is not None:
             if pending.start_id == data.start_id and pending.replaces != data.replaces:
                 raise AllocationConflict("Connection ID has different parameters")
+            await self._write(partial(self.queue.enqueue, scope, data.start_id, data.replaces))
             return await self._reply(scope, current, status=202)
-        if current is not None and current.phase == "allocated":
-            pod = self._pods.get(current.pod_id or "")
-            peer = self.registry.peers.get(current.pod_id or "")
-            starting = (time.monotonic() - self._booted < 600 or
-                        pod is not None and self.allocator.clock() - pod.epoch_ns / 1_000_000_000 < 600)
-            healthy = (pod is not None and pod.status == "RUNNING" and pod.lifecycle == "active" and
-                       (peer is not None and not peer.drained or starting))
-            if current.start_id == data.start_id or healthy:
-                return await self._reply(scope, current)
-            if data.replaces != current.start_id:
-                raise AllocationConflict("Replacement must name the current connection")
-        previous = self.queue.attempt(scope)
-        if previous is not None and previous.start_id == data.start_id:
-            return await self._reply(scope, current, status=202)
+        existing = self._sessions.get((scope, data.start_id))
+        if existing is not None:
+            if existing.replaces != data.replaces:
+                raise AllocationConflict("Connection ID has different parameters")
+            return await self._reply(scope, existing)
+        previous = self.queue.attempt(scope, data.start_id)
+        if previous is not None:
+            return await self._reply(scope, self._sessions.get((scope, previous.start_id)) or Session(
+                previous.start_id, None, "rejected" if previous.rejected else "lost",
+                self.allocator.spec.fingerprint, self.allocator.spec.image,
+            ), status=202)
         await self._write(partial(self.queue.enqueue, scope, data.start_id, data.replaces))
         self._wake.set()
         return await self._reply(scope, self._cached(scope), status=202)
@@ -325,11 +322,12 @@ class Gateway:
         pending = self.queue.pending(scope)
         session = (self._cached(scope) if pending is not None and pending.start_id == start_id else
                    self._sessions.get((scope, start_id)))
-        previous = self.queue.attempt(scope)
-        if session is None and previous is not None and previous.start_id == start_id:
-            session = self._cached(scope)
-            if session is not None and session.start_id != start_id:
-                session = None
+        previous = self.queue.attempt(scope, start_id)
+        if session is None and previous is not None:
+            session = self._sessions.get((scope, previous.start_id)) or Session(
+                previous.start_id, None, "rejected" if previous.rejected else "lost",
+                self.allocator.spec.fingerprint, self.allocator.spec.image,
+            )
         if session is None:
             raise AuthRejected("session_not_found", 404)
         return await self._reply(scope, session)
@@ -462,7 +460,11 @@ class Gateway:
             except CapacityReached:
                 capacity_available = False
         for scope, entry in entries:
-            if scope.round != self.round or entry.eligible_at > now or self._due.get(scope, 0) > now:
+            if scope.round != self.round:
+                continue
+            if self._due.get(scope, 0) > now:
+                if not entry.submitted:
+                    break
                 continue
             self._due[scope] = now + self.poll_seconds
             result = self._progress.get(scope)
@@ -471,8 +473,10 @@ class Gateway:
             if not finished:
                 if entry.submitted and (scope, entry.start_id) not in visible:
                     continue
-                if not entry.submitted and not capacity_available and scope not in grouped:
-                    continue
+                if not entry.submitted and not capacity_available and not any(
+                    owner.hotkey == scope.hotkey for owner in grouped
+                ):
+                    break
                 try:
                     result = await self._run(self._worker, partial(self._advance, scope, entry))
                 except CreateDeferred as error:

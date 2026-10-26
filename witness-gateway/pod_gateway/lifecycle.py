@@ -161,7 +161,7 @@ class Allocator:
             raise ProviderUnavailable("Pod lifecycle update is unconfirmed")
         return actual
 
-    def retire(self, scope: Scope, start_id: str, pod_id: str) -> Session:
+    def retire(self, scope: Scope, start_id: str, pod_id: str, *, drain: bool = True) -> Session:
         with self.lock:
             pod = self.provider.get(pod_id)
             if pod is None:
@@ -180,7 +180,7 @@ class Allocator:
                 self.selection.update(pod, active=False)
             if pod.lifecycle != "drained":
                 pod = self._rename(pod, "draining")
-                if pod.status not in ("EXITED", "ERROR") and not self.control.drain(pod):
+                if drain and pod.status not in ("EXITED", "ERROR") and not self.control.drain(pod):
                     return replace(original, phase="retiring")
                 pod = self._rename(pod, "drained")
             try:
@@ -280,9 +280,6 @@ class Allocator:
                 if self.clock() - operation.since >= self.create_grace:
                     return replace(operation.session, phase="lost", pod_id=None)
                 return self._progress(scope, operation)
-            current = self.winner(pods)
-            if current is not None and replaces != current.markers["WITNESS_START_ID"]:
-                raise AllocationConflict("Replacement must name the current connection")
             if (
                 operation is not None
                 and operation.session.phase in ("draining", "creating")
@@ -321,9 +318,15 @@ class Allocator:
             return actual
         if operation.submitted:
             return operation.session
-        for pod in self.owned(inventory, scope):
+        for pod in inventory:
+            owner = pod.scope()
+            if owner is None or (owner != scope and (
+                scope.round == "gateway" or owner.round == "gateway" or
+                owner.deployment != scope.deployment or owner.hotkey != scope.hotkey
+            )):
+                continue
             if (
-                self.retire(scope, pod.markers["WITNESS_START_ID"], pod.id).phase
+                self.retire(owner, pod.markers["WITNESS_START_ID"], pod.id, drain=scope.round == "gateway").phase
                 != "retired"
             ):
                 return operation.session

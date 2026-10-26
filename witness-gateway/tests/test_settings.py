@@ -59,7 +59,7 @@ def test_location_preferences_apply_to_both_pod_roles(values: dict[str, object])
 
 def test_gateway_admission_settings_are_bounded_and_forwarded(values: dict[str, object]) -> None:
     limits = {
-        "WITNESS_CREATE_COOLDOWN_SECONDS": "3600", "GATEWAY_CREATE_INTERVAL_SECONDS": "20",
+        "GATEWAY_CREATE_INTERVAL_SECONDS": "20",
         "GATEWAY_REQUEST_INTERVAL_SECONDS": "15", "GATEWAY_POLL_SECONDS": "60",
         "GATEWAY_MAX_REQUESTS": "32", "GATEWAY_MAX_QUEUE": "512",
     }

@@ -3,6 +3,7 @@ from dataclasses import replace
 import pytest
 from support import MemoryState, Provider
 
+from pod_gateway.control import DrainControl
 from pod_gateway.lifecycle import Allocator
 from pod_gateway.models import Pod, PodSpec, Scope
 from pod_gateway.selection import Selection
@@ -14,28 +15,19 @@ NEXT = "00000000-0000-4000-8000-000000000002"
 SPEC = PodSpec("registry/witness@sha256:" + "a" * 64)
 
 
-def test_durable_selection_fences_replacement_before_drain_and_survives_restart() -> None:
+def test_durable_selection_fences_replacement_and_survives_restart() -> None:
     state, provider = MemoryState(), Provider()
     selection = Selection(state)
-    drained = False
-
-    class Control:
-        def drain(self, pod: Pod) -> bool:
-            assert not selection.selected(SCOPE, START, pod.id)
-            return drained
-
-    allocator = Allocator(provider, Control(), SPEC, selection=selection)
+    allocator = Allocator(provider, DrainControl(), SPEC, selection=selection)
     first = allocator.acquire(SCOPE, START)
     assert first.pod_id is not None and selection.selected(SCOPE, START, first.pod_id)
     old = provider.get(first.pod_id)
     assert old is not None
-    waiting = allocator.acquire(SCOPE, NEXT, replaces=START)
-    assert waiting.phase == "draining" and provider.creates == 1
+    replacement = allocator.acquire(SCOPE, NEXT, replaces=START)
+    assert replacement.phase == "allocated" and first.pod_id not in provider.pods
     assert not Selection(state).selected(SCOPE, START, first.pod_id)
     with pytest.raises(StateConflict):
         selection.update(old, active=True)
-    drained = True
-    replacement = allocator.acquire(SCOPE, NEXT, replaces=START)
     assert replacement.pod_id is not None
     assert Selection(state).selected(SCOPE, NEXT, replacement.pod_id)
     with pytest.raises(StateConflict):

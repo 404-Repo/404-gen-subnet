@@ -45,17 +45,13 @@ def test_concurrent_connect_retries_submit_one_create() -> None:
     assert len({s.pod_id for s in sessions}) == 1
 
 
-def test_replacement_waits_for_capture_drain_and_exact_deletion() -> None:
+def test_fresh_allocation_terminates_the_current_pod_without_a_drain_reply() -> None:
     provider, drain = Provider(), Drain(False)
     allocator = Allocator(provider, drain, SPEC)
     old = allocator.acquire(SCOPE, FIRST)
-    waiting = allocator.acquire(SCOPE, SECOND, replaces=FIRST)
-    assert waiting.phase == "draining" and provider.creates == 1
+    new = allocator.acquire(SCOPE, SECOND)
+    assert new.phase == "allocated" and new.pod_id != old.pod_id
     assert not allocator.selected(SCOPE, FIRST, old.pod_id or "")
-    assert old.pod_id in provider.pods
-    drain.ready = True
-    new = allocator.reconcile(SCOPE)
-    assert new is not None and new.phase == "allocated"
     assert old.pod_id not in provider.pods and provider.creates == 2
 
 
@@ -209,8 +205,6 @@ def test_foreign_and_malformed_ownership_never_authorize_deletion() -> None:
     with pytest.raises(InventoryConflict):
         allocator.retire(SCOPE, FIRST, unrelated.id)
     assert unrelated.id in provider.pods
-    with pytest.raises(AllocationConflict):
-        allocator.acquire(SCOPE, SECOND)
     with pytest.raises(AllocationConflict):
         Allocator(provider, Drain(), replace(SPEC, vcpu_count=4)).acquire(SCOPE, FIRST)
 
