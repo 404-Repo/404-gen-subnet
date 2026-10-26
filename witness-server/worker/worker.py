@@ -68,8 +68,13 @@ def verify(
         )
     _verifier_timings(result.stderr)
     if result.returncode:
+        if mode == "finish" and result.returncode != 2:
+            raise RuntimeError("Witness verifier did not complete")
         raise ValueError("Witness verification rejected the exchange")
-    return cast(dict[str, object], json.loads(result.stdout))
+    try:
+        return cast(dict[str, object], json.loads(result.stdout))
+    except ValueError as error:
+        raise RuntimeError("Witness verifier returned an invalid result") from error
 
 
 @timed("relay")

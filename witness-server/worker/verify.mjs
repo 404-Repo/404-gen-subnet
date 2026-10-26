@@ -9,6 +9,8 @@ import { measure, timing } from '../verifier/timing.mjs';
 
 timing('process_start_to_ready', 0);
 
+class RejectedEvidence extends Error {}
+
 export async function run(mode, directory, params, provider, overrides = {}) {
   const targets = {
     codex: {host: 'chatgpt.com', path: '/backend-api/codex/responses', authentication: 'subscription'},
@@ -74,10 +76,17 @@ export async function run(mode, directory, params, provider, overrides = {}) {
     return { authorized: true };
   }
   if (mode !== 'finish') throw new Error('Unknown verifier mode');
-  const saved = JSON.parse(readFileSync(join(directory, 'authorization.json'), 'utf8'));
-  const result = finishAuthorizedResponse([readFileSync(join(directory, 'server.bin'))], {
-    ...saved, requestBody: Buffer.from(saved.requestBody, 'base64'),
-  });
+  const authorization = readFileSync(join(directory, 'authorization.json'), 'utf8');
+  const server = readFileSync(join(directory, 'server.bin'));
+  let saved, result;
+  try {
+    saved = JSON.parse(authorization);
+    result = finishAuthorizedResponse([server], {
+      ...saved, requestBody: Buffer.from(saved.requestBody, 'base64'),
+    });
+  } catch {
+    throw new RejectedEvidence('Witness verification rejected the exchange');
+  }
   writeFileSync(join(directory, 'response.sse'), result.responseBody);
   return { request_sha256: result.request_sha256, response_sha256: result.response_sha256,
     session_id: saved.sessionId ?? null,
@@ -87,5 +96,11 @@ export async function run(mode, directory, params, provider, overrides = {}) {
 }
 
 if (import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
-  console.log(JSON.stringify(await run(...process.argv.slice(2))));
+  try {
+    console.log(JSON.stringify(await run(...process.argv.slice(2))));
+  } catch (error) {
+    if (!(error instanceof RejectedEvidence) && !(process.argv[2] === 'finish' && error.code === 'ENOENT')) throw error;
+    console.error('Witness verification rejected the exchange');
+    process.exitCode = 2;
+  }
 }

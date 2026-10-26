@@ -21,6 +21,7 @@ from unittest.mock import MagicMock
 import httpx
 import pytest
 from channel import WorkerChannel
+from pod import PodRuntime
 from support import MemoryState
 from test_recording import BODY, PRICING, SCOPE, invocation
 from test_recovery import PROOF, START, evidence, prefix, runtime
@@ -132,6 +133,7 @@ def child(directory: Path, mode: str, stage: str, origin: str) -> None:
 
     def finish(_: str, spool: Path, **__: object) -> dict[str, object]:
         if (directory / "verification-unavailable").exists():
+            (directory / "verification-attempted").touch()
             raise RuntimeError("Local verifier is temporarily unavailable")
         files = evidence(budget, item, call)
         if (spool / "server.bin").read_bytes() != files["server.bin"]:
@@ -141,8 +143,32 @@ def child(directory: Path, mode: str, stage: str, origin: str) -> None:
 
     patch = pytest.MonkeyPatch()
     patch.setattr("pod.verify", finish)
+
+    def inspect_pending(worker: PodRuntime) -> None:
+        if stage != "verifier_outage":
+            return
+        deadline = time.monotonic() + 5
+        while not (directory / "verification-attempted").exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        with worker.lock:
+            future = worker.active.get(call.exchange_id)
+        if future is not None:
+            try:
+                future.result(timeout=0.2)
+            except TimeoutError:
+                pass
+        worker.clock = lambda: worker.born + worker.idle_seconds + 1
+        idle_drained = worker.tick()
+        worker.drain()
+        probe = directory / "pending-probe"
+        probe.write_text(json.dumps({
+            "active": len(worker.active), "idle_drained": idle_drained, "drained": worker.tick(),
+        }))
+        probe.replace(directory / "verification-pending")
+
     if mode == "recover":
         worker = runtime(state, records, budget, directory / "spool")
+        inspect_pending(worker)
         worker.executor.shutdown(wait=True)
         return
 
@@ -168,6 +194,7 @@ def child(directory: Path, mode: str, stage: str, origin: str) -> None:
     worker.token = "a" * 64
     worker.accepting = True
     assert worker.start_capture(item, call, WorkerChannel(MagicMock()))
+    inspect_pending(worker)
     worker.executor.shutdown(wait=True)
 
 
@@ -251,53 +278,62 @@ def test_sigkill_capture_recovers_without_repeating_a_possible_dispatch(
         assert budget.summary(SCOPE, item) == summary
 
 
-def test_retained_response_recovers_after_a_temporary_verifier_failure(tmp_path: Path) -> None:
+@pytest.mark.parametrize("restart", [False, True], ids=["live-capture", "startup-recovery"])
+def test_retained_response_recovers_after_a_temporary_verifier_failure(tmp_path: Path, restart: bool) -> None:
     state = DiskState(tmp_path)
     records, budget, item = CallRecords(state), Budget(state, PRICING), invocation()
     call = records.reserve(SCOPE, item)
     records.assign(SCOPE, item, START, "pod-one")
     with provider_fixture() as (origin, requests):
-        process = launch(tmp_path, "capture", "response_spooled", origin)
-        try:
-            deadline = time.monotonic() + 15
-            while not (tmp_path / "reached").exists() and time.monotonic() < deadline and process.poll() is None:
-                time.sleep(0.02)
-            assert (tmp_path / "reached").is_file(), process.communicate(timeout=1)[0].decode()
-            process.kill()
-            process.communicate(timeout=5)
-            assert process.returncode == -signal.SIGKILL
-        finally:
-            if process.poll() is None:
+        if restart:
+            process = launch(tmp_path, "capture", "response_spooled", origin)
+            try:
+                deadline = time.monotonic() + 15
+                while not (tmp_path / "reached").exists() and time.monotonic() < deadline and process.poll() is None:
+                    time.sleep(0.02)
+                assert (tmp_path / "reached").is_file(), process.communicate(timeout=1)[0].decode()
                 process.kill()
                 process.communicate(timeout=5)
+                assert process.returncode == -signal.SIGKILL
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                    process.communicate(timeout=5)
         unavailable = tmp_path / "verification-unavailable"
         unavailable.touch()
-        pending = launch(tmp_path, "recover")
+        pending = launch(tmp_path, "recover" if restart else "capture", "verifier_outage", origin)
         try:
+            deadline = time.monotonic() + 10
+            while not (tmp_path / "verification-pending").exists() and time.monotonic() < deadline and pending.poll() is None:
+                time.sleep(0.02)
+            assert (tmp_path / "verification-pending").is_file()
+            assert json.loads((tmp_path / "verification-pending").read_bytes()) == {
+                "active": 1, "idle_drained": False, "drained": False,
+            }
+            assert pending.poll() is None
+            current = records.locate(SCOPE, call.exchange_id)
+            assert current is not None and current[1].phase == "capturing" and current[1].authorized
+            assert records.retry(SCOPE, item, call.exchange_id).exchange_id == call.exchange_id
+            assert budget.summary(SCOPE, item)["pending_usage"] == 1
+            assert len(requests) == budget.summary(SCOPE, item)["possible_dispatches"] == 1
+            assert (tmp_path / "spool" / call.exchange_id / "server.bin").read_bytes() == evidence(
+                budget, item, call,
+            )["server.bin"]
+            unavailable.unlink()
             output = pending.communicate(timeout=10)[0]
+            assert pending.returncode == 0, output.decode()
         finally:
             if pending.poll() is None:
                 pending.kill()
                 pending.communicate(timeout=5)
-        assert pending.returncode == 0, output.decode()
-        current = records.locate(SCOPE, call.exchange_id)
-        assert current is not None and current[1].phase == "capturing"
-        assert budget.summary(SCOPE, item)["pending_usage"] == 1
-        unavailable.unlink()
-        restored = launch(tmp_path, "recover")
-        try:
-            output = restored.communicate(timeout=5)[0]
-        except subprocess.TimeoutExpired:
-            restored.kill()
-            output = restored.communicate(timeout=5)[0]
-            pytest.fail("Retained response could not settle after verification recovered: " + output.decode())
-        assert restored.returncode == 0, output.decode()
         current = records.locate(SCOPE, call.exchange_id)
         assert current is not None and current[1].phase == "issued"
         assert current[1].deadline == call.deadline
         assert state.get(prefix(call) + "response.sse") == evidence(budget, item, call)["response.sse"]
         assert budget.summary(SCOPE, item)["pending_usage"] == 0
+        assert budget.summary(SCOPE, item)["known_credits"] == "2.0"
         assert budget.summary(SCOPE, item)["possible_dispatches"] == len(requests) == 1
+        assert not (tmp_path / "spool" / call.exchange_id).exists()
 
 
 if __name__ == "__main__":

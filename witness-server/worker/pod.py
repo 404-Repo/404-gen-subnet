@@ -251,9 +251,8 @@ class PodRuntime:
                             "exchange_id": exchange_id,
                         }
                     )
-                except Exception as error:  # noqa: BLE001 - retain partial evidence on interrupted TLS
+                except Exception as error:  # noqa: BLE001 - retain evidence until verification completes
                     metadata, failure = None, type(error).__name__
-                if metadata is None:
                     # A dead process cannot establish how much of a paid response
                     # was lost. Keep this attempt pending so it cannot be retried.
                     self.evidence.put(
@@ -263,6 +262,8 @@ class PodRuntime:
                             "usage_state": "unknown", "error_type": failure,
                         }),
                     )
+                    if not isinstance(error, ValueError):
+                        raise
                     return
             self._finalize(invocation, call, metadata, failure, not_dispatched=not_dispatched)
 
@@ -388,7 +389,7 @@ class PodRuntime:
             if (directory / "authorization.json").is_file() and (
                 directory / "server.bin"
             ).is_file():
-                with suppress(Exception):
+                try:
                     metadata = verify(
                         "finish", directory, provider=invocation.provider
                     )
@@ -400,6 +401,12 @@ class PodRuntime:
                             "exchange_id": call.exchange_id,
                         }
                     )
+                except ValueError:
+                    pass
+                except Exception:  # noqa: BLE001 - retry verification without another provider request
+                    if not not_dispatched:
+                        self._recover(call.exchange_id)
+                        finalized = True
         if not finalized:
             self._finalize(invocation, call, metadata, failure, not_dispatched=not_dispatched)
         with suppress(OSError):
