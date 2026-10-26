@@ -18,6 +18,10 @@ witness-client/src/witness_client/**
 !witness-client/src/witness_client/*.py
 !witness-client/src/witness_client/*.pyi
 !witness-client/src/witness_client/py.typed
+!witness-client/benchmarks/
+witness-client/benchmarks/**
+!witness-client/benchmarks/prover.py
+!witness-client/benchmarks/runtime_metrics.go
 !witness-client/tests/
 witness-client/tests/**
 !witness-client/tests/*.py
