@@ -252,6 +252,10 @@ class WitnessClient:
         session_id: str | None = None,
         **params: Unpack[ResponseCreateParamsBase],
     ) -> Response | ModelStream:
+        """Repeat the same request and request_id to reuse its saved result.
+
+        Change request_id for another model call with the same request.
+        """
         key, body = self._request(request_id, session_id, params)
         captured = self._resolve(key, body, session_id)
         return model_result(captured.status, captured.body, self._mode, stream=stream)

@@ -351,6 +351,10 @@ class ObservedWitness(WitnessClient):
         session_id: str | None = None,
         **params: Unpack[ResponseCreateParamsBase],
     ) -> Response | ModelStream:
+        """Repeat the same request and request_id to reuse its saved result.
+
+        Change request_id for another model call with the same request.
+        """
         key, body = self._request(request_id, session_id, params)
         occurrence = self.schedule.occurrence(key)
         captured = self.schedule.step(

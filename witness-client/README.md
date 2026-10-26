@@ -103,6 +103,39 @@ keys reuse a saved outcome throughout the miner's allocation scope. Use a stable
 different `request_id` for intentionally fresh inference. It is distinct from the
 generation seed and is not sent to OpenAI as a randomness seed.
 
+### Model request options
+
+Pass OpenAI Responses request-body parameters to `responses.create()`, such as
+`model`, `input`, `instructions`, `reasoning`, `max_output_tokens`, `text` and
+`tools`. OpenAI validates which options the selected model and account support.
+The requested model must also be included in the round's frozen pricing file.
+
+| Option | Behavior |
+| --- | --- |
+| `request_id` | An integer, default `0`. Repeat the same request and ID to reuse its saved result. Change the ID for another model call with the same request. Use the same IDs when replaying the miner. |
+| `session_id` | Optional subscription routing header, included in request matching. Subscription mode only; accepts 1-1024 visible ASCII characters. |
+| `service_tier` | Defaults to `"default"` when omitted. Other values, including `"auto"`, `"fast"`, `"priority"`, `"ultrafast"` and `"scale"`, are passed through for OpenAI to validate. The witness rejects explicit `"flex"` requests. |
+| `stream` | Defaults to `False`, returning an OpenAI `Response`. `True` returns typed events after the full response has been saved. |
+| `input` | A prompt string or a list of input items, including text and images. |
+| `tools` | Defaults to an empty list. Supplied tool definitions are passed through. |
+| `background` | `True` is unsupported. Omit it or use `False`. |
+| `store` | Passed through in API-key mode. Always set to `False` in subscription mode. |
+
+The complete serialized request body must fit within 8 MiB. Other JSON-serializable
+OpenAI request-body fields are passed through. SDK HTTP options such as `timeout`,
+`extra_headers`, `extra_query` and `extra_body` are unsupported.
+
+Subscription mode also supplies empty `instructions` when omitted and converts a
+string `input` into one user message. Both modes request streaming from OpenAI;
+`stream` controls how the saved response is returned to the caller. These request
+settings are applied before request matching.
+
+OpenAI controls tier availability for each model and account. See the official
+[Fast mode](https://developers.openai.com/api/docs/guides/fast-mode) and
+[Ultrafast mode](https://developers.openai.com/api/docs/guides/ultrafast-mode)
+documentation. All accepted non-Flex tiers use the round's frozen model token
+rates for budget accounting.
+
 The [miner runtime](../miner-runtime/) provides the runner and validator execution
 hosts. Install it alongside this client (`python -m pip install -e miner-runtime`
 from the repository root). The runner automatically observes the supplied function:
