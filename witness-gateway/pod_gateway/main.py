@@ -71,11 +71,9 @@ async def application(settings: GatewaySettings, worker_spec: PodSpec) -> web.Ap
     refresher = MembershipRefresher(membership, rpc, settings.subtensor_rpc_url)
 
     def fence() -> bool:
-        return allocator.selected(
-            settings.gateway_scope,
-            settings.start_id,
-            settings.pod_id,
-        )
+        pod = Allocator.winner(Allocator.owned(provider.list(fresh=True), settings.gateway_scope))
+        return (pod is not None and pod.lifecycle == "active" and pod.status == "RUNNING" and
+                pod.id == settings.pod_id and pod.markers["WITNESS_START_ID"] == settings.start_id)
 
     gateway = Gateway(
         allocator=allocator,
@@ -88,6 +86,12 @@ async def application(settings: GatewaySettings, worker_spec: PodSpec) -> web.Ap
         proof_hash=hashlib.sha256((settings.parameters / "verifying.bin").read_bytes()).hexdigest(),
         fence=fence,
         pricing_hash=hashlib.sha256(settings.pricing_path.read_bytes()).hexdigest(),
+        create_cooldown=settings.create_cooldown,
+        create_interval=settings.create_interval,
+        request_interval=settings.request_interval,
+        poll_seconds=settings.poll_seconds,
+        max_requests=settings.max_requests,
+        max_queue=settings.max_queue,
     )
     app = gateway.application()
 
@@ -119,7 +123,7 @@ async def application(settings: GatewaySettings, worker_spec: PodSpec) -> web.Ap
             http.close()
             rpc.close()
 
-    app.cleanup_ctx.append(lifecycle)
+    app.cleanup_ctx.insert(0, lifecycle)
     return app
 
 

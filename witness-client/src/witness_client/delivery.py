@@ -2,10 +2,12 @@
 
 import hashlib
 import json
+import math
 import random
 import ssl
 import time
 import uuid
+from email.utils import parsedate_to_datetime
 from collections.abc import Callable
 from typing import Literal, TypeAlias, TypeVar
 from urllib.parse import urlsplit
@@ -49,12 +51,22 @@ def request(
                         identifier = str(uuid.UUID(value["exchange_id"]))
             except ValueError:
                 pass  # Never expose a proxy's arbitrary HTML/error body.
+            retry_after = None
+            hint = response.headers.get("Retry-After", "")
+            if 0 < len(hint) <= 64:
+                try:
+                    delay = float(hint) if hint.replace(".", "", 1).isdigit() else parsedate_to_datetime(hint).timestamp() - time.time()
+                    if math.isfinite(delay) and delay >= 0:
+                        retry_after = min(delay, 86400)
+                except (ValueError, TypeError, OverflowError):
+                    pass
             raise WitnessError(
                 f"Witness {response.status_code}: {code}",
                 identifier,
                 status_code=response.status_code,
                 code=code,
                 source="gateway",
+                retry_after=retry_after,
             )
         return bytes(result)
 
@@ -92,6 +104,10 @@ def wait_for_retry(
     if not transient or remaining <= 0:
         raise error
     delay = random.uniform(1, min(10, 2 ** min(attempt + 1, 4)))
+    if isinstance(error, WitnessError) and error.retry_after is not None:
+        delay = max(delay, error.retry_after)
+        if delay >= remaining:
+            raise error
     time.sleep(min(remaining, delay))
 
 

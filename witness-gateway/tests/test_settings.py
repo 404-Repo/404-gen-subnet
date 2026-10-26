@@ -57,6 +57,19 @@ def test_location_preferences_apply_to_both_pod_roles(values: dict[str, object])
         assert body["dataCenterIds"] == ["EU-CZ-1", "EU-RO-1"]
 
 
+def test_gateway_admission_settings_are_bounded_and_forwarded(values: dict[str, object]) -> None:
+    limits = {
+        "WITNESS_CREATE_COOLDOWN_SECONDS": "3600", "GATEWAY_CREATE_INTERVAL_SECONDS": "20",
+        "GATEWAY_REQUEST_INTERVAL_SECONDS": "15", "GATEWAY_POLL_SECONDS": "60",
+        "GATEWAY_MAX_REQUESTS": "32", "GATEWAY_MAX_QUEUE": "512",
+    }
+    settings = Settings.model_validate({**values, **limits})
+    assert {name: gateway_spec(settings).env[name] for name in limits} == limits
+    for name in limits:
+        with pytest.raises(ValueError):
+            Settings.model_validate({**values, name: "0"})
+
+
 @pytest.fixture
 def values(tmp_path: Path) -> dict[str, object]:
     pricing = tmp_path / "pricing.json"

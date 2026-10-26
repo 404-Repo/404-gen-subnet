@@ -37,6 +37,12 @@ class Settings(BaseSettings):
     max_pods: int = Field(default=250, alias="WITNESS_MAX_PODS", ge=1, le=1000)
     max_captures: int = Field(default=2, alias="WITNESS_MAX_CAPTURES", ge=1, le=32)
     idle_seconds: int = Field(default=1800, alias="WITNESS_IDLE_SECONDS", ge=1800)
+    create_cooldown: int = Field(default=1800, alias="WITNESS_CREATE_COOLDOWN_SECONDS", ge=60, le=86400)
+    create_interval: int = Field(default=10, alias="GATEWAY_CREATE_INTERVAL_SECONDS", ge=1, le=3600)
+    request_interval: int = Field(default=10, alias="GATEWAY_REQUEST_INTERVAL_SECONDS", ge=1, le=300)
+    poll_seconds: int = Field(default=30, alias="GATEWAY_POLL_SECONDS", ge=10, le=300)
+    max_requests: int = Field(default=64, alias="GATEWAY_MAX_REQUESTS", ge=4, le=256)
+    max_queue: int = Field(default=1024, alias="GATEWAY_MAX_QUEUE", ge=1, le=4096)
 
     image: str = Field(..., alias="WITNESS_IMAGE")
     artifacts: str | None = Field(default=None, alias="WITNESS_ARTIFACTS")
@@ -97,6 +103,12 @@ class Settings(BaseSettings):
         "max_pods",
         "max_captures",
         "idle_seconds",
+        "create_cooldown",
+        "create_interval",
+        "request_interval",
+        "poll_seconds",
+        "max_requests",
+        "max_queue",
         "worker_vcpu_count",
         "worker_disk_gb",
         "gateway_vcpu_count",

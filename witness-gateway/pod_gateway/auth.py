@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import hashlib
+import heapq
 import json
 import re
 import threading
 import time
+from collections import OrderedDict
 from collections.abc import Mapping
 from typing import cast
 
@@ -92,13 +94,27 @@ class Authenticator:
     def __init__(self, membership: Membership) -> None:
         self.membership = membership
         self._nonces: dict[tuple[str, str], int] = {}
+        self._expiry: list[tuple[int, str, str]] = []
+        self._counts: dict[str, int] = {}
+        self._keys: OrderedDict[str, Keypair] = OrderedDict()
         self._lock = threading.Lock()
+
+    def _check_nonce(self, hotkey: str, nonce: str, now: int) -> None:
+        while self._expiry and self._expiry[0][0] <= now:
+            _, owner, expired = heapq.heappop(self._expiry)
+            self._nonces.pop((owner, expired), None)
+            self._counts[owner] -= 1
+            if self._counts[owner] == 0:
+                del self._counts[owner]
+        if (hotkey, nonce) in self._nonces:
+            raise AuthRejected("replayed_hotkey_auth")
+        if len(self._nonces) >= 100_000 or self._counts.get(hotkey, 0) >= 256:
+            raise AuthRejected("authentication_busy", 429)
 
     def verify(
         self, method: str, path: str, body: bytes, headers: Mapping[str, str]
     ) -> str:
         hotkey = headers.get("x-bittensor-hotkey", "")
-        key = public_key(hotkey)
         nonce, signature = (
             headers.get("x-bittensor-nonce", ""),
             headers.get("x-bittensor-signature", ""),
@@ -114,6 +130,12 @@ class Authenticator:
         now = time.time_ns()
         if not -2_000_000_000 <= now - int(nonce) <= 10_000_000_000:
             raise AuthRejected("stale_hotkey_auth")
+        self.membership.require(hotkey)
+        with self._lock:
+            self._check_nonce(hotkey, nonce, now)
+            key = self._keys.get(hotkey)
+        if key is None:
+            key = public_key(hotkey)
         payload = "\n".join(
             [
                 "btauth/1",
@@ -130,14 +152,15 @@ class Authenticator:
             raise AuthRejected("invalid_signature")
         self.membership.require(hotkey)
         with self._lock:
-            self._nonces = {
-                k: expiry for k, expiry in self._nonces.items() if expiry > now
-            }
-            if (hotkey, nonce) in self._nonces:
-                raise AuthRejected("replayed_hotkey_auth")
-            if len(self._nonces) >= 100_000:
-                raise AuthRejected("authentication_busy", 429)
-            self._nonces[(hotkey, nonce)] = int(nonce) + 10_000_000_001
+            self._check_nonce(hotkey, nonce, now)
+            expiry = int(nonce) + 10_000_000_001
+            self._nonces[(hotkey, nonce)] = expiry
+            heapq.heappush(self._expiry, (expiry, hotkey, nonce))
+            self._counts[hotkey] = self._counts.get(hotkey, 0) + 1
+            self._keys[hotkey] = key
+            self._keys.move_to_end(hotkey)
+            if len(self._keys) > 4096:
+                self._keys.popitem(last=False)
         return hotkey
 
 

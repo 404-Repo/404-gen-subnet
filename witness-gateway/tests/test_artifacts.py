@@ -438,7 +438,7 @@ def test_pod_replacement_recovers_choice_and_denies_stale_new_work(
                 old = fixture.provider.list()[0]
                 fixture.selection.update(old, active=False)
                 fixture.provider.delete(old.id)
-                witness._gateway._expires = 0
+                witness._gateway._invalidate_for("pod_not_selected")
                 await asyncio.to_thread(witness._gateway.ensure_pod)
                 assert fixture.provider.creates == 2 and len(fixture.runtimes) == 2
                 new_renders = await enable(fixture)
@@ -776,7 +776,7 @@ def test_managed_batch_recovers_final_save_on_replacement_without_generation(
                     old = fixture.provider.list()[0]
                     fixture.selection.update(old, active=False)
                     fixture.provider.delete(old.id)
-                    witness._gateway._expires = 0
+                    witness._gateway._invalidate_for("pod_not_selected")
                     await asyncio.to_thread(witness._gateway.ensure_pod)
                     new_renders = await enable(fixture)
                     result = await asyncio.to_thread(run_batch, prompts, settings, witness, renderer, progress=lambda _: None)

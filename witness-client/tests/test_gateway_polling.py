@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import time
 import uuid
+from email.utils import formatdate
 from pathlib import Path
 
 import httpx
@@ -11,7 +13,9 @@ import pytest
 from bittensor_wallet import Keypair
 
 from witness_client import ExchangePending, WitnessError
+from witness_client import delivery
 from witness_client.gateway import GatewayClient
+from witness_client.pods import PodGatewayClient
 
 
 @pytest.fixture
@@ -75,3 +79,71 @@ def test_recovery_polls_saved_progress_through_outage(
             assert failure.value.code == "capture_in_progress"
             assert failure.value.source == "gateway"
             assert polls == [0, 0.5, 1, 2, 2.5, 3]
+
+
+@pytest.mark.parametrize("status", [429, 503])
+@pytest.mark.parametrize("date", [False, True])
+@pytest.mark.parametrize("window", [15, 60])
+def test_delivery_respects_retry_after_within_its_deadline(
+    clock: list[float], status: int, date: bool, window: int,
+) -> None:
+    calls: list[float] = []
+    hint = formatdate(time.time() + 30, usegmt=True) if date else "30"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(clock[0])
+        if len(calls) == 1:
+            return httpx.Response(status, json={"error": "busy"}, headers={"Retry-After": hint})
+        return httpx.Response(200, content=b"ready")
+
+    with httpx.Client(base_url="https://witness.test", transport=httpx.MockTransport(handler)) as http:
+        def operation() -> bytes:
+            return delivery.request(http, "GET", "/pods/current", headers={})
+
+        if window < 30:
+            with pytest.raises(WitnessError) as failure:
+                delivery.retry(operation, deadline=window)
+            assert failure.value.retry_after == 30
+            assert calls == [0] and clock[0] == 0
+        else:
+            assert delivery.retry(operation, deadline=window) == b"ready"
+            assert calls == [0, 30]
+
+
+def test_queued_connection_keeps_the_accepted_id_and_poll_interval(
+    tmp_path: Path, clock: list[float],
+) -> None:
+    accepted = "00000000-0000-4000-8000-000000000001"
+    posted: list[str] = []
+    polls: list[float] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/pods/current":
+            return httpx.Response(200, json={"round": "test-1", "session": None})
+        if request.method == "POST":
+            posted.append(json.loads(request.content)["start_id"])
+        else:
+            assert request.url.path == f"/pods/{accepted}"
+            polls.append(clock[0])
+        return httpx.Response(202 if request.method == "POST" else 200, json={
+            "round": "test-1", "session": {"start_id": accepted, "replaces": None, "phase": "queued"},
+            "witness": None, "retry_after": 30,
+        })
+
+    with httpx.Client(base_url="https://witness.test", transport=httpx.MockTransport(handler)) as http:
+        gateway = PodGatewayClient(http, Keypair.create_from_uri("//Alice"),
+                                   tmp_path, 65, round_number="test-1")
+        try:
+            with pytest.raises(WitnessError) as failure:
+                gateway.ensure_pod()
+            assert failure.value.code == "pod_provisioning_pending"
+            assert polls == [30, 60] and clock[0] == 65
+            gateway.delivery_timeout = 15
+            with pytest.raises(WitnessError, match="remains unresolved"):
+                gateway.ensure_pod()
+            assert clock[0] == 80 and polls == [30, 60]
+        finally:
+            gateway.close()
+    assert len(posted) == 2 and posted[0] != accepted and posted[1] == accepted
+    saved = json.loads(next(tmp_path.glob("pod-connect-*.json")).read_bytes())
+    assert saved == {"start_id": accepted, "replaces": None, "pending": True}

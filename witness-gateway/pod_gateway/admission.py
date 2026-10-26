@@ -2,11 +2,29 @@
 
 from __future__ import annotations
 
-from .models import Pod
+import math
+import threading
+import time
+import uuid
+from collections.abc import Callable
+from typing import Literal, TypeVar
+
+from pydantic import BaseModel, ConfigDict, Field
+
+from .models import Pod, Scope, identifier
+from .state import MAX_JOURNAL_BYTES, StateConflict, StateStore
+
+T = TypeVar("T")
 
 
 class CapacityReached(RuntimeError):
     pass
+
+
+class CreateDeferred(RuntimeError):
+    def __init__(self, retry_at: float) -> None:
+        super().__init__("Pod creation must wait")
+        self.retry_at = retry_at
 
 
 class Admission:
@@ -45,3 +63,185 @@ class Admission:
             victims.append(pod)
             count -= 1
         return victims
+
+
+class PendingStart(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+    round: str
+    start_id: str
+    replaces: str | None = None
+    sequence: int = Field(ge=0)
+    eligible_at: int = Field(ge=0)
+    submitted: bool = False
+
+
+class CreateAttempt(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+    round: str
+    start_id: str
+    at: int = Field(ge=0)
+    rejected: bool = False
+
+
+class QueueState(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    version: Literal[1] = 1
+    deployment: str
+    revision: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    sequence: int = Field(default=0, ge=0)
+    last_create_at: int | None = None
+    pending: dict[str, PendingStart] = Field(default_factory=dict)
+    attempts: dict[str, CreateAttempt] = Field(default_factory=dict)
+
+
+class StartQueue:
+    """One durable FIFO intent and creation allowance per registered hotkey."""
+
+    def __init__(self, store: StateStore, deployment: str, *, cooldown: float = 1800,
+                 interval: float = 10, capacity: int = 1024,
+                 clock: Callable[[], float] = time.time) -> None:
+        if cooldown < 0 or interval < 0 or not 1 <= capacity <= 4096:
+            raise ValueError("Invalid allocation queue bounds")
+        self.store, self.deployment = store, deployment
+        self.cooldown, self.interval, self.capacity, self.clock = cooldown, interval, capacity, clock
+        self.key = f"pod-admission/v1/{deployment}.json"
+        self._state = QueueState(deployment=deployment)
+        self._read_lock, self._write_lock = threading.Lock(), threading.Lock()
+
+    def _load(self) -> tuple[QueueState, str | None]:
+        saved = self.store.load(self.key)
+        state = QueueState(deployment=self.deployment) if saved is None else QueueState.model_validate_json(saved.data)
+        if state.deployment != self.deployment:
+            raise StateConflict("Allocation queue belongs to another deployment")
+        for hotkey, entry in state.pending.items():
+            Scope(self.deployment, entry.round, hotkey)
+            identifier(entry.start_id)
+            if entry.replaces is not None:
+                identifier(entry.replaces)
+        for hotkey, attempt in state.attempts.items():
+            Scope(self.deployment, attempt.round, hotkey)
+            identifier(attempt.start_id)
+        return state, None if saved is None else saved.etag
+
+    def load(self) -> None:
+        with self._write_lock:
+            state, _ = self._load()
+            with self._read_lock:
+                self._state = state
+
+    def _change(self, change: Callable[[QueueState], T]) -> T:
+        with self._write_lock:
+            state, etag = self._load()
+            result = change(state)
+            state.revision = str(uuid.uuid4())
+            data = state.model_dump_json().encode()
+            if len(data) > MAX_JOURNAL_BYTES:
+                raise CapacityReached("Allocation journal is full")
+            self.store.save(self.key, data, etag)
+            with self._read_lock:
+                self._state = state
+            return result
+
+    def entries(self) -> list[tuple[Scope, PendingStart]]:
+        with self._read_lock:
+            return sorted(
+                ((Scope(self.deployment, entry.round, hotkey), entry) for hotkey, entry in self._state.pending.items()),
+                key=lambda item: item[1].sequence,
+            )
+
+    def pending(self, scope: Scope) -> PendingStart | None:
+        with self._read_lock:
+            entry = self._state.pending.get(scope.hotkey)
+            return entry if entry is not None and entry.round == scope.round else None
+
+    def attempt(self, scope: Scope) -> CreateAttempt | None:
+        with self._read_lock:
+            attempt = self._state.attempts.get(scope.hotkey)
+            return attempt if attempt is not None and attempt.round == scope.round else None
+
+    def unresolved(self) -> set[tuple[Scope, str]]:
+        return {(scope, entry.start_id) for scope, entry in self.entries() if entry.submitted}
+
+    def enqueue(self, scope: Scope, start_id: str, replaces: str | None) -> PendingStart:
+        identifier(start_id)
+        if replaces is not None:
+            identifier(replaces)
+        cached = self.pending(scope)
+        if cached is not None:
+            return cached
+
+        def change(state: QueueState) -> PendingStart:
+            current = state.pending.get(scope.hotkey)
+            if current is not None:
+                if current.round != scope.round:
+                    raise CreateDeferred(self.clock() + 60)
+                return current
+            if len(state.pending) >= self.capacity:
+                raise CapacityReached("Allocation queue is full")
+            previous = state.attempts.get(scope.hotkey)
+            if previous is not None and (previous.round, previous.start_id) == (scope.round, start_id):
+                raise StateConflict("Connection has already been attempted")
+            state.sequence += 1
+            entry = PendingStart(
+                round=scope.round, start_id=start_id, replaces=replaces, sequence=state.sequence,
+                eligible_at=max(int(self.clock()), 0 if previous is None or self.cooldown == 0 else
+                                math.ceil(previous.at + self.cooldown)),
+            )
+            state.pending[scope.hotkey] = entry
+            return entry
+
+        return self._change(change)
+
+    def authorize(self, scope: Scope, start_id: str) -> None:
+        def change(state: QueueState) -> None:
+            entry = state.pending.get(scope.hotkey)
+            now = self.clock()
+            if entry is None or (entry.round, entry.start_id) != (scope.round, start_id) or entry.submitted:
+                raise CreateDeferred(now + 60)
+            previous = state.attempts.get(scope.hotkey)
+            due = max(entry.eligible_at, 0 if previous is None or self.cooldown == 0 else previous.at + self.cooldown,
+                      0 if state.last_create_at is None or self.interval == 0 else state.last_create_at + self.interval)
+            if now < due:
+                raise CreateDeferred(due)
+            if previous is not None and (previous.round, previous.start_id) == (scope.round, start_id):
+                raise StateConflict("Connection has already been attempted")
+            state.pending[scope.hotkey] = entry.model_copy(update={"submitted": True})
+            state.attempts[scope.hotkey] = CreateAttempt(round=scope.round, start_id=start_id, at=math.ceil(now))
+            state.last_create_at = math.ceil(now)
+
+        self._change(change)
+
+    def complete(self, scope: Scope, start_id: str, *, rejected: bool = False) -> None:
+        def change(state: QueueState) -> None:
+            entry = state.pending.get(scope.hotkey)
+            if entry is not None and (entry.round, entry.start_id) == (scope.round, start_id):
+                del state.pending[scope.hotkey]
+            previous = state.attempts.get(scope.hotkey)
+            if rejected and previous is not None and (previous.round, previous.start_id) == (scope.round, start_id):
+                state.attempts[scope.hotkey] = previous.model_copy(update={"rejected": True})
+
+        self._change(change)
+
+    def cancel(self, scope: Scope, start_id: str) -> bool:
+        def change(state: QueueState) -> bool:
+            entry = state.pending.get(scope.hotkey)
+            if entry is None:
+                return True
+            if (entry.round, entry.start_id) != (scope.round, start_id) or entry.submitted:
+                return False
+            del state.pending[scope.hotkey]
+            return True
+
+        return self._change(change)
+
+    def discard_old(self, round_number: str) -> None:
+        def change(state: QueueState) -> None:
+            state.pending = {hotkey: entry for hotkey, entry in state.pending.items()
+                             if entry.round == round_number or entry.submitted}
+            state.attempts = {hotkey: attempt for hotkey, attempt in state.attempts.items()
+                              if attempt.round == round_number or self.clock() < attempt.at + self.cooldown}
+
+        self._change(change)

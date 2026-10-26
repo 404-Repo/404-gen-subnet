@@ -28,6 +28,7 @@ class WitnessError(RuntimeError):
         param: str | None = None,
         provider_message: str | None = None,
         response: Response | None = None,
+        retry_after: float | None = None,
     ) -> None:
         self.exchange_id = exchange_id
         self.status_code = status_code
@@ -37,6 +38,7 @@ class WitnessError(RuntimeError):
         self.param = param
         self.provider_message = provider_message
         self.response = response
+        self.retry_after = retry_after
         super().__init__(message)
 
 

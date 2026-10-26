@@ -67,6 +67,7 @@ class PodGatewayClient:
         self.state, self.delivery_timeout = state, delivery_timeout
         self._pod_lock = threading.Lock()
         self._start_id: str | None = None
+        self._unselected: str | None = None
         self._allocation = SignedTransport(http, hotkey, delivery_timeout)
         self._direct: SignedTransport | None = None
         self._expires = 0
@@ -162,6 +163,7 @@ class PodGatewayClient:
         self._connections.append(http)
         self._direct, self._expires = service, endpoint["expires"]
         self._start_id = str(uuid.UUID(str(session["start_id"])))
+        self._unselected = None
         return True
 
     def ensure_pod(self) -> str:
@@ -170,31 +172,68 @@ class PodGatewayClient:
                 assert self._start_id is not None
                 return self._start_id
             pending: dict[str, object] | None = None
+            posted: dict[str, object] | None = None
             if self._pending.is_file():
                 value = json.loads(self._pending.read_bytes())
                 if isinstance(value, dict) and value.get("pending") is True:
                     pending = value
-                    self._allocation_json("POST", "/pods/start", {"round": self.round_number,
-                                          "start_id": pending["start_id"], "replaces": pending.get("replaces")})
+                    posted = self._allocation_json("POST", "/pods/start", {"round": self.round_number,
+                                                   "start_id": pending["start_id"], "replaces": pending.get("replaces")})
             if pending is None:
                 reply = self._allocation_json("GET", "/pods/current")
+                refresh_deadline = time.monotonic() + self.delivery_timeout
+                if (self._unselected is not None and isinstance(reply.get("session"), dict) and
+                        cast(dict[str, object], reply["session"]).get("start_id") == self._unselected and
+                        cast(dict[str, object], reply["session"]).get("phase") == "allocated"):
+                    remaining = refresh_deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise WitnessError("Pod selection remains unresolved; retry the same connection",
+                                           source="gateway", code="pod_provisioning_pending")
+                    delay = reply.get("retry_after", 1)
+                    if isinstance(delay, bool) or not isinstance(delay, (int, float)) or not 0 < delay <= 86400:
+                        raise WitnessError("Invalid gateway retry interval", source="gateway")
+                    time.sleep(min(delay, remaining))
+                    if time.monotonic() >= refresh_deadline:
+                        raise WitnessError("Pod selection remains unresolved; retry the same connection",
+                                           source="gateway", code="pod_provisioning_pending")
+                    reply = self._allocation_json("GET", "/pods/current")
                 if reply.get("round") != self.round_number:
                     raise WitnessError("Gateway competition round changed", code="round_changed", source="gateway")
                 if self._attach(reply):
                     assert self._start_id is not None
                     return self._start_id
                 current = reply.get("session")
-                if isinstance(current, dict) and current.get("phase") in ("allocated", "draining", "creating", "retiring"):
+                if isinstance(current, dict) and current.get("phase") in ("queued", "allocated", "draining", "creating", "retiring"):
                     pending = {"start_id": current["start_id"], "replaces": current.get("replaces"), "pending": True}
                 else:
                     pending = {"start_id": str(uuid.uuid4()), "replaces": current.get("start_id")
                                if isinstance(current, dict) else None, "pending": True}
                     save(self._pending, canonical(pending))
-                    self._allocation_json("POST", "/pods/start", {"round": self.round_number,
-                                          "start_id": pending["start_id"], "replaces": pending.get("replaces")})
+                    posted = self._allocation_json("POST", "/pods/start", {"round": self.round_number,
+                                                   "start_id": pending["start_id"], "replaces": pending.get("replaces")})
+            if posted is not None:
+                if posted.get("round") != self.round_number:
+                    raise WitnessError("Gateway competition round changed", code="round_changed", source="gateway")
+                accepted = posted.get("session")
+                if not isinstance(accepted, dict):
+                    raise WitnessError("Invalid Pod allocation", source="gateway")
+                pending = {"start_id": str(uuid.UUID(str(accepted["start_id"]))),
+                           "replaces": accepted.get("replaces"), "pending": True}
+                save(self._pending, canonical(pending))
+                if self._attach(posted):
+                    save(self._pending, canonical({**pending, "pending": False}))
+                    return str(pending["start_id"])
             start_id = str(uuid.UUID(str(pending["start_id"])))
             deadline = time.monotonic() + self.delivery_timeout
+            initial_delay = posted.get("retry_after", 0) if posted is not None else 0
+            if isinstance(initial_delay, bool) or not isinstance(initial_delay, (int, float)) or not 0 <= initial_delay <= 86400:
+                raise WitnessError("Invalid gateway retry interval", source="gateway")
+            if initial_delay:
+                time.sleep(min(initial_delay, max(0, deadline - time.monotonic())))
             while True:
+                if initial_delay and time.monotonic() >= deadline:
+                    raise WitnessError("Pod provisioning remains unresolved; retry the same connection",
+                                       source="gateway", code="pod_provisioning_pending")
                 reply = self._allocation_json("GET", f"/pods/{start_id}")
                 session = reply.get("session")
                 if not isinstance(session, dict):
@@ -208,7 +247,10 @@ class PodGatewayClient:
                 if time.monotonic() >= deadline:
                     raise WitnessError("Pod provisioning remains unresolved; retry the same connection",
                                        source="gateway", code="pod_provisioning_pending")
-                time.sleep(min(1, max(0, deadline - time.monotonic())))
+                hint = reply.get("retry_after", 1)
+                if isinstance(hint, bool) or not isinstance(hint, (int, float)) or not 0 < hint <= 86400:
+                    raise WitnessError("Invalid gateway retry interval", source="gateway")
+                time.sleep(min(hint, max(0, deadline - time.monotonic())))
 
     def _service(self) -> SignedTransport:
         self.ensure_pod()
@@ -219,6 +261,8 @@ class PodGatewayClient:
         if code not in ("allocation_access_expired", "pod_not_selected"):
             return False
         self._expires = 0
+        if code == "pod_not_selected":
+            self._unselected = self._start_id
         return True
 
     def release(self, identifier: str) -> None:

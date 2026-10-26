@@ -94,9 +94,18 @@ def test_fresh_signature_does_not_expire_while_waiting_for_runpod(
             headers=headers,
             client_max_size=0,
         )
-        gateway = cast(Gateway, SimpleNamespace(auth=Authenticator(membership), fence=fence))
-        response = await Gateway.middleware(gateway, request, handler)
-        assert response.status == (200 if selected else 503), cast(web.Response, response).text
+        allocator = Allocator(Provider(), DrainControl(), PodSpec("registry/witness@sha256:" + "a" * 64),
+                              selection=Selection(MemoryState()))
+        gateway = Gateway(allocator=allocator, auth=Authenticator(membership), registry=Registry(),
+                          deployment="test", round_number="test-1", round_end=int(time.time()) + 600,
+                          secret=SECRET, proof_hash=PROOF, fence=lambda: selected, pricing_hash="d" * 64)
+        monkeypatch.setattr(gateway, "_live", fence)
+        try:
+            response = await Gateway.middleware(gateway, request, handler)
+            assert response.status == (200 if selected else 503), cast(web.Response, response).text
+        finally:
+            for executor in (gateway._worker, gateway._journal, gateway._verifiers, gateway._fencing):
+                executor.shutdown()
 
     asyncio.run(scenario())
     assert handled == ([key.ss58_address] if selected else [])
@@ -349,6 +358,7 @@ class Harness:
             proof_hash=self.proof,
             fence=lambda: True,
             pricing_hash=hashlib.sha256(PRICING).hexdigest(),
+            request_interval=0, poll_seconds=0.05, create_cooldown=0, create_interval=0, refresh_seconds=0.02,
         )
 
         @web.middleware
@@ -620,6 +630,8 @@ def test_deliberate_replacement_waits_for_capture_without_repeating_it(
                     asyncio.to_thread(witness.create, model="fixture", input="image")
                 )
                 assert await asyncio.to_thread(fixture.dispatched.wait, 5)
+                await asyncio.to_thread(fixture.gateway.queue.enqueue, fixture.scope,
+                                        "00000000-0000-4000-8000-000000000002", old_start)
                 replacement = await asyncio.to_thread(
                     fixture.allocator.acquire, fixture.scope, "00000000-0000-4000-8000-000000000002", replaces=old_start
                 )
@@ -922,7 +934,7 @@ def test_restart_and_replacement_use_original_evidence_and_deny_stale_worker(
                 old = fixture.runtimes[0]
                 assert not old.selected()
                 fixture.provider.delete(current.id)
-                witness._gateway._expires = 0
+                witness._gateway._invalidate_for("pod_not_selected")
                 await asyncio.to_thread(witness._gateway.ensure_pod)
                 assert len(fixture.runtimes) == 2 and fixture.provider.creates == 2
                 fixture.corrupt = corrupt

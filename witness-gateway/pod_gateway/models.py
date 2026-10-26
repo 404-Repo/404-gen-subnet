@@ -12,7 +12,7 @@ from types import MappingProxyType
 from typing import Literal, cast
 
 Phase = Literal[
-    "draining", "creating", "allocated", "retiring", "rejected", "lost", "retired"
+    "queued", "draining", "creating", "allocated", "retiring", "rejected", "lost", "retired"
 ]
 MARKERS = (
     "WITNESS_DEPLOYMENT",

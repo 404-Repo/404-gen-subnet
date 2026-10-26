@@ -314,10 +314,32 @@ Caddy's upstream. Both public HTTPS/WSS and upstream TLS verify certificates.
 
 Capacity admission counts actual managed RunPod workers, including pending,
 duplicate, draining and EXITED resources until deletion is confirmed. It uses
-fresh inventory at admission plus temporary headroom for unresolved creates in
-that gateway process. `WITNESS_MAX_PODS` sets the worker count limit. RunPod hourly
-costs remain available as reporting metadata. No capacity slot survives as a
-phantom R2 reservation after Pod loss.
+fresh inventory at admission plus durable headroom for unresolved creates,
+identified by deployment, round, hotkey and start ID. `WITNESS_MAX_PODS` sets the
+worker count limit. RunPod hourly costs remain available as reporting metadata.
+
+Each registered hotkey has at most one queued connection intent. Repeated starts,
+including fresh IDs from other clients, return that intent without changing its
+FIFO position. Starts for a healthy current Pod return that Pod. New creates and
+known provider rejections consume a per-hotkey allowance for
+`WITNESS_CREATE_COOLDOWN_SECONDS` (default 1800), including across gateway restarts
+and round changes. Eligible intents share a global minimum create interval of
+`GATEWAY_CREATE_INTERVAL_SECONDS` (default 10). `GATEWAY_MAX_QUEUE` bounds waiting
+intents (default 1024).
+
+Unsubmitted intents are canceled when their hotkeys lose eligibility. Submitted
+creates retain their capacity headroom until reconciled. Each background pass
+bounds allocation, retirement and access-grant work independently, so queued
+starts do not postpone ready workers or access renewal.
+
+The R2 journal at `pod-admission/v1/<deployment>.json` records authorization before
+the provider POST. If the POST or authorization write has an uncertain outcome, the
+gateway waits for the original Pod to appear; it never repeats the create merely
+because a timeout, cooldown or restart elapsed. That unresolved create continues
+to count against capacity. An operator must reconcile provider inventory before
+manually clearing an unresolved admission record. Confirmed lost Pods release
+their physical capacity, while their hotkey's creation cooldown still applies.
+Known terminal outcomes retry journal completion without another provider POST.
 
 One gateway coordinates worker creation; a host file lock allows one revivor
 process on the independent host. Multiple supervisor hosts are not supported.
@@ -325,12 +347,22 @@ Read-only selection checks share a two-second in-memory RunPod inventory cache;
 create admission and cleanup explicitly refresh it. Mutable names are updated
 with name-only PATCH requests; worker secrets and container settings are preserved.
 
-Creates hidden across a coordinator restart can temporarily exceed the Pod-count
-limit before appearing in inventory. Cleanup drains excess resources, preferring
-dormant copies over active workers, and continues counting them until confirmed
-deletion. RunPod stock and numeric Pod-count quota are not guaranteed.
-Fleet FIFO/priority queuing remains
-separate; busy workers provide bounded local backpressure.
+Miner allocation and status handlers use cached inventory and grants; polling
+does not trigger provider or R2 work. Background reconciliation refreshes inventory
+and issues access grants. Gateway liveness probes remain responsive during a
+provider outage; `admission_ready` reports whether the admission fence is fresh.
+Each authenticated hotkey receives two immediate requests, then one request per
+`GATEWAY_REQUEST_INTERVAL_SECONDS` (default 10). `GATEWAY_MAX_REQUESTS` bounds active
+miner requests (default 64); authentication has four slots and bounded replay
+tracking. Bodies are limited to 16 KiB with a five-second read deadline.
+
+Use the matching witness client: allocation replies advertise
+`GATEWAY_POLL_SECONDS` (default 30), and clients retain the accepted start ID and
+honor that interval and HTTP `Retry-After` within their delivery deadline. Healthy
+direct Pod calls continue independently of gateway polling. Busy workers provide
+bounded local backpressure. RunPod stock and numeric Pod-count quota are not
+guaranteed. Cleanup drains excess resources, preferring dormant copies over active
+workers, and counts them until confirmed deletion.
 
 ## Pod image and renderer
 

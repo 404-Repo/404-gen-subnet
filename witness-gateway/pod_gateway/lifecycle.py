@@ -58,6 +58,8 @@ class Allocator:
         self.selection = selection
         self.lock = threading.RLock()
         self.operations: dict[Scope, Operation] = {}
+        self.before_create: Callable[[Scope, str], None] | None = None
+        self.pending_creates: Callable[[], set[tuple[Scope, str]]] | None = None
 
     @staticmethod
     def owned(inventory: list[Pod], scope: Scope) -> list[Pod]:
@@ -240,6 +242,13 @@ class Allocator:
                 return actual
             return self.current(scope)
 
+    def cancel(self, scope: Scope, start_id: str) -> None:
+        """Forget an unsubmitted intent without changing physical Pods."""
+        with self.lock:
+            operation = self.operations.get(scope)
+            if operation is not None and operation.session.start_id == start_id and not operation.submitted:
+                del self.operations[scope]
+
     def acquire(
         self, scope: Scope, start_id: str, *, replaces: str | None = None
     ) -> Session:
@@ -320,16 +329,19 @@ class Allocator:
                 return operation.session
         inventory = self.provider.list(fresh=True)
         if self.admission is not None:
-            visible = {p.markers.get("WITNESS_START_ID") for p in inventory}
-            pending = sum(
-                o.submitted
-                and o.session.phase == "creating"
-                and o.session.start_id not in visible
-                and self.clock() - o.since < self.create_grace
+            visible = {(p.scope(), p.markers.get("WITNESS_START_ID")) for p in inventory}
+            pending = {
+                (s, o.session.start_id)
                 for s, o in self.operations.items()
-                if s.deployment == scope.deployment
-            )
-            self.admission.check(inventory, scope.deployment, pending=pending)
+                if o.submitted and o.session.phase == "creating" and self.clock() - o.since < self.create_grace
+            }
+            if self.pending_creates is not None:
+                pending |= self.pending_creates()
+            self.admission.check(inventory, scope.deployment, pending=sum(
+                s.deployment == scope.deployment and (s, start_id) not in visible for s, start_id in pending
+            ))
+        if self.before_create is not None:
+            self.before_create(scope, operation.session.start_id)
         operation.submitted = True
         operation.session = replace(operation.session, phase="creating")
         try:
