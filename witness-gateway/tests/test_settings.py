@@ -1,4 +1,8 @@
 import json
+import os
+import shutil
+import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -165,3 +169,24 @@ def test_worker_refuses_a_profile_for_different_packaged_renderer_bytes(tmp_path
     source.write_text("export const limit = 201;")
     with pytest.raises(ValueError, match="packaged renderer"):
         require_artifact_profile(profile, tmp_path)
+
+
+def test_settings_import_with_the_shared_modules_packaged_in_the_pod(tmp_path: Path) -> None:
+    root = Path(__file__).resolve().parents[2]
+    dockerfile = root / "witness-server/worker/Dockerfile.pods"
+    for line in dockerfile.read_text().splitlines():
+        if line.startswith("COPY shared/"):
+            parts = line.split()
+            target = tmp_path / parts[-1].removeprefix("/app/")
+            target.mkdir(parents=True, exist_ok=True)
+            for name in parts[1:-1]:
+                shutil.copyfile(root / name, target / Path(name).name)
+    result = subprocess.run(
+        [sys.executable, "-c", "import pod_gateway.settings"],
+        cwd=tmp_path,
+        env={**os.environ, "PYTHONPATH": os.pathsep.join((str(tmp_path / "shared"), str(root / "witness-gateway")))},
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr

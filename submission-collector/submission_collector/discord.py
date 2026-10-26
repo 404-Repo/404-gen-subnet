@@ -75,11 +75,11 @@ class DiscordNotifier:
             f"Render service may be down.",
         )
 
-    async def notify_downloads_complete(self, round_num: int, results: dict[str, GenerationsMap]) -> None:
+    async def notify_collection_complete(self, round_num: int, results: dict[str, GenerationsMap]) -> None:
         total_miners = len(results)
         if total_miners == 0:
             await self._webhook.send_embed(
-                title=f"Round {round_num} Downloads Complete",
+                title=f"Round {round_num} Collection Complete",
                 color=COLOR_GREEN,
                 fields=[{"name": "Miners", "value": "0", "inline": True}],
             )
@@ -112,7 +112,7 @@ class DiscordNotifier:
         color = COLOR_RED if render_failures > 0 else COLOR_GREEN
 
         await self._webhook.send_embed(
-            title=f"Round {round_num} Downloads Complete",
+            title=f"Round {round_num} Collection Complete",
             color=color,
             fields=[
                 {"name": "Miners", "value": str(total_miners), "inline": True},
@@ -163,7 +163,7 @@ class NullDiscordNotifier(DiscordNotifier):
     async def notify_render_failure(self, hotkey: str) -> None:
         pass
 
-    async def notify_downloads_complete(self, round_num: int, results: dict[str, GenerationsMap]) -> None:
+    async def notify_collection_complete(self, round_num: int, results: dict[str, GenerationsMap]) -> None:
         pass
 
     async def notify_cycle_error(self, error: Exception) -> None:

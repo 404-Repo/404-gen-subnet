@@ -44,6 +44,9 @@ def test_pod_contains_current_client_gateway_worker_and_renderer() -> None:
     run(f"""
 import hashlib
 from pathlib import Path
+import pod_gateway.settings
+import pod_gateway.direct
+import pod
 for name, digest in {expected!r}.items():
     assert hashlib.sha256(Path(name).read_bytes()).hexdigest() == digest, name
 assert Path('/opt/witness-affinity/libwitness-affinity.so').is_file()

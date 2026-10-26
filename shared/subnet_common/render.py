@@ -116,16 +116,7 @@ def _build_query(views: list[View], bg_color: str) -> dict[str, str]:
     }
 
 
-@retry(
-    stop=stop_after_attempt(5),
-    retry=retry_if_exception(_is_retryable),
-    # Spread waits 2 → 30s to give a cold-starting render worker time to come up.
-    # Total budget ≈ 2+4+8+16 ≈ 30s of waiting across the 4 retry pauses.
-    wait=wait_exponential(multiplier=2, min=2, max=30),
-    before_sleep=_log_retry,
-    reraise=True,
-)
-async def _render_views_with_retry(
+async def _render_views(
     client: httpx.AsyncClient,
     endpoint: str,
     js_content: bytes,
@@ -172,6 +163,17 @@ async def _render_views_with_retry(
     return {v.name: img for v, img in zip(views, images, strict=True)}
 
 
+_render_views_with_retry = retry(
+    stop=stop_after_attempt(5),
+    retry=retry_if_exception(_is_retryable),
+    # Spread waits 2 → 30s to give a cold-starting render worker time to come up.
+    # Total budget ≈ 2+4+8+16 ≈ 30s of waiting across the 4 retry pauses.
+    wait=wait_exponential(multiplier=2, min=2, max=30),
+    before_sleep=_log_retry,
+    reraise=True,
+)(_render_views)
+
+
 async def render_views(
     client: httpx.AsyncClient,
     endpoint: str,
@@ -188,10 +190,10 @@ async def render_views(
     Retries up to 3 times on 5xx/429/timeout. Validation failures from the render service
     (e.g. 422 for static-analysis rejection) are returned as None without retry — those
     are permanent miner failures, not transient errors.
-    Set raise_errors to preserve exceptions for a caller that distinguishes failures.
+    Set raise_errors to return the first failure to the caller without retrying.
     """
     if raise_errors:
-        return await _render_views_with_retry(
+        return await _render_views(
             client,
             endpoint,
             js_content,
@@ -219,16 +221,7 @@ async def render_views(
         return None
 
 
-@retry(
-    stop=stop_after_attempt(5),
-    retry=retry_if_exception(_is_retryable),
-    # Spread waits 2 → 30s to give a cold-starting render worker time to come up.
-    # Total budget ≈ 2+4+8+16 ≈ 30s of waiting across the 4 retry pauses.
-    wait=wait_exponential(multiplier=2, min=2, max=30),
-    before_sleep=_log_retry,
-    reraise=True,
-)
-async def _render_grid_with_retry(
+async def _render_grid(
     client: httpx.AsyncClient,
     endpoint: str,
     js_content: bytes,
@@ -250,6 +243,17 @@ async def _render_grid_with_retry(
     return response.content
 
 
+_render_grid_with_retry = retry(
+    stop=stop_after_attempt(5),
+    retry=retry_if_exception(_is_retryable),
+    # Spread waits 2 → 30s to give a cold-starting render worker time to come up.
+    # Total budget ≈ 2+4+8+16 ≈ 30s of waiting across the 4 retry pauses.
+    wait=wait_exponential(multiplier=2, min=2, max=30),
+    before_sleep=_log_retry,
+    reraise=True,
+)(_render_grid)
+
+
 async def render_grid(
     client: httpx.AsyncClient,
     endpoint: str,
@@ -263,10 +267,10 @@ async def render_grid(
 
     Used by the multi-stage judge's grid-based stages (artifact compare + checklist
     verify). Producers cache one grid PNG per stem.
-    Set raise_errors to preserve exceptions for a caller that distinguishes failures.
+    Set raise_errors to return the first failure to the caller without retrying.
     """
     if raise_errors:
-        return await _render_grid_with_retry(client, endpoint, js_content, log_id=log_id, api_key=api_key)
+        return await _render_grid(client, endpoint, js_content, log_id=log_id, api_key=api_key)
     try:
         return await _render_grid_with_retry(client, endpoint, js_content, log_id=log_id, api_key=api_key)
     except httpx.HTTPStatusError as e:

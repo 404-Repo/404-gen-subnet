@@ -14,7 +14,6 @@ from subnet_common.competition.schedule import RoundSchedule, require_schedule
 from subnet_common.competition.state import CompetitionState, RoundStage, require_state
 from subnet_common.git_batcher import GitBatcher
 from subnet_common.github import GitHubClient
-from subnet_common.r2_client import R2Client
 
 from submission_collector.discord import NULL_DISCORD_NOTIFIER, DiscordNotifier
 from submission_collector.download import DownloadPipeline
@@ -26,7 +25,7 @@ from submission_collector.submission import Submission, parse_commitment
 
 DownloadFn = Callable[[GitBatcher, CompetitionState, str, Settings], Awaitable[dict[str, GenerationsMap]]]
 """Signature: (git_batcher, state, ref, settings) -> dict[hotkey, GenerationsMap].
-Creates R2/HTTP clients and runs the download pipeline.
+Creates the HTTP client and runs result collection.
 """
 
 
@@ -75,17 +74,9 @@ async def run_collection_iteration(
         async def download_fn(
             git_batcher: GitBatcher, state: CompetitionState, ref: str, settings: Settings
         ) -> dict[str, GenerationsMap]:
-            async with (
-                R2Client(
-                    access_key_id=settings.r2_access_key_id.get_secret_value(),
-                    secret_access_key=settings.r2_secret_access_key.get_secret_value(),
-                    r2_endpoint=settings.r2_endpoint.get_secret_value(),
-                ) as r2,
-                httpx.AsyncClient(timeout=httpx.Timeout(60, connect=10)) as http_client,
-            ):
+            async with httpx.AsyncClient(timeout=httpx.Timeout(60, connect=10)) as http_client:
                 pipeline = DownloadPipeline(
                     git_batcher=git_batcher,
-                    r2=r2,
                     http_client=http_client,
                     settings=settings,
                 )
@@ -122,9 +113,9 @@ async def collection_iteration(
     Handles three stages of the round lifecycle:
     - OPEN: Waits for latest_reveal_block, collects submissions from chain, saves to git
     - MINER_GENERATION: Waits for generation_deadline_block, then transitions
-    - DOWNLOADING: Collects completed Pod judging bundles and saves their URLs to git
+    - COLLECTING: Collects generated and submitted results and saves their URLs to git
 
-    Transitions to DUELS stage when downloading completes.
+    Transitions to DUELS stage when collection completes.
 
     Returns the estimated time for the next iteration, or None if the stage
     is not managed by this service.
@@ -149,11 +140,11 @@ async def collection_iteration(
     if state.stage == RoundStage.MINER_GENERATION:
         if eta := await _generation_deadline_eta(git=git, state=state, ref=ref, get_block=get_block):
             return eta
-        ref = await _transition_stage(git=git, state=state, ref=ref, settings=settings, stage=RoundStage.DOWNLOADING)
-        # Fall through to DOWNLOADING
+        ref = await _transition_stage(git=git, state=state, ref=ref, settings=settings, stage=RoundStage.COLLECTING)
+        # Fall through to COLLECTING
 
-    if state.stage == RoundStage.DOWNLOADING:
-        await _handle_downloading(
+    if state.stage == RoundStage.COLLECTING:
+        await _handle_collecting(
             git=git, state=state, ref=ref, download_fn=download_fn, settings=settings, discord=discord
         )
         return None
@@ -276,7 +267,7 @@ async def _generation_deadline_eta(
 ) -> datetime | None:
     """Check if the generation deadline has been reached.
     Returns ETA if still waiting for miners to generate, None if deadline passed,
-    and we should proceed to downloading.
+    and we should proceed to collection.
     """
     schedule = await require_schedule(git=git, round_num=state.current_round, ref=ref)
 
@@ -290,7 +281,7 @@ async def _generation_deadline_eta(
     return None
 
 
-async def _handle_downloading(
+async def _handle_collecting(
     git: GitHubClient,
     state: CompetitionState,
     ref: str,
@@ -298,7 +289,7 @@ async def _handle_downloading(
     settings: Settings,
     discord: DiscordNotifier = NULL_DISCORD_NOTIFIER,
 ) -> None:
-    """Run the download pipeline and transition to DUELS."""
+    """Collect generated and submitted results and transition to DUELS."""
     git_batcher = GitBatcher(git=git, base_sha=ref, branch=settings.github_branch)
     results = await download_fn(git_batcher, state, ref, settings)
     state.stage = RoundStage.DUELS
@@ -310,7 +301,7 @@ async def _handle_downloading(
     )
     await git_batcher.flush()
 
-    await discord.notify_downloads_complete(round_num=state.current_round, results=results)
+    await discord.notify_collection_complete(round_num=state.current_round, results=results)
 
 
 async def _read_submissions_from_chain(

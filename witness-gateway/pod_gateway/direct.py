@@ -14,22 +14,11 @@ from typing import TYPE_CHECKING
 import httpx
 from aiohttp import WSMsgType, web
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
-from renderer_client import RenderOptions, RenderRejected
-from witness_client.calls import Digest, RequestKey
+from renderer_client import RenderRejected
+from witness_client.calls import RequestKey
 from witness_client.request import PROVIDERS
 
-from .artifacts import (
-    MAX_PNG_BYTES,
-    MAX_REJECTION_BYTES,
-    ArtifactConflict,
-    ArtifactFailed,
-    ArtifactLimit,
-    ArtifactPending,
-    ArtifactRepository,
-    FinalChoice,
-    RenderArtifact,
-    SubmissionContext,
-)
+from .artifacts import ArtifactRepository, SubmissionContext
 from .auth import Authenticator, AuthRejected, Membership
 from .judging import Judging
 from .models import Scope, identifier
@@ -55,19 +44,10 @@ class Retry(StrictInput):
     exchange_id: str
 
 
-class SaveRender(StrictInput):
-    generation: SubmissionContext
-    submission_commit: str = Field(pattern=r"^[0-9a-f]{40}$")
-    source: str
-    options: RenderOptions = RenderOptions()
-    include_png: bool = True
-
-
 class SaveChoice(StrictInput):
     generation: SubmissionContext
     submission_commit: str = Field(pattern=r"^[0-9a-f]{40}$")
-    source_sha256: Digest | None
-    expected_revision: Digest | None = None
+    source: str | None = Field(max_length=1024 * 1024)
     prompt_image: str | None = Field(default=None, max_length=12 * 1024 * 1024)
 
 
@@ -97,8 +77,7 @@ class Witness:
         if artifacts is not None and artifacts.scope != runtime.scope:
             raise ValueError("Artifact storage belongs to another miner")
         self.artifacts, self.judging = artifacts, judging
-        self.judging_slots = asyncio.Semaphore(1)
-        self.judging_tasks: dict[str, asyncio.Task[None]] = {}
+        self.saving = False
 
     @web.middleware
     async def middleware(
@@ -110,7 +89,7 @@ class Witness:
             body = await request.read()
             if request.method == "GET" and body:
                 raise ValueError("Unexpected request body")
-            if not (request.path.startswith("/render/") or request.path in ("/artifacts/render", "/submissions")) and len(body) > 16384:
+            if not (request.path.startswith("/render/") or request.path == "/submissions") and len(body) > 16384:
                 raise ValueError("Invalid body size")
             for name in (
                 "x-bittensor-version",
@@ -136,14 +115,8 @@ class Witness:
             return web.json_response({"error": str(error)}, status=error.status, headers={"Cache-Control": "no-store"})
         except RecordingConflict:
             return web.json_response({"error": "RecordingConflict"}, status=409)
-        except ArtifactConflict:
-            return web.json_response({"error": "artifact_conflict"}, status=409)
-        except ArtifactLimit:
-            return web.json_response({"error": "artifact_storage_limit"}, status=429)
-        except ArtifactFailed:
-            return web.json_response({"error": "artifact_recovery_exhausted"}, status=409)
-        except ArtifactPending:
-            return web.json_response({"error": "artifact_pending"}, status=503)
+        except RenderRejected as error:
+            return web.Response(text=error.detail_json, status=422, content_type="application/json")
         except (ValidationError, ValueError, KeyError):
             return web.json_response({"error": "invalid_request"}, status=400)
         except web.HTTPException:
@@ -353,177 +326,50 @@ class Witness:
                 raise AuthRejected("unknown_round_prompt", 403)
         return self.artifacts
 
-    def _admit_artifact(self) -> float:
+    def _admit_artifact(self) -> None:
         with self.runtime.lock:
             self._require_selected()
             if time.time() >= self.round_end:
                 raise AuthRejected("round_closed", 403)
             self.runtime.rendering += 1
-            return time.time()
 
     def _artifact_done(self) -> None:
         with self.runtime.lock:
             self.runtime.rendering -= 1
             self.runtime.last_used = self.runtime.clock()
 
-    async def _saved_render_response(self, artifact: RenderArtifact, include_png: bool) -> web.Response:
-        store = self._artifacts(artifact.generation)
-        headers = {
-            "Cache-Control": "no-store",
-            "X-Artifact-Id": artifact.artifact_id,
-            "X-Source-Sha256": artifact.source.sha256,
-            "X-Renderer-Id": artifact.profile.image_digest,
-        }
-        if not include_png:
-            return web.json_response({"artifact": artifact.model_dump(mode="json")}, headers=headers)
-        if artifact.rejection_json is not None:
-            return web.Response(
-                text=artifact.rejection_json, status=422, content_type="application/json", headers=headers
-            )
-        assert artifact.png is not None
-        png = await asyncio.to_thread(store.read_object, artifact.png, MAX_PNG_BYTES)
-        headers["X-Png-Sha256"] = artifact.png.sha256
-        return web.Response(body=png, content_type="image/png", headers=headers)
-
-    async def save_render(self, request: web.Request) -> web.Response:
-        data = SaveRender.model_validate_json(await request.read())
-        store = self._artifacts(data.generation)
-        if data.submission_commit != store.submission_commit:
-            raise ArtifactConflict("Source submission changed")
-        artifact_id = store.identity(data.generation, data.source, data.options)
-        saved = await asyncio.to_thread(store.load_render, data.generation, artifact_id)
-        if saved is not None:
-            await asyncio.to_thread(store.release_reservation, saved)
-            return await self._saved_render_response(saved, data.include_png)
-        await asyncio.to_thread(self._admit_artifact)
-        try:
-            owner = await asyncio.to_thread(store.reserve, data.generation, data.source, data.options)
-            async with (
-                httpx.AsyncClient(timeout=150, trust_env=False) as client,
-                client.stream(
-                    "POST",
-                    self.renderer_url,
-                    params=data.options.query(),
-                    json={"source": data.source},
-                ) as response,
-            ):
-                body = bytearray()
-                limit = MAX_REJECTION_BYTES if response.status_code == 422 else MAX_PNG_BYTES
-                async for chunk in response.aiter_bytes():
-                    body.extend(chunk)
-                    if len(body) > limit:
-                        raise ArtifactPending("Renderer response exceeds limit")
-                png, rejection = None, None
-                if response.status_code == 422:
-                    try:
-                        rejection = RenderRejected(body.decode()).detail_json
-                    except (UnicodeError, ValueError) as error:
-                        raise ArtifactPending("Invalid renderer rejection") from error
-                else:
-                    response.raise_for_status()
-                    if response.headers.get("Content-Type", "").split(";", 1)[0] != "image/png":
-                        raise ArtifactPending("Renderer did not return PNG bytes")
-                    png = bytes(body)
-                    if not png.startswith(b"\x89PNG\r\n\x1a\n"):
-                        raise ArtifactPending("Invalid renderer PNG")
-            saved = await asyncio.to_thread(
-                store.complete,
-                data.generation,
-                data.source,
-                data.options,
-                owner=owner,
-                png=png,
-                rejection_json=rejection,
-            )
-            await asyncio.to_thread(store.release_reservation, saved)
-            return await self._saved_render_response(saved, data.include_png)
-        finally:
-            self._artifact_done()
-
-    async def _complete_choice(self, choice: FinalChoice) -> None:
-        if choice.output_is_none:
-            return
-        if self.judging is None:
-            raise ArtifactPending("Pod judging is unavailable")
-        if await asyncio.to_thread(self.judging.ready, choice):
-            return
-        key = choice.operation_id
-        task = self.judging_tasks.get(key)
-        if task is None:
-            with self.runtime.lock:
-                if self.runtime.draining:
-                    raise ArtifactPending("Pod is draining")
-                self.runtime.rendering += 1
-
-            async def complete() -> None:
-                try:
-                    async with self.judging_slots:
-                        assert self.judging is not None
-                        await self.judging.prepare(choice)
-                finally:
-                    self._artifact_done()
-
-            task = asyncio.create_task(complete())
-            self.judging_tasks[key] = task
-
-            def done(finished: asyncio.Task[None]) -> None:
-                self.judging_tasks.pop(key, None)
-                if not finished.cancelled():
-                    finished.exception()
-
-            task.add_done_callback(done)
-        await asyncio.shield(task)
-
     async def save_choice(self, request: web.Request) -> web.Response:
         data = SaveChoice.model_validate_json(await request.read())
         store = self._artifacts(data.generation)
-        store._generation(data.generation)
-        if data.submission_commit != store.submission_commit:
-            raise ArtifactConflict("Source submission changed")
-        previous = await asyncio.to_thread(store.load_final, data.generation.prompt_sha256)
-        operation = store.operation(data.generation, data.source_sha256)
-        if previous is not None and previous.operation_id == operation:
-            await self._complete_choice(previous)
-            return web.json_response({"submission": previous.model_dump(mode="json")})
-        if (previous.revision if previous else None) != data.expected_revision:
-            raise ArtifactConflict("Final choice changed")
-        accepted_at = await asyncio.to_thread(self._admit_artifact)
+        store.require(data.generation, data.submission_commit)
+        image = None
+        if data.source is not None:
+            if data.prompt_image is None:
+                raise ValueError("Final source requires the prompt image")
+            image = base64.b64decode(data.prompt_image, validate=True)
+            if len(image) > 8 * 1024 * 1024 or hashlib.sha256(image).hexdigest() != data.generation.prompt_sha256:
+                raise ValueError("Prompt bytes differ")
+        if self.judging is None:
+            raise AuthRejected("saving_unavailable", 503)
+        if self.saving:
+            raise AuthRejected("save_in_progress", 429)
+        self.saving = True
         try:
-            artifact = None
-            if data.source_sha256 is not None:
-                artifact = await asyncio.to_thread(store.find_render, data.generation, data.source_sha256)
-                if artifact is None:
-                    raise AuthRejected("source_not_saved", 404)
-                if data.prompt_image is None:
-                    raise ValueError("Final source requires the frozen prompt image")
-                image = base64.b64decode(data.prompt_image, validate=True)
-                await asyncio.to_thread(store.save_prompt, data.generation, image)
-            saved = await asyncio.to_thread(
-                store.save_final,
-                data.generation,
-                data.source_sha256,
-                data.expected_revision,
-                artifact,
-                accepted_at=accepted_at,
-                round_end=self.round_end,
-            )
-            await self._complete_choice(saved)
-            return web.json_response(
-                {"submission": saved.model_dump(mode="json")}, headers={"Cache-Control": "no-store"}
-            )
+            await asyncio.to_thread(self._admit_artifact)
+            try:
+                result = await self.judging.save(data.generation.prompt_sha256, data.source, image)
+                return web.json_response({"submission": result.model_dump()}, headers={"Cache-Control": "no-store"})
+            finally:
+                self._artifact_done()
         finally:
-            self._artifact_done()
+            self.saving = False
 
     async def get_choice(self, request: web.Request) -> web.Response:
-        prompt = request.match_info["prompt"]
         store = self._artifacts()
-        if prompt not in store.prompt_hashes:
-            raise AuthRejected("unknown_round_prompt", 403)
-        saved = await asyncio.to_thread(store.load_final, prompt)
-        if saved is None:
+        result = await asyncio.to_thread(store.result, request.match_info["prompt"])
+        if result is None:
             raise AuthRejected("submission_not_found", 404)
-        await self._complete_choice(saved)
-        return web.json_response({"submission": saved.model_dump(mode="json")}, headers={"Cache-Control": "no-store"})
+        return web.json_response({"submission": result.model_dump()}, headers={"Cache-Control": "no-store"})
 
     def application(self) -> web.Application:
         app = web.Application(middlewares=[self.middleware], client_max_size=16 * 1024 * 1024 + 4096)
@@ -536,7 +382,6 @@ class Witness:
                 web.get("/status/{exchange_id}", self.exchange_status),
                 web.get("/exchanges/{exchange_id}/connect", self.miner_exchange),
                 web.post("/render/grid", self.render),
-                web.post("/artifacts/render", self.save_render),
                 web.post("/submissions", self.save_choice),
                 web.get("/submissions/{prompt}", self.get_choice),
             ]

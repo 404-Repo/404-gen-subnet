@@ -30,14 +30,14 @@ The competition progresses through well-defined stages:
 |-------|-------|-------------|
 | OPEN | submission-collector | Submission window open, miners register on-chain |
 | MINER_GENERATION | submission-collector | Seed published, miners generate and upload 3D files |
-| DOWNLOADING | submission-collector | Fetching 3D files from miner CDNs, rendering previews |
+| COLLECTING | submission-collector | Collecting generated and submitted results |
 | DUELS | judge-service | VLM-based pairwise comparisons, verification requests |
 | FINALIZING | round-manager | Updating the leader and creating the next round schedule |
 | FINISHED | — | Competition complete, no further rounds |
 | PAUSED | — | Manual hold for inspection or intervention |
 
 ```
-FINALIZING ──► OPEN ──► MINER_GENERATION ──► DOWNLOADING ──► DUELS ──► FINALIZING
+FINALIZING ──► OPEN ──► MINER_GENERATION ──► COLLECTING ───► DUELS ──► FINALIZING
      │                                                                      │
      ▼                                                                      │
   FINISHED ◄────────────────────────────────────────────────────────────────┘
@@ -47,7 +47,7 @@ FINALIZING ──► OPEN ──► MINER_GENERATION ──► DOWNLOADING ─�
 
 | Service | Description |
 |---------|-------------|
-| `submission-collector` | Monitors the round schedule, collects miner submissions, downloads 3D files, renders previews. Owns OPEN, MINER_GENERATION, and DOWNLOADING stages. |
+| `submission-collector` | Monitors the round schedule, collects miner submissions, and records generated and submitted results. Owns OPEN, MINER_GENERATION, and COLLECTING stages. |
 | `generation-orchestrator` | Legacy Docker/regeneration implementation awaiting migration. Its remaining role is generating the previous leader's canonical results for new prompts. |
 | `render-service-js` | Renders miner Three.js submissions to multi-view PNG images via headless Chromium with WebGL. |
 | `miner-reference` | Miner guide, token budgets, a Three.js validator, examples and local tools. |

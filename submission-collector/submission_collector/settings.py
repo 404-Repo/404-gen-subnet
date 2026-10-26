@@ -60,15 +60,6 @@ class Settings(BaseSettings):
         alias="DOWNLOAD_JITTER_SECONDS",
         description="Max random delay before collecting each output",
     )
-    max_js_size_bytes: int = Field(
-        default=1 * 1024 * 1024,
-        alias="MAX_JS_SIZE_BYTES",
-        description="Maximum .js module size in bytes (default 1 MiB; matches the miner output specification)",
-    )
-
-    r2_access_key_id: SecretStr = Field(..., alias="R2_ACCESS_KEY_ID", description="R2 access key ID")
-    r2_secret_access_key: SecretStr = Field(..., alias="R2_SECRET_ACCESS_KEY", description="R2 secret access key")
-    r2_endpoint: SecretStr = Field(..., alias="R2_ENDPOINT", description="R2 endpoint")
 
     cdn_url: str = Field(
         default="https://subnet404.xyz", alias="CDN_URL", description="CDN base URL for saved Pod artifacts"

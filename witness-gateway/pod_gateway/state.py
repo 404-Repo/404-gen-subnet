@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from typing import Protocol, cast
 
@@ -46,9 +47,10 @@ class S3(Protocol):
 
 
 class R2StateStore:
-    def __init__(self, client: S3, bucket: str) -> None:
+    def __init__(self, client: S3, bucket: str, *, max_bytes: int = MAX_JOURNAL_BYTES) -> None:
         self.client = client
         self.bucket = bucket
+        self.max_bytes = max_bytes
 
     @classmethod
     def connect(
@@ -69,7 +71,7 @@ class R2StateStore:
         return cls(cast(S3, client), bucket)
 
     def load(self, key: str) -> Snapshot | None:
-        return self._load(key, MAX_JOURNAL_BYTES)
+        return self._load(key, self.max_bytes)
 
     def read(self, key: str, limit: int = 16 * 1024 * 1024) -> bytes | None:
         snapshot = self._load(key, limit)
@@ -92,32 +94,38 @@ class R2StateStore:
         return Snapshot(self._etag(result), data)
 
     def save(self, key: str, data: bytes, expected: str | None) -> Snapshot:
-        if len(data) > MAX_JOURNAL_BYTES:
+        if len(data) > self.max_bytes:
             raise ValueError("Allocation journal exceeds its size limit")
         condition = {"IfNoneMatch": "*"} if expected is None else {"IfMatch": expected}
-        try:
-            result = self.client.put_object(
-                Bucket=self.bucket,
-                Key=key,
-                Body=data,
-                ContentType="application/json",
-                CacheControl="no-store",
-                **condition,
-            )
-            return Snapshot(self._etag(result), data)
-        except ClientError as error:
-            status = error.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
-            if status in (409, 412):
-                raise StateConflict("Allocation journal changed") from None
-            if status is not None and status < 500:
-                if (
-                    status >= 400 and status != 408
-                    and error.response["Error"]["Code"] not in ("RequestTimeout", "RequestTimeoutException")
-                ):
-                    raise WriteRejected("Allocation journal write was rejected") from error
-                raise
-        except BotoCoreError:
-            pass
+        for attempt in range(5):
+            try:
+                result = self.client.put_object(
+                    Bucket=self.bucket,
+                    Key=key,
+                    Body=data,
+                    ContentType="application/json",
+                    CacheControl="no-store",
+                    **condition,
+                )
+                return Snapshot(self._etag(result), data)
+            except ClientError as error:
+                status = error.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
+                if status == 429 and attempt < 4:
+                    time.sleep(2**attempt)
+                    continue
+                if status in (409, 412):
+                    raise StateConflict("Allocation journal changed") from None
+                if status is not None and status < 500:
+                    if (
+                        status >= 400
+                        and status != 408
+                        and error.response["Error"]["Code"] not in ("RequestTimeout", "RequestTimeoutException")
+                    ):
+                        raise WriteRejected("Allocation journal write was rejected") from error
+                    raise
+            except BotoCoreError:
+                pass
+            break
         # The unique journal revision makes an exact readback identify OUR write.
         # A missing/different object never proves the timed-out write cannot arrive.
         try:

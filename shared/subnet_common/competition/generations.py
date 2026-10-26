@@ -1,41 +1,35 @@
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 from pydantic import BaseModel, Field, TypeAdapter
 
-from subnet_common.git_batcher import GitBatcher
-from subnet_common.github import GitHubClient
+
+if TYPE_CHECKING:
+    from subnet_common.git_batcher import GitBatcher
+    from subnet_common.github import GitHubClient
+
+
+MAX_GENERATIONS_BYTES = 16 * 1024 * 1024
 
 
 class GenerationResult(BaseModel):
-    """One miner's outcome for a single prompt stem.
+    """One prompt's saved result.
 
-    A persisted row is either:
-    - Success: `js` is set (CDN URL to the Three.js module); `views` may or may not be
-      set (None most likely means the JS itself was not renderable — counted as a
-      delivery, but it won't win any matches).
-    - Miner failure: `failure_reason` is set (from the miner's `_failed.json` manifest);
-      `js` is None. Permanent — not retried.
+    js is the JavaScript URL and views is the folder containing the canonical
+    white/ and gray/ PNGs, grid.png and embeddings.npz. A failure carries a reason;
+    render rejection can retain the JavaScript URL with no views.
 
-    `views` is a CDN folder prefix. The judge constructs view URLs by convention:
-    `{views}/white/{view_name}.png` for the 8 white-bg views and `{views}/gray/{view_name}.png`
-    for the 4 gray-bg views. View names live in `subnet_common.render.WHITE_VIEWS / GRAY_VIEWS`.
-    Atomic: either all 12 views were uploaded successfully, or `views` is None.
-
-    An empty `GenerationResult()` is used as a "no data" sentinel by consumers and does
-    not represent a persisted outcome.
+    An empty result is a no-data sentinel and is not a completed outcome.
     """
 
     js: str | None = Field(default=None, description="CDN URL to the Three.js module")
     views: str | None = Field(default=None, description="CDN folder prefix containing white/ and gray/ rendered views")
     failure_reason: str | None = Field(
         default=None,
-        description=(
-            "Why this stem has no usable output: a miner-reported failure or a collector "
-            "pipeline failure (e.g. 'js_fetch_failed: HTTP 404', 'render_failed', "
-            "'embeddings_failed'). None means a clean delivery or a no-data sentinel."
-        ),
+        description="Why this prompt has no usable result; None means a successful result or no-data sentinel",
     )
     size: int = Field(default=0, description="Size of the JS module in bytes")
-    source_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
-    submission_revision: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 
     def is_failed(self) -> bool:
         """True when this stem has a recorded permanent delivery failure."""

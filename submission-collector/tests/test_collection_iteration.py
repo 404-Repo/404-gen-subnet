@@ -137,7 +137,7 @@ async def test_miner_generation_before_deadline_returns_eta(git: MockGitHubClien
     assert not download.called
 
 
-async def test_miner_generation_past_deadline_transitions_to_downloading_and_calls_download(
+async def test_miner_generation_past_deadline_transitions_to_collecting_and_calls_download(
     git: MockGitHubClient, settings: Settings
 ) -> None:
     add_state(git, stage=RoundStage.MINER_GENERATION, round_num=1)
@@ -157,12 +157,12 @@ async def test_miner_generation_past_deadline_transitions_to_downloading_and_cal
     assert result is None
     assert download.called
 
-    # First commit: MINER_GENERATION -> DOWNLOADING transition
+    # First commit: MINER_GENERATION -> COLLECTING transition
     first_commit = git._commits[0]
-    downloading_state = CompetitionState.model_validate_json(first_commit["files"]["state.json"])
-    assert downloading_state.stage == RoundStage.DOWNLOADING
+    collecting_state = CompetitionState.model_validate_json(first_commit["files"]["state.json"])
+    assert collecting_state.stage == RoundStage.COLLECTING
 
-    # Last commit: DOWNLOADING -> DUELS transition
+    # Last commit: COLLECTING -> DUELS transition
     last_commit = git._commits[-1]
     duels_state = CompetitionState.model_validate_json(last_commit["files"]["state.json"])
     assert duels_state.stage == RoundStage.DUELS

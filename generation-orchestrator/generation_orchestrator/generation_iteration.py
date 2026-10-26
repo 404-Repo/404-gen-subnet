@@ -31,7 +31,7 @@ from generation_orchestrator.settings import Settings
 from generation_orchestrator.staggered_semaphore import StaggeredSemaphore
 
 
-GENERATING_STAGES = {RoundStage.MINER_GENERATION, RoundStage.DOWNLOADING, RoundStage.DUELS}
+GENERATING_STAGES = {RoundStage.MINER_GENERATION, RoundStage.COLLECTING, RoundStage.DUELS}
 
 
 async def run_generation_iteration(

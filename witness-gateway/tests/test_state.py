@@ -23,6 +23,7 @@ class FakeS3:
         self.puts: list[dict[str, object]] = []
         self.gets = 0
         self.mode = "ok"
+        self.throttles = 0
         self.body: BytesIO | None = None
         self.read_error: ClientError | None = None
 
@@ -38,6 +39,9 @@ class FakeS3:
 
     def put_object(self, **kwargs: object) -> dict[str, object]:
         self.puts.append(kwargs)
+        if self.throttles:
+            self.throttles -= 1
+            raise s3_error("TooManyRequests", 429)
         if self.mode.startswith("status-"):
             status = int(self.mode.removeprefix("status-"))
             raise s3_error(str(status), status)
@@ -142,6 +146,57 @@ def test_journal_size_limit_closes_body_and_forbids_oversized_writes() -> None:
     with pytest.raises(ValueError):
         store.save("journal", s3.data, None)
     assert s3.puts == []
+
+
+def test_result_index_can_use_a_larger_limit_without_changing_journal_limits() -> None:
+    s3 = FakeS3()
+    data = b"x" * (MAX_JOURNAL_BYTES + 1)
+    store = R2StateStore(s3, "private", max_bytes=2 * MAX_JOURNAL_BYTES)
+    store.save("journal", data, None)
+    saved = store.load("journal")
+    assert saved is not None and saved.data == data
+    with pytest.raises(ValueError):
+        R2StateStore(s3, "private").load("journal")
+
+
+def test_rate_limited_writes_retry_then_save(monkeypatch: pytest.MonkeyPatch) -> None:
+    s3 = FakeS3()
+    s3.throttles = 2
+    delays: list[float] = []
+    monkeypatch.setattr("time.sleep", delays.append)
+    store = R2StateStore(s3, "private")
+    saved = store.save("journal", b"result-index", None)
+    assert store.load("journal") == saved
+    assert saved.data == b"result-index"
+    assert delays == [1, 2]
+
+
+def test_rate_limited_writes_stop_after_five_attempts(monkeypatch: pytest.MonkeyPatch) -> None:
+    s3 = FakeS3()
+    s3.throttles = 10
+    delays: list[float] = []
+    monkeypatch.setattr("time.sleep", delays.append)
+    with pytest.raises(WriteRejected):
+        R2StateStore(s3, "private").save("journal", b"result-index", None)
+    assert len(s3.puts) == 5 and s3.data is None
+    assert delays == [1, 2, 4, 8]
+
+
+def test_rate_limit_retry_cannot_overwrite_a_concurrent_write(monkeypatch: pytest.MonkeyPatch) -> None:
+    s3 = FakeS3()
+    store = R2StateStore(s3, "private")
+    first = store.save("journal", b"first", None)
+    s3.throttles = 1
+
+    def competing_write(delay: float) -> None:
+        s3.data = b"another-writer"
+        s3.etag = '"another-etag"'
+
+    monkeypatch.setattr("time.sleep", competing_write)
+    with pytest.raises(StateConflict):
+        store.save("journal", b"replacement", first.etag)
+    saved = store.load("journal")
+    assert saved is not None and saved.data == b"another-writer"
 
 
 def test_client_disables_implicit_sdk_retries(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -162,10 +162,11 @@ PYTHONPATH=miner-reference python -m miner_reference.batch check \
 ```
 
 For Pod-managed submissions, pass `--submission-commit <admitted-40-character-commit>`
-and the approved worker image digest as `--renderer-id`. Candidate renders and the
-final JS or explicit `None` are saved on the witness Pod; `--renderer-url` is optional
-in this mode. The Pod prepares the judging views, grid and embeddings after saving
-the final choice. The runner checkpoints returned bytes before final-save delivery.
+and the approved worker image digest as `--renderer-id`. Previews use the Pod renderer;
+`--renderer-url` is optional in this mode. Final saving sends the returned JavaScript
+or explicit `None` to the Pod. The Pod saves the JavaScript, prepares and saves the
+judging views, grid and embeddings, then reports success. Saving errors are returned
+for retry; only one save runs at a time per Pod. The runner checkpoints returned bytes before final-save delivery.
 Retry the same batch output directory after a lost acknowledgement or Pod replacement;
 it resumes final saving without rerunning completed generation. Infrastructure failures
 remain pending. The gateway must have matching [artifact configuration](../witness-gateway/README.md#artifact-storage).
@@ -198,9 +199,9 @@ This is a local batch driver. Production sandbox isolation, verified renderer
 replay and receipt submission belong to the runtime described below.
 
 Outside `generate`, the runner checkpoints the returned JavaScript or explicit
-`None` before saving its final choice through the witness Pod. It retries saving
+`None` before saving its final result through the witness Pod. It retries saving
 those bytes after a lost acknowledgement or Pod replacement. The collector reads
-the saved choice directly from the existing public R2 bucket. Replay validation compares
+the saved result record directly from the existing public R2 bucket. Replay validation compares
 the reproduced return with this independent submission; a storage receipt does
 not establish source reproducibility.
 

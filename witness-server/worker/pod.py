@@ -630,13 +630,15 @@ def main() -> None:
     artifact_store = None
     if artifact_config := os.environ.get("WITNESS_ARTIFACTS"):
         from pod_gateway.renderer import require_artifact_profile
+        from subnet_common.competition.generations import MAX_GENERATIONS_BYTES
 
         config = ArtifactConfig.model_validate_json(artifact_config)
         if os.environ.get("WITNESS_RENDERER_ENABLED") != "1":
             raise ValueError("Artifact storage requires the packaged renderer")
         require_artifact_profile(config.profile, Path("/opt/renderer"))
         artifact_store = ArtifactRepository(
-            state, evidence, runtime.scope, config.profile, config.limits,
+            evidence, runtime.scope,
+            index=R2StateStore(evidence.client, evidence.bucket, max_bytes=MAX_GENERATIONS_BYTES),
             seed=config.seed, submission_commit=config.commits[runtime.scope.hotkey],
             prompt_hashes=config.prompt_hashes,
         )

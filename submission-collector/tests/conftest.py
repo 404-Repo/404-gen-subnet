@@ -16,9 +16,6 @@ def settings() -> Settings:
     return Settings(
         GITHUB_TOKEN=SecretStr("test-token"),
         GITHUB_REPO="test/repo",
-        R2_ACCESS_KEY_ID=SecretStr("test-r2-key"),
-        R2_SECRET_ACCESS_KEY=SecretStr("test-r2-secret"),
-        R2_ENDPOINT=SecretStr("https://test-r2-endpoint"),
         DOWNLOAD_JITTER_SECONDS=0,
     )
 
