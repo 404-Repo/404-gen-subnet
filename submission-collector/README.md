@@ -22,7 +22,7 @@ expands the storage keys with that URL, and replaces `generated.json` for each m
 in Git. It needs no R2 credentials. A missing index (HTTP 404) or prompt entry becomes
 `not_submitted`; an explicit `None` becomes `generation_failed`, and a renderer
 rejection remains `render_rejected`. HTTP status errors, timeouts and connection
-errors use two total attempts, waiting at least three seconds or longer when
+errors use five total attempts, waiting at least three seconds or longer when
 `Retry-After` supplies a numeric delay in seconds. The concurrency slot is released
 between attempts. Exhausted retries leave collection retryable.
 

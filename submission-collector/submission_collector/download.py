@@ -96,7 +96,7 @@ class ResultCollector:
         return generations
 
     @retry(
-        stop=stop_after_attempt(2),
+        stop=stop_after_attempt(5),
         wait=_retry_delay,
         retry=retry_if_exception_type((httpx.HTTPStatusError, httpx.TimeoutException, httpx.RequestError)),
     )
