@@ -17,14 +17,13 @@ public R2 bucket (`404-gen`). It publishes one result index at
 with four fields: `js`, `views`, `failure_reason` and `size`. The prompt ID is the
 stem of its published prompt URL.
 
-The collector reads one index per miner over HTTP through `CDN_URL`, expands the
-storage keys with that URL, and writes `generated.json` for each miner in Git. It
-needs no R2 credentials. A missing index (HTTP 404) or prompt entry becomes
+The collector reads one complete index per miner over HTTP through `CDN_URL`,
+expands the storage keys with that URL, and replaces `generated.json` for each miner
+in Git. It needs no R2 credentials. A missing index (HTTP 404) or prompt entry becomes
 `not_submitted`; an explicit `None` becomes `generation_failed`, and a renderer
-rejection remains `render_rejected`. HTTP 429 responses are retried up to five total attempts,
-keeping the concurrency slot while waiting. Retry delays are at least 2, 4, 8 and
-16 seconds, or longer when `Retry-After` supplies a numeric delay in seconds.
-Exhausted retries and other HTTP or connection errors leave collection retryable.
+rejection remains `render_rejected`. HTTP status errors, timeouts and connection
+errors use two total attempts with a fixed three-second wait. The concurrency slot
+is released between attempts. Exhausted retries leave collection retryable.
 
 ## Algorithm
 

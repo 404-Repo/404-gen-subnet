@@ -124,8 +124,8 @@ def make_get_locked_alpha(locked: dict[str, float] | None = None, default: float
     return get_locked_alpha
 
 
-class SpyDownloadFn:
-    """A download_fn that tracks whether it was called."""
+class SpyCollectFn:
+    """A collect_fn that tracks whether it was called."""
 
     def __init__(self) -> None:
         self.called: bool = False

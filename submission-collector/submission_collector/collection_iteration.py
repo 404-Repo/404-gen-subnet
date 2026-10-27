@@ -16,14 +16,14 @@ from subnet_common.git_batcher import GitBatcher
 from subnet_common.github import GitHubClient
 
 from submission_collector.discord import NULL_DISCORD_NOTIFIER, DiscordNotifier
-from submission_collector.download import DownloadPipeline
+from submission_collector.download import ResultCollector
 from submission_collector.prompts import select_prompts
 from submission_collector.revealed_commitments import get_all_revealed_commitments
 from submission_collector.settings import Settings
 from submission_collector.submission import Submission, parse_commitment
 
 
-DownloadFn = Callable[[GitBatcher, CompetitionState, str, Settings], Awaitable[dict[str, GenerationsMap]]]
+CollectFn = Callable[[GitBatcher, CompetitionState, str, Settings], Awaitable[dict[str, GenerationsMap]]]
 """Signature: (git_batcher, state, ref, settings) -> dict[hotkey, GenerationsMap].
 Creates the HTTP client and runs result collection.
 """
@@ -71,16 +71,16 @@ async def run_collection_iteration(
             )
             return float(lock["locked_mass"].tao) if lock is not None else 0.0
 
-        async def download_fn(
+        async def collect_fn(
             git_batcher: GitBatcher, state: CompetitionState, ref: str, settings: Settings
         ) -> dict[str, GenerationsMap]:
             async with httpx.AsyncClient(timeout=httpx.Timeout(60, connect=10)) as http_client:
-                pipeline = DownloadPipeline(
+                collector = ResultCollector(
                     git_batcher=git_batcher,
                     http_client=http_client,
                     settings=settings,
                 )
-                return await pipeline.run(state=state, ref=ref)
+                return await collector.collect(state=state, ref=ref)
 
         async with GitHubClient(
             repo=settings.github_repo,
@@ -92,7 +92,7 @@ async def run_collection_iteration(
                 get_commitments=get_commitments,
                 get_hotkey_owners=get_hotkey_owners,
                 get_locked_alpha=get_locked_alpha,
-                download_fn=download_fn,
+                collect_fn=collect_fn,
                 settings=settings,
                 discord=discord,
             )
@@ -104,7 +104,7 @@ async def collection_iteration(
     get_commitments: Callable[[], Awaitable[dict]],
     get_hotkey_owners: Callable[[], Awaitable[dict[str, str]]],
     get_locked_alpha: Callable[[str], Awaitable[float]],
-    download_fn: DownloadFn,
+    collect_fn: CollectFn,
     settings: Settings,
     discord: DiscordNotifier = NULL_DISCORD_NOTIFIER,
 ) -> datetime | None:
@@ -145,7 +145,7 @@ async def collection_iteration(
 
     if state.stage == RoundStage.COLLECTING:
         await _handle_collecting(
-            git=git, state=state, ref=ref, download_fn=download_fn, settings=settings, discord=discord
+            git=git, state=state, ref=ref, collect_fn=collect_fn, settings=settings, discord=discord
         )
         return None
 
@@ -285,13 +285,13 @@ async def _handle_collecting(
     git: GitHubClient,
     state: CompetitionState,
     ref: str,
-    download_fn: DownloadFn,
+    collect_fn: CollectFn,
     settings: Settings,
     discord: DiscordNotifier = NULL_DISCORD_NOTIFIER,
 ) -> None:
     """Collect generated and submitted results and transition to DUELS."""
     git_batcher = GitBatcher(git=git, base_sha=ref, branch=settings.github_branch)
-    results = await download_fn(git_batcher, state, ref, settings)
+    results = await collect_fn(git_batcher, state, ref, settings)
     state.stage = RoundStage.DUELS
     state.next_stage_eta = None
     await git_batcher.write(

@@ -1,13 +1,18 @@
+import asyncio
 import json
 
+import httpx
 import pytest
+from subnet_common.competition.generations import GenerationsAdapter
 from subnet_common.competition.state import CompetitionState, RoundStage
+from subnet_common.git_batcher import GitBatcher
 from subnet_common.testing import MockGitHubClient
 
 from submission_collector.collection_iteration import collection_iteration
+from submission_collector.download import ResultCollector
 from submission_collector.settings import Settings
 from tests.conftest import (
-    SpyDownloadFn,
+    SpyCollectFn,
     add_config,
     add_prompts,
     add_schedule,
@@ -40,7 +45,7 @@ async def test_admission_accepts_source_before_prompt_configuration(
         get_commitments=make_get_commitments({HOTKEY: reveal}),
         get_hotkey_owners=make_get_hotkey_owners({HOTKEY: "coldkey"}),
         get_locked_alpha=make_get_locked_alpha(),
-        download_fn=SpyDownloadFn(),
+        collect_fn=SpyCollectFn(),
         settings=settings,
     )
     submission = json.loads(git.committed["rounds/1/submissions.json"])[HOTKEY]
@@ -56,7 +61,7 @@ async def test_unhandled_stage_returns_next_stage_eta_and_does_nothing(
     git: MockGitHubClient, settings: Settings, stage: RoundStage
 ) -> None:
     add_state(git, stage=stage)
-    download = SpyDownloadFn()
+    collect = SpyCollectFn()
 
     result = await collection_iteration(
         git=git,
@@ -64,20 +69,20 @@ async def test_unhandled_stage_returns_next_stage_eta_and_does_nothing(
         get_commitments=make_get_commitments(),
         get_hotkey_owners=make_get_hotkey_owners(),
         get_locked_alpha=make_get_locked_alpha(),
-        download_fn=download,
+        collect_fn=collect,
         settings=settings,
     )
 
     assert result is None
     assert git.committed == {}
-    assert not download.called
+    assert not collect.called
 
 
 async def test_open_before_reveal_window_returns_eta(git: MockGitHubClient, settings: Settings) -> None:
     add_state(git, stage=RoundStage.OPEN, round_num=1)
     add_schedule(git, round_num=1, latest_reveal_block=200)
     add_config(git)
-    download = SpyDownloadFn()
+    collect = SpyCollectFn()
 
     result = await collection_iteration(
         git=git,
@@ -85,20 +90,20 @@ async def test_open_before_reveal_window_returns_eta(git: MockGitHubClient, sett
         get_commitments=make_get_commitments(),
         get_hotkey_owners=make_get_hotkey_owners(),
         get_locked_alpha=make_get_locked_alpha(),
-        download_fn=download,
+        collect_fn=collect,
         settings=settings,
     )
 
     assert result is not None
     assert git.committed == {}
-    assert not download.called
+    assert not collect.called
 
 
 async def test_open_no_submissions_transitions_to_finalizing(git: MockGitHubClient, settings: Settings) -> None:
     add_state(git, stage=RoundStage.OPEN, round_num=1)
     add_schedule(git, round_num=1, latest_reveal_block=200)
     add_config(git)
-    download = SpyDownloadFn()
+    collect = SpyCollectFn()
 
     result = await collection_iteration(
         git=git,
@@ -106,12 +111,12 @@ async def test_open_no_submissions_transitions_to_finalizing(git: MockGitHubClie
         get_commitments=make_get_commitments({}),
         get_hotkey_owners=make_get_hotkey_owners(),
         get_locked_alpha=make_get_locked_alpha(),
-        download_fn=download,
+        collect_fn=collect,
         settings=settings,
     )
 
     assert result is None
-    assert not download.called
+    assert not collect.called
 
     new_state = CompetitionState.model_validate_json(git.committed["state.json"])
     assert new_state.stage == RoundStage.FINALIZING
@@ -120,7 +125,7 @@ async def test_open_no_submissions_transitions_to_finalizing(git: MockGitHubClie
 async def test_miner_generation_before_deadline_returns_eta(git: MockGitHubClient, settings: Settings) -> None:
     add_state(git, stage=RoundStage.MINER_GENERATION, round_num=1)
     add_schedule(git, round_num=1, generation_deadline_block=500)
-    download = SpyDownloadFn()
+    collect = SpyCollectFn()
 
     result = await collection_iteration(
         git=git,
@@ -128,21 +133,21 @@ async def test_miner_generation_before_deadline_returns_eta(git: MockGitHubClien
         get_commitments=make_get_commitments(),
         get_hotkey_owners=make_get_hotkey_owners(),
         get_locked_alpha=make_get_locked_alpha(),
-        download_fn=download,
+        collect_fn=collect,
         settings=settings,
     )
 
     assert result is not None
     assert git.committed == {}
-    assert not download.called
+    assert not collect.called
 
 
-async def test_miner_generation_past_deadline_transitions_to_collecting_and_calls_download(
+async def test_miner_generation_past_deadline_transitions_to_collecting_and_calls_collect(
     git: MockGitHubClient, settings: Settings
 ) -> None:
     add_state(git, stage=RoundStage.MINER_GENERATION, round_num=1)
     add_schedule(git, round_num=1, generation_deadline_block=500)
-    download = SpyDownloadFn()
+    collect = SpyCollectFn()
 
     result = await collection_iteration(
         git=git,
@@ -150,12 +155,12 @@ async def test_miner_generation_past_deadline_transitions_to_collecting_and_call
         get_commitments=make_get_commitments(),
         get_hotkey_owners=make_get_hotkey_owners(),
         get_locked_alpha=make_get_locked_alpha(),
-        download_fn=download,
+        collect_fn=collect,
         settings=settings,
     )
 
     assert result is None
-    assert download.called
+    assert collect.called
 
     # First commit: MINER_GENERATION -> COLLECTING transition
     first_commit = git._commits[0]
@@ -177,7 +182,7 @@ async def test_open_collects_submissions_and_transitions_to_miner_generation(
     add_prompts(git, ["prompt_a", "prompt_b", "prompt_c", "prompt_d", "prompt_e"])
 
     commitments = {HOTKEY: make_commitment(block=150)}
-    download = SpyDownloadFn()
+    collect = SpyCollectFn()
 
     result = await collection_iteration(
         git=git,
@@ -185,13 +190,13 @@ async def test_open_collects_submissions_and_transitions_to_miner_generation(
         get_commitments=make_get_commitments(commitments),
         get_hotkey_owners=make_get_hotkey_owners({HOTKEY: "coldkey-1"}),
         get_locked_alpha=make_get_locked_alpha(),
-        download_fn=download,
+        collect_fn=collect,
         settings=settings,
     )
 
     # Should return an ETA for the generation deadline
     assert result is not None
-    assert not download.called
+    assert not collect.called
 
     # Should commit state, seed, prompts, and submissions
     committed = git.committed
@@ -240,7 +245,7 @@ async def test_open_saves_same_block_submissions_in_seed_order(
         get_commitments=make_get_commitments({HOTKEY: make_commitment(), HOTKEY_2: make_commitment()}),
         get_hotkey_owners=make_get_hotkey_owners({HOTKEY: "coldkey-1", HOTKEY_2: "coldkey-2"}),
         get_locked_alpha=make_get_locked_alpha(),
-        download_fn=SpyDownloadFn(),
+        collect_fn=SpyCollectFn(),
         settings=settings,
     )
 
@@ -255,7 +260,7 @@ async def test_open_insufficient_lock_drops_submission(git: MockGitHubClient, se
     add_prompts(git, ["prompt_a", "prompt_b", "prompt_c"])
 
     commitments = {HOTKEY: make_commitment(block=150)}
-    download = SpyDownloadFn()
+    collect = SpyCollectFn()
 
     result = await collection_iteration(
         git=git,
@@ -263,7 +268,7 @@ async def test_open_insufficient_lock_drops_submission(git: MockGitHubClient, se
         get_commitments=make_get_commitments(commitments),
         get_hotkey_owners=make_get_hotkey_owners({HOTKEY: "coldkey-1"}),
         get_locked_alpha=make_get_locked_alpha({"coldkey-1": 99.0}),
-        download_fn=download,
+        collect_fn=collect,
         settings=settings,
     )
 
@@ -283,7 +288,7 @@ async def test_open_lock_requirement_scales_with_submitting_hotkeys_per_coldkey(
 
     # Both hotkeys belong to one coldkey: 100 ρ covers one hotkey, but 200 is required
     commitments = {HOTKEY: make_commitment(block=150), HOTKEY_2: make_commitment(block=151)}
-    download = SpyDownloadFn()
+    collect = SpyCollectFn()
 
     await collection_iteration(
         git=git,
@@ -291,7 +296,7 @@ async def test_open_lock_requirement_scales_with_submitting_hotkeys_per_coldkey(
         get_commitments=make_get_commitments(commitments),
         get_hotkey_owners=make_get_hotkey_owners({HOTKEY: "coldkey-1", HOTKEY_2: "coldkey-1"}),
         get_locked_alpha=make_get_locked_alpha({"coldkey-1": 100.0}),
-        download_fn=download,
+        collect_fn=collect,
         settings=settings,
     )
 
@@ -306,7 +311,7 @@ async def test_open_sufficient_lock_keeps_all_coldkey_hotkeys(git: MockGitHubCli
     add_prompts(git, ["prompt_a", "prompt_b", "prompt_c"])
 
     commitments = {HOTKEY: make_commitment(block=150), HOTKEY_2: make_commitment(block=151)}
-    download = SpyDownloadFn()
+    collect = SpyCollectFn()
 
     await collection_iteration(
         git=git,
@@ -314,7 +319,7 @@ async def test_open_sufficient_lock_keeps_all_coldkey_hotkeys(git: MockGitHubCli
         get_commitments=make_get_commitments(commitments),
         get_hotkey_owners=make_get_hotkey_owners({HOTKEY: "coldkey-1", HOTKEY_2: "coldkey-1"}),
         get_locked_alpha=make_get_locked_alpha({"coldkey-1": 200.0}),
-        download_fn=download,
+        collect_fn=collect,
         settings=settings,
     )
 
@@ -329,7 +334,7 @@ async def test_open_hotkey_not_in_metagraph_is_dropped(git: MockGitHubClient, se
     add_prompts(git, ["prompt_a", "prompt_b", "prompt_c"])
 
     commitments = {HOTKEY: make_commitment(block=150), HOTKEY_2: make_commitment(block=151)}
-    download = SpyDownloadFn()
+    collect = SpyCollectFn()
 
     await collection_iteration(
         git=git,
@@ -337,9 +342,68 @@ async def test_open_hotkey_not_in_metagraph_is_dropped(git: MockGitHubClient, se
         get_commitments=make_get_commitments(commitments),
         get_hotkey_owners=make_get_hotkey_owners({HOTKEY: "coldkey-1"}),
         get_locked_alpha=make_get_locked_alpha({"coldkey-1": 100.0}),
-        download_fn=download,
+        collect_fn=collect,
         settings=settings,
     )
 
     submissions = json.loads(git.committed["rounds/0/submissions.json"])
     assert set(submissions) == {HOTKEY}
+
+
+async def test_collection_replaces_previously_collected_results(git: MockGitHubClient, settings: Settings) -> None:
+    state = add_state(git, stage=RoundStage.COLLECTING)
+    add_prompts(git, ["https://prompts.test/chair.png", "https://prompts.test/table.png"], round_num=1)
+    git.files["rounds/1/submissions.json"] = json.dumps(
+        {HOTKEY: dict(repo="test/model", commit="c" * 40, revealed_at_block=150, tie_breaker="0" * 128, round="test-1")}
+    )
+    path = f"rounds/1/{HOTKEY}/generated.json"
+    git.files[path] = json.dumps(
+        {"chair": {"js": "https://old.test/chair.js"}, "table": {"js": "https://old.test/table.js"}}
+    )
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(200, json={"chair": {"js": "chair.js", "views": "chair"}})
+    )
+    batcher = GitBatcher(git=git, base_sha="ref", branch=settings.github_branch)
+    async with httpx.AsyncClient(transport=transport) as client:
+        await ResultCollector(batcher, client, settings).collect(state, "ref")
+    await batcher.flush()
+
+    results = GenerationsAdapter.validate_json(git.committed[path])
+    assert results["chair"].js == f"{settings.cdn_url}/chair.js"
+    assert results["chair"].views == f"{settings.cdn_url}/chair"
+    assert results["table"].js is None
+    assert results["table"].failure_reason == "not_submitted"
+
+
+async def test_retry_wait_allows_another_miner_to_be_collected(
+    git: MockGitHubClient, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state = add_state(git, stage=RoundStage.COLLECTING)
+    add_prompts(git, ["https://prompts.test/chair.png"], round_num=1)
+    submission = dict(repo="test/model", commit="c" * 40, revealed_at_block=150, tie_breaker="0" * 128, round="test-1")
+    git.files["rounds/1/submissions.json"] = json.dumps({HOTKEY: submission, HOTKEY_2: submission})
+    settings.max_concurrent_downloads = 1
+    monkeypatch.setattr("submission_collector.download.random.shuffle", lambda hotkeys: None)
+    rate_limited = asyncio.Event()
+    other_fetched = asyncio.Event()
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        if HOTKEY in request.url.path and not rate_limited.is_set():
+            rate_limited.set()
+            return httpx.Response(429)
+        if HOTKEY_2 in request.url.path:
+            other_fetched.set()
+        return httpx.Response(200, json={"chair": {"js": "chair.js"}})
+
+    batcher = GitBatcher(git=git, base_sha="ref", branch=settings.github_branch)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        collecting = asyncio.create_task(ResultCollector(batcher, client, settings).collect(state, "ref"))
+        try:
+            await asyncio.wait_for(rate_limited.wait(), timeout=1)
+            await asyncio.wait_for(other_fetched.wait(), timeout=1)
+            assert not collecting.done()
+        finally:
+            await collecting
+    await batcher.flush()
+    results = GenerationsAdapter.validate_json(git.committed[f"rounds/1/{HOTKEY}/generated.json"])
+    assert results["chair"].js == f"{settings.cdn_url}/chair.js"
