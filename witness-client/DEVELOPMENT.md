@@ -1,6 +1,6 @@
 # Witness client development
 
-The [sequence diagrams](SEQUENCE.md) trace call reservation, TLS setup,
+The [sequence diagrams](SEQUENCE.md) trace call start, TLS setup,
 credential disclosure and response capture. See [TIMINGS.md](TIMINGS.md) for
 monotonic diagnostics and the [Pod guide](../witness-gateway/PODS.md) for lifecycle,
 recording and recovery contracts.
@@ -31,15 +31,19 @@ allocation's certificate, address, server name and expiring scoped grant.
 `responses.create()` accepts `ResponseCreateParamsBase` model arguments and returns
 an SDK `Response` by default or buffered typed events for `stream=True`. Provider
 HTTP errors use SDK exceptions; failed/incomplete Responses remain objects.
+The client polls unfinished calls internally. Infrastructure failures use SDK
+connection/timeout errors with the original `WitnessError` as their cause.
 `request_id` selects fresh capture identity, and optional subscription `session_id`
 is a verified routing header. Background generation is rejected. Subscription
 normalization forces `store=false`. Request bodies are bounded to 8 MiB.
 
 `WitnessError.exchange_id` identifies an attempt for recovery. `resume()` polls
 that exchange using saved local job state and retrieves its durable Response.
-`release()` can retire an unclaimed capture; it cannot repeat inference or erase
-uncertain usage. `delivery_timeout` is a positive per-phase retry window (default
-600 seconds), independent of the server's access/capture deadlines and retention.
+`delivery_timeout` is a positive per-phase wait/retry window (default 600 seconds).
+Capture and recovery share one window, including safe
+replacement attempts, bounded also by the server's capture deadline. REST
+requests each time out after thirty seconds. Access deadlines and retention
+remain server-owned.
 Keep local state private/persistent. No SDK inference retry is enabled.
 
 Trusted hosts use `capture_context`, `capture_response(key, body)` and

@@ -101,9 +101,10 @@ The default result is an OpenAI `Response`, including output items and typed usa
 Failed/incomplete Responses retain their status. Provider HTTP failures use SDK
 status exceptions. `stream=True` returns typed SSE events with close/context-manager
 support, buffered until the capture is sealed; it does not expose token timing.
-Background generation and raw SDK transport options are unsupported. Infrastructure
-failures use `WitnessError`/`ExchangePending` and never automatically repeat an
-ambiguously dispatched paid request.
+Background generation and raw SDK transport options are unsupported. Connection
+failures use `openai.APIConnectionError`; an expired wait uses
+`openai.APITimeoutError`. Their cause retains the `WitnessError` and exchange ID.
+An ambiguously dispatched paid request is never automatically repeated.
 
 A direct `WitnessClient.responses.create()` also works for other work during the
 round's access window. Equal provider/body/`request_id`/subscription-`session_id`
@@ -165,13 +166,17 @@ renderer behavior. See the complete [contract and field inventory](../witness-ga
 Use `openai_api_key=os.environ["OPENAI_API_KEY"]` instead of `subscription="codex"`
 for API authentication. Subscription credentials are refreshed locally and stay
 hidden by the credential proof. For the Pod's packaged renderer, construct
-`RendererClient` with its pinned renderer identity and `transport=client.renderer_transport()`.
+`RendererClient("https://witness.internal/v1", ...)` with its pinned renderer
+identity and `transport=client.renderer_transport()`.
+
+The client uses `/v1` for gateway allocation, call snapshots and capture
+WebSockets. Set `witness_url` to the gateway's HTTPS origin without a path.
 
 ## Concurrency
 
 `WitnessClient(..., parallel_preparations=3)` bounds simultaneous call
 preparations across calls. The default is three and the range is 1 through
-32. A slot covers dispatch, TLS, credential proving and durable authorization;
+32. A slot covers TLS, credential proving and durable authorization;
 it becomes available while the provider runs. Native proving remains serialized.
 
 The execution host can separately bound active captures using a shared `call_slots`
@@ -185,6 +190,11 @@ credential proof and saves authorization. It then captures and persists the
 response independently of the live client connection. Delivery waits and upload
 retries reuse saved data.
 
+`responses.create()` starts or joins the same logical call, polls unfinished
+captures and retrieves the saved outcome internally. Its capture/recovery wait
+uses `delivery_timeout` and the server's capture deadline; safe replacement
+attempts share that wait window. Each REST request has a thirty-second timeout.
+
 The authenticated Pod supplies trusted completion metadata and expected evidence
 hashes. Normal completion verifies the request and response bytes already held
 by the client. Missing provider evidence bytes download directly from signed,
@@ -192,13 +202,12 @@ exchange-scoped R2 URLs and are checked against those hashes. Keep the bucket
 private; an object fetched from an arbitrary CDN URL alone is insufficient.
 
 Keep the original configuration, state directory, hotkey and authentication mode.
-A `WitnessError.exchange_id` identifies the attempt. Retrieve it with
-`client.resume(exchange_id)` during the access window. Repeated `run_generation()` restores completed observations and pending logical calls. A top-level aborted attempt retains its trace separately; another attempt recovers the saved calls.
-
-`client.release(exchange_id)` releases a stuck capture without resetting usage.
-A request already running may still finish and save evidence. Preserve its
-recovery files and unresolved accounting. Releasing does not start another
-provider request.
+Repeating `responses.create()` with the same request and `request_id` retrieves or
+continues waiting for that call. `resume(exchange_id)` also retrieves a saved
+attempt during the access window, using the exchange ID from the underlying
+`WitnessError`. Repeated `run_generation()` restores completed observations and
+pending logical calls. A top-level aborted attempt retains its trace separately;
+another attempt recovers the saved calls.
 
 The validator combines host observations with native-verified captures, then supplies retained responses during replay. It matches per-key occurrences, causal delivery order, stream operations and output bytes. The [Pod guide](../witness-gateway/PODS.md) describes verified offline
 replay, storage layout and lifecycle.
@@ -225,5 +234,3 @@ and timeouts, and [TIMINGS.md](TIMINGS.md) for diagnostics. The client is
 For subscription requests, an optional `session_id` sends a nonsecret routing
 header across related calls. It is separate from `request_id` and
 `prompt_cache_key`; it participates in request matching and is checked against TLS evidence.
-`ExchangePending` reports an unresolved capture that should be resumed without
-starting another inference.

@@ -8,11 +8,12 @@ import uuid
 from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Unpack, cast
+from typing import Any, Unpack, cast
 
 import httpx
 import pytest
 from bittensor_wallet import Keypair
+from openai import APIConnectionError, APIError, APITimeoutError
 from openai.types.responses import Response
 from openai.types.responses.response_create_params import ResponseCreateParamsBase
 from renderer_client import RenderOptions, RenderRejected, RenderUnavailable
@@ -84,7 +85,7 @@ class Calls:
     def __init__(self) -> None:
         self.requests: list[tuple[int, ResponseCreateParamsBase]] = []
         self.invalid_choice = False
-        self.failure: WitnessError | None = None
+        self.failure: WitnessError | APIError | None = None
 
     def create(self, *, request_id: int = 0, **params: Unpack[ResponseCreateParamsBase]) -> Response:
         self.requests.append((request_id, params))
@@ -128,7 +129,7 @@ class Witness(WitnessClient):
 
     def renderer_transport(self) -> httpx.BaseTransport:
         def submit(request: httpx.Request) -> httpx.Response:
-            if request.url.path == "/artifacts/context":
+            if request.url.path == "/v1/artifacts/context":
                 return httpx.Response(200, json={"submission_commit": "c" * 40})
             value = json.loads(request.content)
             source = value["source"]
@@ -279,11 +280,22 @@ def test_invalid_selection_does_not_trigger_a_repair() -> None:
     assert len(malformed.requests) == 1
 
 
-def test_infrastructure_failures_propagate_instead_of_changing_the_algorithm() -> None:
+@pytest.mark.parametrize("selecting", [False, True])
+@pytest.mark.parametrize("failure", [
+    WitnessError("Gateway unavailable", source="gateway"),
+    APIConnectionError(request=cast(Any, httpx.Request("POST", "https://api.openai.com/v1/responses"))),
+    APITimeoutError(request=cast(Any, httpx.Request("POST", "https://api.openai.com/v1/responses"))),
+])
+def test_infrastructure_failures_propagate_instead_of_changing_the_algorithm(
+    selecting: bool, failure: WitnessError | APIError,
+) -> None:
     calls = Calls()
-    calls.failure = WitnessError("Gateway unavailable", source="gateway")
-    with pytest.raises(WitnessError):
-        run(PNG, 42, calls, Renderer())
+    calls.failure = failure
+    with pytest.raises(type(failure)):
+        if selecting:
+            choose(PNG, 42, calls, [Candidate("source", PNG)], 4)
+        else:
+            run(PNG, 42, calls, Renderer())
 
 
 def test_batch_runs_prompts_in_parallel_with_a_shared_call_limit(tmp_path: Path, prompts: list[Prompt]) -> None:

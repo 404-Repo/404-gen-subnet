@@ -29,12 +29,23 @@ def request(
     headers: dict[str, str],
     limit: int = 32768,
     extensions: dict[str, object] | None = None,
+    deadline: float | None = None,
 ) -> bytes:
     """Perform exactly one bounded request; callers own its retry deadline."""
-    with http.stream(method, path, content=body, headers=headers, extensions=extensions) as response:
+    timeouts = http.timeout.as_dict()
+    if deadline is not None:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise WitnessError("Witness delivery timed out", source="gateway", code="capture_timeout")
+        timeouts = {name: min(value, remaining) if value is not None else remaining
+                    for name, value in timeouts.items()}
+    with http.stream(method, path, content=body, headers=headers, extensions=extensions,
+                     timeout=httpx.Timeout(**timeouts)) as response:
         result = bytearray()
         bound = limit if response.is_success else 32768
         for chunk in response.iter_bytes():
+            if deadline is not None and time.monotonic() > deadline:
+                raise WitnessError("Witness delivery timed out", source="gateway", code="capture_timeout")
             result.extend(chunk)
             if len(result) > bound:
                 raise WitnessError("Oversized witness response", source="gateway")

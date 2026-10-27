@@ -305,7 +305,7 @@ def main() -> None:
             subscription=None if args.api else "codex",
         ) as witness,
         RendererClient(
-            args.renderer_url or "https://witness.internal",
+            args.renderer_url or "https://witness.internal/v1",
             renderer_id=args.renderer_id,
             api_key=os.environ.get("RENDERER_API_KEY"),
             timeout=240,

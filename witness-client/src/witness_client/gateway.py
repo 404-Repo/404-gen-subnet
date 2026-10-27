@@ -76,15 +76,18 @@ class SignedTransport:
         return headers
 
     @contextmanager
-    def tunnel(self, identifier: str) -> Iterator[WebSocketTunnel]:
+    def tunnel(self, identifier: str, *, deadline: float | None = None) -> Iterator[WebSocketTunnel]:
         """Connect to the assigned worker for one TLS exchange, closing on exit."""
-        path = f"/exchanges/{identifier}/connect"
+        path = f"/v1/exchanges/{identifier}/connect"
         headers = self._headers("GET", path, b"")
         url = (
             str(self.http.base_url).rstrip("/").replace("https://", "wss://", 1) + path
         )
         try:
             with measure("websocket_connect"):
+                remaining = deadline - time.monotonic() if deadline is not None else 30
+                if remaining <= 0:
+                    raise TimeoutError("Capture wait timed out before WebSocket connection")
                 socket = connect(
                     url,
                     additional_headers=headers,
@@ -92,8 +95,8 @@ class SignedTransport:
                     compression=None,
                     max_size=256 * 1024,
                     max_queue=16,
-                    open_timeout=30,
-                    close_timeout=5,
+                    open_timeout=min(30, remaining),
+                    close_timeout=min(5, remaining),
                     create_connection=_GatewayConnection,
                     ssl=self.tls,
                     server_hostname=self.server_name,
@@ -102,20 +105,22 @@ class SignedTransport:
                 yield WebSocketTunnel(socket, identifier)
         except (WebSocketException, OSError, TimeoutError) as error:
             raise WitnessError(
-                "Worker connection lost; recover the result or release the allocation",
+                "Worker connection lost; recover the saved result",
                 identifier,
                 code="connection_lost",
                 source="gateway",
             ) from error
 
     def _request_once(
-        self, method: str, path: str, body: bytes = b"", *, limit: int = 32768
+        self, method: str, path: str, body: bytes = b"", *, limit: int = 32768,
+        deadline: float | None = None,
     ) -> bytes | None:
         # Sign each attempt afresh. Retried jobs and objects keep the same bytes.
         headers = self._headers(method, path, body)
         try:
             return request(self.http, method, path, body, headers=headers, limit=limit,
-                           extensions={"sni_hostname": self.server_name} if self.server_name else None)
+                           extensions={"sni_hostname": self.server_name} if self.server_name else None,
+                           deadline=deadline)
         except WitnessError as error:
             if error.status_code == 404 and error.code == "object_not_ready":
                 return None
@@ -143,9 +148,9 @@ class SignedTransport:
         """Send one renderer or artifact request, preserving its caller's timeout."""
         path = request.url.raw_path.decode("ascii")
         allowed = (
-            request.method == "POST" and request.url.path in ("/render/grid", "/submissions")
+            request.method == "POST" and request.url.path in ("/v1/render/grid", "/v1/submissions")
             or request.method == "GET" and (
-                path == "/artifacts/context" or re.fullmatch(r"/submissions/[0-9a-f]{64}", path) is not None
+                path == "/v1/artifacts/context" or re.fullmatch(r"/v1/submissions/[0-9a-f]{64}", path) is not None
             )
         )
         if not allowed:
@@ -183,7 +188,7 @@ class GatewayClient(SignedTransport):
     ) -> bytes | None:
         """Read exchange progress or a saved response, or None if it is not ready.
 
-        ``name`` is relative to ``/exchanges/{identifier}/``, for example
+        ``name`` is relative to ``/v1/exchanges/{identifier}/``, for example
         ``progress`` or ``response.sse``. Responses exceeding
         ``limit`` bytes raise WitnessError. Transient failures are retried using
         ``deadline``, an absolute time.monotonic() value; when omitted, the retry
@@ -191,16 +196,12 @@ class GatewayClient(SignedTransport):
         """
         try:
             return self._request_with_retry(
-                "GET", f"/exchanges/{identifier}/{name}", limit=limit, deadline=deadline
+                "GET", f"/v1/exchanges/{identifier}/{name}", limit=limit, deadline=deadline
             )
         except httpx.TransportError as error:
             raise WitnessError(
                 f"Gateway download failed: {error}", identifier, source="gateway"
             ) from error
-
-    def release(self, identifier: str) -> None:
-        """Retire an allocation; a worker already capturing OpenAI may still save evidence."""
-        self._request_with_retry("POST", f"/release/{identifier}")
 
     def remaining_seconds(self, identifier: str) -> float:
         return remaining_seconds(self.state, identifier)
@@ -212,7 +213,7 @@ class GatewayClient(SignedTransport):
         means evidence is saved, including when OpenAI rejected the request.
         The caller handles polling and retries.
         """
-        raw = self._request_once("GET", f"/exchanges/{identifier}/progress")
+        raw = self._request_once("GET", f"/v1/exchanges/{identifier}/progress")
         return _parse_status(raw, identifier) if raw is not None else {"status": "new"}
 
     def wait_for_evidence(self, identifier: str) -> ExchangeStatus:

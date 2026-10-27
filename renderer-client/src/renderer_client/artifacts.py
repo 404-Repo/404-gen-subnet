@@ -43,7 +43,7 @@ class ArtifactClient(RendererClient):
     ) -> None:
         if hashlib.sha256(prompt_image).hexdigest() != prompt_sha256:
             raise ValueError("Prompt bytes differ from the frozen input")
-        super().__init__(url, renderer_id=renderer_id, transport=transport, timeout=timeout)
+        super().__init__(url.rstrip("/") + "/v1", renderer_id=renderer_id, transport=transport, timeout=timeout)
         self.generation: dict[str, object] = {"prompt_sha256": prompt_sha256, "seed": seed}
         self.prompt_image = base64.b64encode(prompt_image).decode("ascii")
         self._origin = self._url.removesuffix("/render/grid")

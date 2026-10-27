@@ -515,7 +515,7 @@ class PodRuntime:
                     if self.tick():
                         return
                     with connect(
-                        f"{self.origin}/control/{self.scope.hotkey}/{self.start_id}",
+                        f"{self.origin}/v1/control/{self.scope.hotkey}/{self.start_id}",
                         additional_headers={
                             "Authorization": "Bearer " + self.token,
                             "x-witness-pod": self.pod_id,

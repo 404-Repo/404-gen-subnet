@@ -68,17 +68,20 @@ class WebSocketTunnel:
                 return message
         return b""
 
-    def verify(self, phase: Phase, claim: bytes, timeout: float) -> ExchangeStatus:
+    def verify(
+        self, phase: Phase, claim: bytes, timeout: float, *, deadline: float | None = None,
+    ) -> ExchangeStatus:
         """Send a proof and wait for the worker's verification acknowledgement."""
         if phase not in ("handshake", "authorize"):
             raise WitnessError("Unsupported authorization phase", self.identifier)
+        deadline = min(deadline, time.monotonic() + timeout) if deadline is not None else time.monotonic() + timeout
+        if time.monotonic() >= deadline:
+            raise TimeoutError("Proof verification deadline reached")
         self.flush()
-        self._send(
-            json.dumps(
-                {"type": phase, "claim": json.loads(claim)}, separators=(",", ":")
-            ), phase,
-        )
-        deadline = time.monotonic() + timeout
+        proof = json.dumps({"type": phase, "claim": json.loads(claim)}, separators=(",", ":"))
+        if time.monotonic() >= deadline:
+            raise TimeoutError("Proof verification deadline reached")
+        self._send(proof, phase)
         while not self.ended:
             message = self._receive(max(0, deadline - time.monotonic()))
             if isinstance(message, bytes):

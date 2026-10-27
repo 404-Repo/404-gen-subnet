@@ -66,7 +66,7 @@ class Session(TypedDict):
 
 
 class ExchangeStatus(TypedDict):
-    """Worker progress read from /exchanges/{id}/progress through the gateway.
+    """Worker progress read from /v1/exchanges/{id}/progress through the gateway.
 
     Attributes:
         status: Exchange phase: new, running, issued, or failed. Issued means the

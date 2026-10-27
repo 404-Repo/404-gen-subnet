@@ -152,16 +152,35 @@ class CallRecords:
         return call
 
     def assign(
-        self, scope: Scope, request: RequestKey, start_id: str, pod_id: str, *, allow_reassign: bool = False
+        self, scope: Scope, request: RequestKey, start_id: str, pod_id: str, *, allow_reassign: bool = False,
+        expected_exchange_id: str | None = None,
     ) -> Call:
         def change(record: CallRecord) -> Call:
             call = record.call
-            if call.phase == "reserved" or (call.phase == "assigned" and allow_reassign):
+            if (
+                call.exchange_id == expected_exchange_id
+                and call.phase == "failed"
+                and call.not_dispatched
+                and not call.authorized
+            ):
+                record.attempts[call.exchange_id] = call.model_copy(deep=True)
+                call = record.call = Call(
+                    request=request, exchange_id=str(uuid.uuid4()), deadline=int(time.time()) + self.exchange_seconds
+                )
+            if call.phase == "reserved" or (
+                call.phase == "assigned" and allow_reassign and (
+                    call.start_id != start_id or call.pod_id != pod_id or call.deadline <= time.time()
+                )
+            ):
+                if call.deadline <= time.time():
+                    call.deadline = int(time.time()) + self.exchange_seconds
                 call.phase, call.start_id, call.pod_id = "assigned", start_id, pod_id
                 call.capture_id = str(uuid.uuid4())
             return call.model_copy(deep=True)
 
-        return self._change(scope, request, change)
+        call = self._change(scope, request, change)
+        self._index(scope, call)
+        return call
 
     def claim(self, scope: Scope, request: RequestKey, pod_id: str, capture_id: str) -> bool:
         def change(record: CallRecord) -> bool:
@@ -217,13 +236,5 @@ class CallRecords:
                 raise RecordingConflict("Cannot replace an existing result with an error")
             call.phase, call.failure = "failed", failure
             call.not_dispatched = not_dispatched and not call.authorized
-
-        self._change(scope, request, change)
-
-    def release(self, scope: Scope, request: RequestKey) -> None:
-        def change(record: CallRecord) -> None:
-            call = record.call
-            if call.phase in ("reserved", "assigned"):
-                call.phase, call.failure, call.not_dispatched = "failed", "ReleasedBeforeCapture", True
 
         self._change(scope, request, change)

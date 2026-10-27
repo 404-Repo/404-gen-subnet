@@ -87,41 +87,33 @@ class PodGatewayClient:
         value: object | None = None,
         *,
         limit: int = 1024 * 1024,
+        deadline: float | None = None,
     ) -> dict[str, object]:
         body = b"" if value is None else canonical(value)
+        if deadline is None:
+            deadline = time.monotonic() + self.delivery_timeout
         raw = retry(
-            lambda: self._request_once(method, path, body, limit=limit),
-            deadline=time.monotonic() + self.delivery_timeout,
+            lambda: self._request_once(method, path, body, limit=limit, deadline=deadline),
+            deadline=deadline,
         )
         result: object = json.loads(raw or b"{}")
         if not isinstance(result, dict):
             raise WitnessError("Invalid Pod gateway response", source="gateway")
         return result
 
-    def reserve(self, invocation: RequestKey) -> Snapshot:
+    def start(
+        self, invocation: RequestKey, *, expected_exchange_id: str | None = None, deadline: float | None = None,
+    ) -> Snapshot:
+        value: dict[str, object] = {"request": invocation.model_dump()}
+        if expected_exchange_id is not None:
+            value["expected_exchange_id"] = str(uuid.UUID(expected_exchange_id))
         return self._snapshot(
-            self._json("POST", "/calls", invocation.model_dump())
+            self._json("POST", "/v1/calls", value, deadline=deadline)
         )
 
-    def snapshot(self, exchange_id: str) -> Snapshot:
+    def snapshot(self, exchange_id: str, *, deadline: float | None = None) -> Snapshot:
         return self._snapshot(
-            self._json("GET", f"/status/{uuid.UUID(exchange_id)!s}")
-        )
-
-    def dispatch(self, invocation: RequestKey, start_id: str) -> Snapshot:
-        return self._snapshot(
-            self._json(
-                "POST",
-                "/calls/dispatch",
-                {"request": invocation.model_dump(), "start_id": start_id},
-            )
-        )
-
-    def retry(self, invocation: RequestKey, exchange_id: str) -> Snapshot:
-        return self._snapshot(
-            self._json("POST", "/calls/retry", {
-                "request": invocation.model_dump(), "exchange_id": exchange_id,
-            })
+            self._json("GET", f"/v1/calls/{uuid.UUID(exchange_id)!s}", deadline=deadline)
         )
 
     def _snapshot(self, value: dict[str, object]) -> Snapshot:
@@ -136,7 +128,7 @@ class PodGatewayClient:
         def attempt() -> bytes | None:
             wait = min(20, max(0, math.ceil(deadline - time.monotonic())))
             self._allocation.headers["Prefer"] = f"wait={wait}"
-            return self._allocation._request_once(method, path, body)
+            return self._allocation._request_once(method, path, body, deadline=deadline)
 
         raw = retry(attempt, deadline=deadline)
         result = json.loads(raw or b"{}")
@@ -174,13 +166,18 @@ class PodGatewayClient:
         self.round_number = round_number
         return True
 
-    def ensure_pod(self) -> str:
-        with self._pod_lock:
+    def ensure_pod(self, *, deadline: float | None = None) -> str:
+        if deadline is None:
+            deadline = time.monotonic() + self.delivery_timeout
+        if not self._pod_lock.acquire(timeout=max(0, deadline - time.monotonic())):
+            raise WitnessError("Pod connection wait timed out", source="gateway", code="capture_timeout")
+        try:
+            if time.monotonic() >= deadline:
+                raise WitnessError("Pod connection wait timed out", source="gateway", code="capture_timeout")
             if self._direct is not None and time.time() < self._expires - 30:
                 assert self._start_id is not None
                 return self._start_id
-            deadline = time.monotonic() + self.delivery_timeout
-            reply = self._allocation_json("GET", "/pods/current", deadline=deadline)
+            reply = self._allocation_json("GET", "/v1/pods/current", deadline=deadline)
             allocation: dict[str, object] | None = None
             if self._connection.is_file():
                 value = json.loads(self._connection.read_bytes())
@@ -194,7 +191,7 @@ class PodGatewayClient:
                     allocation = {"start_id": str(uuid.uuid4()), "replaces": current.get("start_id")
                                   if isinstance(current, dict) else None}
                     save(self._connection, canonical({**allocation, "round": reply["round"]}))
-                reply = self._allocation_json("POST", "/pods/start", allocation,
+                reply = self._allocation_json("POST", "/v1/pods/start", allocation,
                                                deadline=deadline)
             while True:
                 session = reply.get("session")
@@ -217,10 +214,12 @@ class PodGatewayClient:
                 if time.monotonic() >= deadline:
                     raise WitnessError("Pod provisioning remains unresolved; retry the same connection",
                                        source="gateway", code="pod_provisioning_pending")
-                reply = self._allocation_json("GET", f"/pods/{start_id}", deadline=deadline)
+                reply = self._allocation_json("GET", f"/v1/pods/{start_id}", deadline=deadline)
+        finally:
+            self._pod_lock.release()
 
-    def _service(self) -> SignedTransport:
-        self.ensure_pod()
+    def _service(self, *, deadline: float | None = None) -> SignedTransport:
+        self.ensure_pod(deadline=deadline)
         assert self._direct is not None
         return self._direct
 
@@ -230,30 +229,27 @@ class PodGatewayClient:
         self._expires = 0
         return True
 
-    def release(self, identifier: str) -> None:
-        retry(
-            lambda: self._request_once("POST", f"/release/{identifier}"),
-            deadline=time.monotonic() + self.delivery_timeout,
-        )
-
     def remaining_seconds(self, identifier: str) -> float:
         return remaining_seconds(self.state, identifier)
 
-    def _request_once(self, method: str, path: str, body: bytes = b"", *, limit: int = 32768) -> bytes | None:
-        service = self._service()
+    def _request_once(
+        self, method: str, path: str, body: bytes = b"", *, limit: int = 32768,
+        deadline: float | None = None,
+    ) -> bytes | None:
+        service = self._service(deadline=deadline)
         try:
-            return service._request_once(method, path, body, limit=limit)
+            return service._request_once(method, path, body, limit=limit, deadline=deadline)
         except httpx.TransportError:
             self._expires = 0
             raise
         except WitnessError as error:
             if not self._invalidate_for(error.code):
                 raise
-            return self._service()._request_once(method, path, body, limit=limit)
+            return self._service(deadline=deadline)._request_once(method, path, body, limit=limit, deadline=deadline)
 
     @contextmanager
-    def tunnel(self, identifier: str) -> Iterator[WebSocketTunnel]:
-        with self._service().tunnel(identifier) as tunnel:
+    def tunnel(self, identifier: str, *, deadline: float | None = None) -> Iterator[WebSocketTunnel]:
+        with self._service(deadline=deadline).tunnel(identifier, deadline=deadline) as tunnel:
             yield tunnel
 
     def close(self) -> None:

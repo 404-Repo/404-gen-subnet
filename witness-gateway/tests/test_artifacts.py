@@ -188,6 +188,104 @@ def test_final_checkpoint_rejects_changed_source_commit(
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize("entrypoint", ["main", "batch"])
+@pytest.mark.parametrize("recover", [False, True])
+@pytest.mark.parametrize("subscription", [False, True])
+def test_reference_miner_completes_authenticated_flow(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, entrypoint: str, recover: bool, subscription: bool,
+) -> None:
+    import json
+
+    from test_recording import PRICING
+    from main import generate
+    from miner_reference.batch import BatchSettings, Prompt, run_batch
+    from miner_reference.submissions import run_and_save
+    from miner_runtime.runner import run_generation
+    from renderer_client import RendererClient
+    from witness_client.calls import canonical
+
+    pricing = json.loads(PRICING)
+    pricing["calls_per_prompt"] = 10
+    rate = pricing["models"]["fixture"]
+    pricing["models"] = {name: rate for name in ("gpt-6-astra", "gpt-6.1-sol")}
+    monkeypatch.setattr("test_service.PRICING", canonical(pricing))
+    if subscription:
+        monkeypatch.setattr(
+            "witness_client.request.subscription_credentials", lambda *_: ("fixture-" + "a" * 80, "c" * 32),
+        )
+
+    def answer(body: bytes, number: int) -> str:
+        if json.loads(body).get("text", {}).get("format", {}).get("type") == "json_schema":
+            return json.dumps({"winner": "A", "reason": "closest shape", "improvements": "refine proportions"})
+        return SOURCE + f"\n// candidate {number}"
+
+    async def scenario() -> None:
+        fixture = Harness(tmp_path, monkeypatch)
+        fixture.image, fixture.response_text = PNG, answer
+        if recover:
+            fixture.failures = ["lost"]
+        path = tmp_path / "prompt.png"
+        path.write_bytes(fixture.image)
+        prompt = Prompt("chair", path, hashlib.sha256(fixture.image).hexdigest())
+        settings = BatchSettings(tmp_path / "batch", 42, "fixture")
+        async with fixture.running():
+            with fixture.client(subscription=subscription) as witness:
+                await asyncio.to_thread(witness._gateway.ensure_pod)
+                rendered = await enable(fixture)
+                original = witness.renderer_transport
+                lost = False
+
+                def transport() -> httpx.BaseTransport:
+                    inner = original()
+
+                    def deliver(request: httpx.Request) -> httpx.Response:
+                        nonlocal lost
+                        response = inner.handle_request(request)
+                        if recover and not lost and request.url.path == "/v1/submissions" and response.is_success:
+                            lost = True
+                            response.close()
+                            raise httpx.ReadError("Lost final-save acknowledgement", request=request)
+                        return response
+
+                    return httpx.MockTransport(deliver)
+
+                monkeypatch.setattr(witness, "renderer_transport", transport)
+                with RendererClient(
+                    "https://witness.internal/v1", renderer_id=IMAGE, transport=transport(),
+                ) as renderer, client(fixture, transport()) as submissions:
+                    checkpoint = tmp_path / "private/final.json"
+
+                    def run() -> object:
+                        if entrypoint == "batch":
+                            return run_batch([prompt], settings, witness, renderer, progress=lambda _: None)
+                        return run_and_save(
+                            lambda: run_generation(generate, fixture.image, 42, witness, renderer),
+                            submissions, checkpoint,
+                        )
+
+                    if recover:
+                        if entrypoint == "batch":
+                            assert await asyncio.to_thread(run) == {"chair": "pending"}
+                        else:
+                            with pytest.raises(RenderUnavailable):
+                                await asyncio.to_thread(run)
+                        assert lost and fixture.paid == 7
+                    result = await asyncio.to_thread(run)
+                    if entrypoint == "batch":
+                        assert result == {"chair": "selected"}
+                        output = (settings.output / "chair/selected.js").read_text()
+                    else:
+                        output = json.loads(checkpoint.read_bytes())["output"]
+                    saved = await asyncio.to_thread(submissions.get_submission)
+                    assert fixture.state.get(str(saved["js"])) == output.encode()
+                    assert saved["failure_reason"] is None
+                    assert fixture.state.get(str(saved["views"]) + "/embeddings.npz") == b"fixture embeddings"
+                    await asyncio.to_thread(run)
+                    assert fixture.paid == 7 and len(rendered) == 6
+
+    asyncio.run(scenario())
+
+
 def test_none_is_saved_as_a_generation_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     async def scenario() -> None:
         fixture = Harness(tmp_path, monkeypatch)
@@ -223,7 +321,7 @@ def test_lost_final_acknowledgement_retries_saving_without_generating_again(
                 def deliver(request: httpx.Request) -> httpx.Response:
                     nonlocal lost
                     response = inner.handle_request(request)
-                    if request.url.path == "/submissions" and response.is_success and not lost:
+                    if request.url.path == "/v1/submissions" and response.is_success and not lost:
                         lost = True
                         response.close()
                         raise httpx.ReadError("Lost final-save acknowledgement", request=request)
@@ -560,7 +658,7 @@ def test_managed_batch_recovers_final_save_on_replacement_without_generation(
                     def deliver(request: httpx.Request) -> httpx.Response:
                         nonlocal lost
                         response = inner.handle_request(request)
-                        if not lost and request.url.path == "/submissions" and response.is_success:
+                        if not lost and request.url.path == "/v1/submissions" and response.is_success:
                             lost = True
                             response.close()
                             raise httpx.ReadError("Lost final-save acknowledgement", request=request)

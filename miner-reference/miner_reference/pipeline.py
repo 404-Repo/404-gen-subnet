@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, Unpack, cast
 
-from openai import APIError
+from openai import APIConnectionError, APIError
 from openai.types.responses import Response, ResponseInputParam
 from openai.types.responses.response_create_params import ResponseCreateParamsBase
 from pydantic import BaseModel, ConfigDict
@@ -110,6 +110,8 @@ def candidate(
             instructions=INSTRUCTIONS,
             input=cast(ResponseInputParam, [{"role": "user", "content": content}]),
         )
+    except APIConnectionError:
+        raise
     except (WitnessError, APIError) as error:
         if isinstance(error, WitnessError) and error.source != "provider":
             raise
@@ -209,6 +211,8 @@ def choose(
                 }
             },
         )
+    except APIConnectionError:
+        raise
     except (WitnessError, APIError) as error:
         if isinstance(error, WitnessError) and error.source != "provider":
             raise

@@ -16,7 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from witness_client.calls import Digest, RequestKey, canonical
 from witness_client.client import CapturedResponse, WitnessClient
 from witness_client.errors import ExchangePending, WitnessError
-from witness_client.response import ModelStream, model_result
+from witness_client.response import ModelStream, model_error, model_result
 from witness_client.state import save
 
 T = TypeVar("T")
@@ -357,14 +357,19 @@ class ObservedWitness(WitnessClient):
         """
         key, body = self._request(request_id, session_id, params)
         occurrence = self.schedule.occurrence(key)
-        captured = self.schedule.step(
-            key,
-            occurrence,
-            "create",
-            0,
-            stream,
-            lambda entry, replay: self.read(entry, replay, key, body),
-        )
+        try:
+            captured = self.schedule.step(
+                key,
+                occurrence,
+                "create",
+                0,
+                stream,
+                lambda entry, replay: self.read(entry, replay, key, body),
+            )
+        except ReplayMismatch:
+            raise
+        except WitnessError as error:
+            raise model_error(error, self._mode) from error
         result = model_result(captured.status, captured.body, self._mode, stream=stream)
         return (
             ObservedStream(result, self.schedule, key, occurrence)
@@ -377,6 +382,3 @@ class ObservedWitness(WitnessClient):
 
     def resume(self, exchange_id: str) -> Response:
         raise ReplayMismatch("Execution code must use responses.create()")
-
-    def release(self, exchange_id: str) -> None:
-        raise ReplayMismatch("Execution code cannot change capture allocations")

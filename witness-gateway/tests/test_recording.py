@@ -10,7 +10,7 @@ from witness_client.calls import RequestKey, canonical, request_digest
 
 from pod_gateway.budget import Budget, BudgetRejected
 from pod_gateway.models import Scope
-from pod_gateway.records import CallRecords, RecordingConflict
+from pod_gateway.records import Call, CallRecords, RecordingConflict
 
 SCOPE = Scope("competition", "test-0", "5" * 48)
 BODY = canonical({"model": "fixture", "input": "image", "stream": True, "service_tier": "default"})
@@ -88,7 +88,9 @@ def test_unknown_dispatch_cannot_retry_or_erase_unknown_usage(authorized: bool) 
         records.authorize(SCOPE, item, "pod", exchange_id=call.exchange_id)
     budget.settle(SCOPE, item, None)
     records.failed(SCOPE, item, "pod", "Interrupted", exchange_id=call.exchange_id)
-    assert records.retry(SCOPE, item, call.exchange_id).exchange_id == call.exchange_id
+    assert records.assign(
+        SCOPE, item, assigned.start_id or "", "pod", expected_exchange_id=call.exchange_id,
+    ).exchange_id == call.exchange_id
     assert budget.summary(SCOPE, item)["pending_usage"] == 1
 
 
@@ -110,18 +112,37 @@ def test_expired_unstarted_reservation_can_resume_without_extending_an_active_ca
     assert recording is not None and recording.call.exchange_id == first.exchange_id
 
 
+def test_expired_unclaimed_assignment_can_resume_without_extending_a_claim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = [1000.0]
+    monkeypatch.setattr("pod_gateway.records.time.time", lambda: clock[0])
+    records, item = CallRecords(MemoryState(), exchange_seconds=60), invocation()
+    start_id = "00000000-0000-4000-8000-000000000001"
+    first = records.assign(SCOPE, item, start_id, "pod-one", allow_reassign=True)
+    clock[0] += 61
+    resumed = records.assign(SCOPE, item, start_id, "pod-one", allow_reassign=True)
+    assert resumed.exchange_id == first.exchange_id and resumed.deadline > clock[0]
+    assert not records.claim(SCOPE, item, "pod-one", first.capture_id or "")
+    assert records.claim(SCOPE, item, "pod-one", resumed.capture_id or "")
+    clock[0] += 61
+    active = records.assign(SCOPE, item, start_id, "pod-one", allow_reassign=True)
+    assert active.phase == "capturing" and active.deadline == resumed.deadline
+
+
 def test_concurrent_retries_grant_exactly_one_capture_claim() -> None:
     records = CallRecords(MemoryState())
     with ThreadPoolExecutor(max_workers=8) as pool:
-        calls = list(pool.map(lambda _: records.reserve(SCOPE, invocation()), range(8)))
+        calls = list(pool.map(lambda _: records.assign(
+            SCOPE, invocation(), "00000000-0000-4000-8000-000000000001", "pod-one", allow_reassign=True,
+        ), range(8)))
     assert len({call.exchange_id for call in calls}) == 1
-    assigned = records.assign(SCOPE, invocation(), "00000000-0000-4000-8000-000000000001", "pod-one")
-    assert assigned.capture_id is not None
+    assert len({call.capture_id for call in calls}) == 1
     with ThreadPoolExecutor(max_workers=8) as pool:
         permissions = list(
             pool.map(
-                lambda _: records.claim(SCOPE, invocation(), "pod-one", assigned.capture_id or ""),
-                range(8),
+                lambda call: records.claim(SCOPE, invocation(), "pod-one", call.capture_id or ""),
+                calls,
             )
         )
     assert sum(permissions) == 1
@@ -201,10 +222,13 @@ def test_late_attempt_cannot_authorize_or_replace_its_retry() -> None:
     original = records.reserve(SCOPE, item)
     call = records.assign(SCOPE, item, "00000000-0000-4000-8000-000000000001", "pod-one")
     assert records.claim(SCOPE, item, "pod-one", call.capture_id or "")
-    assert records.retry(SCOPE, item, original.exchange_id).phase == "capturing"
+    assert records.assign(
+        SCOPE, item, call.start_id or "", "pod-one", expected_exchange_id=original.exchange_id,
+    ).phase == "capturing"
     records.failed(SCOPE, item, "pod-one", "TimeoutError", exchange_id=original.exchange_id, not_dispatched=True)
-    retried = records.retry(SCOPE, item, original.exchange_id)
-    assigned = records.assign(SCOPE, item, "00000000-0000-4000-8000-000000000001", "pod-one")
+    retried = assigned = records.assign(
+        SCOPE, item, call.start_id or "", "pod-one", expected_exchange_id=original.exchange_id,
+    )
     assert not records.claim(SCOPE, item, "pod-one", call.capture_id or "")
     assert records.claim(SCOPE, item, "pod-one", assigned.capture_id or "")
     with pytest.raises(RecordingConflict):
@@ -216,4 +240,33 @@ def test_late_attempt_cannot_authorize_or_replace_its_retry() -> None:
     assert current is not None and current[1].phase == "capturing" and not current[1].authorized
     records.authorize(SCOPE, item, "pod-one", exchange_id=retried.exchange_id)
     records.issued(SCOPE, item, "pod-one", b"new result", exchange_id=retried.exchange_id)
-    assert records.retry(SCOPE, item, original.exchange_id).phase == "issued"
+    assert records.assign(
+        SCOPE, item, call.start_id or "", "pod-one", expected_exchange_id=original.exchange_id,
+    ).phase == "issued"
+
+
+def test_concurrent_and_stale_setup_recovery_cannot_advance_a_newer_attempt() -> None:
+    records, item = CallRecords(MemoryState()), invocation()
+    start_id = "00000000-0000-4000-8000-000000000001"
+    first = records.assign(SCOPE, item, start_id, "pod-one")
+    assert records.claim(SCOPE, item, "pod-one", first.capture_id or "")
+    records.failed(SCOPE, item, "pod-one", "SetupFailed", exchange_id=first.exchange_id, not_dispatched=True)
+
+    def recover(exchange_id: str) -> Call:
+        return records.assign(SCOPE, item, start_id, "pod-one", expected_exchange_id=exchange_id)
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        replacements = list(pool.map(lambda _: recover(first.exchange_id), range(8)))
+    second = replacements[0]
+    assert second.exchange_id != first.exchange_id and second.phase == "assigned"
+    assert all(call == second for call in replacements)
+    assert records.claim(SCOPE, item, "pod-one", second.capture_id or "")
+    records.failed(SCOPE, item, "pod-one", "SetupFailed", exchange_id=second.exchange_id, not_dispatched=True)
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        stale = list(pool.map(lambda _: recover(first.exchange_id), range(8)))
+    assert all(call.exchange_id == second.exchange_id and call.phase == "failed" for call in stale)
+    third = recover(second.exchange_id)
+    assert third.exchange_id != second.exchange_id
+    for previous in (first, second):
+        located = records.locate(SCOPE, previous.exchange_id)
+        assert located is not None and located[1].not_dispatched

@@ -10,6 +10,30 @@ evidence. SQL is not required.
 
 Imports, installation, tests and `--help` do not create infrastructure.
 
+## HTTP API
+
+Witness API routes use the `/v1` prefix. Configure `witness_url` and
+`WITNESS_ORIGIN` with the gateway's HTTPS origin; clients and workers append the
+versioned paths. Signatures cover the complete path, including `/v1` and any
+renderer query string.
+
+| Service | Method | Path |
+| --- | --- | --- |
+| Gateway | GET | `/v1/pods/current` |
+| Gateway | POST | `/v1/pods/start` |
+| Gateway | GET | `/v1/pods/{start_id}` |
+| Gateway | GET (WebSocket) | `/v1/control/{hotkey}/{start_id}` |
+| Assigned Pod | POST | `/v1/calls` |
+| Assigned Pod | GET | `/v1/calls/{exchange_id}` |
+| Assigned Pod | GET (WebSocket) | `/v1/exchanges/{exchange_id}/connect` |
+| Assigned Pod | POST | `/v1/render/grid` |
+| Assigned Pod | GET | `/v1/artifacts/context` |
+| Assigned Pod | POST | `/v1/submissions` |
+| Assigned Pod | GET | `/v1/submissions/{prompt}` |
+
+The gateway's unauthenticated health check is `GET /health`. The Pod forwards
+preview rendering to the internal renderer's `POST /render/grid` endpoint.
+
 ## Execution and replay contract
 
 The miner supplies `generate(image, seed, witness, renderer)`. Model calls need no
@@ -44,7 +68,8 @@ a shared renderer/model scheduler, or the competition's complete validation job.
 `witness.responses.create(model=..., input=...)` returns an OpenAI `Response`.
 Failed/incomplete Responses retain their status, usage and output. HTTP errors
 raise the corresponding OpenAI SDK status-error class; SSE errors raise SDK
-`APIError`. Witness infrastructure failures use `WitnessError`/`ExchangePending`.
+`APIError`. Witness delivery failures raise SDK connection/timeout errors with
+the original `WitnessError` as their cause.
 Background generation and raw SDK transport options are unsupported.
 
 `stream=True` returns a typed event iterator with close/context-manager support.
@@ -69,12 +94,12 @@ permits fresh inference for an otherwise identical request. Serialized request
 keys and call hashes use the `request_id` field.
 
 The gateway selects its current round at allocation/reconnect and returns it in
-allocation replies. `POST /pods/start` accepts a start UUID and optional predecessor;
+allocation replies. `POST /v1/pods/start` accepts a start UUID and optional predecessor;
 miners need no round configuration. Per-call requests contain no round, prompt,
 image hash, generation seed, source hash, URL or global invocation ordinal.
 The server owns round context for access deadlines, state and evidence.
 `ArtifactClient.load_context()` reads the approved source commit through the
-authenticated `GET /artifacts/context` endpoint.
+authenticated `GET /v1/artifacts/context` endpoint.
 Preview requests supply source and preview options without creating stored
 artifacts. After `generate` returns, the runner submits its JavaScript or `None`
 with the prompt hash and seed. The Pod makes the fixed final renders and supplies
@@ -84,6 +109,23 @@ approved source commit.
 Source, prompt, seed and checkpoint checks remain required.
 
 ### Capture, failures and restart
+
+`POST /v1/calls` starts or joins a logical call. Its JSON body contains `request`,
+an object with `provider`, the normalized request-body `request_sha256`,
+`request_id`, and optional subscription `session_id`. A new or unfinished call
+returns `202 Accepted` with
+the same durable exchange, a `Location: /v1/calls/<exchange_id>` header and a
+`Retry-After` hint. An assigned call includes its proof/capture WebSocket session;
+HTTP acceptance alone cannot authorize a provider request. A completed call
+returns `200` with its saved completion metadata, including provider failures.
+An expired unclaimed assignment can renew its deadline for the same exchange,
+fencing its previous claim token. Claimed captures retain their original deadline.
+`GET /v1/calls/<exchange_id>` returns the current snapshot. The supplied client's
+`responses.create()` handles polling and retrieval and returns a Response or
+buffered stream, or raises a provider, connection or timeout error. Miners do not
+need to call `resume()` for ordinary calls. A capture/recovery wait is bounded by
+`delivery_timeout` and the exchange deadline; REST requests time out after thirty
+seconds.
 
 A logical call owns a current capture attempt; an exchange UUID identifies an
 attempt, and a private capture capability fences its selected Pod/start. CAS state
@@ -97,7 +139,12 @@ paid request. Recovery finalizes retained ciphertext or joins the same exchange;
 an unresolved paid attempt keeps unknown usage and its retained spool. Losing
 unuploaded spool bytes can prevent completion. Only durable non-dispatch evidence
 permits an internal replacement attempt; earlier attempts remain addressable.
-The client allows two such replacements per call, with one/two-second delays.
+To recover setup, the same `POST /v1/calls` body includes `expected_exchange_id`.
+The Pod atomically creates and assigns a replacement only when that exchange is
+still current, durably failed, proven undispatched and unauthorized. Delayed or
+duplicate recovery requests return the current attempt without replacing it.
+The client allows two such replacements per `create()`, with one/two-second delays,
+within the same capture/recovery wait window.
 No inference retry follows a provider rejection or an ambiguously dispatched call.
 
 The worker captures independently of client delivery and saves the response,
@@ -112,8 +159,7 @@ returning to the caller. A process restart resumes saved observations and pendin
 logical calls. A top-level exception aborts that execution attempt; its trace is
 retained separately and a subsequent attempt may recover the same paid calls.
 Completed traces and their visible failures cannot be rewritten by a restart.
-`resume(exchange_id)` retrieves a durable Response; `release(exchange_id)` can
-retire an unclaimed attempt and cannot repeat inference.
+`resume(exchange_id)` retrieves a durable Response without repeating inference.
 
 ### Observation order and validator accounting
 
@@ -243,7 +289,7 @@ The gateway serializes worker create admission and records requests in R2 before
 creating Pods. Delivery retries join the same allocation across gateway restarts.
 On restart, RunPod inventory is queried directly. The client also recovers when
 its previous Pod ID returns 404. Installed clients can discover and reattach the
-current allocation through `GET /pods/current`; a new `POST /pods/start` request
+current allocation through `GET /v1/pods/current`; a new `POST /v1/pods/start` request
 joins the queue for a fresh Pod. R2 retains the selection fence; RunPod inventory
 remains authoritative for identity, capacity and lifecycle.
 

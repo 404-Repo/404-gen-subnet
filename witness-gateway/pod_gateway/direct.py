@@ -34,14 +34,9 @@ class StrictInput(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
 
-class Dispatch(StrictInput):
+class Start(StrictInput):
     request: RequestKey
-    start_id: str
-
-
-class Retry(StrictInput):
-    request: RequestKey
-    exchange_id: str
+    expected_exchange_id: str | None = None
 
 
 class SaveChoice(StrictInput):
@@ -83,12 +78,12 @@ class Witness:
         self, request: web.Request, handler: Callable[[web.Request], Awaitable[web.StreamResponse]]
     ) -> web.StreamResponse:
         try:
-            if request.raw_path != request.path and not request.path.startswith("/render/"):
+            if request.raw_path != request.path and not request.path.startswith("/v1/render/"):
                 raise AuthRejected("unknown_route", 404)
             body = await request.read()
             if request.method == "GET" and body:
                 raise ValueError("Unexpected request body")
-            if not (request.path.startswith("/render/") or request.path == "/submissions") and len(body) > 16384:
+            if not (request.path.startswith("/v1/render/") or request.path == "/v1/submissions") and len(body) > 16384:
                 raise ValueError("Invalid body size")
             for name in (
                 "x-bittensor-version",
@@ -145,49 +140,45 @@ class Witness:
             "completion": completion,
         }
 
-    async def reserve(self, request: web.Request) -> web.Response:
-        invocation = RequestKey.model_validate_json(await request.read())
-        scope = self._scope(request)
-        if time.time() >= self.round_end:
-            record = await asyncio.to_thread(self.records.load, scope, invocation.id)
-            if record is None:
-                raise AuthRejected("round_closed", 403)
-        await asyncio.to_thread(self._require_selected)
-        call = await asyncio.to_thread(self.records.reserve, scope, invocation)
-        return web.json_response(await self._snapshot(scope, invocation, call))
+    async def _call_response(self, scope: Scope, invocation: RequestKey, call: Call) -> web.Response:
+        snapshot = await self._snapshot(scope, invocation, call)
+        pending = snapshot["completion"] is None
+        headers = {"Cache-Control": "no-store", "Location": f"/v1/calls/{call.exchange_id}"}
+        if pending:
+            headers["Retry-After"] = "1"
+        return web.json_response(snapshot, status=202 if pending else 200, headers=headers)
 
-    async def dispatch(self, request: web.Request) -> web.Response:
-        data = Dispatch.model_validate_json(await request.read())
-        invocation, scope = data.request, self._scope(request)
+    async def start(self, request: web.Request) -> web.Response:
+        data = Start.model_validate_json(await request.read())
+        invocation = data.request
+        expected = identifier(data.expected_exchange_id) if data.expected_exchange_id is not None else None
+        scope = self._scope(request)
         record = await asyncio.to_thread(self.records.load, scope, invocation.id)
         call = None if record is None else record.call
-        if call is None:
+        if call is None and expected is not None:
             raise AuthRejected("exchange_not_found", 404)
-        if call.phase in ("issued", "failed", "capturing"):
-            return web.json_response(await self._snapshot(scope, invocation, call))
+        if call is not None:
+            if call.request != invocation:
+                raise RecordingConflict("Call identity differs")
+            if call.phase in ("issued", "capturing") or (
+                call.phase == "failed" and (
+                    expected != call.exchange_id or call.authorized or not call.not_dispatched
+                )
+            ):
+                return await self._call_response(scope, invocation, call)
         if time.time() >= self.round_end:
             raise AuthRejected("round_closed", 403)
         await asyncio.to_thread(self._require_selected)
-        if data.start_id != self.runtime.start_id:
-            raise AuthRejected("pod_not_selected", 409)
         call = await asyncio.to_thread(
             self.records.assign,
             scope,
             invocation,
             self.runtime.start_id,
             self.runtime.pod_id,
-            allow_reassign=call.phase == "assigned" and call.pod_id != self.runtime.pod_id,
+            allow_reassign=True,
+            expected_exchange_id=expected,
         )
-        return web.json_response(await self._snapshot(scope, invocation, call), status=202)
-
-    async def retry(self, request: web.Request) -> web.Response:
-        data = Retry.model_validate_json(await request.read())
-        if time.time() >= self.round_end:
-            raise AuthRejected("round_closed", 403)
-        scope = self._scope(request)
-        await asyncio.to_thread(self._require_selected)
-        call = await asyncio.to_thread(self.records.retry, scope, data.request, identifier(data.exchange_id))
-        return web.json_response(await self._snapshot(scope, data.request, call))
+        return await self._call_response(scope, invocation, call)
 
     async def exchange_status(self, request: web.Request) -> web.Response:
         scope = self._scope(request)
@@ -195,15 +186,6 @@ class Witness:
         if located is None:
             raise AuthRejected("exchange_not_found", 404)
         return web.json_response(await self._snapshot(scope, *located))
-
-    async def release(self, request: web.Request) -> web.Response:
-        scope = self._scope(request)
-        exchange_id = identifier(request.match_info["exchange_id"])
-        located = await asyncio.to_thread(self.records.locate, scope, exchange_id)
-        if located is None:
-            raise AuthRejected("exchange_not_found", 404)
-        await asyncio.to_thread(self.records.release, scope, located[0])
-        return web.json_response({"released": True})
 
     def session(self, invocation: RequestKey, call: Call) -> dict[str, object]:
         host, path = PROVIDERS[invocation.provider]
@@ -389,16 +371,13 @@ class Witness:
         app = web.Application(middlewares=[self.middleware], client_max_size=16 * 1024 * 1024 + 4096)
         app.add_routes(
             [
-                web.post("/calls", self.reserve),
-                web.post("/calls/dispatch", self.dispatch),
-                web.post("/calls/retry", self.retry),
-                web.post("/release/{exchange_id}", self.release),
-                web.get("/status/{exchange_id}", self.exchange_status),
-                web.get("/exchanges/{exchange_id}/connect", self.miner_exchange),
-                web.post("/render/grid", self.render),
-                web.get("/artifacts/context", self.artifact_context),
-                web.post("/submissions", self.save_choice),
-                web.get("/submissions/{prompt}", self.get_choice),
+                web.post("/v1/calls", self.start),
+                web.get("/v1/calls/{exchange_id}", self.exchange_status),
+                web.get("/v1/exchanges/{exchange_id}/connect", self.miner_exchange),
+                web.post("/v1/render/grid", self.render),
+                web.get("/v1/artifacts/context", self.artifact_context),
+                web.post("/v1/submissions", self.save_choice),
+                web.get("/v1/submissions/{prompt}", self.get_choice),
             ]
         )
         return app

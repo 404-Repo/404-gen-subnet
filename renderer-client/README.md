@@ -66,6 +66,11 @@ new competition output requirements. One theta/phi pair gives a single-view PNG:
 options = RenderOptions(thetas=(30,), phis=(0,), lighting="neutral")
 ```
 
+For the Witness Pod's renderer, use `https://witness.internal/v1` as the
+`RendererClient` base URL and `transport=witness.renderer_transport()`.
+`ArtifactClient` takes the Pod origin (`https://witness.internal`) and uses
+`/v1` for preview rendering, final saves and saved-result lookup.
+
 An optional `api_key` supplies a Bearer header for an authenticated renderer proxy.
 The client raises `RenderRejected` for structured 422 responses; `error.details`
 contains the original validation failures and metrics. Transport, authentication,

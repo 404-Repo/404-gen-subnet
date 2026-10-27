@@ -122,8 +122,9 @@ class Capture(WitnessClient):
         (self._state / call.exchange_id).mkdir(mode=0o700)
         result = CapturedResponse(call.exchange_id, status, response)
         self._save_response(result)
-        if failure == "delivery":
-            raise WitnessError("Delivery unavailable", call.exchange_id, source="gateway", code="delivery_failed")
+        if failure in ("delivery", "timeout"):
+            raise WitnessError("Delivery unavailable", call.exchange_id, source="gateway",
+                               code="capture_timeout" if failure == "timeout" else "delivery_failed")
         return result
 
     def export(self, output: Path, image: bytes = b"PNG", seed: int = 42) -> Path:
@@ -176,7 +177,7 @@ def test_concurrent_arrival_order_is_independent_of_identity_and_delivery(tmp_pa
     assert live.paid == 2
 
 
-@pytest.mark.parametrize("failure", ["before", "delivery", "failed", "incomplete"])
+@pytest.mark.parametrize("failure", ["before", "delivery", "timeout", "failed", "incomplete"])
 def test_original_failures_replay_even_when_current_delivery_would_succeed(tmp_path: Path, failure: str) -> None:
     live = Capture(tmp_path)
     live.failures[0] = failure
@@ -185,8 +186,9 @@ def test_original_failures_replay_even_when_current_delivery_would_succeed(tmp_p
         try:
             value = witness.create(model="fixture", input="image")
             return str(value.status) + value.output_text
-        except WitnessError as error:
-            return str(error.code)
+        except openai.APIConnectionError as error:
+            assert isinstance(error.__cause__, WitnessError)
+            return type(error).__name__ + str(error.__cause__.code)
 
     expected = run_generation(generate, b"PNG", 42, live, None)
     bundle = live.export(tmp_path / "bundle")
@@ -205,8 +207,9 @@ def test_unknown_usage_is_reproduced_but_cannot_pass_prompt_budget(tmp_path: Pat
             return witness.create(model="fixture", input="image").output_text
         except openai.RateLimitError as error:
             return str(error.status_code) + str(error.code)
-        except WitnessError as error:
-            return str(error.code)
+        except openai.APIConnectionError as error:
+            assert isinstance(error.__cause__, WitnessError)
+            return str(error.__cause__.code)
 
     expected = run_generation(generate, b"PNG", 42, live, None)
     replay = ReplayWitness(live.export(tmp_path / "bundle"))

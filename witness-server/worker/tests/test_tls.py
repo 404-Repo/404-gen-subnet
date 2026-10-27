@@ -165,7 +165,7 @@ def test_real_tls_gate_records_large_exchange_even_when_miner_leaves(
         return cast(dict[str, object], json.loads(result.stdout))
 
     def evidence(request: httpx.Request) -> httpx.Response:
-        route = f"/exchanges/{identifier}/"
+        route = f"/v1/exchanges/{identifier}/"
         assert request.url.path.startswith(route)
         assert "authorization" not in request.headers
         assert request.headers["x-bittensor-hotkey"] == hotkey.ss58_address
@@ -263,14 +263,15 @@ def test_real_tls_gate_records_large_exchange_even_when_miner_leaves(
                     raise
 
             observed = executor.submit(witness)
+            capture_deadline = time.monotonic() + 180
 
             def handshake(disclosure: HandshakeDisclosure) -> None:
                 tunnel.flush()
-                client._handshake(tunnel, disclosure)
+                client._handshake(tunnel, disclosure, deadline=capture_deadline)
 
             def authorize(disclosure: EarlyDisclosure) -> None:
                 tunnel.flush()
-                client._authorize(tunnel, disclosure)
+                client._authorize(tunnel, disclosure, deadline=capture_deadline)
                 if abandon:
                     tunnel.close()
                     raise MinerLeft
@@ -318,7 +319,7 @@ def test_real_tls_gate_records_large_exchange_even_when_miner_leaves(
                 )
                 assert isinstance(client._gateway, PodGatewayClient)
                 with pytest.MonkeyPatch.context() as patch:
-                    patch.setattr(client._gateway, "snapshot", lambda _: Snapshot(
+                    patch.setattr(client._gateway, "snapshot", lambda _, **__: Snapshot(
                         call=call, hotkey=hotkey.ss58_address, session=dict(session),
                     ))
                     patch.setattr(client._gateway, "recorded", lambda *_, **__: (session, provider_status, response_body))

@@ -33,7 +33,7 @@ from .calls import RequestKey
 from .errors import ExchangePending, WitnessError
 from .pods import PodGatewayClient
 from .proof import Prover
-from .response import ModelStream, model_result
+from .response import ModelStream, model_error, model_result
 from .state import save as _save
 from .timing import identify_exchange, measure, timed
 from .transport import exchange
@@ -96,8 +96,9 @@ class WitnessClient:
             openai_api_key: OpenAI API key. Choose this or subscription.
             subscription: Use "codex" for an existing local Codex login.
                 Credentials are refreshed when needed.
-            delivery_timeout: Positive retry window in seconds for each gateway
-                delivery phase (default 600), not a total create() time limit.
+            delivery_timeout: Positive wait/retry window in seconds for each
+                delivery phase (default 600), including capture and recovery.
+                It is not a total create() time limit.
             parallel_preparations: Maximum concurrent Pod call preparations
                 across calls (1 through 32, default 3).
         """
@@ -252,7 +253,10 @@ class WitnessClient:
         Change request_id for another model call with the same request.
         """
         key, body = self._request(request_id, session_id, params)
-        captured = self._resolve(key, body, session_id)
+        try:
+            captured = self._resolve(key, body, session_id)
+        except WitnessError as error:
+            raise model_error(error, self._mode) from error
         return model_result(captured.status, captured.body, self._mode, stream=stream)
 
     def _request(
@@ -267,15 +271,6 @@ class WitnessClient:
         return RequestKey.from_body(
             self._mode, body, request_id, session_id=session_id
         ), body
-
-    def release(self, exchange_id: str) -> None:
-        """Release an unclaimed capture without issuing inference.
-
-        This is safe to repeat.
-        An OpenAI request already in progress may still finish and save evidence;
-        use resume() to retrieve it. Releasing does not issue another GPT request.
-        """
-        self._gateway.release(str(uuid.UUID(exchange_id)))
 
     def renderer_transport(self) -> httpx.BaseTransport:
         """Authenticate RendererClient requests to this miner's assigned Pod."""
@@ -300,7 +295,7 @@ class WitnessClient:
             raise WitnessError("Cannot resume a different provider", identifier)
         deadline = time.monotonic() + self._gateway.delivery_timeout
         while True:
-            snapshot = self._gateway.snapshot(identifier)
+            snapshot = self._gateway.snapshot(identifier, deadline=deadline)
             if snapshot.call.phase == "issued":
                 saved_request = self._state / identifier / "request.json"
                 request = None
@@ -335,22 +330,30 @@ class WitnessClient:
             time.sleep(min(0.5, max(0, deadline - time.monotonic())))
 
     def _handshake(
-        self, tunnel: WebSocketTunnel, disclosure: HandshakeDisclosure
+        self, tunnel: WebSocketTunnel, disclosure: HandshakeDisclosure, *, deadline: float,
     ) -> None:
         """Verify TLS and its fixed HEAD probe before slow proof preparation."""
-        claim = _disclosure_claim(disclosure)
+        raw = _encode_json(_disclosure_claim(disclosure))
         with measure("handshake_verification_wait"):
+            timeout = min(
+                self._gateway.remaining_seconds(tunnel.identifier),
+                deadline - time.monotonic(),
+            )
+            if timeout <= 0:
+                raise TimeoutError("Capture wait timed out before handshake verification")
             tunnel.verify(
                 "handshake",
-                _encode_json(claim),
-                min(
-                    self._gateway.delivery_timeout,
-                    self._gateway.remaining_seconds(tunnel.identifier),
-                ),
+                raw,
+                timeout,
+                deadline=deadline,
             )
 
-    def _authorize(self, tunnel: WebSocketTunnel, disclosure: EarlyDisclosure) -> None:
+    def _authorize(
+        self, tunnel: WebSocketTunnel, disclosure: EarlyDisclosure, *, deadline: float,
+    ) -> None:
         """Commit disclosure before the witness releases this one provider request."""
+        if time.monotonic() >= deadline:
+            raise TimeoutError("Capture wait timed out before credential proof")
         with measure("credential_proof"):
             credential = self._prover.prove(disclosure["private"])
         claim: Claim = {
@@ -361,13 +364,17 @@ class WitnessClient:
             raw = _encode_json(claim)
             _save(self._state / tunnel.identifier / "claim.json", raw)
         with measure("authorization_verification_wait"):
+            timeout = min(
+                self._gateway.remaining_seconds(tunnel.identifier),
+                deadline - time.monotonic(),
+            )
+            if timeout <= 0:
+                raise TimeoutError("Capture wait timed out before authorization")
             tunnel.verify(
                 "authorize",
                 raw,
-                min(
-                    self._gateway.delivery_timeout,
-                    self._gateway.remaining_seconds(tunnel.identifier),
-                ),
+                timeout,
+                deadline=deadline,
             )
 
     def _save_response(self, response: CapturedResponse) -> None:
@@ -408,7 +415,7 @@ class WitnessClient:
         retries = 0
         raw_response: bytes | None = None
         try:
-            snapshot = self._gateway.reserve(key)
+            snapshot = self._gateway.start(key)
             identifier = snapshot.call.exchange_id
             identify_exchange(identifier)
             if (
@@ -416,7 +423,7 @@ class WitnessClient:
                 or snapshot.hotkey != self._hotkey.ss58_address
             ):
                 raise WitnessError(
-                    "Call reservation differs", identifier, code="invalid_recording"
+                    "Witness call differs", identifier, code="invalid_recording"
                 )
             directory = self._state / identifier
             directory.mkdir(mode=0o700, exist_ok=True)
@@ -430,7 +437,8 @@ class WitnessClient:
                 ),
             )
             attempted = False
-            deadline = time.monotonic() + snapshot.call.deadline - time.time()
+            delivery_deadline = time.monotonic() + self._gateway.delivery_timeout
+            deadline = min(delivery_deadline, time.monotonic() + snapshot.call.deadline - time.time())
             with (
                 self._call_slots
                 if self._call_slots is not None
@@ -451,18 +459,28 @@ class WitnessClient:
                         snapshot.call.phase == "failed"
                         and snapshot.call.not_dispatched
                         and not snapshot.call.authorized
-                    ):
-                        if retries >= 2:
-                            break
-                        retries += 1
-                        time.sleep(retries)
-                        snapshot = self._gateway.retry(key, snapshot.call.exchange_id)
+                    ) or (snapshot.call.phase == "assigned" and attempted):
+                        expected_exchange_id = None
+                        if snapshot.call.phase == "failed":
+                            if retries >= 2:
+                                break
+                            retries += 1
+                            deadline = delivery_deadline
+                            expected_exchange_id = snapshot.call.exchange_id
+                            time.sleep(min(retries, max(0, deadline - time.monotonic())))
+                        if time.monotonic() >= deadline:
+                            raise WitnessError(
+                                "Capture wait timed out", identifier, code="capture_timeout", source="gateway"
+                            )
+                        snapshot = self._gateway.start(
+                            key, expected_exchange_id=expected_exchange_id, deadline=deadline
+                        )
                         if (
                             snapshot.call.request != key
                             or snapshot.hotkey != self._hotkey.ss58_address
                         ):
                             raise WitnessError(
-                                "Retry reservation differs", code="invalid_recording"
+                                "Witness retry differs", code="invalid_recording"
                             )
                         identifier = snapshot.call.exchange_id
                         identify_exchange(identifier)
@@ -477,9 +495,7 @@ class WitnessClient:
                                 }
                             ),
                         )
-                        deadline = (
-                            time.monotonic() + snapshot.call.deadline - time.time()
-                        )
+                        deadline = min(delivery_deadline, time.monotonic() + snapshot.call.deadline - time.time())
                         attempted = False
                         raw_response = None
                         preparation.close()
@@ -487,12 +503,6 @@ class WitnessClient:
                             preparation.enter_context(self._preparation)
                         continue
                     if not attempted and snapshot.call.phase != "failed":
-                        if snapshot.call.phase in ("reserved", "assigned"):
-                            openai_request.load_credentials(
-                                self._config, self._mode, self._api_key
-                            )
-                            start_id = self._gateway.ensure_pod()
-                            snapshot = self._gateway.dispatch(key, start_id)
                         if snapshot.session is not None:
                             session = cast(Session, snapshot.session)
                             host, path = openai_request.PROVIDERS[self._mode]
@@ -522,10 +532,10 @@ class WitnessClient:
                             )
                             _save(directory / "request.json", body)
                             try:
-                                with self._gateway.tunnel(identifier) as tunnel:
+                                with self._gateway.tunnel(identifier, deadline=deadline) as tunnel:
 
                                     def authorize(disclosure: EarlyDisclosure) -> None:
-                                        self._authorize(tunnel, disclosure)
+                                        self._authorize(tunnel, disclosure, deadline=deadline)
                                         preparation.close()
 
                                     raw_response = exchange(
@@ -533,7 +543,7 @@ class WitnessClient:
                                         request.host,
                                         request.chunks,
                                         handshake=lambda disclosure: self._handshake(
-                                            tunnel, disclosure
+                                            tunnel, disclosure, deadline=deadline
                                         ),
                                         authorize=authorize,
                                         timeout=max(0, deadline - time.monotonic()),
@@ -546,16 +556,17 @@ class WitnessClient:
                                 TLSAbruptCloseError,
                             ):
                                 # Recover a claimed exchange that may already be paying/capturing.
-                                snapshot = self._gateway.snapshot(identifier)
-                                if snapshot.call.phase == "assigned":
-                                    # An unclaimed exchange can reconnect when admission becomes available.
-                                    attempted = False
+                                snapshot = self._gateway.snapshot(identifier, deadline=deadline)
+                    if snapshot.call.phase == "failed":
+                        continue
                     if time.monotonic() >= deadline:
-                        raise ExchangePending(
-                            "Capture remains unresolved; reuse the same request_id and body",
+                        raise WitnessError(
+                            "Capture wait timed out",
                             identifier,
+                            code="capture_timeout",
+                            source="gateway",
                         )
-                    snapshot = self._gateway.snapshot(identifier)
+                    snapshot = self._gateway.snapshot(identifier, deadline=deadline)
                     if snapshot.call.phase != "issued":
                         time.sleep(min(0.5, max(0, deadline - time.monotonic())))
             if snapshot.call.phase == "failed":
@@ -578,6 +589,10 @@ class WitnessClient:
         except WitnessError as error:
             error.exchange_id = error.exchange_id or identifier
             raise
+        except httpx.TimeoutException as error:
+            raise WitnessError(
+                "Witness connection timed out", identifier, code="capture_timeout", source="gateway"
+            ) from error
         except Exception as error:
             raise WitnessError(
                 "Witness capture did not complete",

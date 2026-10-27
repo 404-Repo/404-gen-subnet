@@ -143,7 +143,7 @@ class Gateway:
                 raise ValueError("Headers exceed limit")
             if request.path == "/health":
                 return await handler(request)
-            if request.path.startswith("/control/"):
+            if request.path.startswith("/v1/control/"):
                 scope = self.scope(request.match_info["hotkey"])
                 start_id = identifier(request.match_info["start_id"])
                 if (len(request.headers.getall("authorization", [])) != 1 or
@@ -669,9 +669,9 @@ class Gateway:
         app.cleanup_ctx.append(self._lifecycle)
         app.add_routes([
             web.get("/health", self.health),
-            web.get("/pods/current", self.current),
-            web.post("/pods/start", self.start),
-            web.get("/pods/{start_id}", self.pod_status),
-            web.get("/control/{hotkey}/{start_id}", self.pod_control),
+            web.get("/v1/pods/current", self.current),
+            web.post("/v1/pods/start", self.start),
+            web.get("/v1/pods/{start_id}", self.pod_status),
+            web.get("/v1/control/{hotkey}/{start_id}", self.pod_control),
         ])
         return app

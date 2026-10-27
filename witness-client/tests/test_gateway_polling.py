@@ -46,7 +46,7 @@ def test_recovery_polls_saved_progress_through_outage(
 
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.method == "GET", "Recovery must not start another generation"
-        assert request.url.path == f"/exchanges/{identifier}/progress"
+        assert request.url.path == f"/v1/exchanges/{identifier}/progress"
         assert clock[0] <= 3, "Polling extended the recovery deadline"
         polls.append(clock[0])
         if clock[0] == 0:
@@ -98,7 +98,7 @@ def test_delivery_respects_retry_after_within_its_deadline(
 
     with httpx.Client(base_url="https://witness.test", transport=httpx.MockTransport(handler)) as http:
         def operation() -> bytes:
-            return delivery.request(http, "GET", "/pods/current", headers={})
+            return delivery.request(http, "GET", "/v1/pods/current", headers={})
 
         if window < 30:
             with pytest.raises(WitnessError) as failure:
@@ -119,12 +119,12 @@ def test_queued_connection_keeps_the_accepted_id_within_its_deadline(
     polls: list[float] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/pods/current":
+        if request.url.path == "/v1/pods/current":
             return httpx.Response(200, json={"round": "test-1", "session": None})
         if request.method == "POST":
             posted.append(json.loads(request.content)["start_id"])
         else:
-            assert request.url.path == f"/pods/{accepted}"
+            assert request.url.path == f"/v1/pods/{accepted}"
             polls.append(clock[0])
         if blocking:
             clock[0] += int(request.headers["Prefer"].removeprefix("wait="))
@@ -151,3 +151,60 @@ def test_queued_connection_keeps_the_accepted_id_within_its_deadline(
     assert len(posted) == 2 and posted[0] != accepted and posted[1] == accepted
     saved = json.loads(next(tmp_path.glob("pod-connect-*.json")).read_bytes())
     assert saved["start_id"] == accepted and saved["replaces"] is None
+
+
+def test_pod_status_outage_uses_the_capture_wait_deadline(
+    tmp_path: Path, clock: list[float], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from witness_client.gateway import SignedTransport
+
+    identifier = str(uuid.uuid4())
+    polls: list[float] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET" and request.url.path == f"/v1/calls/{identifier}"
+        polls.append(clock[0])
+        return httpx.Response(503, json={"error": "witness_unavailable"})
+
+    with httpx.Client(base_url="https://witness.test", transport=httpx.MockTransport(handler)) as http:
+        key = Keypair.create_from_uri("//Alice")
+        gateway = PodGatewayClient(http, key, tmp_path, 60)
+        monkeypatch.setattr(gateway, "_service", lambda **kwargs: SignedTransport(http, key, 60))
+        try:
+            with pytest.raises(WitnessError) as failure:
+                gateway.snapshot(identifier, deadline=3)
+            assert failure.value.code == "capture_timeout"
+            assert polls == [0, 1, 2] and clock[0] == 3
+        finally:
+            gateway.close()
+
+
+@pytest.mark.parametrize("transport_timeout", [False, True])
+def test_status_reconnection_keeps_the_capture_deadline(
+    tmp_path: Path, clock: list[float], transport_timeout: bool,
+) -> None:
+    accepted = str(uuid.uuid4())
+    requests: list[str] = []
+    timeouts: list[float] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request.url.path)
+        timeouts.extend(request.extensions["timeout"].values())
+        if transport_timeout:
+            clock[0] += request.extensions["timeout"]["read"]
+            raise httpx.ReadTimeout("Fixture allocation response timed out", request=request)
+        clock[0] += int(request.headers["Prefer"].removeprefix("wait="))
+        return httpx.Response(202, json={
+            "round": "test-1", "session": {"phase": "queued", "start_id": accepted, "replaces": None},
+            "witness": None, "retry_after": 0,
+        })
+
+    with httpx.Client(base_url="https://witness.test", transport=httpx.MockTransport(handler), timeout=30) as http:
+        gateway = PodGatewayClient(http, Keypair.create_from_uri("//Alice"), tmp_path, 60)
+        try:
+            with pytest.raises((WitnessError, httpx.TimeoutException)):
+                gateway.snapshot(str(uuid.uuid4()), deadline=1)
+        finally:
+            gateway.close()
+    assert clock[0] == 1 and requests == ["/v1/pods/current"]
+    assert timeouts and all(0 < timeout <= 1 for timeout in timeouts)

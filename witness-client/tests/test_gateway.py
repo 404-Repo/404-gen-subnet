@@ -53,7 +53,7 @@ def test_invalid_worker_status_cannot_accept_recovery(
 
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.method == "GET", "Malformed status must not upload a claim"
-        assert request.url.path == f"/exchanges/{identifier}/progress"
+        assert request.url.path == f"/v1/exchanges/{identifier}/progress"
         calls.append(request.url.path)
         return httpx.Response(200, content=raw)
 
@@ -67,7 +67,7 @@ def test_invalid_worker_status_cannot_accept_recovery(
     assert failure.value.source == "gateway"
     assert failure.value.code == "invalid_gateway_response"
     assert failure.value.exchange_id == identifier
-    assert calls == [f"/exchanges/{identifier}/progress"]
+    assert calls == [f"/v1/exchanges/{identifier}/progress"]
 
 
 @pytest.mark.parametrize(

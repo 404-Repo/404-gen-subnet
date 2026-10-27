@@ -34,4 +34,4 @@ def test_sealed_capture_never_triggers_post_generation_claim(
         with pytest.raises(WitnessError, match="sealed") as error:
             gateway.wait_for_evidence(identifier)
     assert error.value.exchange_id == identifier
-    assert polls == [f"/exchanges/{identifier}/progress"]
+    assert polls == [f"/v1/exchanges/{identifier}/progress"]

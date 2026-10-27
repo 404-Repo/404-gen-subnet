@@ -21,6 +21,10 @@ Completion metadata comes from the authenticated Pod. Saved provider evidence
 downloads use signed R2 URLs with size and SHA256 checks. The gateway carries
 allocation and lifecycle control messages only.
 
+Gateway and direct Pod API routes use `/v1`, including their WebSockets.
+See the [route table](PODS.md#http-api). Configure clients with the gateway origin;
+the unauthenticated gateway health check is `GET /health`.
+
 ## Local checks
 
 Install the client development tools and native proof library as described in

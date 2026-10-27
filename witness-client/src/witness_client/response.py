@@ -243,6 +243,14 @@ def _provider_request(provider: Literal["api", "codex"]) -> httpx.Request:
     return httpx.Request("POST", f"https://{host}{path}")
 
 
+def model_error(error: WitnessError, provider: Literal["api", "codex"]) -> openai.APIConnectionError:
+    """Expose witness delivery failures through the model API's SDK errors."""
+    request = cast(Any, _provider_request(provider))
+    if error.code in ("capture_timeout", "capture_in_progress", "pod_provisioning_pending"):
+        return openai.APITimeoutError(request=request)
+    return openai.APIConnectionError(message=str(error), request=request)
+
+
 def model_result(
     status: int, body: bytes, provider: Literal["api", "codex"], *, stream: bool = False
 ) -> Response | ModelStream:

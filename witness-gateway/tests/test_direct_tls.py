@@ -149,8 +149,8 @@ def test_native_direct_tls_durable_completion_and_exact_recovery(
             original = WitnessClient._authorize
             if leave:
 
-                def authorize(client: WitnessClient, tunnel: object, disclosure: object) -> None:
-                    original(client, tunnel, disclosure)  # type: ignore[arg-type]
+                def authorize(client: WitnessClient, tunnel: object, disclosure: object, *, deadline: float) -> None:
+                    original(client, tunnel, disclosure, deadline=deadline)  # type: ignore[arg-type]
                     tunnel.close()  # type: ignore[attr-defined]
                     raise OSError("Fixture miner left after authorization")
 
@@ -165,9 +165,11 @@ def test_native_direct_tls_durable_completion_and_exact_recovery(
 
                     def run() -> None:
                         if status != 200:
-                            with pytest.raises(openai.APIStatusError) as rejected:
-                                bound.create(model="fixture", input="x" * (1024 * 1024))
-                            assert rejected.value.status_code == status
+                            for stream in (False, True):
+                                with pytest.raises(openai.APIStatusError) as rejected:
+                                    bound.create(stream=stream, model="fixture", input="x" * (1024 * 1024))
+                                assert rejected.value.status_code == status
+                                assert rejected.value.response.content == response_body
                             return
                         answer = bound.create(model="fixture", input="x" * (1024 * 1024))
                         assert answer.output_text == text
