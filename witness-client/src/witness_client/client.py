@@ -107,10 +107,6 @@ class WitnessClient:
             self._config = config.copy()
         else:
             self._config = json.loads(Path(config).read_text(encoding="utf-8"))
-        if self._config.get("transport", "pods-v1") != "pods-v1":
-            raise ValueError(
-                "Only witness Pods are supported; use a Pod gateway and omit 'transport'"
-            )
         if (
             not isinstance(parallel_preparations, int)
             or isinstance(parallel_preparations, bool)

@@ -248,8 +248,6 @@ def main() -> None:
     prompts = [Prompt(row["id"], Path(row["path"]), row["sha256"]) for row in manifest["prompts"]]
     check_prompts(prompts)
     config = cast(WitnessConfig, json.loads(args.witness_config.read_bytes()))
-    if config.get("transport", "pods-v1") != "pods-v1":
-        parser.error("The batch runner requires a Pod gateway")
     namespace = hashlib.sha256(
         canonical(
             {
