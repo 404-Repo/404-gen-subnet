@@ -14,13 +14,22 @@ MAX_GENERATIONS_BYTES = 16 * 1024 * 1024
 
 
 class GenerationResult(BaseModel):
-    """One prompt's saved result.
+    """One miner's outcome for a single prompt stem.
 
-    js is the JavaScript URL and views is the folder containing the canonical
-    white/ and gray/ PNGs, grid.png and embeddings.npz. A failure carries a reason;
-    render rejection can retain the JavaScript URL with no views.
+    A persisted row is either:
+    - Success: `js` is set (CDN URL to the Three.js module); `views` may or may not be
+      set (None most likely means the JS itself was not renderable — counted as a
+      delivery, but it won't win any matches).
+    - Miner failure: `failure_reason` is set (from the miner's `_failed.json` manifest);
+      `js` is None. Permanent — not retried.
 
-    An empty result is a no-data sentinel and is not a completed outcome.
+    `views` is a CDN folder prefix. The judge constructs view URLs by convention:
+    `{views}/white/{view_name}.png` for the 8 white-bg views and `{views}/gray/{view_name}.png`
+    for the 4 gray-bg views. View names live in `subnet_common.render.WHITE_VIEWS / GRAY_VIEWS`.
+    Atomic: either all 12 views were uploaded successfully, or `views` is None.
+
+    An empty `GenerationResult()` is used as a "no data" sentinel by consumers and does
+    not represent a persisted outcome.
     """
 
     js: str | None = Field(default=None, description="CDN URL to the Three.js module")
