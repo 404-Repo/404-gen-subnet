@@ -15,6 +15,7 @@ import pytest
 from aiohttp import web
 from renderer_client import ArtifactClient, ArtifactUnavailable, RenderRejected, RenderUnavailable
 from subnet_common.competition.generations import GenerationResult, GenerationsAdapter
+from subnet_common.render import GRAY_BG, GRAY_VIEWS, WHITE_BG, WHITE_VIEWS
 from support import MemoryState
 from test_service import Harness
 
@@ -76,6 +77,51 @@ def client(fixture: Harness, transport: httpx.BaseTransport) -> ArtifactClient:
         seed=42,
         transport=transport,
     )
+
+
+def test_judging_saves_every_view_when_larger_render_jobs_time_out(monkeypatch: pytest.MonkeyPatch) -> None:
+    state = MemoryState()
+    prompt = hashlib.sha256(PNG).hexdigest()
+    store = ArtifactRepository(
+        state, Scope("test", "test-0", "5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty"),
+        index=state, seed=42, submission_commit=COMMIT, prompt_hashes=frozenset({prompt}),
+    )
+    expected = {
+        f"{background}/{view.name}.png": PNG + f"{color}:{view.theta}:{view.phi}".encode()
+        for background, color, views in (("white", WHITE_BG, WHITE_VIEWS), ("gray", GRAY_BG, GRAY_VIEWS))
+        for view in views
+    } | {"grid.png": PNG, "embeddings.npz": b"fixture embeddings"}
+
+    def backend(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/render/grid":
+            return httpx.Response(200, content=PNG)
+        query = request.url.params
+        angles = list(zip(query["thetas"].split(","), query["phis"].split(","), strict=True))
+        if len(angles) > 4:
+            return httpx.Response(500, json={"error": "render timed out after 30000ms"})
+        images = [PNG + f"{query['bg_color']}:{theta}:{phi}".encode() for theta, phi in angles]
+        if len(images) == 1:
+            return httpx.Response(200, content=images[0])
+        return httpx.Response(200, json={"images": [base64.b64encode(image).decode() for image in images]})
+
+    original_client = httpx.AsyncClient
+
+    def render_client(*, timeout: float, trust_env: bool) -> httpx.AsyncClient:
+        return original_client(timeout=timeout, trust_env=trust_env, transport=httpx.MockTransport(backend))
+
+    async def embeddings(
+        image: bytes, white: dict[str, bytes], log_id: str, *, revision: str, hf_token: str | None,
+    ) -> bytes:
+        assert white == {view.name: expected[f"white/{view.name}.png"] for view in WHITE_VIEWS}
+        return expected["embeddings.npz"]
+
+    monkeypatch.setattr("pod_gateway.judging.httpx.AsyncClient", render_client)
+    monkeypatch.setattr("pod_gateway.judging.build_embeddings_npz", embeddings)
+    result = asyncio.run(Judging(store, "http://renderer", "fixture-revision", None).save(prompt, SOURCE, PNG))
+    assert result.failure_reason is None and result.views == store.prefix(prompt)
+    assert store.result(prompt) == result
+    assert state.get(str(result.js)) == SOURCE.encode()
+    assert {name: state.get(f"{result.views}/{name}") for name in expected} == expected
 
 
 def test_runner_saves_returned_source_and_all_judging_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

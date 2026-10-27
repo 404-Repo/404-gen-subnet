@@ -32,7 +32,10 @@ class Judging:
             try:
                 async with httpx.AsyncClient(timeout=150, trust_env=False) as client:
                     white = await render_views(
-                        client, self.endpoint, data, WHITE_VIEWS, WHITE_BG, root, raise_errors=True
+                        client, self.endpoint, data, WHITE_VIEWS[:4], WHITE_BG, root, raise_errors=True
+                    )
+                    white_other = await render_views(
+                        client, self.endpoint, data, WHITE_VIEWS[4:], WHITE_BG, root, raise_errors=True
                     )
                     gray = await render_views(client, self.endpoint, data, GRAY_VIEWS, GRAY_BG, root, raise_errors=True)
                     grid = await render_grid(client, self.endpoint, data, root, raise_errors=True)
@@ -43,8 +46,9 @@ class Judging:
                 result.failure_reason = "render_rejected"
                 await asyncio.to_thread(self.store.update_result, prompt, result)
                 raise rejection from error
-            if white is None or gray is None or grid is None or image is None:
+            if white is None or white_other is None or gray is None or grid is None or image is None:
                 raise RuntimeError("Renderer did not produce every judging view")
+            white.update(white_other)
             for name, content in (
                 {f"white/{name}.png": content for name, content in white.items()}
                 | {f"gray/{name}.png": content for name, content in gray.items()}
