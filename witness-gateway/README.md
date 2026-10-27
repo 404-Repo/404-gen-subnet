@@ -86,15 +86,17 @@ Set `WITNESS_ARTIFACTS` to JSON in the gateway/revivor environment:
   },
   "seed": 42,
   "prompt_ids": {"REPLACE_WITH_IMAGE_SHA256": "REPLACE_WITH_OFFICIAL_PROMPT_ID"},
-  "commits": {"REPLACE_WITH_ADMITTED_HOTKEY": "REPLACE_WITH_40_CHARACTER_SOURCE_COMMIT"}
+  "commits": {}
 }
 ```
 
-Use the immutable `WITNESS_IMAGE` digest, frozen round seed and admitted source
-commits. `prompt_ids` maps the SHA256 of each frozen image to its official
-filename stem from the round's prompt URLs. Supply the mapping from the same
-frozen round metadata; image hashes and filename IDs are separate identities.
-Each image must resolve to one distinct prompt ID. Only the packaged renderer is supported;
+Use the immutable `WITNESS_IMAGE` digest and frozen round seed. `prompt_ids` maps
+each image's SHA256 to its official filename ID without the extension.
+Supply the mapping from the same frozen round metadata; image hashes and
+filename IDs are separate identities. Each image must resolve to one distinct ID.
+The optional `commits` map supplies legacy checkpoint metadata; it does not
+restrict miner admission or final saving. Legacy `prompt_hashes` configurations
+retain their hash-based IDs. Only the packaged renderer is supported;
 `bootstrap_sha256` must be null. Compute its profile hash from the exact build
 context, from the repository root:
 

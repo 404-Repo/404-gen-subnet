@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import json
+import shutil
 import threading
 from contextlib import ExitStack
 from functools import partial
@@ -22,7 +24,7 @@ from subnet_common.render import GRAY_BG, GRAY_VIEWS, WHITE_BG, WHITE_VIEWS
 from support import MemoryState
 from test_service import Harness
 
-from pod_gateway.artifacts import ArtifactRepository, SubmissionContext
+from pod_gateway.artifacts import ArtifactConfig, ArtifactRepository, SubmissionContext
 from pod_gateway.models import Scope
 from pod_gateway.results import ResultSaver
 from pod_gateway.state import Snapshot
@@ -35,7 +37,7 @@ COMMIT = "c" * 40
 
 
 async def enable(
-    fixture: Harness, *, fail_first_render: bool = False, commit: str = COMMIT,
+    fixture: Harness, *, fail_first_render: bool = False, commit: str | None = COMMIT,
     prompt_ids: dict[str, str] | None = None,
 ) -> list[str]:
     rendered: list[str] = []
@@ -135,7 +137,10 @@ def test_result_saver_saves_every_view_when_larger_render_jobs_time_out(monkeypa
     assert {name: state.get(f"{result.views}/{name}") for name in expected} == expected
 
 
-def test_runner_saves_returned_source_and_all_result_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("commit", [COMMIT, None])
+def test_runner_saves_returned_source_and_all_result_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, commit: str | None,
+) -> None:
     from miner_reference.submissions import run_and_save
 
     async def scenario() -> None:
@@ -143,7 +148,7 @@ def test_runner_saves_returned_source_and_all_result_files(tmp_path: Path, monke
         async with fixture.running():
             with fixture.client() as witness:
                 await asyncio.to_thread(witness._gateway.ensure_pod)
-                await enable(fixture)
+                await enable(fixture, commit=commit)
                 with client(fixture, witness.renderer_transport()) as renderer:
 
                     def generate() -> str:
@@ -540,7 +545,8 @@ def test_concurrent_result_index_updates_preserve_each_prompt(monkeypatch: pytes
 
     def repository() -> ArtifactRepository:
         return ArtifactRepository(
-            state, scope, index=state, seed=42, submission_commit=COMMIT, prompt_ids={prompt: prompt for prompt in prompts}
+            state, scope, index=state, seed=42, submission_commit=COMMIT,
+            prompt_ids={prompt: prompt for prompt in prompts},
         )
 
     first, second = repository(), repository()
@@ -958,14 +964,104 @@ def test_managed_batch_recovers_final_save_on_replacement_without_generation(
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize("commits", [None, {}, {"5" * 48: COMMIT}])
+def test_assigned_miner_without_a_commit_submits_and_recovers_official_results(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, commits: dict[str, str] | None,
+) -> None:
+    async def scenario() -> None:
+        fixture = Harness(tmp_path, monkeypatch)
+        empty_image = b"frozen empty prompt"
+        digest, empty_digest = (hashlib.sha256(image).hexdigest() for image in (fixture.image, empty_image))
+        config = ArtifactConfig.model_validate({
+            "profile": {"image_digest": IMAGE, "validation_sha256": "b" * 64},
+            "seed": 987654321,
+            "prompt_ids": {digest: "official-chair", empty_digest: "official-empty"},
+            **({} if commits is None else {"commits": commits}),
+        })
+        async with fixture.running():
+            with fixture.client() as witness:
+                await asyncio.to_thread(witness._gateway.ensure_pod)
+                rendered = await enable(
+                    fixture, commit=config.commits.get(fixture.scope.hotkey), prompt_ids=config.prompt_ids,
+                )
+                store = fixture.services[-1].artifacts
+                assert store is not None
+                store.seed = config.seed
+                with client(fixture, witness.renderer_transport()) as legacy:
+                    assert await asyncio.to_thread(legacy.load_context) == {"submission_commit": None}
+                with httpx.Client(base_url="https://witness.internal", transport=witness.renderer_transport()) as http:
+                    saved = await asyncio.to_thread(http.post, "/v1/submissions", json={
+                        "generation": {"prompt_sha256": digest}, "source": SOURCE,
+                        "prompt_image": base64.b64encode(fixture.image).decode(),
+                    })
+                    empty = await asyncio.to_thread(http.post, "/v1/submissions", json={
+                        "generation": {"prompt_sha256": empty_digest}, "source": None,
+                    })
+                assert saved.status_code == empty.status_code == 200
+                expected = {"official-chair": saved.json()["submission"], "official-empty": empty.json()["submission"]}
+                assert str(expected["official-chair"]["js"]).endswith("/official-chair.js")
+                assert expected["official-empty"]["failure_reason"] == "generation_failed"
+                assert fixture.state.get(str(expected["official-chair"]["js"])) == SOURCE.encode()
+                for scope in (
+                    Scope(store.scope.deployment, "another-round", store.scope.hotkey),
+                    Scope(store.scope.deployment, store.scope.round, "5" * 48),
+                ):
+                    foreign = ArtifactRepository(fixture.state, scope, index=fixture.state, seed=config.seed,
+                                                 prompt_ids=config.prompt_ids)
+                    foreign.update_result(digest, GenerationResult(failure_reason="generation_failed"))
+            shutil.rmtree(tmp_path / "client", ignore_errors=True)
+            fixture.services[-1].round_end = 0
+            with fixture.client("fresh-client") as resumed:
+                recovered = await asyncio.to_thread(resumed._gateway._request_once, "GET", "/v1/submissions")
+                assert json.loads(recovered or b"null") == {"submissions": expected}
+            assert rendered == [SOURCE] and fixture.paid == 0 and fixture.provider.creates == 1
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("source", [SOURCE, None])
+def test_hash_keyed_results_recover_official_ids_and_keep_artifact_pointers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, source: str | None,
+) -> None:
+    async def scenario() -> None:
+        fixture = Harness(tmp_path, monkeypatch)
+        async with fixture.running():
+            with fixture.client() as witness:
+                await asyncio.to_thread(witness._gateway.ensure_pod)
+                digest = hashlib.sha256(fixture.image).hexdigest()
+                rendered = await enable(fixture, commit=None, prompt_ids={digest: "official-chair"})
+                store = fixture.services[-1].artifacts
+                assert store is not None
+                previous = GenerationResult(failure_reason="generation_failed")
+                if source is not None:
+                    root = f"rounds/{store.scope.round}/{store.scope.hotkey}/submitted/{digest}"
+                    previous = GenerationResult(js=root + ".js", views=root, size=len(source.encode()))
+                    fixture.state.put(root + ".js", source.encode())
+                    fixture.state.put(root + "/grid.png", PNG)
+                fixture.state.put(store.index_key, GenerationsAdapter.dump_json({digest: previous}))
+                fixture.services[-1].round_end = 0
+                recovered = await asyncio.to_thread(witness._gateway._request_once, "GET", "/v1/submissions")
+                assert json.loads(recovered or b"null") == {"submissions": {"official-chair": previous.model_dump()}}
+                with client(fixture, witness.renderer_transport()) as legacy:
+                    assert await asyncio.to_thread(legacy.get_submission) == previous.model_dump()
+                    assert await asyncio.to_thread(legacy.save_final, source) == previous.model_dump()
+                assert GenerationsAdapter.validate_json(fixture.state.get(store.index_key) or b"{}") == {
+                    "official-chair": previous,
+                }
+                if previous.js is not None:
+                    assert fixture.state.get(previous.js) == SOURCE.encode()
+                    assert fixture.state.get(str(previous.views) + "/grid.png") == PNG
+                assert rendered == [] and fixture.paid == 0
+
+    asyncio.run(scenario())
+
+
 def test_identifying_saved_results_preserves_a_concurrent_submission(monkeypatch: pytest.MonkeyPatch) -> None:
     state = MemoryState()
     scope = Scope("test", "test-0", "5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty")
     first_hash, second_hash = "a" * 64, "b" * 64
-    store = ArtifactRepository(
-        state, scope, index=state, seed=42, submission_commit=COMMIT,
-        prompt_ids={first_hash: "official-chair", second_hash: "official-empty"},
-    )
+    store = ArtifactRepository(state, scope, index=state, seed=42,
+                               prompt_ids={first_hash: "official-chair", second_hash: "official-empty"})
     first = GenerationResult(js="existing.js", views="existing", size=10)
     second = GenerationResult(failure_reason="generation_failed")
     state.put(store.index_key, GenerationsAdapter.dump_json({first_hash: first}))

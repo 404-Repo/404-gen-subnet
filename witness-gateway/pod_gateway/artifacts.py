@@ -32,16 +32,25 @@ class ArtifactConfig(Frozen):
 
     profile: ArtifactProfile
     seed: int = Field(ge=0, lt=2**64)
-    commits: dict[str, str]
+    commits: dict[str, str] = Field(default_factory=dict)
     prompt_ids: dict[str, str] = Field(min_length=1, max_length=4096)
+
+    @model_validator(mode="before")
+    @classmethod
+    def legacy_prompts(cls, value: object) -> object:
+        if isinstance(value, dict) and "prompt_ids" not in value:
+            hashes = value.get("prompt_hashes")
+            if isinstance(hashes, (list, tuple, set, frozenset)) and all(isinstance(key, str) for key in hashes):
+                return {**value, "prompt_ids": {key: key for key in hashes}}
+        return value
 
     @model_validator(mode="after")
     def submissions(self) -> ArtifactConfig:
-        if not self.commits or any(
+        if any(
             not re.fullmatch(r"[1-9A-HJ-NP-Za-km-z]{48}", hotkey) or not re.fullmatch(r"[0-9a-f]{40}", commit)
             for hotkey, commit in self.commits.items()
         ):
-            raise ValueError("Expected admitted hotkeys and source commits")
+            raise ValueError("Expected hotkeys and source commits")
         if any(
             not re.fullmatch(r"[0-9a-f]{64}", digest)
             or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,254}", prompt)
@@ -65,8 +74,8 @@ class ArtifactRepository:
         *,
         index: StateStore,
         seed: int,
-        submission_commit: str,
         prompt_ids: dict[str, str],
+        submission_commit: str | None = None,
     ) -> None:
         self.objects, self.scope, self.index = objects, scope, index
         self.seed, self.submission_commit, self.prompt_ids = seed, submission_commit, prompt_ids

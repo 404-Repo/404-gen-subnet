@@ -109,15 +109,19 @@ allocation replies. `POST /v1/pods/start` accepts a start UUID and optional pred
 miners need no round configuration. Per-call requests contain no round, prompt,
 image hash, generation seed, source hash, URL or global invocation ordinal.
 The server owns round context for access deadlines, state and evidence.
-`ArtifactClient.load_context()` reads the approved source commit through the
-authenticated `GET /v1/artifacts/context` endpoint.
+`ArtifactClient.load_context()` reads optional source-commit metadata through the
+authenticated `GET /v1/artifacts/context` endpoint. `submission_commit` is null
+when no commit is configured for the assigned miner; it does not authorize saving.
 Preview requests supply source and preview options without creating stored
 artifacts. After `generate` returns, the runner submits its JavaScript or `None`
-with the prompt hash and seed. The Pod makes the fixed final renders and supplies
+with the prompt hash and optional seed. The Pod makes the fixed final renders and supplies
 the round in storage paths. The SDK recovers retained model responses and
 submitted prompt identities from the authenticated Pod without generated local
 recovery files. Configuration, credentials, wallet material and proof parameters
 remain caller-provided inputs.
+
+Legacy final-save checkpoint reuse checks the prompt hash, seed, renderer and
+source-commit metadata, including its absence.
 
 Live execution runners can call `WitnessClient.submit(image, source)` or await
 `AsyncWitnessClient.submit(image, source)` after generation returns.
@@ -140,6 +144,9 @@ replay does not query or save results to a Pod. If generation or submission fail
 the caller reports the failure and leaves the prompt pending for a later pass.
 Repeating identical canonical requests and stable request IDs reuses recordings;
 preview rendering can repeat and changed model requests can start new inference.
+
+Retained hash-keyed indexes recover under official IDs while preserving their
+stored artifact pointers.
 
 ### Capture, failures and restart
 

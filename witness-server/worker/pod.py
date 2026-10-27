@@ -639,7 +639,7 @@ def main() -> None:
         artifact_store = ArtifactRepository(
             evidence, runtime.scope,
             index=R2StateStore(evidence.client, evidence.bucket, max_bytes=MAX_GENERATIONS_BYTES),
-            seed=config.seed, submission_commit=config.commits[runtime.scope.hotkey],
+            seed=config.seed, submission_commit=config.commits.get(runtime.scope.hotkey),
             prompt_ids=config.prompt_ids,
         )
 

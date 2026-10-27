@@ -50,12 +50,12 @@ class ArtifactClient(RendererClient):
         self._origin = self._url.removesuffix("/render/grid")
         self._timeout = timeout
 
-    def load_context(self) -> dict[str, str]:
-        """Read the Pod's approved source commit for final checkpoints."""
+    def load_context(self) -> dict[str, str | None]:
+        """Read the Pod's optional source commit for final checkpoints."""
         raw = self._exchange("GET", "/artifacts/context")
         try:
             commit = json.loads(raw)["submission_commit"]
-            if not isinstance(commit, str) or re.fullmatch(r"[0-9a-f]{40}", commit) is None:
+            if commit is not None and (not isinstance(commit, str) or re.fullmatch(r"[0-9a-f]{40}", commit) is None):
                 raise ValueError("Invalid source commit metadata")
         except (ValueError, KeyError, TypeError) as error:
             raise RenderUnavailable("Invalid artifact context") from error
