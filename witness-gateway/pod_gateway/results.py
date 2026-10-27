@@ -1,4 +1,4 @@
-"""Save JavaScript, judging views and embeddings for a final result."""
+"""Save JavaScript, rendered views and embeddings for a final result."""
 
 from __future__ import annotations
 
@@ -13,10 +13,10 @@ from subnet_common.render import GRAY_BG, GRAY_VIEWS, WHITE_BG, WHITE_VIEWS, ren
 from .artifacts import ArtifactRepository
 
 
-class Judging:
+class ResultSaver:
     def __init__(self, store: ArtifactRepository, endpoint: str, revision: str, hf_token: str | None) -> None:
         if not revision:
-            raise ValueError("Judging requires a frozen embedding model revision")
+            raise ValueError("Result saving requires a frozen embedding model revision")
         self.store, self.endpoint, self.revision, self.hf_token = store, endpoint, revision, hf_token
 
     async def save(self, prompt: str, source: str | None, image: bytes | None) -> GenerationResult:

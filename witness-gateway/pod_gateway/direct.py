@@ -20,10 +20,10 @@ from witness_client.request import PROVIDERS
 
 from .artifacts import ArtifactRepository, SubmissionContext
 from .auth import Authenticator, AuthRejected, Membership
-from .judging import Judging
 from .models import Scope, identifier
 from .records import Call, RecordingConflict
 from .recovery import recover_issued
+from .results import ResultSaver
 from .security import verify_miner_access
 
 if TYPE_CHECKING:
@@ -64,7 +64,7 @@ class Witness:
         artifact_url: Callable[[str], str],
         *,
         artifacts: ArtifactRepository | None = None,
-        judging: Judging | None = None,
+        result_saver: ResultSaver | None = None,
     ) -> None:
         self.runtime, self.artifact_url = runtime, artifact_url
         self.records, self.budget, self.evidence = runtime.records, runtime.budget, runtime.evidence
@@ -73,7 +73,7 @@ class Witness:
         self.renderer_url = "http://127.0.0.1:8002/render/grid"
         if artifacts is not None and artifacts.scope != runtime.scope:
             raise ValueError("Artifact storage belongs to another miner")
-        self.artifacts, self.judging = artifacts, judging
+        self.artifacts, self.result_saver = artifacts, result_saver
         self._save_lock = asyncio.Lock()
         self._pending_saves = 0
 
@@ -338,7 +338,7 @@ class Witness:
             image = base64.b64decode(data.prompt_image, validate=True)
             if len(image) > 8 * 1024 * 1024 or hashlib.sha256(image).hexdigest() != data.generation.prompt_sha256:
                 raise ValueError("Prompt bytes differ")
-        if self.judging is None:
+        if self.result_saver is None:
             raise AuthRejected("saving_unavailable", 503)
         if self._pending_saves >= SAVE_QUEUE_CAPACITY + 1:
             raise AuthRejected("save_queue_full", 503)
@@ -365,7 +365,7 @@ class Witness:
                     )
                 await asyncio.to_thread(self._admit_artifact)
                 try:
-                    result = await self.judging.save(data.generation.prompt_sha256, data.source, image)
+                    result = await self.result_saver.save(data.generation.prompt_sha256, data.source, image)
                     return web.json_response(
                         {"submission": result.model_dump()}, headers={"Cache-Control": "no-store"}
                     )

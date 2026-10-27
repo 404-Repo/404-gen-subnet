@@ -4,9 +4,9 @@ The render service exposes `POST /render` (see render-service-js/src/server.js).
 call renders N views in one shot — `thetas` and `phis` are pairwise lists, the
 response is `{"images": [base64, ...], "count": N, ...}`.
 
-The view sets and camera params here are the canonical contract used by both the
-generation orchestrator and Pod judging pipeline. The judge reads PNGs back from
-the storage layout `{prefix}/white/{view}.png` and `{prefix}/gray/{view}.png`.
+The view sets and camera parameters here are used by the generation orchestrator
+and witness Pods to render and save results. The judge reads the saved PNGs from
+`{prefix}/white/{view}.png` and `{prefix}/gray/{view}.png`.
 """
 
 import asyncio

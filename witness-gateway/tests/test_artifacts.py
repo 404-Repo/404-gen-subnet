@@ -23,8 +23,8 @@ from support import MemoryState
 from test_service import Harness
 
 from pod_gateway.artifacts import ArtifactRepository, SubmissionContext
-from pod_gateway.judging import Judging
 from pod_gateway.models import Scope
+from pod_gateway.results import ResultSaver
 from pod_gateway.state import Snapshot
 
 
@@ -64,9 +64,9 @@ async def enable(fixture: Harness, *, fail_first_render: bool = False, commit: s
         submission_commit=commit,
         prompt_hashes=frozenset({hashlib.sha256(fixture.image).hexdigest()}),
     )
-    service.judging = Judging(service.artifacts, origin, "fixture-revision", None)
+    service.result_saver = ResultSaver(service.artifacts, origin, "fixture-revision", None)
     fixture.monkeypatch.setattr(
-        "pod_gateway.judging.build_embeddings_npz", AsyncMock(return_value=b"fixture embeddings")
+        "pod_gateway.results.build_embeddings_npz", AsyncMock(return_value=b"fixture embeddings")
     )
     return rendered
 
@@ -86,7 +86,7 @@ def client(
     )
 
 
-def test_judging_saves_every_view_when_larger_render_jobs_time_out(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_result_saver_saves_every_view_when_larger_render_jobs_time_out(monkeypatch: pytest.MonkeyPatch) -> None:
     state = MemoryState()
     prompt = hashlib.sha256(PNG).hexdigest()
     store = ArtifactRepository(
@@ -122,16 +122,16 @@ def test_judging_saves_every_view_when_larger_render_jobs_time_out(monkeypatch: 
         assert white == {view.name: expected[f"white/{view.name}.png"] for view in WHITE_VIEWS}
         return expected["embeddings.npz"]
 
-    monkeypatch.setattr("pod_gateway.judging.httpx.AsyncClient", render_client)
-    monkeypatch.setattr("pod_gateway.judging.build_embeddings_npz", embeddings)
-    result = asyncio.run(Judging(store, "http://renderer", "fixture-revision", None).save(prompt, SOURCE, PNG))
+    monkeypatch.setattr("pod_gateway.results.httpx.AsyncClient", render_client)
+    monkeypatch.setattr("pod_gateway.results.build_embeddings_npz", embeddings)
+    result = asyncio.run(ResultSaver(store, "http://renderer", "fixture-revision", None).save(prompt, SOURCE, PNG))
     assert result.failure_reason is None and result.views == store.prefix(prompt)
     assert store.result(prompt) == result
     assert state.get(str(result.js)) == SOURCE.encode()
     assert {name: state.get(f"{result.views}/{name}") for name in expected} == expected
 
 
-def test_runner_saves_returned_source_and_all_judging_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_runner_saves_returned_source_and_all_result_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from miner_reference.submissions import run_and_save
 
     async def scenario() -> None:
@@ -498,7 +498,7 @@ def test_embedding_failure_is_reported_and_the_miner_can_retry(tmp_path: Path, m
                 await asyncio.to_thread(witness._gateway.ensure_pod)
                 await enable(fixture)
                 embeddings = AsyncMock(side_effect=OSError("Embedding calculation failed"))
-                monkeypatch.setattr("pod_gateway.judging.build_embeddings_npz", embeddings)
+                monkeypatch.setattr("pod_gateway.results.build_embeddings_npz", embeddings)
                 with client(fixture, witness.renderer_transport()) as renderer:
                     with pytest.raises(ArtifactUnavailable) as error:
                         await asyncio.to_thread(renderer.save_final, SOURCE)
@@ -612,7 +612,7 @@ def test_final_saves_complete_without_generating_again(
                         arrived[generation.prompt_sha256].set()
 
                 monkeypatch.setattr(store, "require", require)
-                monkeypatch.setattr("pod_gateway.judging.build_embeddings_npz", embeddings)
+                monkeypatch.setattr("pod_gateway.results.build_embeddings_npz", embeddings)
                 inner = witness.renderer_transport()
 
                 def deliver(request: httpx.Request) -> httpx.Response:
@@ -702,7 +702,7 @@ def test_save_queue_limits_and_failures_release_the_next_job(
                         arrived.set()
 
                 monkeypatch.setattr(store, "require", require)
-                monkeypatch.setattr("pod_gateway.judging.build_embeddings_npz", embeddings)
+                monkeypatch.setattr("pod_gateway.results.build_embeddings_npz", embeddings)
                 with (
                     client(fixture, witness.renderer_transport()) as first,
                     client(
