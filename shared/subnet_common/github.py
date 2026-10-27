@@ -171,7 +171,7 @@ class GitHubClient:
         response.raise_for_status()
         return str(response.json()["sha"])
 
-    async def _create_tree(self, base_sha: str, items: list[dict]) -> str:
+    async def _create_tree(self, base_sha: str, items: list[dict[str, str]]) -> str:
         response = await self.client.post(
             f"/repos/{self.repo}/git/trees",
             json={"base_tree": base_sha, "tree": items},

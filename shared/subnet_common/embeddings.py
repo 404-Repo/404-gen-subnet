@@ -68,7 +68,9 @@ def _load_model(
         # B615 (HF unsafe download): the revision kwarg is required at the call site (no
         # default), so this is always a concrete branch/tag/commit chosen by the operator
         # via service settings. Pin to a commit hash in production for reproducibility.
-        _processor = AutoImageProcessor.from_pretrained(model_id, revision=revision, token=hf_token)  # nosec B615
+        _processor = AutoImageProcessor.from_pretrained(  # type: ignore[no-untyped-call]  # nosec B615
+            model_id, revision=revision, token=hf_token
+        )
         _model = AutoModel.from_pretrained(model_id, revision=revision, token=hf_token)  # nosec B615
         _device = _resolve_device(device)
         _model.to(_device).eval()
