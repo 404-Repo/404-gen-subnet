@@ -18,7 +18,7 @@ with four fields: `js`, `views`, `failure_reason` and `size`. The prompt ID is t
 stem of its published prompt URL.
 
 The collector reads one index per miner over HTTP through `CDN_URL`, expands the
-storage keys with that URL, and writes `submitted.json` for each miner in Git. It
+storage keys with that URL, and writes `generated.json` for each miner in Git. It
 needs no R2 credentials. A missing index (HTTP 404) or prompt entry becomes
 `not_submitted`; an explicit `None` becomes `generation_failed`, and a renderer
 rejection remains `render_rejected`. HTTP 429 responses are retried up to five total attempts,
@@ -47,7 +47,7 @@ Reads and writes to the competition Git repository:
 | `rounds/{n}/seed.json` | W | Random seed for prompt selection       |
 | `rounds/{n}/prompts.txt` | W | Selected prompts for the round         |
 | `rounds/{n}/submissions.json` | W | Admitted repo, exact commit, reveal block and round |
-| `rounds/{n}/{hotkey}/submitted.json` | W | JS URL, preview prefix, size and failure status |
+| `rounds/{n}/{hotkey}/generated.json` | W | JS URL, preview prefix, size and failure status |
 
 ## Development
 ```bash

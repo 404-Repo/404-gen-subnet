@@ -88,8 +88,8 @@ All state is stored in the competition git repository.
 
 | File | Writer | Description |
 |------|--------|-------------|
-| `submitted.json` | submission-collector | Miner's single Three.js result and rendered-view bundle |
-| `generated_1.json` (under `leader/`) | leader generator | Previous leader's single result bundle for the round's prompts |
+| `generated.json` | submission-collector | Miner's single Three.js result and rendered-view bundle |
+| `generated.json` (under `leader/`) | leader generator | Previous leader's single result bundle for the round's prompts |
 | `duels_*.json` | judge-service | Detailed match reports with per-prompt outcomes |
 
 ## Verification Pipeline

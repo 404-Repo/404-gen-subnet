@@ -51,8 +51,7 @@ GenerationsAdapter = TypeAdapter(GenerationsMap)
 
 
 def _path(round_num: int, hotkey: str) -> str:
-    filename = "generated_1.json" if hotkey == "leader" else "submitted.json"
-    return f"rounds/{round_num}/{hotkey}/{filename}"
+    return f"rounds/{round_num}/{hotkey}/generated.json"
 
 
 async def get_generations(

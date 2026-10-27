@@ -131,10 +131,10 @@ def _world(miners: list[str]) -> MockGitHubClient:
             ],
             indent=2,
         ).decode(),
-        f"rounds/1/{LEADER}/generated_1.json": _GENERATIONS_JSON,
+        f"rounds/1/{LEADER}/generated.json": _GENERATIONS_JSON,
     }
     for hk in miners:
-        files[f"rounds/1/{hk}/submitted.json"] = _GENERATIONS_JSON
+        files[f"rounds/1/{hk}/generated.json"] = _GENERATIONS_JSON
     return MockGitHubClient(files=files)
 
 
@@ -381,9 +381,9 @@ async def test_exploratory_duels_fill_cache_while_validation_is_pending(
 @pytest.mark.parametrize("leader_empty", [False, True])
 async def test_unusable_challenger_never_beats_leader(settings: Settings, leader_empty: bool) -> None:
     git = _world([HK_A])
-    git.files[f"rounds/1/{HK_A}/submitted.json"] = _EMPTY_GENERATIONS_JSON
+    git.files[f"rounds/1/{HK_A}/generated.json"] = _EMPTY_GENERATIONS_JSON
     if leader_empty:
-        git.files[f"rounds/1/{LEADER}/generated_1.json"] = _EMPTY_GENERATIONS_JSON
+        git.files[f"rounds/1/{LEADER}/generated.json"] = _EMPTY_GENERATIONS_JSON
     discord, calls, waits = await _run_round(git, {}, [], settings)
     assert _winner(git) == LEADER
     assert calls == []

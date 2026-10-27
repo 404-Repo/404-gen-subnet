@@ -12,8 +12,8 @@ and hotkey identify the submitted source and results for that validation pass.
 
 | Path | Producer | Consumer | Contract |
 | --- | --- | --- | --- |
-| `rounds/{n}/{hotkey}/submitted.json` | Collector | Judge, validator | Prompt stem to `GenerationResult` (`js`, `views`, `failure_reason`, `size`) |
-| `rounds/{n}/leader/generated_1.json` | Leader generator | Judge | Same result schema, one bundle for the previous leader |
+| `rounds/{n}/{hotkey}/generated.json` | Collector | Judge, validator | Prompt stem to `GenerationResult` (`js`, `views`, `failure_reason`, `size`) |
+| `rounds/{n}/leader/generated.json` | Leader generator | Judge | Same result schema, one bundle for the previous leader |
 | `rounds/{n}/validation_requests.json` | Judge | Validator | Append-only list of `{hotkey}`; one request per round/hotkey |
 | `rounds/{n}/validation_results.json` | Validator | Judge | Hotkey to `{verdict: "passed" or "failed", reason}`; one terminal result |
 | `rounds/{n}/source_audit.json` | Source auditor | Judge | Existing list of `{hotkey, verdict, reason}` source verdicts |
@@ -23,9 +23,8 @@ and hotkey identify the submitted source and results for that validation pass.
 | `leader.json` | Round manager | Judge, leader generator, weights setter | Source repository/commit, hotkey, weight, effective block and legacy `docker` string |
 
 `generations.get_generations` and `save_generations` resolve the single result
-bundle by hotkey: `leader` uses `generated_1.json`, and miners use `submitted.json`.
-The `1` is part of the retained leader filename. There is no source selector or
-repeat index in the API. `validation_requests` provides `ValidationRequest`,
+bundle at `rounds/{n}/{hotkey}/generated.json` for every hotkey, including `leader`.
+There is no source selector or repeat index in the API. `validation_requests` provides `ValidationRequest`,
 `ValidationRequests`, `get_validation_requests` and `save_validation_requests` for
 the hotkey-only request channel. `validation` provides `ValidationResult` and
 `ValidationVerdict` (`passed` or `failed`), with `get_validation_results` and
@@ -66,7 +65,7 @@ Complete its migration and provide a replay validator before competition cutover
   audit/regeneration loop and its generation-report/generation-audit feedback.
   Keep previous-leader generation for new prompts, executing the leader source
   identified by repository/commit. `miner_runner.py` and `pod_session.py` must
-  produce `leader/generated_1.json` through the new execution path, without
+  produce `leader/generated.json` through the new execution path, without
   candidate repeats or submitted-versus-regenerated comparisons.
   `generation_summary.py` and the regeneration-report methods in `discord.py`
   depend on the removed `GenerationReport`, `RepeatStats` and
@@ -82,7 +81,7 @@ Complete its migration and provide a replay validator before competition cutover
 
 The integrated collector freezes Python repository/commit submissions before
 publishing prompts. Its admission rules and download/render behavior are unchanged;
-`download.py` and its existing tests retain the miner's `submitted.json` path.
+`download.py` and its existing tests use the miner's `generated.json` path in Git.
 
 The integrated round-manager propagates source identity and explicitly writes
 `docker=""` for new leaders. `LeaderEntry.docker` retains its empty default for

@@ -12,8 +12,8 @@ This document focuses on the logic and reasoning behind each layer. For exact th
 ## Round flow (tournament layer)
 
 Each competitor provides one result bundle: miners use
-`rounds/{n}/{hotkey}/submitted.json`, and the previous leader uses
-`rounds/{n}/leader/generated_1.json`. Both use the same result schema. The same
+`rounds/{n}/{hotkey}/generated.json`, and the previous leader uses
+`rounds/{n}/leader/generated.json`. Both use the same result schema. The same
 Three.js modules, rendered views and embeddings are compared throughout the round.
 How those outputs were produced is outside the judge's boundary.
 
@@ -183,8 +183,8 @@ The service reads from and writes to the competition Git repository:
 | `state.json` | R/W | Current round and stage |
 | `rounds/{n}/matches_matrix.csv` | R/W | All match results |
 | `rounds/{n}/validation_requests.json` | W | One validation request per local winner (validator consumes) |
-| `rounds/{n}/{hotkey}/submitted.json` | R | Miner's Three.js results, views and failure details |
-| `rounds/{n}/leader/generated_1.json` | R | Previous leader's single result bundle for this round's prompts |
+| `rounds/{n}/{hotkey}/generated.json` | R | Miner's Three.js results, views and failure details |
+| `rounds/{n}/leader/generated.json` | R | Previous leader's single result bundle for this round's prompts |
 | `rounds/{n}/validation_results.json` | R | Validator's terminal passed/failed result per hotkey; absent while pending |
 | `rounds/{n}/source_audit.json` | R | Source-level audit results (independent check on the published code) |
 | `rounds/{n}/{hotkey}/duels_*.json` | W | Detailed match reports |

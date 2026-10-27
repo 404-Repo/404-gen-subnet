@@ -61,7 +61,7 @@ class Collection:
             return await pipeline.run(CompetitionState(current_round=1, stage=RoundStage.COLLECTING), "ref")
 
     def result(self):
-        return GenerationsAdapter.validate_json(self.git.committed[f"rounds/1/{HOTKEY}/submitted.json"])[PROMPT]
+        return GenerationsAdapter.validate_json(self.git.committed[f"rounds/1/{HOTKEY}/generated.json"])[PROMPT]
 
 
 @pytest.fixture
@@ -104,7 +104,7 @@ async def test_cdn_failure_remains_retryable(collection: Collection) -> None:
     collection.responses[collection.url] = httpx.Response(503)
     with pytest.raises(httpx.HTTPStatusError):
         await collection.run()
-    assert f"rounds/1/{HOTKEY}/submitted.json" not in collection.git.committed
+    assert f"rounds/1/{HOTKEY}/generated.json" not in collection.git.committed
     collection.save()
     await collection.run()
     assert collection.result().views == f"{collection.settings.cdn_url}/{collection.root}"
@@ -166,7 +166,7 @@ async def test_exhausted_rate_limit_retries_leave_collection_retryable(
     assert [later - earlier for earlier, later in zip(attempts, attempts[1:], strict=False)] == [
         timedelta(seconds=delay) for delay in (2, 4, 8, 16)
     ]
-    assert f"rounds/1/{HOTKEY}/submitted.json" not in collection.git.committed
+    assert f"rounds/1/{HOTKEY}/generated.json" not in collection.git.committed
     await collection.run()
     assert collection.result().views == f"{collection.settings.cdn_url}/{collection.root}"
 
@@ -246,5 +246,5 @@ async def test_skips_already_completed_prompts(collection: Collection) -> None:
     existing = {
         PROMPT: GenerationResult(js="https://assets.test/chair.js", views="https://assets.test/chair", size=100)
     }
-    collection.git.files[f"rounds/1/{HOTKEY}/submitted.json"] = GenerationsAdapter.dump_json(existing).decode()
+    collection.git.files[f"rounds/1/{HOTKEY}/generated.json"] = GenerationsAdapter.dump_json(existing).decode()
     assert await collection.run() == {HOTKEY: existing}

@@ -3,7 +3,7 @@
 > This implementation still uses the legacy Docker/regeneration contracts. Its
 > candidate audit loop and repeated generation reports must be retired before it
 > can run with the new shared contracts. Keep its role generating the previous
-> leader's results for new prompts in `rounds/{n}/leader/generated_1.json`. See
+> leader's results for new prompts in `rounds/{n}/leader/generated.json`. See
 > [required producer migrations](../shared/README.md#required-producer-migrations)
 > for the affected consumers and the separate replay validator's contract.
 
