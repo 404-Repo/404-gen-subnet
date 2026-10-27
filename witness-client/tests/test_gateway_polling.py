@@ -153,6 +153,90 @@ def test_queued_connection_keeps_the_accepted_id_within_its_deadline(
     assert saved["start_id"] == accepted and saved["replaces"] is None
 
 
+def test_retiring_connection_waits_within_its_deadline_without_replacing_the_worker(
+    tmp_path: Path, clock: list[float],
+) -> None:
+    accepted = str(uuid.uuid4())
+    polls: list[float] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET" and request.url.path == "/v1/pods/current"
+        polls.append(clock[0])
+        return httpx.Response(200, json={
+            "round": "test-1", "session": {"start_id": accepted, "replaces": None, "phase": "retiring"},
+            "witness": None, "retry_after": 30,
+        })
+
+    with httpx.Client(base_url="https://witness.test", transport=httpx.MockTransport(handler)) as http:
+        gateway = PodGatewayClient(http, Keypair.create_from_uri("//Alice"), tmp_path, 65)
+        try:
+            with pytest.raises(WitnessError) as failure:
+                gateway.ensure_pod()
+            assert failure.value.code == "pod_provisioning_pending"
+            assert polls == [0, 30, 60] and clock[0] == 65
+        finally:
+            gateway.close()
+
+
+@pytest.mark.parametrize("completion", ["lost", "absent", "successor"])
+@pytest.mark.parametrize("pending", [False, True])
+def test_retirement_after_discovery_recovers_within_the_original_deadline(
+    tmp_path: Path, clock: list[float], monkeypatch: pytest.MonkeyPatch, completion: str, pending: bool,
+) -> None:
+    previous, successor = str(uuid.uuid4()), str(uuid.uuid4())
+    phase = ["allocated"]
+    posted: list[dict[str, object]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert clock[0] < 4
+        session: dict[str, object] | None
+        if request.method == "POST":
+            allocation = json.loads(request.content)
+            assert phase[0] == "lost"
+            assert allocation["start_id"] != previous and allocation["replaces"] == previous
+            posted.append(allocation)
+            session = {**allocation, "phase": "queued" if pending else "allocated"}
+        else:
+            if request.url.path == f"/v1/pods/{previous}":
+                phase[0] = "retiring" if phase[0] == "allocated" else "lost"
+            elif phase[0] == "retiring":
+                assert request.url.path == "/v1/pods/current"
+                phase[0] = "lost"
+            session = (None if completion == "absent" and phase[0] == "lost" else
+                       {"start_id": previous, "replaces": None, "phase": phase[0]})
+            if completion == "successor" and phase[0] == "lost":
+                session = {"start_id": successor, "replaces": previous, "phase": "queued" if pending else "allocated"}
+            elif posted:
+                session = {**posted[0], "phase": "queued"}
+        return httpx.Response(200, json={
+            "round": "test-1", "session": session, "witness": None, "retry_after": 1,
+        })
+
+    with httpx.Client(base_url="https://witness.test", transport=httpx.MockTransport(handler)) as http:
+        gateway = PodGatewayClient(http, Keypair.create_from_uri("//Alice"), tmp_path, 4)
+
+        def attach(reply: dict[str, object]) -> bool:
+            session = reply.get("session")
+            return isinstance(session, dict) and session["start_id"] != previous and session["phase"] == "allocated"
+
+        monkeypatch.setattr(gateway, "_attach", attach)
+        try:
+            if pending:
+                with pytest.raises(WitnessError) as failure:
+                    gateway.ensure_pod()
+                assert failure.value.code == "pod_provisioning_pending" and clock[0] == 4
+            else:
+                actual = gateway.ensure_pod()
+                assert actual == (successor if completion == "successor" else posted[0]["start_id"])
+                assert clock[0] == 2
+            assert len(posted) == (0 if completion == "successor" else 1)
+            saved = json.loads(gateway._connection.read_bytes())
+            assert saved["start_id"] == (successor if completion == "successor" else posted[0]["start_id"])
+            assert saved["replaces"] == previous
+        finally:
+            gateway.close()
+
+
 def test_pod_status_outage_uses_the_capture_wait_deadline(
     tmp_path: Path, clock: list[float], monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -6,6 +6,8 @@ import asyncio
 import base64
 import hashlib
 import threading
+from contextlib import ExitStack
+from functools import partial
 from itertools import count
 from pathlib import Path
 from types import SimpleNamespace
@@ -20,7 +22,7 @@ from subnet_common.render import GRAY_BG, GRAY_VIEWS, WHITE_BG, WHITE_VIEWS
 from support import MemoryState
 from test_service import Harness
 
-from pod_gateway.artifacts import ArtifactRepository
+from pod_gateway.artifacts import ArtifactRepository, SubmissionContext
 from pod_gateway.judging import Judging
 from pod_gateway.models import Scope
 from pod_gateway.state import Snapshot
@@ -564,14 +566,23 @@ def test_concurrent_result_index_updates_preserve_each_prompt(monkeypatch: pytes
     assert second.result(prompts[1]) == results[1]
 
 
-def test_only_one_final_save_runs_at_a_time(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("case", ["queued", "queue_full", "queue_wait_timeout", "access_expiry"])
+def test_final_saves_complete_without_generating_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str,
+) -> None:
     from miner_reference.submissions import run_and_save
 
     async def scenario() -> None:
         fixture = Harness(tmp_path, monkeypatch)
-        started, release, busy = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        started, release, retryable = asyncio.Event(), asyncio.Event(), asyncio.Event()
         loop = asyncio.get_running_loop()
         generated: list[str] = []
+        statuses: list[int] = []
+        errors: list[str] = []
+        if case == "queue_full":
+            monkeypatch.setattr("pod_gateway.direct.SAVE_QUEUE_CAPACITY", 1)
+        elif case == "queue_wait_timeout":
+            monkeypatch.setattr("pod_gateway.direct.SAVE_QUEUE_WAIT_SECONDS", 0.05)
 
         async def embeddings(*args: object, **kwargs: object) -> bytes:
             started.set()
@@ -588,51 +599,176 @@ def test_only_one_final_save_runs_at_a_time(tmp_path: Path, monkeypatch: pytest.
                 rendered = await enable(fixture)
                 store = fixture.services[-1].artifacts
                 assert store is not None
-                other_image = b"another prompt"
-                store.prompt_hashes |= {hashlib.sha256(other_image).hexdigest()}
+                images = [fixture.image, b"second prompt", b"third prompt"]
+                sources = [SOURCE, SOURCE + "\n// second", SOURCE + "\n// third"]
+                prompts = [hashlib.sha256(image).hexdigest() for image in images]
+                store.prompt_hashes |= set(prompts)
+                arrived = {prompt: asyncio.Event() for prompt in prompts[1:]}
+                original_require = store.require
+
+                def require(generation: SubmissionContext) -> None:
+                    original_require(generation)
+                    if generation.prompt_sha256 in arrived:
+                        arrived[generation.prompt_sha256].set()
+
+                monkeypatch.setattr(store, "require", require)
                 monkeypatch.setattr("pod_gateway.judging.build_embeddings_npz", embeddings)
                 inner = witness.renderer_transport()
 
                 def deliver(request: httpx.Request) -> httpx.Response:
                     response = inner.handle_request(request)
-                    if response.status_code == 429:
-                        loop.call_soon_threadsafe(busy.set)
+                    if request.url.path == "/v1/submissions":
+                        statuses.append(response.status_code)
+                        if response.status_code == 503:
+                            errors.append(str(response.json()["error"]))
+                            loop.call_soon_threadsafe(retryable.set)
+                            loop.call_soon_threadsafe(release.set)
                     return response
 
-                with (
-                    client(fixture, witness.renderer_transport()) as first,
-                    client(fixture, httpx.MockTransport(deliver), prompt_image=other_image, timeout=5) as second,
-                ):
-                    pending = asyncio.create_task(asyncio.to_thread(
-                        run_and_save, lambda: generate(SOURCE), first, tmp_path / "first/final.json",
-                    ))
+                with ExitStack() as clients:
+                    renderers = [clients.enter_context(client(
+                        fixture, httpx.MockTransport(deliver), prompt_image=image, timeout=5,
+                    )) for image in images]
+                    pending = []
                     try:
-                        await asyncio.wait_for(started.wait(), 5)
-                        other_source = SOURCE + "\n// other"
-                        other = asyncio.create_task(asyncio.to_thread(
-                            run_and_save, lambda: generate(other_source), second, tmp_path / "second/final.json",
-                        ))
-                        await asyncio.wait_for(busy.wait(), 5)
-                        assert store.result(str(second.generation["prompt_sha256"])) is None
+                        for index, renderer in enumerate(renderers):
+                            pending.append(asyncio.create_task(asyncio.to_thread(
+                                run_and_save, partial(generate, sources[index]), renderer,
+                                tmp_path / str(index) / "final.json",
+                            )))
+                            event = started if index == 0 else arrived[prompts[index]]
+                            await asyncio.wait_for(event.wait(), 5)
+                        if case in ("queue_full", "queue_wait_timeout"):
+                            await asyncio.wait_for(retryable.wait(), 2)
+                        else:
+                            assert rendered == [SOURCE]
+                            if case == "access_expiry":
+                                monkeypatch.setattr(
+                                    "pod_gateway.security.time", SimpleNamespace(time=lambda: float("inf")),
+                                )
                     finally:
                         release.set()
-                        result = await pending
-                    other_result = await other
-                    assert fixture.state.get(str(result["js"])) == SOURCE.encode()
-                    assert fixture.state.get(str(other_result["js"])) == other_source.encode()
-                    assert result["failure_reason"] is other_result["failure_reason"] is None
-                    assert generated == rendered == [SOURCE, other_source]
+                        results = await asyncio.gather(*pending)
+                    for source, result in zip(sources, results, strict=True):
+                        assert fixture.state.get(str(result["js"])) == source.encode()
+                        assert result["failure_reason"] is None
+                    assert generated == sources
+                    if case in ("queue_full", "queue_wait_timeout"):
+                        assert sorted(rendered) == sorted(sources)
+                        assert statuses.count(200) == 3 and set(statuses) == {200, 503}
+                        assert errors and set(errors) == {"save_" + case}
+                    else:
+                        assert rendered == sources
+                        assert statuses == [200, 200, 200]
                     assert fixture.paid == 0
 
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize("status,code", [
-    (429, "save_in_progress"), (429, "rate_limited"), (403, "round_closed"),
-    (409, "recording_conflict"), (503, "save_in_progress"),
+@pytest.mark.parametrize("failure", ["full", "timeout", "round_closed", "not_selected", "first_save"])
+def test_save_queue_limits_and_failures_release_the_next_job(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str,
+) -> None:
+    async def scenario() -> None:
+        fixture = Harness(tmp_path, monkeypatch)
+        started, release, arrived = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        other_image, other_source = b"another prompt", SOURCE + "\n// other"
+        prompt = hashlib.sha256(other_image).hexdigest()
+        monkeypatch.setattr("pod_gateway.direct.SAVE_QUEUE_CAPACITY", 1, raising=False)
+        if failure == "timeout":
+            monkeypatch.setattr("pod_gateway.direct.SAVE_QUEUE_WAIT_SECONDS", 0.05, raising=False)
+
+        async def embeddings(image: bytes, *args: object, **kwargs: object) -> bytes:
+            if image == fixture.image:
+                started.set()
+                await release.wait()
+                if failure == "first_save":
+                    raise OSError("Embedding calculation failed")
+            return b"fixture embeddings"
+
+        async with fixture.running():
+            with fixture.client() as witness:
+                await asyncio.to_thread(witness._gateway.ensure_pod)
+                rendered = await enable(fixture)
+                service, runtime = fixture.services[-1], fixture.runtimes[-1]
+                store = service.artifacts
+                assert store is not None
+                store.prompt_hashes |= {prompt}
+                original_require = store.require
+
+                def require(generation: SubmissionContext) -> None:
+                    original_require(generation)
+                    if generation.prompt_sha256 == prompt:
+                        arrived.set()
+
+                monkeypatch.setattr(store, "require", require)
+                monkeypatch.setattr("pod_gateway.judging.build_embeddings_npz", embeddings)
+                with (
+                    client(fixture, witness.renderer_transport()) as first,
+                    client(
+                        fixture, witness.renderer_transport(), prompt_image=other_image,
+                        timeout=1 if failure == "timeout" else 5,
+                    ) as second,
+                ):
+                    pending = asyncio.create_task(asyncio.to_thread(first.save_final, SOURCE))
+                    other = None
+                    with monkeypatch.context() as admission:
+                        try:
+                            await asyncio.wait_for(started.wait(), 5)
+                            other = asyncio.create_task(asyncio.to_thread(second.save_final, other_source))
+                            await asyncio.wait_for(arrived.wait(), 5)
+                            if failure == "full":
+                                with (
+                                    client(
+                                        fixture, witness.renderer_transport(), prompt_image=other_image, timeout=1,
+                                    ) as overflow,
+                                    pytest.raises(ArtifactUnavailable) as full,
+                                ):
+                                    await asyncio.to_thread(overflow.save_final, other_source)
+                                assert (full.value.status, full.value.code) == (503, "save_queue_full")
+                            elif failure == "timeout":
+                                with pytest.raises(ArtifactUnavailable) as timeout:
+                                    await asyncio.wait_for(asyncio.shield(other), 2)
+                                assert (timeout.value.status, timeout.value.code) == (503, "save_queue_wait_timeout")
+                            elif failure == "round_closed":
+                                admission.setattr(service, "round_end", 0)
+                            elif failure == "not_selected":
+                                admission.setattr(runtime, "selected", lambda: False)
+                            assert rendered == [SOURCE]
+                        finally:
+                            release.set()
+                            first_result = (await asyncio.gather(pending, return_exceptions=True))[0]
+                            other_result = (
+                                (await asyncio.gather(other, return_exceptions=True))[0] if other is not None else None
+                            )
+                        if failure == "first_save":
+                            assert isinstance(first_result, ArtifactUnavailable) and first_result.status == 503
+                        else:
+                            assert isinstance(first_result, dict) and first_result["failure_reason"] is None
+                        errors = {
+                            "timeout": (503, "save_queue_wait_timeout"), "round_closed": (403, "round_closed"),
+                            "not_selected": (409, "pod_not_selected"),
+                        }
+                        if failure in errors:
+                            assert isinstance(other_result, ArtifactUnavailable)
+                            assert (other_result.status, other_result.code) == errors[failure]
+                            assert store.result(prompt) is None
+                        else:
+                            assert isinstance(other_result, dict) and other_result["failure_reason"] is None
+                    recovered = await asyncio.to_thread(second.save_final, other_source)
+                    assert fixture.state.get(str(recovered["js"])) == other_source.encode()
+                    assert rendered == [SOURCE, other_source] and fixture.paid == 0
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("status,code,elapsed", [
+    (429, "save_in_progress", 2.5), (503, "save_queue_full", 2.5), (503, "save_queue_wait_timeout", 2.5),
+    (429, "rate_limited", 0.25), (401, "allocation_access_expired", 0.25), (403, "round_closed", 0.25),
+    (409, "recording_conflict", 0.25), (503, "save_in_progress", 0.25),
 ])
-def test_final_save_busy_retry_is_bounded_and_preserves_the_checkpoint(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, status: int, code: str,
+def test_final_save_transient_retry_is_bounded_and_preserves_the_checkpoint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, status: int, code: str, elapsed: float,
 ) -> None:
     from miner_reference.submissions import run_and_save
 
@@ -667,7 +803,7 @@ def test_final_save_busy_retry_is_bounded_and_preserves_the_checkpoint(
         with pytest.raises(ArtifactUnavailable) as unavailable:
             run_and_save(generate, renderer, checkpoint)
         assert (unavailable.value.status, unavailable.value.code) == (status, code)
-        assert now[0] == (2.5 if (status, code) == (429, "save_in_progress") else 0.25)
+        assert now[0] == elapsed
         failing = False
         assert run_and_save(generate, renderer, checkpoint) == {"js": "saved.js"}
         assert generated == [SOURCE]

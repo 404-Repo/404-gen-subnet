@@ -161,6 +161,7 @@ class Harness:
         self.services: list[Witness] = []
         self.runners: list[web.AppRunner] = []
         self.tasks: list[asyncio.Task[None]] = []
+        self.stopping = False
         self.paid = self.gateway_bytes = self.origin_bytes = 0
         self.gateway_paths: list[str] = []
         self.origin_paths: list[str] = []
@@ -310,7 +311,24 @@ class Harness:
         current = self.provider.get(pod.id)
         assert current is not None
         self.provider.pods[pod.id] = replace(current, tcp={8000: ("127.0.0.1", int(origin.rsplit(":", 1)[1]))})
-        await asyncio.to_thread(runtime.run)
+
+        # In-process workers terminate after the fixture drains their pending work.
+        class Terminated(BaseException):
+            pass
+
+        tick = runtime.tick
+
+        def running() -> bool:
+            drained = tick()
+            if self.stopping and drained:
+                raise Terminated
+            return drained
+
+        self.monkeypatch.setattr(runtime, "tick", running)
+        try:
+            await asyncio.to_thread(runtime.run)
+        except Terminated:
+            pass
 
     @asynccontextmanager
     async def running(self) -> AsyncIterator[Harness]:
@@ -401,6 +419,7 @@ class Harness:
             yield self
         finally:
             self.allow_response.set()
+            self.stopping = True
             for runtime in self.runtimes:
                 runtime.drain()
             await self.registry.close()
@@ -776,6 +795,45 @@ def test_initial_connection_waits_once_then_reuses_its_pod(
             with fixture.client("restarted") as restarted:
                 assert await asyncio.wait_for(asyncio.to_thread(restarted._gateway.ensure_pod), 3) == start_id
             assert fixture.provider.creates == 1
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("saved_connection", [False, True])
+def test_fresh_client_waits_for_retiring_capture_then_reuses_its_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, saved_connection: bool,
+) -> None:
+    async def scenario() -> None:
+        fixture = Harness(tmp_path, monkeypatch)
+        async with fixture.running():
+            with fixture.client() as witness, fixture.client("client" if saved_connection else "fresh") as fresh:
+                old_start = await asyncio.to_thread(witness._gateway.ensure_pod)
+                old_pod = fixture.provider.list()[0]
+                fixture.allow_response.clear()
+                capture = asyncio.create_task(asyncio.to_thread(witness.create, model="fixture", input="image"))
+                assert await asyncio.to_thread(fixture.dispatched.wait, 2)
+                retired = await asyncio.to_thread(fixture.allocator.retire, fixture.scope, old_start, old_pod.id)
+                assert retired.phase == "retiring"
+
+                def immediate_current(request: httpx.Request) -> None:
+                    if request.url.path == "/v1/pods/current":
+                        request.headers["Prefer"] = "wait=0"
+
+                fresh._gateway.http.event_hooks["request"].append(immediate_current)
+                async with asyncio.timeout(2):
+                    while fixture.gateway._current[fixture.scope].phase != "retiring":
+                        await asyncio.sleep(0.01)
+                reconnect = asyncio.create_task(asyncio.to_thread(fresh._gateway.ensure_pod))
+                await asyncio.sleep(0.1)
+                assert not reconnect.done() and fixture.provider.get(old_pod.id) is not None
+                assert fixture.provider.creates == fixture.paid == 1
+                fixture.allow_response.set()
+                original = await asyncio.wait_for(capture, 5)
+                new_start = await asyncio.wait_for(reconnect, 5)
+                recovered = await asyncio.to_thread(fresh.create, model="fixture", input="image")
+                assert new_start != old_start and fixture.provider.get(old_pod.id) is None
+                assert recovered.output_text == original.output_text == "answer-1"
+                assert fixture.provider.creates == 2 and fixture.paid == 1
 
     asyncio.run(scenario())
 

@@ -83,6 +83,32 @@ def runtime(state: MemoryState, records: CallRecords, budget: Budget, spool: Pat
     )
 
 
+def test_permanently_drained_worker_reconnects_until_retirement_is_confirmed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = MemoryState()
+    worker = runtime(state, CallRecords(state), Budget(state, PRICING), tmp_path / "spool")
+    sockets = [MagicMock(), MagicMock()]
+    drain = json.dumps({"type": "drain", "id": "selection"})
+    sockets[0].recv.side_effect = [drain, OSError("Fixture gateway restarted")]
+    sockets[1].recv.side_effect = [drain, json.dumps({"type": "retired"})]
+    connections: list[MagicMock] = []
+
+    def connect(*args: object, **kwargs: object) -> MagicMock:
+        socket = sockets[len(connections)]
+        socket.__enter__.return_value = socket
+        connections.append(socket)
+        return socket
+
+    monkeypatch.setattr("pod.connect", connect)
+    monkeypatch.setattr("pod.time.sleep", lambda _: None)
+    worker.run()
+    assert len(connections) == 2
+    for socket in sockets:
+        assert {"type": "drained"} in [json.loads(call.args[0]) for call in socket.send.call_args_list]
+    assert not worker.selected()
+
+
 @pytest.mark.parametrize("settled", [False, True])
 def test_complete_r2_capture_recovers_after_worker_loss(settled: bool) -> None:
     state = MemoryState()

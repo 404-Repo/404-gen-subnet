@@ -82,7 +82,12 @@ class ArtifactClient(RendererClient):
                 if (
                     method != "POST"
                     or path != "/submissions"
-                    or (error.status, error.code) != (429, "save_in_progress")
+                    or (error.status, error.code)
+                    not in (
+                        (429, "save_in_progress"),
+                        (503, "save_queue_full"),
+                        (503, "save_queue_wait_timeout"),
+                    )
                 ):
                     raise
                 remaining = deadline - time.monotonic()
@@ -106,7 +111,7 @@ class ArtifactClient(RendererClient):
             raise RenderUnavailable("Invalid saved submission") from error
 
     def save_final(self, output: str | None) -> dict[str, object]:
-        """Save final artifacts, retrying Pod busy responses within the configured timeout."""
+        """Save final artifacts, retrying busy and queue errors within the configured timeout."""
         if output is not None:
             if not isinstance(output, str):
                 raise ValueError("generate() must return JavaScript or None")

@@ -8,6 +8,7 @@ import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
 from dataclasses import replace
+from functools import partial
 from types import SimpleNamespace
 from typing import cast
 
@@ -23,7 +24,7 @@ from pod_gateway.auth import Authenticator, Membership
 from pod_gateway.control import DrainControl, Peer, Registry
 from pod_gateway.lifecycle import Allocator
 from pod_gateway.models import Pod, PodSpec, Scope, json_bytes
-from pod_gateway.runpod import CreateRejected, CreateUnknown
+from pod_gateway.runpod import CreateRejected, CreateUnknown, ProviderUnavailable
 from pod_gateway.selection import Selection
 from pod_gateway.security import capability
 from pod_gateway.server import Gateway
@@ -197,6 +198,121 @@ def test_cached_status_and_unauthenticated_rejection_survive_a_stalled_provider(
                                          {"start_id": SECOND})
                 assert response.status == 202 and (await response.json())["session"]["start_id"] == SECOND
             assert provider.creates == 1
+
+    asyncio.run(scenario())
+
+
+def test_permanent_drain_survives_control_disconnect() -> None:
+    async def scenario() -> None:
+        provider = Provider()
+        async with running(provider, MemoryState()) as (gateway, client):
+            scope = gateway.scope(KEYS[0].ss58_address)
+            response = await request(client, KEYS[0], "POST", "/v1/pods/start", {"start_id": FIRST})
+            assert response.status == 202
+            await response.read()
+            async with asyncio.timeout(2):
+                while not gateway._pods:
+                    await asyncio.sleep(0.01)
+            pod = next(iter(gateway._pods.values()))
+            gateway._due[scope] = time.time() + 60
+            async with client.ws_connect(f"/v1/control/{scope.hotkey}/{FIRST}", headers={
+                "Authorization": "Bearer " + capability(gateway.secret, scope, FIRST),
+                "x-witness-pod": pod.id,
+            }) as socket:
+                assert (await socket.receive_json())["type"] == "activate"
+                await socket.send_json({"type": "drained"})
+            async with asyncio.timeout(2):
+                while pod.id in gateway.registry.peers:
+                    await asyncio.sleep(0.01)
+            gateway._due.pop(scope, None)
+            async with asyncio.timeout(2):
+                while provider.get(pod.id) is not None:
+                    await asyncio.sleep(0.01)
+            assert provider.creates == 1
+
+    asyncio.run(scenario())
+
+
+def test_spontaneous_drain_keeps_the_outstanding_control_reply_readable() -> None:
+    async def scenario() -> None:
+        provider = Provider()
+        async with running(provider, MemoryState()) as (gateway, client):
+            scope = gateway.scope(KEYS[0].ss58_address)
+            response = await request(client, KEYS[0], "POST", "/v1/pods/start", {"start_id": FIRST})
+            assert response.status == 202
+            await response.read()
+            async with asyncio.timeout(2):
+                while not gateway._pods:
+                    await asyncio.sleep(0.01)
+            pod = next(iter(gateway._pods.values()))
+            gateway._due[scope] = time.time() + 60
+            async with client.ws_connect(f"/v1/control/{scope.hotkey}/{FIRST}", headers={
+                "Authorization": "Bearer " + capability(gateway.secret, scope, FIRST), "x-witness-pod": pod.id,
+            }) as socket:
+                assert (await socket.receive_json())["type"] == "activate"
+                retiring = asyncio.create_task(gateway._run(
+                    gateway._worker, partial(gateway.allocator.retire, scope, FIRST, pod.id),
+                ))
+                try:
+                    peer = gateway.registry.peers[pod.id]
+                    async with asyncio.timeout(2):
+                        while not peer.replies:
+                            await asyncio.sleep(0.01)
+                    await socket.send_json({"type": "drained"})
+                    command = await socket.receive_json(timeout=2)
+                    assert command["type"] == "drain"
+                    await socket.send_json({"type": "reply", "id": command["id"], "drained": False})
+                    retired = await asyncio.wait_for(asyncio.shield(retiring), 2)
+                    assert retired.phase == "retired" and provider.get(pod.id) is None
+                    assert (await socket.receive_json(timeout=2))["type"] == "retired"
+                finally:
+                    await asyncio.wait_for(retiring, 12)
+
+    asyncio.run(scenario())
+
+
+def test_drained_worker_confirms_deletion_after_gateway_restart() -> None:
+    class HeldDelete(Provider):
+        hold = True
+
+        def delete(self, pod_id: str) -> None:
+            if self.hold:
+                raise ProviderUnavailable("Fixture deletion is unconfirmed")
+            super().delete(pod_id)
+
+    async def scenario() -> None:
+        provider, state = HeldDelete(), MemoryState()
+        async with running(provider, state) as (gateway, client):
+            scope = gateway.scope(KEYS[0].ss58_address)
+            response = await request(client, KEYS[0], "POST", "/v1/pods/start", {"start_id": FIRST})
+            assert response.status == 202
+            await response.read()
+            async with asyncio.timeout(2):
+                while not gateway._pods:
+                    await asyncio.sleep(0.01)
+            pod = next(iter(gateway._pods.values()))
+            async with client.ws_connect(f"/v1/control/{scope.hotkey}/{FIRST}", headers={
+                "Authorization": "Bearer " + capability(gateway.secret, scope, FIRST), "x-witness-pod": pod.id,
+            }) as socket:
+                await socket.receive_json()
+                await socket.send_json({"type": "drained"})
+                async with asyncio.timeout(2):
+                    while provider.pods[pod.id].lifecycle != "drained":
+                        await asyncio.sleep(0.01)
+                with pytest.raises(TimeoutError):
+                    await socket.receive_json(timeout=0.05)
+        async with running(provider, state) as (gateway, client):
+            async with asyncio.timeout(2):
+                while pod.id not in gateway._pods:
+                    await asyncio.sleep(0.01)
+            async with client.ws_connect(f"/v1/control/{scope.hotkey}/{FIRST}", headers={
+                "Authorization": "Bearer " + capability(gateway.secret, scope, FIRST), "x-witness-pod": pod.id,
+            }) as socket:
+                assert (await socket.receive_json())["type"] == "drain"
+                provider.hold = False
+                await socket.send_json({"type": "drained"})
+                assert (await socket.receive_json(timeout=2))["type"] == "retired"
+            assert provider.get(pod.id) is None and provider.creates == 1
 
     asyncio.run(scenario())
 

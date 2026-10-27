@@ -51,9 +51,13 @@ stored under `<prefix>/`.
 
 A final save supplies JavaScript or an explicit `None`. For JavaScript, the Pod
 overwrites the source, renders the 12 canonical judging views and grid, computes
-embeddings, and saves the result. One final save runs at a time per Pod; another
-save receives HTTP 429. Preview rendering uses the renderer's existing concurrency
-limit.
+embeddings, and saves the result. One final save runs at a time per Pod, with up
+to eight additional saves waiting in arrival order for up to two minutes. A full
+queue returns HTTP 503 `save_queue_full`; an expired queue wait returns HTTP 503
+`save_queue_wait_timeout`. Requests authenticate on arrival; Pod selection and
+the round cutoff are checked before queued work starts. The client retries these
+two queue errors within its configured save timeout, using the same output.
+Preview rendering uses the renderer's existing concurrency limit.
 
 The Pod publishes `rounds/<full-round-name>/<hotkey>/submitted.json`, mapping
 prompt hashes to records containing `js`, `views`, `failure_reason` and `size`;

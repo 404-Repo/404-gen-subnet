@@ -543,9 +543,10 @@ class Gateway:
             pods = grouped.get(scope, [])
             drained = next((pod for pod in pods if pod.id in self._retiring), None)
             if drained is not None:
+                # A permanent drain report remains valid after its socket closes.
                 self._due[scope] = now + self.poll_seconds
                 await self._run(self._worker, partial(self.allocator.retire, scope,
-                                                     drained.markers["WITNESS_START_ID"], drained.id))
+                                                     drained.markers["WITNESS_START_ID"], drained.id, drain=False))
                 break
             if len(pods) > 1 or any(p.lifecycle != "active" or p.status in ("EXITED", "ERROR") or
                                     p.id in self._retiring for p in pods):
@@ -602,8 +603,6 @@ class Gateway:
             pod.lifecycle == "active" and pod.status != "RUNNING"
         ):
             raise AuthRejected("pod_starting", 503)
-        if pod.lifecycle == "drained":
-            raise AuthRejected("pod_drained", 409)
         if pod_id in self.registry.peers or pod_id in self._connecting:
             raise AuthRejected("pod_already_connected", 409)
         socket = web.WebSocketResponse(max_msg_size=16384, heartbeat=15)
@@ -614,6 +613,17 @@ class Gateway:
             self._connecting.discard(pod_id)
         peer = Peer(socket, scope, start_id, pod_id)
         self.registry.peers[pod_id] = peer
+        retirement: asyncio.Task[None] | None = None
+
+        async def retire() -> None:
+            try:
+                retired = await self._run(self._worker, partial(self.allocator.retire, scope, start_id, pod_id,
+                                                               drain=False))
+                if retired.phase == "retired" and not socket.closed:
+                    await socket.send_json({"type": "retired"})
+            except Exception:  # noqa: BLE001 - retain permanent drain for lifecycle retries
+                self._wake.set()
+
         try:
             selected = self._selected(scope, start_id, pod_id)
             await socket.send_json(
@@ -650,6 +660,8 @@ class Gateway:
                     peer.ready = False
                     peer.drained = True
                     self._retiring.add(pod_id)
+                    if retirement is None or retirement.done():
+                        retirement = asyncio.create_task(retire())
                 else:
                     break
         finally:
@@ -659,6 +671,9 @@ class Gateway:
             for future in peer.replies.values():
                 if not future.done():
                     future.set_result({})
+            if retirement is not None:
+                retirement.cancel()
+                await asyncio.gather(retirement, return_exceptions=True)
             await socket.close()
         return socket
 

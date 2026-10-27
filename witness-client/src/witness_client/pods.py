@@ -184,6 +184,18 @@ class PodGatewayClient:
                 if isinstance(value, dict) and value.get("round") == reply.get("round"):
                     allocation = {"start_id": value["start_id"], "replaces": value.get("replaces")}
             current = reply.get("session")
+            while isinstance(current, dict) and current.get("phase") == "retiring":
+                if allocation is not None and allocation["start_id"] == current.get("start_id"):
+                    allocation = None
+                hint = reply.get("retry_after", 1)
+                if isinstance(hint, bool) or not isinstance(hint, (int, float)) or not 0 <= hint <= 86400:
+                    raise WitnessError("Invalid gateway retry interval", source="gateway")
+                time.sleep(min(hint, max(0, deadline - time.monotonic())))
+                if time.monotonic() >= deadline:
+                    raise WitnessError("Pod retirement remains unresolved; retry the same connection",
+                                       source="gateway", code="pod_provisioning_pending")
+                reply = self._allocation_json("GET", "/v1/pods/current", deadline=deadline)
+                current = reply.get("session")
             if not isinstance(current, dict) or current.get("phase") in ("rejected", "lost", "retired"):
                 if allocation is None or (
                     isinstance(current, dict) and current.get("start_id") == allocation["start_id"]
@@ -193,11 +205,25 @@ class PodGatewayClient:
                     save(self._connection, canonical({**allocation, "round": reply["round"]}))
                 reply = self._allocation_json("POST", "/v1/pods/start", allocation,
                                                deadline=deadline)
+            retiring: str | None = None
             while True:
                 session = reply.get("session")
+                if retiring is not None:
+                    if not isinstance(session, dict) or (
+                        session.get("start_id") == retiring and session.get("phase") in ("rejected", "lost", "retired")
+                    ):
+                        allocation = {"start_id": str(uuid.uuid4()), "replaces": retiring}
+                        save(self._connection, canonical({**allocation, "round": reply["round"]}))
+                        reply = self._allocation_json("POST", "/v1/pods/start", allocation, deadline=deadline)
+                        retiring = None
+                        continue
+                    if session.get("start_id") != retiring:
+                        retiring = None
                 if not isinstance(session, dict):
                     raise WitnessError("Invalid Pod allocation", source="gateway")
                 start_id = str(uuid.UUID(str(session["start_id"])))
+                if session.get("phase") == "retiring":
+                    retiring = start_id
                 if session.get("phase") in ("rejected", "lost", "retired"):
                     self._connection.unlink(missing_ok=True)
                     raise WitnessError("Pod allocation did not become ready", source="gateway", code="pod_unavailable")
@@ -214,7 +240,8 @@ class PodGatewayClient:
                 if time.monotonic() >= deadline:
                     raise WitnessError("Pod provisioning remains unresolved; retry the same connection",
                                        source="gateway", code="pod_provisioning_pending")
-                reply = self._allocation_json("GET", f"/v1/pods/{start_id}", deadline=deadline)
+                reply = self._allocation_json("GET", "/v1/pods/current" if retiring is not None else
+                                               f"/v1/pods/{start_id}", deadline=deadline)
         finally:
             self._pod_lock.release()
 

@@ -512,8 +512,7 @@ class PodRuntime:
         try:
             while True:
                 try:
-                    if self.tick():
-                        return
+                    self.tick()
                     with connect(
                         f"{self.origin}/v1/control/{self.scope.hotkey}/{self.start_id}",
                         additional_headers={
@@ -538,6 +537,8 @@ class PodRuntime:
                                 if kind == "activate":
                                     with self.lock:
                                         self.accepting = not self.draining
+                                elif kind == "retired" and self.tick():
+                                    return
                                 elif kind == "drain":
                                     self.drain()
                                     self._send(
@@ -554,7 +555,6 @@ class PodRuntime:
                                 pass
                             if self.tick():
                                 self._send(socket, {"type": "drained"})
-                                return
                             with self.lock:
                                 self._send(
                                     socket,

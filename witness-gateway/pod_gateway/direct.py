@@ -29,6 +29,9 @@ from .security import verify_miner_access
 if TYPE_CHECKING:
     from pod import PodRuntime
 
+SAVE_QUEUE_CAPACITY = 8
+SAVE_QUEUE_WAIT_SECONDS = 120
+
 
 class StrictInput(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
@@ -71,7 +74,8 @@ class Witness:
         if artifacts is not None and artifacts.scope != runtime.scope:
             raise ValueError("Artifact storage belongs to another miner")
         self.artifacts, self.judging = artifacts, judging
-        self.saving = False
+        self._save_lock = asyncio.Lock()
+        self._pending_saves = 0
 
     @web.middleware
     async def middleware(
@@ -336,29 +340,41 @@ class Witness:
                 raise ValueError("Prompt bytes differ")
         if self.judging is None:
             raise AuthRejected("saving_unavailable", 503)
-        if self.saving:
-            raise AuthRejected("save_in_progress", 429)
-        self.saving = True
+        if self._pending_saves >= SAVE_QUEUE_CAPACITY + 1:
+            raise AuthRejected("save_queue_full", 503)
+        self._pending_saves += 1
         try:
-            previous = await asyncio.to_thread(store.result, data.generation.prompt_sha256)
-            if previous is not None:
-                if data.source is None:
-                    same = previous.js is None
-                else:
-                    same = previous.js is not None and await asyncio.to_thread(
-                        store.objects.get, previous.js, 1024 * 1024
-                    ) == data.source.encode()
-                if not same:
-                    raise RecordingConflict("Final output already saved")
-                return web.json_response({"submission": previous.model_dump()}, headers={"Cache-Control": "no-store"})
-            await asyncio.to_thread(self._admit_artifact)
             try:
-                result = await self.judging.save(data.generation.prompt_sha256, data.source, image)
-                return web.json_response({"submission": result.model_dump()}, headers={"Cache-Control": "no-store"})
+                async with asyncio.timeout(SAVE_QUEUE_WAIT_SECONDS):
+                    await self._save_lock.acquire()
+            except TimeoutError as error:
+                raise AuthRejected("save_queue_wait_timeout", 503) from error
+            try:
+                previous = await asyncio.to_thread(store.result, data.generation.prompt_sha256)
+                if previous is not None:
+                    if data.source is None:
+                        same = previous.js is None
+                    else:
+                        same = previous.js is not None and await asyncio.to_thread(
+                            store.objects.get, previous.js, 1024 * 1024
+                        ) == data.source.encode()
+                    if not same:
+                        raise RecordingConflict("Final output already saved")
+                    return web.json_response(
+                        {"submission": previous.model_dump()}, headers={"Cache-Control": "no-store"}
+                    )
+                await asyncio.to_thread(self._admit_artifact)
+                try:
+                    result = await self.judging.save(data.generation.prompt_sha256, data.source, image)
+                    return web.json_response(
+                        {"submission": result.model_dump()}, headers={"Cache-Control": "no-store"}
+                    )
+                finally:
+                    self._artifact_done()
             finally:
-                self._artifact_done()
+                self._save_lock.release()
         finally:
-            self.saving = False
+            self._pending_saves -= 1
 
     async def get_choice(self, request: web.Request) -> web.Response:
         store = self._artifacts()
