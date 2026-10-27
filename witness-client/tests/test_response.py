@@ -316,3 +316,20 @@ def test_model_stream_preserves_events_then_raises_the_original_sdk_error() -> N
         assert failure.value.code == "server_error"
         with pytest.raises(StopIteration):
             next(stream)
+
+
+PARTIAL = (
+    b'data: {"type":"response.created","response":{"id":"fixture","status":"in_progress"}}\n\n'
+    b'data: {"type":"response.output_text.delta","output_index":0,"content_index":0,"delta":"partial"}\n\n'
+)
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_truncated_sse_raises_an_sdk_error_instead_of_successful_eof_or_raw_value_error(stream: bool) -> None:
+    import openai
+    from witness_client.response import model_result
+
+    with pytest.raises(openai.APIError):
+        result = model_result(200, PARTIAL, "api", stream=stream)
+        if stream:
+            list(result)

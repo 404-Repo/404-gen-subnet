@@ -197,6 +197,7 @@ class ModelStream(Iterator[ResponseStreamEvent]):
         self.events = iter(sse_events(body))
         self.provider = provider
         self.closed = False
+        self.terminal = False
 
     def __iter__(self) -> Self:
         return self
@@ -213,10 +214,21 @@ class ModelStream(Iterator[ResponseStreamEvent]):
                     cast(Any, _provider_request(self.provider)),
                     body=details,
                 )
+            if value.get("type") in ("response.completed", "response.failed", "response.incomplete"):
+                self.terminal = True
             return cast(
                 ResponseStreamEvent,
                 construct_type(type_=ResponseStreamEvent, value=value),
             )
+        except StopIteration:
+            self.close()
+            if self.terminal:
+                raise
+            raise openai.APIError(
+                "Missing completed OpenAI response",
+                cast(Any, _provider_request(self.provider)),
+                body=None,
+            ) from None
         except BaseException:
             self.close()
             raise
@@ -293,4 +305,10 @@ def model_result(
             error.provider_message or str(error),
             cast(Any, _provider_request(provider)),
             body={"code": error.provider_code, "param": error.param},
+        ) from error
+    except ValueError as error:
+        raise openai.APIError(
+            str(error),
+            cast(Any, _provider_request(provider)),
+            body=None,
         ) from error

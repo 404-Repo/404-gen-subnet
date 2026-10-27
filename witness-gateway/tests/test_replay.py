@@ -46,6 +46,7 @@ class Capture(WitnessClient):
         self.records, self.budget = CallRecords(self.state), Budget(self.state, pricing)
         self.pricing = pricing
         self.paid = 0
+        self.outcome: tuple[int, bytes, dict[str, int] | None] | None = None
         self.failures: dict[int, str] = {}
         self.gate: threading.Event | None = None
 
@@ -90,6 +91,8 @@ class Capture(WitnessClient):
             )
             + b"\n\n"
         )
+        if self.outcome is not None:
+            status, response, usage = self.outcome
         manifest = canonical(
             {
                 "call_id": key.id,
