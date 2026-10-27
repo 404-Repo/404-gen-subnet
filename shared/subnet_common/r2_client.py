@@ -2,9 +2,7 @@ from types import TracebackType
 from typing import Self
 
 import aioboto3
-from botocore.exceptions import ClientError
 from types_aiobotocore_s3 import S3Client
-from types_aiobotocore_s3.type_defs import PutObjectRequestTypeDef
 
 
 class R2Client:
@@ -54,35 +52,3 @@ class R2Client:
             ContentType=content_type,
         )
         return key
-
-    async def download(self, key: str, limit: int | None = None) -> bytes:
-        response = await self.client.get_object(Bucket=self.bucket, Key=key)
-        stream = response["Body"]
-        async with stream:
-            if limit is None:
-                body: bytes = await stream.read()
-                return body
-            result = bytearray()
-            while chunk := await stream.read(min(256 * 1024, limit + 1 - len(result))):
-                result.extend(chunk)
-                if len(result) > limit:
-                    raise ValueError("R2 object exceeds its size limit")
-            return bytes(result)
-
-    async def create(self, key: str, data: bytes, content_type: str = "application/json") -> bool:
-        """Publish an immutable object; False means another complete object already exists."""
-        parameters: PutObjectRequestTypeDef = {
-            "Bucket": self.bucket,
-            "Key": key,
-            "Body": data,
-            "ContentType": content_type,
-            "CacheControl": "no-store",
-            "IfNoneMatch": "*",
-        }
-        try:
-            await self.client.put_object(**parameters)
-        except ClientError as error:
-            if error.response.get("ResponseMetadata", {}).get("HTTPStatusCode") in (409, 412):
-                return False
-            raise
-        return True
