@@ -152,7 +152,8 @@ draining Pods. Captures check permission immediately before provider release;
 queued saves check when execution begins. Already admitted work finishes retaining
 its evidence. Status, saved-result lookup and identical saved submissions remain
 available. A ready new round applies to new allocations; existing Pods retain
-their frozen inputs. Replacing a previous round's Pod waits for its drain report.
+their frozen inputs. Grant renewal for an in-flight call or saved-result lookup
+keeps the existing allocation. Replacing a previous round's Pod waits for its drain report.
 The revivor leaves round selection and draining to the gateway.
 
 Previously assigned miners can replace a lost Pod in the same current round for

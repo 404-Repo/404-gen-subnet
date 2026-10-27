@@ -434,6 +434,28 @@ async def test_collection_uses_the_round_storage_prefix_and_retains_artifact_poi
     assert result.js == f"{settings.cdn_url}/{root}.js" and result.views == f"{settings.cdn_url}/{root}"
 
 
+@pytest.mark.parametrize("url,prompt", [
+    ("https://prompts.test/chair%2Dlarge.png", "chair-large"),
+    ("https://prompts.test/chair.png?token=a.b", "chair"),
+])
+async def test_collection_keeps_saved_results_for_encoded_and_signed_prompt_urls(
+    git: MockGitHubClient, settings: Settings, url: str, prompt: str,
+) -> None:
+    state = add_state(git, stage=RoundStage.COLLECTING)
+    add_prompts(git, [url], round_num=1)
+    git.files["rounds/1/submissions.json"] = json.dumps({HOTKEY: dict(
+        repo="test/model", commit="c" * 40, revealed_at_block=150, tie_breaker="0" * 128, round="test-1",
+    )})
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, json={prompt: {"js": "saved.js"}}))
+    batcher = GitBatcher(git=git, base_sha="ref", branch=settings.github_branch)
+    async with httpx.AsyncClient(transport=transport) as http:
+        await ResultCollector(batcher, http, settings).collect(state, "ref")
+    await batcher.flush()
+    results = GenerationsAdapter.validate_json(git.committed[f"rounds/1/{HOTKEY}/generated.json"])
+    assert results[prompt].js == f"{settings.cdn_url}/saved.js"
+    assert results[prompt].failure_reason is None
+
+
 async def test_retry_wait_allows_another_miner_to_be_collected(
     git: MockGitHubClient, settings: Settings, monkeypatch: pytest.MonkeyPatch
 ) -> None:

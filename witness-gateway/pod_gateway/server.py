@@ -128,13 +128,13 @@ class Gateway:
             assert self.spec_for_round is not None
             spec = self.spec_for_round(inputs)
             changed = inputs.round != self.round
+            if changed:
+                await self._write(partial(self.queue.rollover, inputs.round))
             def use_round() -> None:
                 with self.allocator.lock:
                     self.allocator.spec = spec
                     self.round = inputs.round
             await self._run(self._worker, use_round)
-            if changed:
-                await self._write(partial(self.queue.rollover, inputs.round))
         await self.publish_policy()
         self._wake.set()
 
@@ -486,9 +486,13 @@ class Gateway:
         if not self.fence():
             raise AuthRejected("gateway_fenced", 503)
         self.auth.membership.require(scope.hotkey)
+        operation = self.allocator.operations.get(scope)
+        if (entry.submitted and operation is not None and not operation.submitted
+                and operation.session.start_id == entry.start_id):
+            self.queue.release_authorization(scope, entry.start_id)
+            entry = entry.model_copy(update={"submitted": False})
         if not entry.submitted:
             self._require_round(scope)
-        operation = self.allocator.operations.get(scope)
         if entry.submitted:
             # A restarted or uncertain admission can only discover its original create.
             if operation is None or not operation.submitted:
@@ -585,7 +589,10 @@ class Gateway:
                         result.phase in ("allocated", "rejected", "retired"))
             if not finished:
                 if entry.submitted and (scope, entry.start_id) not in visible:
-                    continue
+                    operation = self.allocator.operations.get(scope)
+                    if (operation is None or operation.submitted
+                            or operation.session.start_id != entry.start_id):
+                        continue
                 if not entry.submitted and not capacity_available and not any(
                     owner.hotkey == scope.hotkey for owner in grouped
                 ):

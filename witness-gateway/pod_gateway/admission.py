@@ -241,6 +241,23 @@ class StartQueue:
 
         self._change(change)
 
+    def release_authorization(self, scope: Scope, start_id: str) -> None:
+        """Return a confirmed undispatched intent to the queue."""
+        def change(state: QueueState) -> None:
+            entry = state.pending.get(scope.hotkey)
+            if entry is None or (entry.round, entry.start_id) != (scope.round, start_id) or not entry.submitted:
+                return
+            history = state.history[scope.hotkey]
+            history[start_id] = history[start_id].model_copy(update={"submitted": False})
+            state.pending[scope.hotkey] = entry.model_copy(update={"submitted": False})
+            previous = [attempt for attempt in history.values() if attempt.round == scope.round and attempt.submitted]
+            if previous:
+                state.attempts[scope.hotkey] = max(previous, key=lambda attempt: attempt.at)
+            else:
+                state.attempts.pop(scope.hotkey, None)
+
+        self._change(change)
+
     def complete(self, scope: Scope, start_id: str, *, rejected: bool = False) -> None:
         def change(state: QueueState) -> None:
             entry = state.pending.get(scope.hotkey)

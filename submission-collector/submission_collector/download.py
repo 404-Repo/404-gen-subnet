@@ -1,6 +1,7 @@
 import asyncio
 import random
 from pathlib import Path
+from urllib.parse import unquote, urlsplit
 
 import httpx
 from loguru import logger
@@ -51,7 +52,7 @@ class ResultCollector:
         prompt_urls = await require_prompts(git=self.git_batcher.git, round_num=state.current_round, ref=ref)
         schedule = await get_schedule(self.git_batcher.git, state.current_round, ref)
         storage_prefix = "" if schedule is None else schedule.witness_storage_prefix
-        prompts = [Path(url).stem for url in prompt_urls]
+        prompts = [Path(unquote(urlsplit(url).path)).stem for url in prompt_urls]
         hotkeys = list(submissions.keys())
         random.shuffle(hotkeys)
         logger.info(f"Collecting {len(hotkeys)} result indexes for {len(prompts)} prompts")

@@ -15,11 +15,12 @@ from subnet_common.competition.generations import GenerationResult
 from test_artifacts import SOURCE, client, enable
 from test_rounds import Competition, policy, publication
 from test_service import Harness, call_key
-from witness_client import WitnessError
+from witness_client import AsyncWitnessClient, WitnessError
 
 from pod_gateway.auth import AuthRejected
-from pod_gateway.models import PodSpec
+from pod_gateway.models import PodSpec, Scope
 from pod_gateway.rounds import PromptImage, RoundInputs, RoundPolicy
+from pod_gateway.state import Snapshot, StateConflict, WriteUncertain
 
 
 def freeze(fixture: Harness, *, images: tuple[bytes, ...] | None = None) -> RoundInputs:
@@ -390,4 +391,194 @@ def test_gateway_restart_retains_a_pending_pod_until_its_frozen_specification_is
             await gateway.round_changed()
             await gateway._step()
             assert provider.pods[pending.id].lifecycle == "active" and provider.creates == 1
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("closed", [False, True])
+def test_allocation_resumes_when_policy_is_lost_after_authorization(
+    monkeypatch: pytest.MonkeyPatch, closed: bool,
+) -> None:
+    from support import MemoryState, Provider
+    from test_gateway_limits import FIRST, SECOND, KEYS, coordinator
+
+    async def scenario() -> None:
+        state, provider, clock = MemoryState(), Provider(), [1000.0]
+        competition = Competition(publication(number=1), state=state)
+        await competition.controller.refresh()
+        async with coordinator(provider, state, clock) as gateway:
+            base = gateway.allocator.spec
+            gateway.rounds = competition.controller
+            gateway.spec_for_round = lambda inputs: replace(base, env={
+                "WITNESS_ROUND_INPUTS": inputs.model_dump_json(),
+            })
+            await gateway.round_changed()
+            scope = gateway.scope(KEYS[0].ss58_address)
+            if closed:
+                gateway.queue.enqueue(scope, FIRST, None)
+                await gateway._step()
+                pod = next(iter(provider.pods.values()))
+                provider.delete(pod.id)
+                gateway._publish(provider.list())
+                competition.source.publish(publication(number=1, stage="paused"))
+                await competition.controller.refresh()
+                await gateway.round_changed()
+            start_id = SECOND if closed else FIRST
+            gateway.queue.enqueue(scope, start_id, FIRST if closed else None)
+            authorize = gateway.queue.authorize
+
+            def interrupted(owner: Scope, start: str) -> None:
+                authorize(owner, start)
+                competition.controller.policy = None
+
+            clock[0] += 31
+            entry = gateway.queue.pending(scope)
+            assert entry is not None
+            with monkeypatch.context() as patch:
+                patch.setattr(gateway.queue, "authorize", interrupted)
+                with pytest.raises(AuthRejected):
+                    gateway._advance(scope, entry)
+            assert provider.creates == int(closed)
+            await competition.controller.refresh()
+            await gateway.round_changed()
+            clock[0] += 31
+            await gateway._step()
+            assert provider.creates == int(closed) + 1
+            assert [pod.markers["WITNESS_START_ID"] for pod in provider.pods.values()] == [start_id]
+            assert gateway.queue.pending(scope) is None
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("applied", [False, True])
+def test_round_rollover_retries_a_failed_queue_write(monkeypatch: pytest.MonkeyPatch, applied: bool) -> None:
+    from support import MemoryState, Provider
+    from test_gateway_limits import FIRST, SECOND, KEYS, coordinator
+
+    async def scenario() -> None:
+        state, provider, clock = MemoryState(), Provider(), [1000.0]
+        competition = Competition(publication(number=1), state=state)
+        await competition.controller.refresh()
+        async with coordinator(provider, state, clock) as gateway:
+            base = gateway.allocator.spec
+            gateway.rounds = competition.controller
+            gateway.spec_for_round = lambda inputs: replace(base, env={
+                "WITNESS_ROUND_INPUTS": inputs.model_dump_json(),
+            })
+            await gateway.round_changed()
+            scope = gateway.scope(KEYS[0].ss58_address)
+            gateway.queue.enqueue(scope, FIRST, None)
+            competition.source.publish(publication(number=2, seed=91, prompt="lamp"))
+            await competition.controller.refresh()
+            save = state.save
+
+            def failed_write(key: str, data: bytes, expected: str | None) -> Snapshot:
+                if applied:
+                    save(key, data, expected)
+                    raise WriteUncertain("Rollover acknowledgement lost")
+                raise StateConflict("Rollover write failed")
+
+            with monkeypatch.context() as patch:
+                patch.setattr(state, "save", failed_write)
+                with pytest.raises((StateConflict, WriteUncertain)):
+                    await gateway.round_changed()
+            await competition.controller.refresh()
+            await gateway.round_changed()
+            current = gateway.scope(scope.hotkey)
+            gateway.queue.enqueue(current, SECOND, None)
+            await gateway._step()
+            assert current.round == "test-2" and provider.creates == 1
+            assert [pod.scope() for pod in provider.pods.values()] == [current]
+            assert gateway.queue.pending(current) is None
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize("lost", [False, True])
+def test_saved_results_survive_grant_renewal_after_rollover(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, asynchronous: bool, lost: bool,
+) -> None:
+    async def scenario() -> None:
+        fixture = Harness(tmp_path, monkeypatch)
+        competition = Competition(publication(prefix=""), state=fixture.state)
+        async with fixture.running():
+            fixture.gateway.rounds = competition.controller
+            base = fixture.allocator.spec
+            fixture.gateway.spec_for_round = lambda inputs: replace(base, env={
+                "WITNESS_ROUND_INPUTS": inputs.model_dump_json(),
+            })
+            await competition.controller.refresh()
+            await fixture.gateway.round_changed()
+            with fixture.client() as witness:
+                await asyncio.to_thread(witness._gateway.ensure_pod)
+                inputs = competition.controller.require()
+                fixture.image = competition.images["chair"]
+                await enable(fixture, prompt_ids=inputs.prompt_ids)
+                saved = await asyncio.to_thread(witness.submit, fixture.image, None)
+                async with AsyncWitnessClient(
+                    witness._config, hotkey=fixture.key, openai_api_key="fixture-" + "a" * 80, delivery_timeout=5,
+                ) as async_witness:
+                    if asynchronous:
+                        await async_witness._gateway.ensure_pod()
+                    competition.source.publish(publication(number=1, seed=91, prompt="lamp", prefix=""))
+                    await competition.controller.refresh()
+                    await fixture.gateway.round_changed()
+                    if lost:
+                        pod_id = fixture.runtimes[-1].pod_id
+                        fixture.provider.delete(pod_id)
+                        await until(lambda: pod_id not in fixture.gateway._pods)
+                        with pytest.raises(WitnessError, match="allocated round"):
+                            if asynchronous:
+                                async_witness._gateway._expires = 0
+                                await async_witness.get_submitted()
+                            else:
+                                witness._gateway._expires = 0
+                                await asyncio.to_thread(witness.get_submitted)
+                        assert fixture.provider.creates == 1
+                        return
+                    if asynchronous:
+                        async_witness._gateway._expires = 0
+                        results = await async_witness.get_submitted()
+                    else:
+                        witness._gateway._expires = 0
+                        results = await asyncio.to_thread(witness.get_submitted)
+                    assert results == {"chair": saved} and fixture.provider.creates == 1
+                    if asynchronous:
+                        async_witness._gateway._expires = 0
+                        started = await async_witness._gateway.start(call_key())
+                    else:
+                        witness._gateway._expires = 0
+                        started = await asyncio.to_thread(witness._gateway.start, call_key())
+                    assert started.session is not None and started.session["round"] == "test-1"
+                    assert fixture.provider.creates == 2 and fixture.paid == 0
+
+    asyncio.run(scenario())
+
+
+def test_admitted_provider_call_finishes_across_rollover_and_grant_renewal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        fixture = Harness(tmp_path, monkeypatch)
+        competition = Competition(publication(prefix=""), state=fixture.state)
+        fixture.allow_response.clear()
+        async with fixture.running():
+            fixture.gateway.rounds = competition.controller
+            base = fixture.allocator.spec
+            fixture.gateway.spec_for_round = lambda inputs: replace(base, env={
+                "WITNESS_ROUND_INPUTS": inputs.model_dump_json(),
+            })
+            await competition.controller.refresh()
+            await fixture.gateway.round_changed()
+            with fixture.client() as witness:
+                response = asyncio.create_task(asyncio.to_thread(witness.create, model="fixture", input="image"))
+                assert await asyncio.to_thread(fixture.dispatched.wait, 5)
+                competition.source.publish(publication(number=1, seed=91, prompt="lamp", prefix=""))
+                await competition.controller.refresh()
+                await fixture.gateway.round_changed()
+                witness._gateway._expires = 0
+                fixture.allow_response.set()
+                assert (await response).output_text == "answer-1"
+                assert fixture.paid == fixture.provider.creates == 1
+
     asyncio.run(scenario())

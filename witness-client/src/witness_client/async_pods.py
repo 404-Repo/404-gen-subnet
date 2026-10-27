@@ -183,6 +183,8 @@ class AsyncPodGatewayClient:
         expected_exchange_id: str | None = None,
         deadline: float | None = None,
     ) -> Snapshot:
+        if expected_exchange_id is None:
+            await self.ensure_pod(deadline=deadline)
         value: dict[str, object] = {"request": invocation.model_dump()}
         if expected_exchange_id is not None:
             value["expected_exchange_id"] = str(uuid.UUID(expected_exchange_id))
@@ -199,7 +201,8 @@ class AsyncPodGatewayClient:
         return snapshot
 
     async def _allocation_json(
-        self, method: str, path: str, value: object | None = None, *, deadline: float
+        self, method: str, path: str, value: object | None = None, *, deadline: float,
+        expected_round: str | None = None,
     ) -> dict[str, object]:
         body = b"" if value is None else canonical(value)
 
@@ -212,6 +215,10 @@ class AsyncPodGatewayClient:
         result = json.loads(raw or b"{}")
         if not isinstance(result, dict):
             raise WitnessError("Invalid allocation reply", source="gateway")
+        if expected_round is not None and result.get("round") != expected_round:
+            raise WitnessError(
+                "The allocated round is no longer available", source="gateway", code="round_closed"
+            )
         return result
 
     def _attach(self, reply: dict[str, object]) -> bool:
@@ -264,7 +271,7 @@ class AsyncPodGatewayClient:
         self.round_number = round_number
         return True
 
-    async def ensure_pod(self, *, deadline: float | None = None) -> str:
+    async def ensure_pod(self, *, deadline: float | None = None, renew: bool = False) -> str:
         if deadline is None:
             deadline = time.monotonic() + self.delivery_timeout
         try:
@@ -281,7 +288,26 @@ class AsyncPodGatewayClient:
             if self._direct is not None and time.time() < self._expires - 30:
                 assert self._start_id is not None
                 return self._start_id
-            reply = await self._allocation_json("GET", "/v1/pods/current", deadline=deadline)
+            expected_round = self.round_number if renew else None
+            reply = None
+            if renew and self._start_id is not None:
+                try:
+                    reply = await self._allocation_json(
+                        "GET", f"/v1/pods/{self._start_id}", deadline=deadline, expected_round=expected_round
+                    )
+                except WitnessError as error:
+                    if error.code != "session_not_found":
+                        raise
+                if reply is not None:
+                    previous = reply.get("session")
+                    if not isinstance(previous, dict) or previous.get("phase") in (
+                        "rejected", "lost", "retired",
+                    ):
+                        reply = None
+            if reply is None:
+                reply = await self._allocation_json(
+                    "GET", "/v1/pods/current", deadline=deadline, expected_round=expected_round
+                )
             allocation = self._allocation_request if self._allocation_round == reply.get("round") else None
             current = reply.get("session")
             if not isinstance(current, dict) or current.get("phase") in (
@@ -298,7 +324,7 @@ class AsyncPodGatewayClient:
                     }
                     self._allocation_request, self._allocation_round = allocation, str(reply["round"])
                 reply = await self._allocation_json(
-                    "POST", "/v1/pods/start", allocation, deadline=deadline
+                    "POST", "/v1/pods/start", allocation, deadline=deadline, expected_round=expected_round
                 )
             while True:
                 session = reply.get("session")
@@ -332,13 +358,13 @@ class AsyncPodGatewayClient:
                         code="pod_provisioning_pending",
                     )
                 reply = await self._allocation_json(
-                    "GET", f"/v1/pods/{start_id}", deadline=deadline
+                    "GET", f"/v1/pods/{start_id}", deadline=deadline, expected_round=expected_round
                 )
         finally:
             self._pod_lock.release()
 
     async def _service(self, *, deadline: float | None = None) -> AsyncSignedTransport:
-        await self.ensure_pod(deadline=deadline)
+        await self.ensure_pod(deadline=deadline, renew=True)
         assert self._direct is not None
         return self._direct
 
