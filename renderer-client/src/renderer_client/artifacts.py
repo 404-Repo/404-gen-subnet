@@ -6,6 +6,7 @@ import base64
 import hashlib
 import json
 import re
+import time
 from typing import cast
 
 import httpx
@@ -47,6 +48,7 @@ class ArtifactClient(RendererClient):
         self.generation: dict[str, object] = {"prompt_sha256": prompt_sha256, "seed": seed}
         self.prompt_image = base64.b64encode(prompt_image).decode("ascii")
         self._origin = self._url.removesuffix("/render/grid")
+        self._timeout = timeout
 
     def load_context(self) -> dict[str, str]:
         """Read the Pod's approved source commit for final checkpoints."""
@@ -60,19 +62,39 @@ class ArtifactClient(RendererClient):
         return {"submission_commit": commit}
 
     def _exchange(self, method: str, path: str, value: object | None = None) -> bytes:
-        try:
-            with self._http.stream(method, self._origin + path, json=value) as response:
-                raw = _read_bounded(response, MAX_ERROR_BYTES)
-                if response.status_code == 422:
-                    raise RenderRejected(raw.decode())
-                if not response.is_success:
-                    details = json.loads(raw)
-                    raise ArtifactUnavailable(str(details.get("error", "invalid_response")), response.status_code)
-                return raw
-        except httpx.HTTPError as error:
-            raise RenderUnavailable("Final-save transport failed; retry saving") from error
-        except (ValueError, KeyError, TypeError, UnicodeError) as error:
-            raise RenderUnavailable("Invalid final-save response") from error
+        deadline = time.monotonic() + self._timeout
+        while True:
+            try:
+                with self._http.stream(
+                    method,
+                    self._origin + path,
+                    json=value,
+                    timeout=max(0, deadline - time.monotonic()),
+                ) as response:
+                    raw = _read_bounded(response, MAX_ERROR_BYTES)
+                    if response.status_code == 422:
+                        raise RenderRejected(raw.decode())
+                    if not response.is_success:
+                        details = json.loads(raw)
+                        raise ArtifactUnavailable(str(details.get("error", "invalid_response")), response.status_code)
+                    return raw
+            except ArtifactUnavailable as error:
+                if (
+                    method != "POST"
+                    or path != "/submissions"
+                    or (error.status, error.code) != (429, "save_in_progress")
+                ):
+                    raise
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise
+                time.sleep(min(1, remaining))
+                if time.monotonic() >= deadline:
+                    raise
+            except httpx.HTTPError as error:
+                raise RenderUnavailable("Final-save transport failed; retry saving") from error
+            except (ValueError, KeyError, TypeError, UnicodeError) as error:
+                raise RenderUnavailable("Invalid final-save response") from error
 
     def _submission(self, raw: bytes) -> dict[str, object]:
         try:
@@ -84,7 +106,7 @@ class ArtifactClient(RendererClient):
             raise RenderUnavailable("Invalid saved submission") from error
 
     def save_final(self, output: str | None) -> dict[str, object]:
-        """Save the source, judging views and embeddings; errors leave saving retryable."""
+        """Save final artifacts, retrying Pod busy responses within the configured timeout."""
         if output is not None:
             if not isinstance(output, str):
                 raise ValueError("generate() must return JavaScript or None")

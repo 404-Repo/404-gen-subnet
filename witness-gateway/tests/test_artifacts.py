@@ -8,6 +8,7 @@ import hashlib
 import threading
 from itertools import count
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import httpx
@@ -68,14 +69,18 @@ async def enable(fixture: Harness, *, fail_first_render: bool = False, commit: s
     return rendered
 
 
-def client(fixture: Harness, transport: httpx.BaseTransport) -> ArtifactClient:
+def client(
+    fixture: Harness, transport: httpx.BaseTransport, *, prompt_image: bytes | None = None, timeout: float = 150,
+) -> ArtifactClient:
+    image = fixture.image if prompt_image is None else prompt_image
     return ArtifactClient(
         "https://witness.internal",
         renderer_id=IMAGE,
-        prompt_sha256=hashlib.sha256(fixture.image).hexdigest(),
-        prompt_image=fixture.image,
+        prompt_sha256=hashlib.sha256(image).hexdigest(),
+        prompt_image=image,
         seed=42,
         transport=transport,
+        timeout=timeout,
     )
 
 
@@ -560,36 +565,112 @@ def test_concurrent_result_index_updates_preserve_each_prompt(monkeypatch: pytes
 
 
 def test_only_one_final_save_runs_at_a_time(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from miner_reference.submissions import run_and_save
+
     async def scenario() -> None:
         fixture = Harness(tmp_path, monkeypatch)
-        started, release = asyncio.Event(), asyncio.Event()
+        started, release, busy = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        loop = asyncio.get_running_loop()
+        generated: list[str] = []
 
         async def embeddings(*args: object, **kwargs: object) -> bytes:
             started.set()
             await release.wait()
             return b"fixture embeddings"
 
+        def generate(source: str) -> str:
+            generated.append(source)
+            return source
+
         async with fixture.running():
             with fixture.client() as witness:
                 await asyncio.to_thread(witness._gateway.ensure_pod)
-                await enable(fixture)
+                rendered = await enable(fixture)
+                store = fixture.services[-1].artifacts
+                assert store is not None
+                other_image = b"another prompt"
+                store.prompt_hashes |= {hashlib.sha256(other_image).hexdigest()}
                 monkeypatch.setattr("pod_gateway.judging.build_embeddings_npz", embeddings)
+                inner = witness.renderer_transport()
+
+                def deliver(request: httpx.Request) -> httpx.Response:
+                    response = inner.handle_request(request)
+                    if response.status_code == 429:
+                        loop.call_soon_threadsafe(busy.set)
+                    return response
+
                 with (
                     client(fixture, witness.renderer_transport()) as first,
-                    client(fixture, witness.renderer_transport()) as second,
+                    client(fixture, httpx.MockTransport(deliver), prompt_image=other_image, timeout=5) as second,
                 ):
-                    pending = asyncio.create_task(asyncio.to_thread(first.save_final, SOURCE))
+                    pending = asyncio.create_task(asyncio.to_thread(
+                        run_and_save, lambda: generate(SOURCE), first, tmp_path / "first/final.json",
+                    ))
                     try:
                         await asyncio.wait_for(started.wait(), 5)
-                        with pytest.raises(ArtifactUnavailable) as busy:
-                            await asyncio.to_thread(second.save_final, SOURCE + "\n// other")
-                        assert busy.value.status == 429
+                        other_source = SOURCE + "\n// other"
+                        other = asyncio.create_task(asyncio.to_thread(
+                            run_and_save, lambda: generate(other_source), second, tmp_path / "second/final.json",
+                        ))
+                        await asyncio.wait_for(busy.wait(), 5)
+                        assert store.result(str(second.generation["prompt_sha256"])) is None
                     finally:
                         release.set()
                         result = await pending
+                    other_result = await other
                     assert fixture.state.get(str(result["js"])) == SOURCE.encode()
+                    assert fixture.state.get(str(other_result["js"])) == other_source.encode()
+                    assert result["failure_reason"] is other_result["failure_reason"] is None
+                    assert generated == rendered == [SOURCE, other_source]
+                    assert fixture.paid == 0
 
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("status,code", [
+    (429, "save_in_progress"), (429, "rate_limited"), (403, "round_closed"),
+    (409, "recording_conflict"), (503, "save_in_progress"),
+])
+def test_final_save_busy_retry_is_bounded_and_preserves_the_checkpoint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, status: int, code: str,
+) -> None:
+    from miner_reference.submissions import run_and_save
+
+    now = [0.0]
+    failing = True
+    generated: list[str] = []
+
+    def sleep(seconds: float) -> None:
+        now[0] += seconds
+
+    monkeypatch.setattr(
+        "renderer_client.artifacts.time", SimpleNamespace(monotonic=lambda: now[0], sleep=sleep), raising=False,
+    )
+
+    def deliver(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/artifacts/context":
+            return httpx.Response(200, json={"submission_commit": COMMIT})
+        if failing:
+            now[0] += 0.25
+            return httpx.Response(status, json={"error": code})
+        return httpx.Response(200, json={"submission": {"js": "saved.js"}})
+
+    def generate() -> str:
+        generated.append(SOURCE)
+        return SOURCE
+
+    with ArtifactClient(
+        "https://witness.internal", renderer_id=IMAGE, prompt_sha256=hashlib.sha256(PNG).hexdigest(),
+        prompt_image=PNG, seed=42, transport=httpx.MockTransport(deliver), timeout=2.5,
+    ) as renderer:
+        checkpoint = tmp_path / "private/final.json"
+        with pytest.raises(ArtifactUnavailable) as unavailable:
+            run_and_save(generate, renderer, checkpoint)
+        assert (unavailable.value.status, unavailable.value.code) == (status, code)
+        assert now[0] == (2.5 if (status, code) == (429, "save_in_progress") else 0.25)
+        failing = False
+        assert run_and_save(generate, renderer, checkpoint) == {"js": "saved.js"}
+        assert generated == [SOURCE]
 
 
 def test_new_final_saves_require_an_open_round(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
