@@ -115,6 +115,7 @@ class Revivor:
         failures: int = 3,
         clock: Callable[[], float] = time.time,
         round_end: int | None = None,
+        follow_competition: bool = False,
     ) -> None:
         self.provider, self.gateway, self.workers = provider, gateway, workers
         self.health: dict[str, dict[str, object]] = {}
@@ -122,6 +123,7 @@ class Revivor:
         self.publisher, self.probe = publisher, probe
         self.startup_grace, self.failures, self.clock = startup_grace, failures, clock
         self.round_end = round_end
+        self.follow_competition = follow_competition
 
     def _health(self, current: Session, healthy: bool) -> bool:
         value = self.health.setdefault(
@@ -201,6 +203,13 @@ class Revivor:
                 continue
             try:
                 pods = self.workers.owned(inventory, scope)
+                if self.follow_competition:
+                    # The gateway owns automatic round selection and draining.
+                    # A pause, unknown state or rollover does not discard evidence.
+                    for pod in pods:
+                        if pod.lifecycle == "drained":
+                            self.workers.retire(scope, pod.markers["WITNESS_START_ID"], pod.id)
+                    continue
                 ended = self.round_end is not None and self.clock() >= self.round_end
                 for pod in pods:
                     if scope.round != self.active_round or (
@@ -278,7 +287,7 @@ def _run(settings: RevivorSettings, worker_spec: PodSpec, gateway_spec: PodSpec)
             workers=workers,
             scope=settings.gateway_scope,
             active_round=settings.round,
-            round_end=settings.round_end,
+            follow_competition=True,
             publisher=CaddyPublisher(
                 origin=settings.gateway_url,
                 ca_file=settings.ca_file,

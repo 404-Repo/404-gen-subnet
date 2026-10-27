@@ -36,6 +36,19 @@ class StateStore(Protocol):
     def save(self, key: str, data: bytes, expected: str | None) -> Snapshot: ...
 
 
+class PrefixedState:
+    """Apply a round's storage namespace to calls and accounting journals."""
+
+    def __init__(self, store: StateStore, prefix: str) -> None:
+        self.store, self.prefix = store, prefix
+
+    def load(self, key: str) -> Snapshot | None:
+        return self.store.load(self.prefix + key)
+
+    def save(self, key: str, data: bytes, expected: str | None) -> Snapshot:
+        return self.store.save(self.prefix + key, data, expected)
+
+
 class Body(Protocol):
     def read(self, amount: int) -> bytes: ...
     def close(self) -> None: ...

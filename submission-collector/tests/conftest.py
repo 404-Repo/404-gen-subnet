@@ -37,7 +37,7 @@ def add_schedule(
     round_num: int = 1,
     earliest_reveal_block: int = 100,
     latest_reveal_block: int = 200,
-    generation_deadline_block: int = 500,
+    generation_deadline_block: int | None = 500,
 ) -> RoundSchedule:
     """Create a RoundSchedule and store it in the mock git."""
     schedule = RoundSchedule(

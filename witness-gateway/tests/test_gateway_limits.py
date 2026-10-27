@@ -518,14 +518,23 @@ def test_new_requests_replace_running_pods_and_old_delivery_retries_survive_rest
 
 
 def test_a_previous_round_pod_releases_capacity_for_the_same_miner() -> None:
+    from test_lifecycle import Drain
+
     async def scenario() -> None:
         provider, clock = Provider(), [1000.0]
         async with coordinator(provider, MemoryState(), clock) as gateway:
             gateway.allocator.admission = Admission(max_pods=1)
+            drain = Drain(False)
+            gateway.allocator.control = drain
             scope = gateway.scope(KEYS[0].ss58_address)
             old = provider.create(gateway.allocator.spec.body(replace(scope, round="test-0"), FIRST))
             gateway._publish(provider.list())
             gateway.queue.enqueue(scope, SECOND, None)
+            await gateway._step()
+            assert old.id in provider.pods and provider.creates == 1
+            drain.ready = True
+            clock[0] += gateway.poll_seconds + 1
+            gateway._publish(provider.list())
             await gateway._step()
             assert old.id not in provider.pods
             assert [pod.scope() for pod in provider.pods.values()] == [scope]

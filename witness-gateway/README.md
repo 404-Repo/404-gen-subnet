@@ -44,22 +44,23 @@ client, proof parameters and configuration in the
 
 ## Artifact storage
 
-The Pod saves final results in the existing public `404-gen` bucket under
-`rounds/<full-round-name>/<hotkey>/submitted/<prompt-id>`. The JavaScript is
+The Pod saves final results in the configured bucket under
+`<storage-prefix>rounds/<full-round-name>/<hotkey>/submitted/<prompt-id>`. The empty
+storage prefix preserves the official `404-gen` paths. The JavaScript is
 `<prefix>.js`; white and gray judging views, `grid.png` and `embeddings.npz` are
 stored under `<prefix>/`.
 
 A final save supplies JavaScript or an explicit `None`. For JavaScript, the Pod
-overwrites the source, renders the 12 canonical judging views and grid, computes
+writes the source, renders the 12 canonical judging views and grid, computes
 embeddings, and saves the result. One final save runs at a time per Pod, with up
 to eight additional saves waiting in arrival order for up to two minutes. A full
 queue returns HTTP 503 `save_queue_full`; an expired queue wait returns HTTP 503
 `save_queue_wait_timeout`. Requests authenticate on arrival; Pod selection and
-the round cutoff are checked before queued work starts. The client retries these
+fresh round permission are checked before queued work starts. The client retries these
 two queue errors within its configured save timeout, using the same output.
 Preview rendering uses the renderer's existing concurrency limit.
 
-The Pod publishes `rounds/<full-round-name>/<hotkey>/submitted.json`, mapping
+The Pod publishes `<storage-prefix>rounds/<full-round-name>/<hotkey>/submitted.json`, mapping
 official prompt IDs to records containing `js`, `views`, `failure_reason` and `size`;
 `js` and `views` are storage keys. A saved final output cannot be replaced;
 retrying the same output returns its saved result without rendering again.
@@ -75,28 +76,18 @@ generation again.
 
 Set `DINOV3_REVISION` to the approved embedding-model commit and supply `HF_TOKEN`
 for the gated DINOv3 model. These settings are forwarded to witness Pods.
-Set `WITNESS_ARTIFACTS` to JSON in the gateway/revivor environment:
+Set `WITNESS_RENDERER_PROFILE` to JSON in the gateway/revivor environment:
 
 ```json
 {
-  "profile": {
-    "image_digest": "sha256:REPLACE_WITH_WORKER_IMAGE_DIGEST",
-    "validation_sha256": "REPLACE_WITH_RENDERER_PROFILE_SHA256",
-    "bootstrap_sha256": null
-  },
-  "seed": 42,
-  "prompt_ids": {"REPLACE_WITH_IMAGE_SHA256": "REPLACE_WITH_OFFICIAL_PROMPT_ID"},
-  "commits": {}
+  "image_digest": "sha256:REPLACE_WITH_WORKER_IMAGE_DIGEST",
+  "validation_sha256": "REPLACE_WITH_RENDERER_PROFILE_SHA256",
+  "bootstrap_sha256": null
 }
 ```
 
-Use the immutable `WITNESS_IMAGE` digest and frozen round seed. `prompt_ids` maps
-each image's SHA256 to its official filename ID without the extension.
-Supply the mapping from the same frozen round metadata; image hashes and
-filename IDs are separate identities. Each image must resolve to one distinct ID.
-The optional `commits` map supplies legacy checkpoint metadata; it does not
-restrict miner admission or final saving. Legacy `prompt_hashes` configurations
-retain their hash-based IDs. Only the packaged renderer is supported;
+Use the immutable `WITNESS_IMAGE` digest. The gateway resolves the seed and prompt
+mapping from the competition snapshot. Only the packaged renderer is supported;
 `bootstrap_sha256` must be null. Compute its profile hash from the exact build
 context, from the repository root:
 
@@ -104,11 +95,109 @@ context, from the repository root:
 PYTHONPATH=witness-gateway python -c 'from pathlib import Path; from pod_gateway.renderer import renderer_profile_sha256; print(renderer_profile_sha256(Path("render-service-js")))'
 ```
 
-Final saving is disabled when `WITNESS_ARTIFACTS` is absent. New saves require
-the selected Pod and an open round. Saved results remain readable after cutoff
-and Pod replacement. Retain result files through judging and the operator's
-retention period.
+The optional legacy `WITNESS_ARTIFACTS` JSON can supply the renderer profile and
+`commits` metadata. Its seed and prompt mapping are replaced by the resolved
+round inputs at allocation. A configured commit is optional checkpoint metadata;
+it does not restrict authenticated, assigned miners from saving. The async and
+sync SDKs accept `submit(image, source)` without a seed or source commit. Explicit
+legacy seeds must still match the frozen seed. Retained hash-keyed indexes recover
+under official IDs without changing their artifact pointers, including saved `None` outcomes.
+
+Set `witness_save_submissions` to `false` in the round schedule to disable final
+storage explicitly. Submission endpoints return `artifact_storage_disabled`;
+provider recordings and accounting remain durable. A round with final saving
+enabled requires a renderer profile and embedding revision. Saved results remain
+readable after admission closes. Retain results and evidence through judging and
+the operator's retention period.
 
 The [collector](../submission-collector/README.md) reads one result index per
 round and hotkey, expands the storage keys with its existing `CDN_URL`, and
 writes the per-miner result index to Git.
+
+## Competition source and admission
+
+Configure `WITNESS_COMPETITION_REPO` with a GitHub repository URL or `owner/repo`
+and `WITNESS_COMPETITION_BRANCH` with the operator's chosen branch. Both default
+to `404-Repo/404-active-competition` and `main`. Every branch follows the same
+rules. A read-only `WITNESS_GITHUB_TOKEN` is optional and is never sent to workers.
+Finney membership, allocation capabilities, selected-Pod fencing and pricing
+remain required. `WITNESS_TEST_HOTKEY` is unsupported. `WITNESS_ACTIVE_ROUND` and `WITNESS_ROUND_END` are not used for
+automatic competition admission.
+
+The gateway resolves the branch once per refresh and reads `config.json`,
+`state.json`, and the selected round's `schedule.json`, `seed.json` and
+`prompts.txt` at that commit. Every prompt image must download and verify before
+allocation is enabled. Official IDs are filename stems; image SHA256s come from
+the downloaded bytes. Repository-relative prompt paths resolve at the selected
+commit. Content-addressed copies in R2 freeze external images as well.
+
+Pods receive `WITNESS_ROUND_INPUTS` and their renderer settings at creation.
+The inputs contain source identity and revision, round, seed, prompt content
+references, hash-to-ID mapping, block deadline or explicit absence, and storage
+scope. `GET /v1/artifacts/context` exposes these inputs and signed prompt URLs to
+the assigned miner. Inputs are durably pinned per repository, branch and round.
+Changing seed, prompt content/IDs, deadline or storage scope for an existing round
+closes admission; publish a new round to use different inputs.
+
+The gateway refreshes state every `WITNESS_ROUND_REFRESH_SECONDS` (default 10)
+and sends policies over authenticated control sockets. Policies expire after
+`WITNESS_ROUND_POLICY_SECONDS` (default 30, maximum 120). New allocations,
+generation, previews and final saves require a fresh policy for the exact frozen
+inputs and current `miner_generation` round. Finite schedules also require a fresh
+Finney block below `generation_deadline_block`; leases are capped at the estimated
+block boundary. `next_stage_eta` is approximate and is never a generation deadline.
+
+A pause, closed stage, source error or expired policy stops new work without
+draining Pods. Captures check permission immediately before provider release;
+queued saves check when execution begins. Already admitted work finishes retaining
+its evidence. Status, saved-result lookup and identical saved submissions remain
+available. A ready new round applies to new allocations; existing Pods retain
+their frozen inputs. Replacing a previous round's Pod waits for its drain report.
+The revivor leaves round selection and draining to the gateway.
+
+Previously assigned miners can replace a lost Pod in the same current round for
+saved-result lookup and recording recovery after closure. That allocation still
+denies new generation, previews and final saves. New miners cannot allocate into
+a closed round. Source identity must remain fresh for recovery allocation.
+
+For a persistent round on any selected branch, publish ordinary round data such as:
+
+`state.json`:
+
+```json
+{"current_round": 0, "stage": "miner_generation", "next_stage_eta": null}
+```
+
+`rounds/0/schedule.json`:
+
+```json
+{
+  "earliest_reveal_block": 1,
+  "latest_reveal_block": 2,
+  "generation_deadline_block": null,
+  "witness_storage_prefix": "witness-sandbox/",
+  "witness_save_submissions": true
+}
+```
+
+`rounds/0/seed.json`:
+
+```json
+{"seed": 42}
+```
+
+`rounds/0/prompts.txt`:
+
+```text
+https://your-prompt-host.example/chair.png
+https://your-prompt-host.example/lamp.png
+```
+
+`config.json` supplies the competition name and existing competition fields.
+The explicit null deadline keeps the collector in `miner_generation` indefinitely;
+omitting the deadline is invalid. An unbounded round still needs fresh policies.
+Use a distinct deployment for independently operated gateways and an explicit
+storage prefix for isolated branch results, calls, accounting and recordings.
+The collector uses the same prefix. Offline export accepts `--storage-prefix`.
+The empty prefix retains all official paths. Repeated runs of the same persistent
+round resume its immutable saved results; use a new round for new submissions.

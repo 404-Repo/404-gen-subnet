@@ -7,16 +7,18 @@ import hashlib
 import json
 import ssl
 from collections.abc import AsyncIterator
-from contextlib import suppress
 
 import httpx
 from aiohttp import web
+from subnet_common.github import GitHubClient
 
 from .admission import Admission
 from .auth import Authenticator, Membership, MembershipRefresher
 from .control import DrainControl, Registry
 from .lifecycle import Allocator
 from .models import PodSpec
+from .dependencies import worker_spec as resolved_worker_spec
+from .rounds import RoundController, RoundImages, download_image, repository
 from .runpod import RunPodClient
 from .selection import Selection
 from .server import Gateway
@@ -50,11 +52,25 @@ async def application(settings: GatewaySettings, worker_spec: PodSpec) -> web.Ap
     membership = Membership(
         settings.deployment,
         settings.netuid,
-        settings.round,
-        settings.test_hotkey,
+        "unconfigured",
     )
     rpc = httpx.Client(timeout=45, follow_redirects=False)
     refresher = MembershipRefresher(membership, rpc, settings.subtensor_rpc_url)
+    source_http = httpx.AsyncClient(timeout=30, trust_env=False)
+    github = GitHubClient(
+        repository(settings.competition_repo),
+        token=None if settings.github_token is None else settings.github_token.get_secret_value(),
+    )
+
+    async def head() -> tuple[int, float]:
+        return await asyncio.to_thread(refresher.generation_head)
+
+    rounds = RoundController(
+        git=github, repo=settings.competition_repo, branch=settings.competition_branch,
+        objects=RoundImages(state), pins=state, download=lambda url: download_image(source_http, url),
+        head=head, ttl=settings.round_policy_seconds,
+        on_close=lambda: gateway.publish_policy(),
+    )
 
     def fence() -> bool:
         pod = Allocator.winner(Allocator.owned(provider.list(fresh=True), settings.gateway_scope))
@@ -66,8 +82,8 @@ async def application(settings: GatewaySettings, worker_spec: PodSpec) -> web.Ap
         auth=Authenticator(membership),
         registry=registry,
         deployment=settings.deployment,
-        round_number=settings.round,
-        round_end=settings.round_end,
+        round_number="unconfigured",
+        round_end=None,
         secret=settings.secret,
         proof_hash=hashlib.sha256((settings.parameters / "verifying.bin").read_bytes()).hexdigest(),
         fence=fence,
@@ -77,10 +93,25 @@ async def application(settings: GatewaySettings, worker_spec: PodSpec) -> web.Ap
         poll_seconds=settings.poll_seconds,
         max_requests=settings.max_requests,
         max_queue=settings.max_queue,
+        rounds=rounds,
+        spec_for_round=lambda inputs: resolved_worker_spec(settings, inputs),
     )
     app = gateway.application()
 
     async def lifecycle(_: web.Application) -> AsyncIterator[None]:
+        await github.__aenter__()
+        github.client.headers["Cache-Control"] = "no-cache"
+        async def refresh_round() -> None:
+            while True:
+                try:
+                    await rounds.refresh()
+                    await gateway.round_changed()
+                except Exception as error:  # noqa: BLE001 - fail closed without privileged diagnostics
+                    rounds.policy = None
+                    print(json.dumps({"event": "round_refresh_failed", "error_type": type(error).__name__}), flush=True)
+                    await gateway.publish_policy()
+                await asyncio.sleep(settings.round_refresh_seconds)
+
         async def refresh() -> None:
             while True:
                 try:
@@ -97,16 +128,18 @@ async def application(settings: GatewaySettings, worker_spec: PodSpec) -> web.Ap
                     )
                 await asyncio.sleep(600)
 
-        task = asyncio.create_task(refresh())
+        tasks = [asyncio.create_task(refresh()), asyncio.create_task(refresh_round())]
         try:
             yield
         finally:
-            task.cancel()
-            with suppress(asyncio.CancelledError):
-                await task
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
             await registry.close()
             http.close()
             rpc.close()
+            await source_http.aclose()
+            await github.__aexit__(None, None, None)
 
     app.cleanup_ctx.insert(0, lifecycle)
     return app

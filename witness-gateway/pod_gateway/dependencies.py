@@ -6,11 +6,13 @@ import ssl
 import tempfile
 from pathlib import Path
 
+from .artifacts import ArtifactConfig
 from .models import PodSpec
+from .rounds import RoundInputs
 from .settings import Settings
 
 
-def worker_spec(settings: Settings) -> PodSpec:
+def worker_spec(settings: Settings, inputs: RoundInputs | None = None) -> PodSpec:
     environment = {
         name: settings.pod_environment[name]
         for name in (
@@ -19,9 +21,12 @@ def worker_spec(settings: Settings) -> PodSpec:
             "R2_SECRET_ACCESS_KEY",
             "R2_BUCKET",
             "WITNESS_GATEWAY_URL",
-            "WITNESS_ROUND_END",
         )
     }
+    if inputs is not None:
+        environment["WITNESS_ROUND_INPUTS"] = inputs.model_dump_json()
+    elif "WITNESS_ROUND_END" in settings.pod_environment:
+        environment["WITNESS_ROUND_END"] = settings.pod_environment["WITNESS_ROUND_END"]
     environment.update(
         {
             "WITNESS_ROLE": "worker",
@@ -31,8 +36,17 @@ def worker_spec(settings: Settings) -> PodSpec:
             "WITNESS_MAX_CAPTURES": settings.pod_environment.get("WITNESS_MAX_CAPTURES", "2"),
         }
     )
-    if settings.artifacts is not None:
+    profile = settings.profile
+    if inputs is not None and inputs.save_submissions and profile is None:
+        raise ValueError("Round enables final saving; configure WITNESS_RENDERER_PROFILE")
+    if inputs is not None and inputs.save_submissions and profile is not None:
+        commits = {} if settings.artifacts is None else ArtifactConfig.model_validate_json(settings.artifacts).commits
+        environment["WITNESS_ARTIFACTS"] = ArtifactConfig(
+            profile=profile, seed=inputs.seed, prompt_ids=inputs.prompt_ids, commits=commits,
+        ).model_dump_json()
+    elif inputs is None and settings.artifacts is not None:
         environment["WITNESS_ARTIFACTS"] = settings.artifacts
+    if "WITNESS_ARTIFACTS" in environment:
         environment["DINOV3_REVISION"] = str(settings.embedding_revision)
         if settings.hf_token is not None:
             environment["HF_TOKEN"] = settings.hf_token.get_secret_value()
@@ -52,11 +66,9 @@ def gateway_spec(settings: Settings) -> PodSpec:
     environment = {
         name: settings.pod_environment[name]
         for name in (
-            "WITNESS_ACTIVE_ROUND",
             "WITNESS_GATEWAY_OWNER_HOTKEY",
             "WITNESS_GATEWAY_URL",
             "WITNESS_MASTER_KEY",
-            "WITNESS_ROUND_END",
             "WITNESS_IMAGE",
             "GATEWAY_RUNPOD_API_KEY",
             "R2_ENDPOINT",
@@ -69,6 +81,12 @@ def gateway_spec(settings: Settings) -> PodSpec:
         )
     }
     for name in (
+        "WITNESS_COMPETITION_REPO",
+        "WITNESS_COMPETITION_BRANCH",
+        "WITNESS_GITHUB_TOKEN",
+        "WITNESS_ROUND_REFRESH_SECONDS",
+        "WITNESS_ROUND_POLICY_SECONDS",
+        "WITNESS_RENDERER_PROFILE",
         "WITNESS_CPU_ID",
         "WITNESS_VCPU",
         "WITNESS_DISK_GB",

@@ -50,10 +50,11 @@ from pod_gateway.lifecycle import Allocator
 from pod_gateway.models import Pod, PodSpec, Scope
 from pod_gateway.records import Call, CallRecord, CallRecords
 from pod_gateway.replay import export_bundle
+from pod_gateway.rounds import RoundInputs
 from pod_gateway.security import capability
 from pod_gateway.selection import Selection
 from pod_gateway.server import Gateway
-from pod_gateway.state import WriteUncertain
+from pod_gateway.state import PrefixedState, WriteUncertain
 
 SECRET = b"s" * 32
 PROOF = "c" * 64
@@ -256,8 +257,8 @@ class Harness:
             store.put(prefix + "/" + name, content)
         metadata = {
             **cast(dict[str, object], kwargs["extra_metadata"]),
-            "round": self.scope.round,
-            "hotkey": self.scope.hotkey,
+            "round": kwargs["round_number"],
+            "hotkey": kwargs["hotkey"],
             "exchange_id": directory.name,
             "request_sha256": hashlib.sha256(body).hexdigest(),
             "response_sha256": hashlib.sha256(response).hexdigest(),
@@ -287,19 +288,25 @@ class Harness:
     async def launch(self, pod: Pod, body: dict[str, object]) -> None:
         spool = self.directory / pod.id / "spool"
         spool.parent.mkdir(mode=0o700, exist_ok=True)
+        scope = pod.scope()
+        assert scope is not None
+        env = cast(dict[str, str], body["env"])
+        inputs = RoundInputs.model_validate_json(env["WITNESS_ROUND_INPUTS"]) if "WITNESS_ROUND_INPUTS" in env else None
+        journals = PrefixedState(self.state, "" if inputs is None else inputs.storage_prefix)
         runtime = PodRuntime(
             evidence=self.state,
-            records=self.records,
-            budget=Budget(self.state, PRICING),
-            scope=self.scope,
+            records=self.records if inputs is None else CallRecords(journals),
+            budget=Budget(journals, PRICING),
+            scope=scope,
             start_id=pod.markers["WITNESS_START_ID"],
             pod_id=pod.id,
-            token=capability(SECRET, self.scope, pod.markers["WITNESS_START_ID"]),
+            token=capability(SECRET, scope, pod.markers["WITNESS_START_ID"]),
             origin=self.origin,
             proof_hash=self.proof,
-            round_end=int(time.time()) + 600,
+            round_end=int(time.time()) + 600 if inputs is None else None,
             spool=spool,
             selection=self.selection,
+            round_inputs=inputs,
         )
         context, runtime.certificate = pod_context(spool.parent / "tls")
         self.runtimes.append(runtime)

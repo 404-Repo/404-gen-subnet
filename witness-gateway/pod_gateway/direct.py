@@ -130,9 +130,15 @@ class Witness:
         if not self.runtime.selected():
             raise AuthRejected("pod_not_selected", 409)
 
+    def _require_generation(self) -> None:
+        self.runtime.require_generation()
+        if self.round_end is not None and time.time() >= self.round_end:
+            raise AuthRejected("round_closed", 403)
+
     async def _snapshot(self, scope: Scope, invocation: RequestKey, call: Call) -> dict[str, object]:
         call = await asyncio.to_thread(
-            recover_issued, self.records, self.budget, self.evidence.get, scope, invocation, call, self.proof_hash
+            recover_issued, self.records, self.budget, self.runtime.read_evidence,
+            scope, invocation, call, self.proof_hash
         )
         session = self.session(invocation, call) if call.phase == "assigned" else None
         completion = (
@@ -171,8 +177,7 @@ class Witness:
                 )
             ):
                 return await self._call_response(scope, invocation, call)
-        if time.time() >= self.round_end:
-            raise AuthRejected("round_closed", 403)
+        await asyncio.to_thread(self._require_generation)
         await asyncio.to_thread(self._require_selected)
         call = await asyncio.to_thread(
             self.records.assign,
@@ -207,7 +212,7 @@ class Witness:
         return {"url": self.artifact_url(key), "sha256": hashlib.sha256(raw).hexdigest(), "size": len(raw)}
 
     def completion(self, scope: Scope, invocation: RequestKey, call: Call) -> dict[str, object]:
-        prefix = f"rounds/{scope.round}/{scope.hotkey}/{call.exchange_id}/"
+        prefix = f"{self.runtime.storage_prefix}rounds/{scope.round}/{scope.hotkey}/{call.exchange_id}/"
         manifest = self.evidence.get(prefix + "manifest.json", 1024 * 1024)
         if manifest is None or hashlib.sha256(manifest).hexdigest() != call.manifest_sha256:
             raise RecordingConflict("Durable manifest differs")
@@ -268,8 +273,7 @@ class Witness:
         def admit() -> None:
             with self.runtime.lock:
                 self._require_selected()
-                if time.time() >= self.round_end:
-                    raise AuthRejected("round_closed", 403)
+                self._require_generation()
                 self.runtime.rendering += 1
 
         await asyncio.to_thread(admit)
@@ -313,8 +317,7 @@ class Witness:
     def _admit_artifact(self) -> None:
         with self.runtime.lock:
             self._require_selected()
-            if time.time() >= self.round_end:
-                raise AuthRejected("round_closed", 403)
+            self._require_generation()
             self.runtime.rendering += 1
 
     def _artifact_done(self) -> None:
@@ -323,9 +326,17 @@ class Witness:
             self.runtime.last_used = self.runtime.clock()
 
     async def artifact_context(self, request: web.Request) -> web.Response:
-        store = self._artifacts()
+        inputs = self.runtime.round_inputs
+        if inputs is None:
+            store = self._artifacts()
+            context: dict[str, object] = {"submission_commit": store.submission_commit}
+        else:
+            context = {"submission_commit": None if self.artifacts is None else self.artifacts.submission_commit,
+                       "round_inputs": inputs.model_dump(mode="json"),
+                       "prompts": [{**p.model_dump(), "url": self.artifact_url(p.image_key)} for p in inputs.prompts],
+                       "saving_enabled": self.artifacts is not None}
         return web.json_response(
-            {"submission_commit": store.submission_commit}, headers={"Cache-Control": "no-store"}
+            context, headers={"Cache-Control": "no-store"}
         )
 
     async def save_choice(self, request: web.Request) -> web.Response:

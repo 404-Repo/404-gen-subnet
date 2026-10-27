@@ -309,8 +309,8 @@ Miner HTTP requests and WebSocket upgrades use `btauth/1`, canonical sr25519
 hotkeys, ten-second nonces and ownership checks. A Python refresher checks the
 Finney genesis, one finalized block, its timestamp and every subnet hotkey. The
 complete membership snapshot and gateway nonce cache stay in gateway memory.
-Absent/stale membership fails closed. The optional test hotkey is restricted to
-`test-0`, `test-1`, and `test-2`.
+Absent/stale membership fails closed. Automatic competition admission uses
+Finney membership for every configured source branch.
 
 A deliberate connection uses a fresh start UUID and names its predecessor.
 RunPod display names use `w404-<deployment[:12]>-<round[:12]>-<hotkey[:8]>-<state>`.
@@ -324,8 +324,9 @@ Idle retirement revokes the durable R2 selection fence and marks the actual old 
 to stop accepting work. Capture and evidence uploads must finish before an
 authenticated worker reports permanent drain. Only then is an idle resource marked
 drained and deleted. A new miner allocation revokes and terminates that miner's
-existing worker Pods, including previous rounds, without waiting for a worker drain
-acknowledgement. Unresolved calls stay unresolved. Creation of the replacement
+existing worker Pods. Replacement across rounds waits for a worker drain
+acknowledgement so in-flight captures retain their evidence. Same-round deliberate
+replacement retains its existing lifecycle. Unresolved calls stay unresolved. Creation of the replacement
 requires an exact-ID GET 404 after DELETE.
 
 The gateway serializes worker create admission and records requests in R2 before
@@ -370,11 +371,11 @@ every direct request with its hotkey. The grant cannot authenticate Pod control.
 Current registration is rechecked when the grant is renewed.
 
 Calls and proof messages use the direct Pod port. Outbound control messages carry
-activation, readiness and drain only. A control reconnect does not cancel a paid
-capture or revoke an otherwise selected healthy Pod. New calls stop at the round
-deadline. Pre-deadline Pods drain then; allocations acquired after the deadline
-serve recovery only and drain after inactivity. Old-round cleanup retires all
-exactly owned Pods.
+activation, readiness, renewable round permission and drain. A control reconnect
+does not cancel a paid capture. New work requires a fresh policy for the Pod's
+frozen inputs and the current `miner_generation` round. Closing or pausing a round
+does not drain its Pods. Status, saved results and recording recovery remain
+available. See [competition source and admission](README.md#competition-source-and-admission).
 
 RunPod's [CPU create contract](https://docs.runpod.io/api-reference-v2/pods/create-a-pod)
 accepts TCP ports with CPU compute; the [port guide](https://docs.runpod.io/pods/configuration/expose-ports)
@@ -386,9 +387,10 @@ before deployment; documentation and local fixtures do not establish live reacha
 
 ## Evidence downloads
 
-Private journals and spool uploads use the existing `rounds/<round>/<hotkey>/<exchange>/`
+Private journals and spool uploads use `<storage-prefix>rounds/<round>/<hotkey>/<exchange>/`
 paths. Completed public evidence has immutable, content-addressed copies under
-`evidence/v1/<deployment>/<round>/<hotkey>/<exchange>/<sha256>/<name>`. Execution observations stay with the execution host, outside miner scratch space.
+`<storage-prefix>evidence/v1/<deployment>/<round>/<hotkey>/<exchange>/<sha256>/<name>`.
+The empty storage prefix preserves official paths. Execution observations stay with the execution host, outside miner scratch space.
 The Pod returns the trusted manifest and expected hashes through its authenticated
 TLS service and issues short-lived, object-specific signed R2 GET URLs. The client
 downloads directly from R2, with a separate HTTP client that sends no hotkey or
@@ -616,7 +618,7 @@ build continues to start `python -m pod_gateway`.
 
 Publish through the operator's release process and configure the immutable image
 digest in [deploy/revivor.env.example](deploy/revivor.env.example). Set the actual
-deadline, canonical operator hotkey, capacity limits, keys and
+competition repository and branch, renderer profile, canonical operator hotkey, capacity limits, keys and
 HTTPS origin. Keep the deployment namespace/master key stable for the round.
 Both roles must use the image's frozen pricing bytes. Images must use digests.
 Gateway and worker state protocols must match. Finish active captures and replace

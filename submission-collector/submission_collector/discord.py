@@ -29,11 +29,11 @@ class DiscordNotifier:
         round_num: int,
         committed_count: int,
         accepted_count: int,
-        generation_deadline: datetime,
+        generation_deadline: datetime | None,
         prompts_url: str,
         seed_url: str,
     ) -> None:
-        unix_ts = int(generation_deadline.timestamp())
+        deadline = "No deadline" if generation_deadline is None else f"<t:{int(generation_deadline.timestamp())}:f>"
         await self._webhook.send_embed(
             title=f"Round {round_num} Submissions Collected",
             color=COLOR_GREEN,
@@ -41,7 +41,7 @@ class DiscordNotifier:
                 {"name": "Committed", "value": str(committed_count), "inline": True},
                 {"name": "No lock", "value": str(committed_count - accepted_count), "inline": True},
                 {"name": "Accepted", "value": str(accepted_count), "inline": True},
-                {"name": "Generation Deadline", "value": f"<t:{unix_ts}:f>", "inline": True},
+                {"name": "Generation Deadline", "value": deadline, "inline": True},
                 {"name": "Prompts", "value": f"[prompts.txt]({prompts_url})", "inline": True},
                 {"name": "Seed", "value": f"[seed.json]({seed_url})", "inline": True},
             ],
@@ -151,7 +151,7 @@ class NullDiscordNotifier(DiscordNotifier):
         round_num: int,
         committed_count: int,
         accepted_count: int,
-        generation_deadline: datetime,
+        generation_deadline: datetime | None,
         prompts_url: str,
         seed_url: str,
     ) -> None:

@@ -19,10 +19,12 @@ from urllib.parse import urlsplit
 
 from channel import Channel
 from pod_gateway.budget import Budget, BudgetNotReserved
+from pod_gateway.auth import AuthRejected
 from pod_gateway.models import Scope, identifier, json_bytes, object_dict
 from pod_gateway.records import Call, CallRecords
 from pod_gateway.recovery import recover_issued
 from pod_gateway.renderer import render_service
+from pod_gateway.rounds import RoundInputs, RoundPolicy
 from pod_gateway.selection import Selection
 from pod_gateway.state import WriteUncertain
 from storage import Store
@@ -48,12 +50,13 @@ class PodRuntime:
         token: str,
         origin: str,
         proof_hash: str,
-        round_end: int,
+        round_end: int | None,
         spool: Path,
         max_captures: int = 2,
         idle_seconds: int = 1800,
         clock: Callable[[], float] = time.monotonic,
         selection: Selection | None = None,
+        round_inputs: RoundInputs | None = None,
     ) -> None:
         url = urlsplit(origin)
         if (
@@ -71,6 +74,12 @@ class PodRuntime:
         self.scope, self.start_id, self.pod_id = scope, identifier(start_id), pod_id
         self.token, self.origin = token, f"wss://{url.netloc}"
         self.proof_hash, self.round_end = proof_hash, round_end
+        if round_inputs is not None and round_inputs.round != scope.round:
+            raise ValueError("Frozen inputs belong to another round")
+        self.round_inputs = round_inputs
+        self.round_policy: RoundPolicy | None = None
+        self.policy_until = 0.0
+        self.storage_prefix = "" if round_inputs is None else round_inputs.storage_prefix
         self.spool, self.max_captures, self.idle_seconds = (
             spool,
             max_captures,
@@ -122,6 +131,28 @@ class PodRuntime:
             return (self.accepting and not self.draining and (self.selection is None or
                     self.selection.selected(self.scope, self.start_id, self.pod_id)))
 
+    def require_generation(self) -> None:
+        with self.lock:
+            if self.round_inputs is not None:
+                if self.round_policy is None or self.clock() >= self.policy_until:
+                    raise AuthRejected("round_policy_stale", 503)
+                self.round_policy.require(self.round_inputs, time.time())
+            if self.round_end is not None and time.time() >= self.round_end:
+                raise AuthRejected("round_closed", 403)
+
+    def install_policy(self, value: object, pod_id: str, start_id: str) -> None:
+        with self.lock:
+            self.round_policy = None
+            self.policy_until = 0
+            if pod_id != self.pod_id or start_id != self.start_id or value is None:
+                return
+            policy = RoundPolicy.model_validate(value)
+            self.round_policy = policy
+            self.policy_until = self.clock() + max(0, min(120, policy.expires_at - time.time()))
+
+    def read_evidence(self, key: str) -> bytes | None:
+        return self.evidence.get(self.storage_prefix + key)
+
     def start_capture(self, invocation: RequestKey, call: Call, channel: Channel) -> bool:
         with self.lock:
             if call.exchange_id in self.active:
@@ -130,8 +161,11 @@ class PodRuntime:
                 not self.selected()
                 or self.draining
                 or len(self.active) >= self.max_captures
-                or time.time() >= self.round_end
             ):
+                return False
+            try:
+                self.require_generation()
+            except AuthRejected:
                 return False
             if (
                 call.pod_id != self.pod_id
@@ -220,7 +254,7 @@ class PodRuntime:
             if call.pod_id != self.pod_id or call.start_id != self.start_id:
                 raise RuntimeError("Spool belongs to a different capture allocation")
             call = recover_issued(
-                self.records, self.budget, self.evidence.get, self.scope, invocation, call, self.proof_hash
+                self.records, self.budget, self.read_evidence, self.scope, invocation, call, self.proof_hash
             )
             if call.phase in ("issued", "failed"):
                 self._cleanup(exchange_id)
@@ -256,7 +290,7 @@ class PodRuntime:
                     # A dead process cannot establish how much of a paid response
                     # was lost. Keep this attempt pending so it cannot be retried.
                     self.evidence.put(
-                        f"rounds/{self.scope.round}/{self.scope.hotkey}/{exchange_id}/status.json",
+                        f"{self.storage_prefix}rounds/{self.scope.round}/{self.scope.hotkey}/{exchange_id}/status.json",
                         json_bytes({
                             "status": "running", "authorized": True,
                             "usage_state": "unknown", "error_type": failure,
@@ -285,11 +319,11 @@ class PodRuntime:
         if (name not in self.PUBLIC_EVIDENCE | {"manifest.json"} or len(digest) != 64
                 or any(c not in "0123456789abcdef" for c in digest)):
             raise ValueError("Invalid public evidence object")
-        return (f"evidence/v1/{self.scope.deployment}/{self.scope.round}/{self.scope.hotkey}/"
+        return (f"{self.storage_prefix}evidence/v1/{self.scope.deployment}/{self.scope.round}/{self.scope.hotkey}/"
                 f"{identifier(exchange_id)}/{digest}/{name}")
 
     def publish(self, exchange_id: str, metadata: dict[str, object]) -> dict[str, object]:
-        prefix = f"rounds/{self.scope.round}/{self.scope.hotkey}/{identifier(exchange_id)}/"
+        prefix = f"{self.storage_prefix}rounds/{self.scope.round}/{self.scope.hotkey}/{identifier(exchange_id)}/"
         objects = {}
         for name in sorted(self.PUBLIC_EVIDENCE):
             raw = self.evidence.get(prefix + name)
@@ -308,7 +342,7 @@ class PodRuntime:
         assert call.capture_id is not None
         directory = self.spool / identifier(call.exchange_id)
         directory.mkdir(mode=0o700, exist_ok=True)
-        prefix = f"rounds/{self.scope.round}/{self.scope.hotkey}/{call.exchange_id}"
+        prefix = f"{self.storage_prefix}rounds/{self.scope.round}/{self.scope.hotkey}/{call.exchange_id}"
         host, path = PROVIDERS[invocation.provider]
         session = {
             "id": call.exchange_id,
@@ -341,11 +375,11 @@ class PodRuntime:
                     if (
                         self.draining
                         or not self.accepting
-                        or time.time() >= self.round_end
                     ):
                         raise RuntimeError("Pod is fenced before provider release")
                     if not self.selected():
                         raise RuntimeError("RunPod allocation is no longer selected")
+                    self.require_generation()
                     authorization = json.loads((directory / "authorization.json").read_bytes())
                     if authorization.get("sessionId") != invocation.session_id:
                         raise ValueError("Verified routing header differs from reserved call")
@@ -359,7 +393,8 @@ class PodRuntime:
                         not_dispatched = True
                         raise
                     self.records.authorize(self.scope, invocation, self.pod_id, exchange_id=call.exchange_id)
-                    if time.time() >= self.round_end or not self.selected():
+                    self.require_generation()
+                    if not self.selected():
                         raise RuntimeError("Round ended before provider release")
 
             def complete(final: dict[str, object]) -> None:
@@ -417,7 +452,7 @@ class PodRuntime:
         not_dispatched: bool = False,
     ) -> None:
         directory = self.spool / identifier(call.exchange_id)
-        prefix = f"rounds/{self.scope.round}/{self.scope.hotkey}/{call.exchange_id}"
+        prefix = f"{self.storage_prefix}rounds/{self.scope.round}/{self.scope.hotkey}/{call.exchange_id}"
         if metadata is not None:
             final = metadata
 
@@ -442,7 +477,7 @@ class PodRuntime:
                     if file.is_file():
                         self.evidence.put(prefix + "/" + name, file.read_bytes())
                 recovered = recover_issued(
-                    self.records, self.budget, self.evidence.get, self.scope, invocation, current, self.proof_hash
+                    self.records, self.budget, self.read_evidence, self.scope, invocation, current, self.proof_hash
                 )
                 if recovered.phase == "issued":
                     return
@@ -474,7 +509,7 @@ class PodRuntime:
                 if located is None:
                     raise RuntimeError("Capture record is missing")
                 recovered = recover_issued(
-                    self.records, self.budget, self.evidence.get, self.scope, invocation, located[1], self.proof_hash
+                    self.records, self.budget, self.read_evidence, self.scope, invocation, located[1], self.proof_hash
                 )
                 if recovered.phase == "issued":
                     return
@@ -537,6 +572,9 @@ class PodRuntime:
                                 if kind == "activate":
                                     with self.lock:
                                         self.accepting = not self.draining
+                                elif kind == "round_policy":
+                                    self.install_policy(value.get("policy"), str(value.get("pod_id")),
+                                                        str(value.get("start_id")))
                                 elif kind == "retired" and self.tick():
                                     return
                                 elif kind == "drain":
@@ -589,7 +627,7 @@ def main() -> None:
     from pod_gateway.artifacts import ArtifactConfig, ArtifactRepository
     from pod_gateway.certs import pod_context
     from pod_gateway.direct import Witness
-    from pod_gateway.state import R2StateStore
+    from pod_gateway.state import PrefixedState, R2StateStore
     from storage import R2Store
 
     state = R2StateStore.connect(
@@ -602,10 +640,12 @@ def main() -> None:
     if hashlib.sha256(pricing).hexdigest() != os.environ["WITNESS_PRICING_SHA256"]:
         raise ValueError("Witness image has different frozen pricing bytes")
     evidence = R2Store()
+    inputs = RoundInputs.model_validate_json(os.environ["WITNESS_ROUND_INPUTS"])
+    journals = PrefixedState(state, inputs.storage_prefix)
     runtime = PodRuntime(
         evidence=evidence,
-        records=CallRecords(state),
-        budget=Budget(state, pricing),
+        records=CallRecords(journals),
+        budget=Budget(journals, pricing),
         scope=Scope(
             os.environ["WITNESS_DEPLOYMENT"],
             os.environ["WITNESS_ROUND"],
@@ -618,21 +658,26 @@ def main() -> None:
         proof_hash=hashlib.sha256(
             (PARAMETERS / "verifying.bin").read_bytes()
         ).hexdigest(),
-        round_end=int(os.environ["WITNESS_ROUND_END"]),
+        round_end=None,
         spool=Path(os.environ.get("WITNESS_SPOOL", "/var/lib/witness/spool")),
         max_captures=int(os.environ.get("WITNESS_MAX_CAPTURES", "2")),
         idle_seconds=int(os.environ.get("WITNESS_IDLE_SECONDS", "1800")),
         selection=Selection(state),
+        round_inputs=inputs,
     )
     signal.signal(signal.SIGTERM, lambda *_: runtime.drain())
     signal.signal(signal.SIGINT, lambda *_: runtime.drain())
     tls, runtime.certificate = pod_context(runtime.spool.parent / "tls")
     artifact_store = None
+    if inputs.save_submissions and not os.environ.get("WITNESS_ARTIFACTS"):
+        raise ValueError("Final saving requires the frozen artifact configuration")
     if artifact_config := os.environ.get("WITNESS_ARTIFACTS"):
         from pod_gateway.renderer import require_artifact_profile
         from subnet_common.competition.generations import MAX_GENERATIONS_BYTES
 
         config = ArtifactConfig.model_validate_json(artifact_config)
+        if (not inputs.save_submissions or config.seed != inputs.seed or config.prompt_ids != inputs.prompt_ids):
+            raise ValueError("Artifact configuration differs from frozen round inputs")
         if os.environ.get("WITNESS_RENDERER_ENABLED") != "1":
             raise ValueError("Artifact storage requires the packaged renderer")
         require_artifact_profile(config.profile, Path("/opt/renderer"))
@@ -641,6 +686,7 @@ def main() -> None:
             index=R2StateStore(evidence.client, evidence.bucket, max_bytes=MAX_GENERATIONS_BYTES),
             seed=config.seed, submission_commit=config.commits.get(runtime.scope.hotkey),
             prompt_ids=config.prompt_ids,
+            storage_prefix=inputs.storage_prefix,
         )
 
     async def serve() -> None:

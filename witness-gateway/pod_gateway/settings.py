@@ -17,17 +17,23 @@ from pydantic import (
 )
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
-from .artifacts import ArtifactConfig
+from .artifacts import ArtifactConfig, ArtifactProfile
 from .auth import public_key
 from .models import Scope
+from .rounds import repository
 
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(case_sensitive=True, extra="ignore", frozen=True, hide_input_in_errors=True)
 
     deployment: str = Field(..., alias="WITNESS_DEPLOYMENT")
-    round: str = Field(..., alias="WITNESS_ACTIVE_ROUND")
-    round_end: int = Field(..., alias="WITNESS_ROUND_END", gt=0)
+    round: str = Field(default="unconfigured", alias="WITNESS_ACTIVE_ROUND")
+    round_end: int | None = Field(default=None, alias="WITNESS_ROUND_END", gt=0)
+    competition_repo: str = Field(default="404-Repo/404-active-competition", alias="WITNESS_COMPETITION_REPO")
+    competition_branch: str = Field(default="main", alias="WITNESS_COMPETITION_BRANCH", min_length=1)
+    github_token: SecretStr | None = Field(default=None, alias="WITNESS_GITHUB_TOKEN")
+    round_refresh_seconds: int = Field(default=10, alias="WITNESS_ROUND_REFRESH_SECONDS", ge=1, le=30)
+    round_policy_seconds: int = Field(default=30, alias="WITNESS_ROUND_POLICY_SECONDS", ge=5, le=120)
     gateway_owner_hotkey: str = Field(..., alias="WITNESS_GATEWAY_OWNER_HOTKEY")
     gateway_url: str = Field(..., alias="WITNESS_GATEWAY_URL")
     master_key: SecretStr = Field(..., alias="WITNESS_MASTER_KEY")
@@ -45,6 +51,7 @@ class Settings(BaseSettings):
 
     image: str = Field(..., alias="WITNESS_IMAGE")
     artifacts: str | None = Field(default=None, alias="WITNESS_ARTIFACTS")
+    renderer_profile: str | None = Field(default=None, alias="WITNESS_RENDERER_PROFILE")
     embedding_revision: str | None = Field(default=None, alias="DINOV3_REVISION", min_length=1)
     hf_token: SecretStr | None = Field(default=None, alias="HF_TOKEN")
     registry: str | None = Field(default=None, alias="WITNESS_REGISTRY")
@@ -111,6 +118,8 @@ class Settings(BaseSettings):
         "worker_disk_gb",
         "gateway_vcpu_count",
         "netuid",
+        "round_refresh_seconds",
+        "round_policy_seconds",
         mode="before",
     )
     @classmethod
@@ -143,13 +152,23 @@ class Settings(BaseSettings):
         public_key(self.gateway_owner_hotkey)
         if len(self.secret) < 32 or self.round == "gateway":
             raise ValueError("Invalid master key or round deadline")
-        if self.artifacts is not None:
+        repository(self.competition_repo)
+        if self.test_hotkey is not None:
+            raise ValueError("Automatic competition admission requires Finney membership; WITNESS_TEST_HOTKEY is unsupported")
+        if self.round_refresh_seconds >= self.round_policy_seconds:
+            raise ValueError("Round refresh must be shorter than the admission policy lifetime")
+        if self.artifacts is not None or self.renderer_profile is not None:
             if not self.embedding_revision:
                 raise ValueError("Artifact saving requires DINOV3_REVISION")
-            config = ArtifactConfig.model_validate_json(self.artifacts)
-            if self.image.rsplit("@", 1)[-1] != config.profile.image_digest:
+            if self.image.rsplit("@", 1)[-1] != self.profile.image_digest:  # type: ignore[union-attr]
                 raise ValueError("Artifact renderer profile must match the pinned worker image")
         return self
+
+    @property
+    def profile(self) -> ArtifactProfile | None:
+        if self.renderer_profile is not None:
+            return ArtifactProfile.model_validate_json(self.renderer_profile)
+        return None if self.artifacts is None else ArtifactConfig.model_validate_json(self.artifacts).profile
 
     @cached_property
     def secret(self) -> bytes:

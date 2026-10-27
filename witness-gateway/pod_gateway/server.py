@@ -20,7 +20,8 @@ from .admission import CapacityReached, CreateDeferred, PendingStart, StartQueue
 from .auth import Authenticator, AuthRejected
 from .control import Peer, Registry
 from .lifecycle import AllocationConflict, Allocator, InventoryConflict
-from .models import Pod, Scope, Session, identifier, object_dict
+from .models import Pod, PodSpec, Scope, Session, identifier, object_dict
+from .rounds import RoundController, RoundInputs
 from .runpod import ProviderUnavailable
 from .security import capability, miner_access
 from .state import StateConflict, WriteUncertain
@@ -40,16 +41,19 @@ class Start(BaseModel):
 
 class Gateway:
     def __init__(self, *, allocator: Allocator, auth: Authenticator, registry: Registry,
-                 deployment: str, round_number: str, round_end: int, secret: bytes,
+                 deployment: str, round_number: str, round_end: int | None, secret: bytes,
                  proof_hash: str, fence: Callable[[], bool], pricing_hash: str,
                  create_interval: float = 10,
                  request_interval: float = 10, poll_seconds: float = 30,
                  max_requests: int = 64, max_queue: int = 1024,
-                 refresh_seconds: float = 2, body_timeout: float = 5) -> None:
+                 refresh_seconds: float = 2, body_timeout: float = 5,
+                 rounds: RoundController | None = None,
+                 spec_for_round: Callable[[RoundInputs], PodSpec] | None = None) -> None:
         self.allocator, self.auth, self.registry = allocator, auth, registry
         self.deployment, self.round, self.round_end = deployment, round_number, round_end
         self.secret, self.proof_hash, self.fence = secret, proof_hash, fence
         self.pricing_hash = pricing_hash
+        self.rounds, self.spec_for_round = rounds, spec_for_round
         if allocator.selection is None:
             raise ValueError("Gateway admission requires durable selection storage")
         if (request_interval < 0 or poll_seconds <= 0 or refresh_seconds <= 0 or
@@ -94,9 +98,66 @@ class Gateway:
         if scope.round != self.round or not self.fence():
             raise AuthRejected("gateway_fenced", 503)
         self.auth.membership.require(scope.hotkey)
+        self._require_round(scope)
         self.queue.authorize(scope, start_id)
         if not self.fence():
             raise AuthRejected("gateway_fenced", 503)
+        self._require_round(scope)
+
+    def _require_round(self, scope: Scope | None = None) -> None:
+        if self.rounds is not None:
+            try:
+                current = self.rounds.require()
+            except AuthRejected:
+                previous = None if scope is None else self.queue.attempt(scope)
+                if previous is None or not previous.submitted or previous.rejected:
+                    raise
+                # Previously assigned miners can replace a lost Pod for lookup
+                # and recording recovery. Its policy still denies new work.
+                current = self.rounds.require(generation=False)
+            if scope is not None and current.round != scope.round:
+                raise AuthRejected("round_closed", 403)
+        elif self.round_end is not None and time.time() >= self.round_end:
+            raise AuthRejected("round_closed", 403)
+
+    async def round_changed(self) -> None:
+        if self.rounds is None:
+            return
+        inputs = self.rounds.inputs
+        if inputs is not None:
+            assert self.spec_for_round is not None
+            spec = self.spec_for_round(inputs)
+            changed = inputs.round != self.round
+            def use_round() -> None:
+                with self.allocator.lock:
+                    self.allocator.spec = spec
+                    self.round = inputs.round
+            await self._run(self._worker, use_round)
+            if changed:
+                await self._write(partial(self.queue.rollover, inputs.round))
+        await self.publish_policy()
+        self._wake.set()
+
+    async def publish_policy(self) -> None:
+        for peer in list(self.registry.peers.values()):
+            if not peer.socket.closed:
+                with suppress(ConnectionError, RuntimeError):
+                    await self._send_policy(peer)
+
+    async def _send_policy(self, peer: Peer) -> None:
+        if self.rounds is not None:
+            policy = self.rounds.policy if self._live() else None
+            await peer.socket.send_json({
+                "type": "round_policy", "pod_id": peer.pod_id, "start_id": peer.start_id,
+                "policy": None if policy is None else policy.model_dump(mode="json"),
+            })
+
+    def _control_scope(self, request: web.Request) -> Scope:
+        pod = self._pods.get(request.headers.get("x-witness-pod", ""))
+        scope = None if pod is None else pod.scope()
+        if scope is None or scope.hotkey != request.match_info["hotkey"]:
+            raise AuthRejected("pod_identity_changed", 409)
+        return scope
 
     async def _run(self, executor: ThreadPoolExecutor, function: Callable[[], T]) -> T:
         return await asyncio.get_running_loop().run_in_executor(executor, function)
@@ -144,7 +205,7 @@ class Gateway:
             if request.path == "/health":
                 return await handler(request)
             if request.path.startswith("/v1/control/"):
-                scope = self.scope(request.match_info["hotkey"])
+                scope = self._control_scope(request)
                 start_id = identifier(request.match_info["start_id"])
                 if (len(request.headers.getall("authorization", [])) != 1 or
                         len(request.headers.getall("x-witness-pod", [])) != 1 or not hmac.compare_digest(
@@ -249,8 +310,14 @@ class Gateway:
         return self.scope(str(request["hotkey"]))
 
     async def health(self, request: web.Request) -> web.Response:
+        ready = self._live()
+        try:
+            self._require_round()
+        except AuthRejected:
+            ready = False
         return web.json_response(
-            {"status": "ready", "transport": "pods-v1", "receiver": "404-witness", "admission_ready": self._live()}
+            {"status": "ready", "transport": "pods-v1", "receiver": "404-witness",
+             "round": self.round, "admission_ready": ready}
         )
 
     def _cached(self, scope: Scope) -> Session | None:
@@ -303,7 +370,7 @@ class Gateway:
         retry_after = 0 if wait else self.poll_seconds
         return web.json_response(
             {"session": None if session is None else session.to_dict(), "witness": endpoint, "ready": endpoint is not None,
-             "round": self.round, "retry_after": retry_after,
+             "round": scope.round, "retry_after": retry_after,
              "next_eligible_at": None if pending is None else pending.eligible_at},
             status=200 if wait and endpoint is not None else status,
             headers={"Cache-Control": "no-store", "Retry-After": str(math.ceil(retry_after))},
@@ -337,6 +404,7 @@ class Gateway:
                 previous.start_id, None, "rejected" if previous.rejected else "lost",
                 self.allocator.spec.fingerprint, self.allocator.spec.image,
             ), status=202)
+        self._require_round(scope)
         await self._write(partial(self.queue.enqueue, scope, data.start_id, data.replaces))
         self._wake.set()
         return await self._reply(request, scope, self._cached(scope), status=202)
@@ -346,6 +414,9 @@ class Gateway:
             self._scope(request),
             identifier(request.match_info["start_id"]),
         )
+        if (scope, start_id) not in self._sessions:
+            scope = next((owner for owner, start in self._sessions
+                          if owner.hotkey == scope.hotkey and start == start_id), scope)
         session = self._session(scope, start_id)
         if session is None:
             raise AuthRejected("session_not_found", 404)
@@ -389,8 +460,7 @@ class Gateway:
             scope = pod.scope()
             if scope is not None and scope.deployment == self.deployment and scope.round != "gateway":
                 self._inventory.append(pod)
-                if scope.round == self.round:
-                    grouped.setdefault(scope, []).append(pod)
+                grouped.setdefault(scope, []).append(pod)
         self._pods = {pod.id: pod for pods in grouped.values() for pod in pods}
         self._current = {}
         self._sessions = {}
@@ -416,6 +486,8 @@ class Gateway:
         if not self.fence():
             raise AuthRejected("gateway_fenced", 503)
         self.auth.membership.require(scope.hotkey)
+        if not entry.submitted:
+            self._require_round(scope)
         operation = self.allocator.operations.get(scope)
         if entry.submitted:
             # A restarted or uncertain admission can only discover its original create.
@@ -480,8 +552,12 @@ class Gateway:
                 await asyncio.wait_for(self._wake.wait(), min(1, self.refresh_seconds))
 
     async def _step(self) -> None:
+        round_ready = self.rounds is None or (
+            self.rounds.inputs is not None
+            and self.allocator.spec.env.get("WITNESS_ROUND_INPUTS") == self.rounds.inputs.model_dump_json()
+        )
         now = self.allocator.clock()
-        entries = self.queue.entries()
+        entries = self.queue.entries() if round_ready else []
         grouped: dict[Scope, list[Pod]] = {}
         visible: set[tuple[Scope, str]] = set()
         for pod in self._inventory:
@@ -491,7 +567,7 @@ class Gateway:
                 visible.add((scope, pod.markers["WITNESS_START_ID"]))
         capacity_available = True
         if self.allocator.admission is not None:
-            pending = {(scope, entry.start_id) for scope, entry in entries if entry.submitted}
+            pending = self.queue.unresolved()
             try:
                 self.allocator.admission.check(self._inventory, self.deployment, pending=len(pending - visible))
             except CapacityReached:
@@ -522,7 +598,7 @@ class Gateway:
                 except AuthRejected as error:
                     if error.status != 403:
                         raise
-                    if not entry.submitted:
+                    if not entry.submitted and str(error) in ("hotkey_not_registered", "hotkey_not_admitted"):
                         await self._run(self._worker, partial(self.allocator.cancel, scope, entry.start_id))
                         if await self._write(partial(self.queue.cancel, scope, entry.start_id)):
                             self._progress.pop(scope, None)
@@ -538,6 +614,8 @@ class Gateway:
                     self._progress.pop(scope, None)
             break
         for scope, session in self._current.items():
+            if not round_ready:
+                continue
             if self.queue.pending(scope) is not None or self._due.get(scope, 0) > now:
                 continue
             pods = grouped.get(scope, [])
@@ -570,7 +648,8 @@ class Gateway:
 
     async def _lifecycle(self, _: web.Application) -> AsyncIterator[None]:
         await self._run(self._journal, self.queue.load)
-        await self._run(self._journal, partial(self.queue.discard_old, self.round))
+        if self.rounds is None:
+            await self._run(self._journal, partial(self.queue.discard_old, self.round))
         tasks = [asyncio.create_task(self._fences()), asyncio.create_task(self._work())]
         try:
             yield
@@ -582,7 +661,7 @@ class Gateway:
                 await asyncio.to_thread(partial(executor.shutdown, wait=True, cancel_futures=True))
 
     async def pod_control(self, request: web.Request) -> web.WebSocketResponse:
-        scope = self.scope(request.match_info["hotkey"])
+        scope = self._control_scope(request)
         start_id, pod_id = (
             identifier(request.match_info["start_id"]),
             request.headers.get("x-witness-pod", ""),
@@ -626,6 +705,7 @@ class Gateway:
 
         try:
             selected = self._selected(scope, start_id, pod_id)
+            await self._send_policy(peer)
             await socket.send_json(
                 {
                     "type": "activate" if selected else "drain",

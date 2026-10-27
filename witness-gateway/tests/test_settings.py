@@ -141,7 +141,7 @@ def test_string_launch_values_remain_literal(values: dict[str, object]) -> None:
         }
     )
     settings = Settings.model_validate(values)
-    for name in ("WITNESS_ROUND_END", "WITNESS_MAX_PODS", "WITNESS_IDLE_SECONDS"):
+    for name in ("WITNESS_MAX_PODS", "WITNESS_IDLE_SECONDS"):
         assert gateway_spec(settings).env[name] == values[name]
     assert "WITNESS_CPU_ID" not in gateway_spec(settings).env
     assert worker_spec(settings).env["WITNESS_IDLE_SECONDS"] == "01800"
@@ -188,6 +188,7 @@ def test_artifact_commits_do_not_restrict_gateway_membership(
     gateway.return_value.application.return_value = web.Application()
     monkeypatch.setattr(main, "Gateway", gateway)
     monkeypatch.setattr("pod_gateway.main.R2StateStore.connect", Mock(return_value=MemoryState()))
+    monkeypatch.setattr(main, "RoundImages", Mock(return_value=MemoryState()))
     monkeypatch.setattr("pod_gateway.main.RunPodClient.http_client", Mock())
     monkeypatch.setattr("pod_gateway.main.httpx.Client", Mock())
     settings = GatewaySettings.model_validate(values)
@@ -223,6 +224,14 @@ def test_assigned_pod_starts_artifact_storage_without_a_source_commit(
         "WITNESS_ROUND": "test-0", "WITNESS_HOTKEY": str(values["WITNESS_GATEWAY_OWNER_HOTKEY"]),
         "WITNESS_START_ID": "00000000-0000-4000-8000-000000000001", "RUNPOD_POD_ID": "fixture-worker",
         "WITNESS_POD_CAPABILITY": "fixture-token", "WITNESS_RENDERER_ENABLED": "1",
+        "WITNESS_ROUND_INPUTS": json.dumps({
+            "repository": "404-repo/404-active-competition", "branch": "fixture", "revision": "a" * 40,
+            "round": "test-0", "number": 0, "seed": 42, "generation_deadline_block": None,
+            "storage_prefix": "", "save_submissions": True,
+            "prompts": [{"id": "official-chair", "sha256": "d" * 64,
+                         "source_url": "https://prompts.test/official-chair.png",
+                         "image_key": "competition-inputs/v1/" + "d" * 64}],
+        }),
         "WITNESS_PRICING_SHA256": hashlib.sha256(pricing.read_bytes()).hexdigest(), "DINOV3_REVISION": "fixture",
         "WITNESS_ARTIFACTS": json.dumps({
             "profile": {"image_digest": "sha256:" + "a" * 64, "validation_sha256": "b" * 64},
