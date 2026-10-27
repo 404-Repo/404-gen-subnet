@@ -273,9 +273,12 @@ Absent/stale membership fails closed. The optional test hotkey is restricted to
 `test-0`, `test-1`, and `test-2`.
 
 A deliberate connection uses a fresh start UUID and names its predecessor.
-Lifecycle states are suffixes of the RunPod name: pending, active, draining and
-drained. Immutable environment markers include ownership, the connection epoch,
-predecessor, pinned specification and dormant boot policy.
+RunPod display names use `w404-<deployment[:12]>-<round[:12]>-<hotkey[:8]>-<state>`.
+Lifecycle states are pending, active, draining and drained. Display names can
+repeat across miners and allocation attempts. Ownership and recovery use the
+complete scope, full hotkey in `WITNESS_HOTKEY`, full allocation UUID in
+`WITNESS_START_ID` and RunPod Pod ID. Immutable environment markers also include
+the connection epoch, predecessor, pinned specification and dormant boot policy.
 
 Idle retirement revokes the durable R2 selection fence and marks the actual old resource as draining before asking the worker
 to stop accepting work. Capture and evidence uploads must finish before an

@@ -18,6 +18,7 @@ from pod_gateway.runpod import (
 SCOPE = Scope("competition", "test-0", "5" * 48)
 SPEC = PodSpec("registry/witness@sha256:" + "a" * 64, env={"PRIVATE_KEY": "hidden-operator-key"})
 START = "00000000-0000-4000-8000-000000000001"
+HASH_UUID_NAME = "w404-competition-test-0-2e6819bf594922d6-00000000000040008000000000000001"
 
 
 def pod_json(pod_id: str = "cpu-pod") -> dict[str, object]:
@@ -38,6 +39,7 @@ def test_cpu_create_uses_v2_and_returns_no_secrets() -> None:
         body = json.loads(request.content)
         assert body["cpu"] == {"id": "cpu3c", "vcpuCount": 2}
         assert body["disk"] == 10 and body["ports"] == ["8000/tcp"]
+        assert body["name"] == "w404-competition-test-0-55555555-pending"
         assert "gpu" not in body and "mounts" not in body
         assert body["env"]["WITNESS_BOOT_MODE"] == "dormant"
         return httpx.Response(201, json=pod_json())
@@ -48,6 +50,50 @@ def test_cpu_create_uses_v2_and_returns_no_secrets() -> None:
     assert set(pod.markers) == set(MARKERS)
     assert "hidden-operator-key" not in repr(pod)
     assert "offline-runpod-key" not in repr(pod)
+
+
+def test_display_name_truncates_labels_and_preserves_full_ownership_metadata() -> None:
+    scope = Scope("deployment-alpha", "round-2026-10-27", "5AbCdEfG" + "H" * 40)
+    body = SPEC.body(scope, START)
+    assert body["name"] == "w404-deployment-a-round-2026-1-5AbCdEfG-pending"
+    pod = client(lambda _: httpx.Response(200, json={**body, "id": "cpu-pod", "status": "RUNNING"})).get("cpu-pod")
+    assert pod is not None and pod.scope() == scope
+    assert pod.markers["WITNESS_HOTKEY"] == scope.hotkey
+    assert pod.markers["WITNESS_START_ID"] == START
+
+
+@pytest.mark.parametrize("base", ["w404-competition-test-0-55555555", HASH_UUID_NAME])
+@pytest.mark.parametrize(("state", "phase"), [
+    ("pending", "creating"), ("active", "allocated"), ("draining", "retiring"), ("drained", "retired"),
+])
+def test_owned_name_formats_preserve_lifecycle_and_allocation(base: str, state: str, phase: str) -> None:
+    pod = client(lambda _: httpx.Response(200, json={**pod_json(), "name": base + "-" + state})).get("cpu-pod")
+    assert pod is not None and pod.scope() == SCOPE
+    assert pod.session().phase == phase
+    assert pod.session().start_id == START and pod.session().pod_id == "cpu-pod"
+
+
+@pytest.mark.parametrize(("marker", "value"), [
+    ("WITNESS_HOTKEY", "5" * 8 + "6" * 40),
+    ("WITNESS_START_ID", "00000000-0000-4000-8000-000000000002"),
+])
+def test_hash_uuid_names_require_matching_full_metadata(marker: str, value: str) -> None:
+    reply = {**pod_json(), "name": HASH_UUID_NAME + "-active"}
+    reply["env"] = {**object_dict(reply["env"]), marker: value}
+    pod = client(lambda _: httpx.Response(200, json=reply)).get("cpu-pod")
+    assert pod is not None and pod.scope() is None
+
+
+@pytest.mark.parametrize("start_id", [None, "invalid", "00000000000040008000000000000001"])
+def test_display_name_requires_complete_allocation_metadata(start_id: str | None) -> None:
+    reply = {**pod_json(), "name": "w404-competition-test-0-55555555-pending"}
+    environment = object_dict(reply["env"])
+    if start_id is None:
+        del environment["WITNESS_START_ID"]
+    else:
+        environment["WITNESS_START_ID"] = start_id
+    pod = client(lambda _: httpx.Response(200, json=reply)).get("cpu-pod")
+    assert pod is not None and pod.scope() is None
 
 
 def test_direct_cpu_endpoint_uses_public_ip_and_mapped_tcp_port() -> None:

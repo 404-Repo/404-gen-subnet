@@ -4,7 +4,7 @@ import pytest
 from support import MemoryState, Provider
 
 from pod_gateway.control import DrainControl
-from pod_gateway.lifecycle import Allocator
+from pod_gateway.lifecycle import Allocator, InventoryConflict
 from pod_gateway.models import Pod, PodSpec, Scope
 from pod_gateway.selection import Selection
 from pod_gateway.state import StateConflict
@@ -29,11 +29,40 @@ def test_durable_selection_fences_replacement_and_survives_restart() -> None:
     with pytest.raises(StateConflict):
         selection.update(old, active=True)
     assert replacement.pod_id is not None
+    successor = provider.get(replacement.pod_id)
+    assert successor is not None and successor.name == old.name
+    assert not Selection(state).selected(SCOPE, START, replacement.pod_id)
+    assert not Selection(state).selected(SCOPE, NEXT, old.id)
     assert Selection(state).selected(SCOPE, NEXT, replacement.pod_id)
     with pytest.raises(StateConflict):
         selection.update(old, active=True)
     selection.update(old, active=False)
     assert selection.selected(SCOPE, NEXT, replacement.pod_id)
+
+
+def test_equal_display_prefixes_keep_miners_and_pod_ids_separate_after_restart() -> None:
+    state, provider = MemoryState(), Provider()
+    other_scope = replace(SCOPE, hotkey=SCOPE.hotkey[:8] + "6" * 40)
+    allocator = Allocator(provider, DrainControl(), SPEC, selection=Selection(state))
+    first = allocator.acquire(SCOPE, START)
+    other = allocator.acquire(other_scope, START)
+    assert first.pod_id is not None and other.pod_id is not None
+    assert first.pod_id != other.pod_id
+    assert provider.pods[first.pod_id].name == provider.pods[other.pod_id].name
+
+    restarted = Allocator(provider, DrainControl(), SPEC, selection=Selection(state))
+    assert restarted.acquire(SCOPE, START) == first
+    assert restarted.acquire(other_scope, START) == other
+    assert provider.creates == 2
+    assert Selection(state).selected(SCOPE, START, first.pod_id)
+    assert Selection(state).selected(other_scope, START, other.pod_id)
+    assert not Selection(state).selected(SCOPE, START, other.pod_id)
+    assert not Selection(state).selected(other_scope, START, first.pod_id)
+    with pytest.raises(InventoryConflict):
+        restarted.retire(SCOPE, START, other.pod_id, drain=False)
+    assert restarted.retire(SCOPE, START, first.pod_id, drain=False).phase == "retired"
+    assert first.pod_id not in provider.pods and other.pod_id in provider.pods
+    assert Selection(state).selected(other_scope, START, other.pod_id)
 
 
 def test_duplicate_start_cannot_take_an_existing_selection() -> None:

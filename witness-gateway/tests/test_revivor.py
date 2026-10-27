@@ -280,6 +280,9 @@ def test_cleanup_removes_only_drained_duplicates_and_old_round_workers() -> None
     old = provider.create(
         SPEC.body(old_scope, "00000000-0000-4000-8000-000000000002", epoch_ns=1)
     )
+    provider.pods[old.id] = replace(
+        old, name="w404-competition-test-old-2e6819bf594922d6-00000000000040008000000000000002-pending"
+    )
     unrelated = Pod("unrelated", "w404-prefix", SPEC.image, "RUNNING", {})
     provider.pods[unrelated.id] = unrelated
     supervisor = Revivor(

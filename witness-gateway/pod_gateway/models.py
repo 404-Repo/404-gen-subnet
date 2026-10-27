@@ -56,11 +56,8 @@ class Scope:
         return f"pod-gateway/v1/{self.deployment}/{self.round}/{self.hotkey}.json"
 
     def name(self, start_id: str) -> str:
-        hotkey_hash = hashlib.sha256(self.hotkey.encode()).hexdigest()[:16]
-        return (
-            f"w404-{self.deployment[:12]}-{self.round[:12]}-"
-            f"{hotkey_hash}-{uuid.UUID(identifier(start_id)).hex}"
-        )
+        identifier(start_id)
+        return f"w404-{self.deployment[:12]}-{self.round[:12]}-{self.hotkey[:8]}"
 
     def markers(
         self,
@@ -222,6 +219,11 @@ class Pod:
                 self.markers["WITNESS_HOTKEY"],
             )
             start = identifier(self.markers["WITNESS_START_ID"])
+            names = {
+                scope.name(start),
+                f"w404-{scope.deployment[:12]}-{scope.round[:12]}-"
+                f"{hashlib.sha256(scope.hotkey.encode()).hexdigest()[:16]}-{uuid.UUID(start).hex}",
+            }
             if (
                 set(self.markers) != set(MARKERS)
                 or self.markers["WITNESS_BOOT_MODE"] != "dormant"
@@ -229,7 +231,8 @@ class Pod:
                 or not self.markers["WITNESS_EPOCH_NS"].isdigit()
                 or self.name
                 not in {
-                    scope.name(start) + "-" + phase
+                    name + "-" + phase
+                    for name in names
                     for phase in ("pending", "active", "draining", "drained")
                 }
             ):

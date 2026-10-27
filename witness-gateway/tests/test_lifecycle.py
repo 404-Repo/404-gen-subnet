@@ -27,13 +27,20 @@ class Drain:
         return self.ready
 
 
-def test_restart_discovers_the_current_connection_without_another_create() -> None:
+@pytest.mark.parametrize("name", [
+    "w404-competition-test-0-55555555-active",
+    "w404-competition-test-0-2e6819bf594922d6-00000000000040008000000000000001-active",
+])
+def test_restart_discovers_the_current_connection_without_another_create(name: str) -> None:
     provider, drain = Provider(), Drain()
     first = Allocator(provider, drain, SPEC).acquire(SCOPE, FIRST)
+    assert first.pod_id is not None
+    provider.pods[first.pod_id] = replace(provider.pods[first.pod_id], name=name)
     restarted = Allocator(provider, drain, SPEC)
     assert restarted.acquire(SCOPE, FIRST) == first
     assert restarted.selected(SCOPE, FIRST, first.pod_id or "")
     assert provider.creates == 1
+    assert provider.pods[first.pod_id].name == name
 
 
 def test_concurrent_connect_retries_submit_one_create() -> None:
@@ -92,7 +99,11 @@ def test_error_pod_replacement_waits_for_confirmed_deletion() -> None:
     assert old.pod_id not in provider.pods and provider.creates == 2
 
 
-def test_lost_create_reply_adopts_the_real_pod_after_restart() -> None:
+@pytest.mark.parametrize("name", [
+    "w404-competition-test-0-55555555-pending",
+    "w404-competition-test-0-2e6819bf594922d6-00000000000040008000000000000001-pending",
+])
+def test_lost_create_reply_adopts_the_real_pod_after_restart(name: str) -> None:
     class LostReply(Provider):
         def create(self, body: dict[str, object]) -> Pod:
             super().create(body)
@@ -100,8 +111,12 @@ def test_lost_create_reply_adopts_the_real_pod_after_restart() -> None:
 
     provider = LostReply()
     assert Allocator(provider, Drain(), SPEC).acquire(SCOPE, FIRST).phase == "creating"
+    pending, = provider.list()
+    provider.pods[pending.id] = replace(pending, name=name)
     recovered = Allocator(provider, Drain(), SPEC).reconcile(SCOPE)
     assert recovered is not None and recovered.phase == "allocated"
+    assert recovered.start_id == FIRST and recovered.pod_id == pending.id
+    assert provider.pods[pending.id].name == "w404-competition-test-0-55555555-active"
     assert provider.creates == 1
 
 
