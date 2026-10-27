@@ -386,11 +386,14 @@ async def test_retry_wait_allows_another_miner_to_be_collected(
     monkeypatch.setattr("submission_collector.download.random.shuffle", lambda hotkeys: None)
     rate_limited = asyncio.Event()
     other_fetched = asyncio.Event()
+    attempt_times: list[float] = []
 
     def respond(request: httpx.Request) -> httpx.Response:
-        if HOTKEY in request.url.path and not rate_limited.is_set():
-            rate_limited.set()
-            return httpx.Response(429)
+        if HOTKEY in request.url.path:
+            attempt_times.append(asyncio.get_running_loop().time())
+            if not rate_limited.is_set():
+                rate_limited.set()
+                return httpx.Response(429, headers={"Retry-After": "4"})
         if HOTKEY_2 in request.url.path:
             other_fetched.set()
         return httpx.Response(200, json={"chair": {"js": "chair.js"}})
@@ -404,6 +407,7 @@ async def test_retry_wait_allows_another_miner_to_be_collected(
             assert not collecting.done()
         finally:
             await collecting
+    assert attempt_times[1] - attempt_times[0] >= 4
     await batcher.flush()
     results = GenerationsAdapter.validate_json(git.committed[f"rounds/1/{HOTKEY}/generated.json"])
     assert results["chair"].js == f"{settings.cdn_url}/chair.js"

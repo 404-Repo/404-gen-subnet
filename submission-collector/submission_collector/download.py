@@ -14,9 +14,20 @@ from subnet_common.competition.prompts import require_prompts
 from subnet_common.competition.state import CompetitionState
 from subnet_common.competition.submissions import MinerSubmission, require_submissions
 from subnet_common.git_batcher import GitBatcher
-from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_fixed
+from tenacity import RetryCallState, retry, retry_if_exception_type, stop_after_attempt
 
 from submission_collector.settings import Settings
+
+
+def _retry_delay(retry_state: RetryCallState) -> float:
+    delay = 3.0
+    error = retry_state.outcome.exception() if retry_state.outcome is not None else None
+    if isinstance(error, httpx.HTTPStatusError):
+        try:
+            delay = max(delay, int(error.response.headers.get("Retry-After", "")))
+        except ValueError:
+            pass
+    return delay
 
 
 class ResultCollector:
@@ -86,7 +97,7 @@ class ResultCollector:
 
     @retry(
         stop=stop_after_attempt(2),
-        wait=wait_fixed(3),
+        wait=_retry_delay,
         retry=retry_if_exception_type((httpx.HTTPStatusError, httpx.TimeoutException, httpx.RequestError)),
     )
     async def _fetch_index(self, key: str) -> GenerationsMap:
