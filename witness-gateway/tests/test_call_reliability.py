@@ -206,8 +206,6 @@ def test_many_independent_clients_join_one_capture_and_keep_the_same_outcome(
                 assert results == [("answer-1", 10, 2)] * 32
                 record = fixture.records.load(fixture.scope, call_key().id)
                 assert record is not None and record.call.phase == "issued" and not record.attempts
-                identifiers = {path.parent.name for client in clients for path in client._state.glob("*/job.json")}
-                assert identifiers == {record.call.exchange_id}
                 assert fixture.paid == fixture.provider.creates == 1
 
     asyncio.run(scenario())

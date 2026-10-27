@@ -640,7 +640,7 @@ def main() -> None:
             evidence, runtime.scope,
             index=R2StateStore(evidence.client, evidence.bucket, max_bytes=MAX_GENERATIONS_BYTES),
             seed=config.seed, submission_commit=config.commits[runtime.scope.hotkey],
-            prompt_hashes=config.prompt_hashes,
+            prompt_ids=config.prompt_ids,
         )
 
     async def serve() -> None:

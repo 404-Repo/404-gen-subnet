@@ -146,7 +146,7 @@ def test_artifact_configuration_reaches_both_pod_roles_and_pins_the_worker_image
             "limits": {"max_renders": 16, "max_bytes": 256 * 1024 * 1024},
             "seed": 42,
             "commits": {values["WITNESS_GATEWAY_OWNER_HOTKEY"]: "c" * 40},
-            "prompt_hashes": ["d" * 64],
+            "prompt_ids": {"d" * 64: "official-prompt"},
         }
     )
     values["WITNESS_ARTIFACTS"] = config

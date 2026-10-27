@@ -6,7 +6,7 @@ import re
 from typing import Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
-from subnet_common.competition.generations import GenerationResult, GenerationsAdapter
+from subnet_common.competition.generations import GenerationResult, GenerationsAdapter, GenerationsMap
 
 from .models import Scope
 from .state import Snapshot, StateConflict, StateStore
@@ -33,7 +33,7 @@ class ArtifactConfig(Frozen):
     profile: ArtifactProfile
     seed: int = Field(ge=0, lt=2**64)
     commits: dict[str, str]
-    prompt_hashes: frozenset[str] = Field(min_length=1, max_length=4096)
+    prompt_ids: dict[str, str] = Field(min_length=1, max_length=4096)
 
     @model_validator(mode="after")
     def submissions(self) -> ArtifactConfig:
@@ -42,8 +42,12 @@ class ArtifactConfig(Frozen):
             for hotkey, commit in self.commits.items()
         ):
             raise ValueError("Expected admitted hotkeys and source commits")
-        if any(not re.fullmatch(r"[0-9a-f]{64}", prompt) for prompt in self.prompt_hashes):
-            raise ValueError("Expected prompt hashes")
+        if any(
+            not re.fullmatch(r"[0-9a-f]{64}", digest)
+            or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,254}", prompt)
+            for digest, prompt in self.prompt_ids.items()
+        ) or len(set(self.prompt_ids.values())) != len(self.prompt_ids):
+            raise ValueError("Expected image SHA256 hashes mapped to distinct official prompt IDs")
         return self
 
 
@@ -62,35 +66,63 @@ class ArtifactRepository:
         index: StateStore,
         seed: int,
         submission_commit: str,
-        prompt_hashes: frozenset[str],
+        prompt_ids: dict[str, str],
     ) -> None:
         self.objects, self.scope, self.index = objects, scope, index
-        self.seed, self.submission_commit, self.prompt_hashes = seed, submission_commit, prompt_hashes
+        self.seed, self.submission_commit, self.prompt_ids = seed, submission_commit, prompt_ids
         self.index_key = f"rounds/{scope.round}/{scope.hotkey}/submitted.json"
         self._saved: Snapshot | None = None
 
     def require(self, generation: SubmissionContext) -> None:
         if generation.seed != self.seed:
             raise ValueError("Seed differs")
-        if generation.prompt_sha256 not in self.prompt_hashes:
+        if generation.prompt_sha256 not in self.prompt_ids:
             raise ValueError("Prompt is not admitted")
 
     def prefix(self, prompt: str) -> str:
-        if prompt not in self.prompt_hashes:
+        if prompt not in self.prompt_ids:
             raise ValueError("Prompt is not admitted")
-        return f"rounds/{self.scope.round}/{self.scope.hotkey}/submitted/{prompt}"
+        return f"rounds/{self.scope.round}/{self.scope.hotkey}/submitted/{self.prompt_ids[prompt]}"
 
     def result(self, prompt: str) -> GenerationResult | None:
         self.prefix(prompt)
+        return self.results().get(self.prompt_ids[prompt])
+
+    def results(self) -> GenerationsMap:
         saved = self.index.load(self.index_key)
-        return None if saved is None else GenerationsAdapter.validate_json(saved.data).get(prompt)
+        for _ in range(16):
+            results = {} if saved is None else GenerationsAdapter.validate_json(saved.data)
+            identified = self._identify(results)
+            if identified == results:
+                return identified
+            try:
+                self._saved = self.index.save(
+                    self.index_key, GenerationsAdapter.dump_json(identified), None if saved is None else saved.etag
+                )
+                return identified
+            except StateConflict:
+                saved = self.index.load(self.index_key)
+        raise StateConflict("Result index is busy")
+
+    def _identify(self, results: GenerationsMap) -> GenerationsMap:
+        official_ids = set(self.prompt_ids.values())
+        identified: GenerationsMap = {}
+        for key, result in results.items():
+            prompt = key if key in official_ids else self.prompt_ids.get(key)
+            if prompt is None:
+                raise ValueError("Saved prompt is not admitted")
+            if prompt in identified and identified[prompt] != result:
+                raise ValueError("Saved prompt results differ")
+            identified[prompt] = result
+        return identified
 
     def update_result(self, prompt: str, result: GenerationResult) -> None:
         self.prefix(prompt)
         saved = self._saved or self.index.load(self.index_key)
         for _ in range(16):
             results = {} if saved is None else GenerationsAdapter.validate_json(saved.data)
-            results[prompt] = result
+            results = self._identify(results)
+            results[self.prompt_ids[prompt]] = result
             try:
                 self._saved = self.index.save(
                     self.index_key, GenerationsAdapter.dump_json(results), None if saved is None else saved.etag

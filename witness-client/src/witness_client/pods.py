@@ -26,7 +26,6 @@ from .errors import WitnessError
 from .gateway import SignedTransport
 from .request import PROVIDERS
 from .response import http_body
-from .state import remaining_seconds, save
 from .tunnel import WebSocketTunnel
 from .types import Session
 
@@ -75,10 +74,8 @@ class PodGatewayClient:
         self._artifacts = ArtifactClient()
 
         self.round_number: str | None = None
-        digest = hashlib.sha256(
-            f"{self.http.base_url}/{self.hotkey.ss58_address}".encode()
-        ).hexdigest()[:24]
-        self._connection = self.state / f"pod-connect-{digest}.json"
+        self._allocation_request: dict[str, object] | None = None
+        self._allocation_round: str | None = None
 
     def _json(
         self,
@@ -178,11 +175,7 @@ class PodGatewayClient:
                 assert self._start_id is not None
                 return self._start_id
             reply = self._allocation_json("GET", "/v1/pods/current", deadline=deadline)
-            allocation: dict[str, object] | None = None
-            if self._connection.is_file():
-                value = json.loads(self._connection.read_bytes())
-                if isinstance(value, dict) and value.get("round") == reply.get("round"):
-                    allocation = {"start_id": value["start_id"], "replaces": value.get("replaces")}
+            allocation = self._allocation_request if self._allocation_round == reply.get("round") else None
             current = reply.get("session")
             while isinstance(current, dict) and current.get("phase") == "retiring":
                 if allocation is not None and allocation["start_id"] == current.get("start_id"):
@@ -202,7 +195,7 @@ class PodGatewayClient:
                 ):
                     allocation = {"start_id": str(uuid.uuid4()), "replaces": current.get("start_id")
                                   if isinstance(current, dict) else None}
-                    save(self._connection, canonical({**allocation, "round": reply["round"]}))
+                    self._allocation_request, self._allocation_round = allocation, str(reply["round"])
                 reply = self._allocation_json("POST", "/v1/pods/start", allocation,
                                                deadline=deadline)
             retiring: str | None = None
@@ -213,7 +206,7 @@ class PodGatewayClient:
                         session.get("start_id") == retiring and session.get("phase") in ("rejected", "lost", "retired")
                     ):
                         allocation = {"start_id": str(uuid.uuid4()), "replaces": retiring}
-                        save(self._connection, canonical({**allocation, "round": reply["round"]}))
+                        self._allocation_request, self._allocation_round = allocation, str(reply["round"])
                         reply = self._allocation_json("POST", "/v1/pods/start", allocation, deadline=deadline)
                         retiring = None
                         continue
@@ -225,12 +218,11 @@ class PodGatewayClient:
                 if session.get("phase") == "retiring":
                     retiring = start_id
                 if session.get("phase") in ("rejected", "lost", "retired"):
-                    self._connection.unlink(missing_ok=True)
                     raise WitnessError("Pod allocation did not become ready", source="gateway", code="pod_unavailable")
                 accepted = {"start_id": start_id, "replaces": session.get("replaces")}
                 if allocation != accepted:
                     allocation = accepted
-                    save(self._connection, canonical({**allocation, "round": reply["round"]}))
+                    self._allocation_request, self._allocation_round = allocation, str(reply["round"])
                 if self._attach(reply):
                     return start_id
                 hint = reply.get("retry_after", 1)
@@ -255,9 +247,6 @@ class PodGatewayClient:
             return False
         self._expires = 0
         return True
-
-    def remaining_seconds(self, identifier: str) -> float:
-        return remaining_seconds(self.state, identifier)
 
     def _request_once(
         self, method: str, path: str, body: bytes = b"", *, limit: int = 32768,
@@ -284,10 +273,10 @@ class PodGatewayClient:
             http.close()
         self._artifacts.close()
 
-    def render(self, request: httpx.Request) -> httpx.Response:
+    def send(self, request: httpx.Request) -> httpx.Response:
         service = self._service()
         try:
-            response = service.render(request)
+            response = service.send(request)
             if response.status_code in (401, 409):
                 try:
                     error = response.json()
@@ -348,34 +337,43 @@ class PodGatewayClient:
             request = self._download(links.get("request.json"), 8 * 1024 * 1024)
         response = (self._download(links.get("response.sse"), 16 * 1024 * 1024)
                     if raw_response is None else http_body(raw_response, allow_error=True))
-        session = cast(Session, completion["session"])
-        value = json.loads(manifest)
-        host, path = PROVIDERS[invocation.provider]
-        expected_provider = f"https://{host}{path}"
-        if (
-            hashlib.sha256(manifest).hexdigest() != call.manifest_sha256
-            or not isinstance(value, dict)
-            or value.get("call_id") != invocation.id
-            or value.get("exchange_id") != call.exchange_id
-            or value.get("proof_key_sha256") != proof_hash
-            or value.get("request_key") != invocation.model_dump()
-            or request_digest(request) != invocation.request_sha256
-            or value.get("request_sha256") != hashlib.sha256(request).hexdigest()
-            or value.get("response_sha256") != hashlib.sha256(response).hexdigest()
-            or session.get("id") != call.exchange_id
-            or session.get("protocol") != 2
-            or session.get("proof_key_sha256") != proof_hash
-            or session.get("provider") != expected_provider
-            or session.get("miner") != self.hotkey.ss58_address
-            or value.get("hotkey") != self.hotkey.ss58_address
-            or session.get("round") != value.get("round")
-            or (raw_response is not None and int(raw_response.split(b" ", 2)[1]) != value.get("provider_status"))
-            or type(value.get("provider_status")) is not int
-        ):
-            raise WitnessError(
-                "Recorded evidence differs from this call",
-                call.exchange_id,
-                source="gateway",
-                code="invalid_recording",
-            )
-        return session, value["provider_status"], response
+        return _recorded_response(self.hotkey, invocation, call, proof_hash, completion,
+                                  manifest, request, response, raw_response)
+
+
+def _recorded_response(
+    hotkey: Keypair, invocation: RequestKey, call: CallView, proof_hash: str,
+    completion: dict[str, object], manifest: bytes, request: bytes, response: bytes,
+    raw_response: bytes | None,
+) -> tuple[Session, int, bytes]:
+    session = cast(Session, completion["session"])
+    value = json.loads(manifest)
+    host, path = PROVIDERS[invocation.provider]
+    expected_provider = f"https://{host}{path}"
+    if (
+        hashlib.sha256(manifest).hexdigest() != call.manifest_sha256
+        or not isinstance(value, dict)
+        or value.get("call_id") != invocation.id
+        or value.get("exchange_id") != call.exchange_id
+        or value.get("proof_key_sha256") != proof_hash
+        or value.get("request_key") != invocation.model_dump()
+        or request_digest(request) != invocation.request_sha256
+        or value.get("request_sha256") != hashlib.sha256(request).hexdigest()
+        or value.get("response_sha256") != hashlib.sha256(response).hexdigest()
+        or session.get("id") != call.exchange_id
+        or session.get("protocol") != 2
+        or session.get("proof_key_sha256") != proof_hash
+        or session.get("provider") != expected_provider
+        or session.get("miner") != hotkey.ss58_address
+        or value.get("hotkey") != hotkey.ss58_address
+        or session.get("round") != value.get("round")
+        or (raw_response is not None and int(raw_response.split(b" ", 2)[1]) != value.get("provider_status"))
+        or type(value.get("provider_status")) is not int
+    ):
+        raise WitnessError(
+            "Recorded evidence differs from this call",
+            call.exchange_id,
+            source="gateway",
+            code="invalid_recording",
+        )
+    return session, value["provider_status"], response

@@ -5,7 +5,7 @@ objects; they introduce no runtime wrapper.
 """
 
 from collections.abc import Callable, Generator
-from typing import Literal, Protocol, Self, TypeAlias
+from typing import Literal, Protocol, Self, TypeAlias, overload
 
 Buffer: TypeAlias = bytes | bytearray
 Wait: TypeAlias = Literal[0, 1]
@@ -79,9 +79,16 @@ class TLSConnection:
     _recordLayer: RecordLayer
     session: Session | None
     def __init__(self, sock: Socket) -> None: ...
+    @overload
     def handshakeClientCert(
         self, *, settings: HandshakeSettings, serverName: str, alpn: list[bytearray]
     ) -> None: ...
+    @overload
+    def handshakeClientCert(
+        self, *, settings: HandshakeSettings, serverName: str, alpn: list[bytearray],
+        async_: Literal[True],
+    ) -> Generator[Wait]: ...
+    def writeAsync(self, data: bytes) -> Generator[Wait]: ...
     def send_keyupdate_request(self, message_type: int) -> Generator[Wait]: ...
     def write(self, data: bytes) -> None: ...
 

@@ -1,8 +1,9 @@
 """Decode one explicitly framed HTTP response and its completed Responses SSE."""
 
+import asyncio
 import json
 import re
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
 from types import TracebackType
 from typing import Any, Literal, Self, cast
 
@@ -312,3 +313,35 @@ def model_result(
             cast(Any, _provider_request(provider)),
             body=None,
         ) from error
+
+
+class AsyncModelStream(AsyncIterator[ResponseStreamEvent]):
+    """Async iteration over sealed SSE with the same typed events and errors."""
+
+    def __init__(self, stream: ModelStream) -> None:
+        self._stream = stream
+
+    def __aiter__(self) -> Self:
+        return self
+
+    async def __anext__(self) -> ResponseStreamEvent:
+        try:
+            await asyncio.sleep(0)
+            return next(self._stream)
+        except StopIteration:
+            raise StopAsyncIteration from None
+        except BaseException:
+            self._stream.close()
+            raise
+
+    async def aclose(self) -> None:
+        self._stream.close()
+
+    async def __aenter__(self) -> Self:
+        return self
+
+    async def __aexit__(
+        self, exc_type: type[BaseException] | None, exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        await self.aclose()

@@ -22,7 +22,6 @@ from websockets.sync.client import ClientConnection, connect
 from .auth import hotkey_headers
 from .delivery import request, retry
 from .errors import ExchangePending, WitnessError
-from .state import remaining_seconds
 from .timing import measure, timed
 from .tunnel import MAX_BYTES, WebSocketTunnel
 from .types import ExchangeStatus
@@ -144,17 +143,18 @@ class SignedTransport:
             ),
         )
 
-    def render(self, request: httpx.Request) -> httpx.Response:
-        """Send one renderer or artifact request, preserving its caller's timeout."""
+    def send(self, request: httpx.Request) -> httpx.Response:
+        """Send one authenticated Pod request, preserving its caller's timeout."""
         path = request.url.raw_path.decode("ascii")
         allowed = (
             request.method == "POST" and request.url.path in ("/v1/render/grid", "/v1/submissions")
             or request.method == "GET" and (
-                path == "/v1/artifacts/context" or re.fullmatch(r"/v1/submissions/[0-9a-f]{64}", path) is not None
+                path in ("/v1/artifacts/context", "/v1/submissions")
+                or re.fullmatch(r"/v1/submissions/[0-9a-f]{64}", path) is not None
             )
         )
         if not allowed:
-            raise ValueError("Unknown renderer route")
+            raise ValueError("Unknown Pod route")
         body = request.read()
         headers = self._headers(request.method, path, body)
         headers["Content-Type"] = "application/json"
@@ -202,9 +202,6 @@ class GatewayClient(SignedTransport):
             raise WitnessError(
                 f"Gateway download failed: {error}", identifier, source="gateway"
             ) from error
-
-    def remaining_seconds(self, identifier: str) -> float:
-        return remaining_seconds(self.state, identifier)
 
     def status(self, identifier: str) -> ExchangeStatus:
         """Fetch one snapshot of the worker's progress as ExchangeStatus.

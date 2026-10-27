@@ -29,6 +29,7 @@ renderer query string.
 | Assigned Pod | POST | `/v1/render/grid` |
 | Assigned Pod | GET | `/v1/artifacts/context` |
 | Assigned Pod | POST | `/v1/submissions` |
+| Assigned Pod | GET | `/v1/submissions` |
 | Assigned Pod | GET | `/v1/submissions/{prompt}` |
 
 The gateway's unauthenticated health check is `GET /health`. The Pod forwards
@@ -36,9 +37,11 @@ preview rendering to the internal renderer's `POST /render/grid` endpoint.
 
 ## Execution and replay contract
 
-The miner supplies `generate(image, seed, witness, renderer)`. Model calls need no
-prompt binding, recording handle or finish operation. The execution host invokes
-the function; its witness boundary automatically observes calls. The validator
+An async miner supplies `generate(image, seed, witness)` and awaits
+`witness.responses.create(...)` and `witness.render(source, options)`. Synchronous
+`generate(image, seed, witness, renderer)` programs remain supported. Model calls
+need no prompt binding, recording handle or finish operation. The execution host
+invokes the function; its witness boundary automatically observes calls. The validator
 uses that execution's observations and authenticated capture evidence to run the
 same submitted code with the expected image and seed.
 
@@ -62,6 +65,14 @@ only the supplied clients. An actual trusted host must keep evidence, expected o
 outside miner access, including imports, native code and child processes. These
 helpers observe the witness boundary only; they do not implement that isolation,
 a shared renderer/model scheduler, or the competition's complete validation job.
+
+Both host helpers remain synchronous. Invoke them outside an active asyncio loop
+when running an async entry point. They run that function in their own loop and bridge
+its calls to the existing synchronous capture/replay boundary and supplied
+`Renderer`. Concurrent model calls and stream operations retain the same
+execution observations. Live `AsyncWitnessClient` uses native async network I/O.
+The host supplies rendering for both entry points; it may use live rendering or
+verified render observations. These helpers do not persist preview renders.
 
 ### Model-call interface and identity
 
@@ -103,10 +114,32 @@ authenticated `GET /v1/artifacts/context` endpoint.
 Preview requests supply source and preview options without creating stored
 artifacts. After `generate` returns, the runner submits its JavaScript or `None`
 with the prompt hash and seed. The Pod makes the fixed final renders and supplies
-the round in storage paths. The approved source commit is read for final checkpoint checks.
-Final-save checkpoint reuse checks the prompt hash, seed, renderer and refreshed
-approved source commit.
-Source, prompt, seed and checkpoint checks remain required.
+the round in storage paths. The SDK recovers retained model responses and
+submitted prompt identities from the authenticated Pod without generated local
+recovery files. Configuration, credentials, wallet material and proof parameters
+remain caller-provided inputs.
+
+Live execution runners can call `WitnessClient.submit(image, source)` or await
+`AsyncWitnessClient.submit(image, source)` after generation returns.
+`POST /v1/submissions` accepts `generation.prompt_sha256`, `source` (JavaScript or
+null), and the base64 `prompt_image` for JavaScript. An omitted `generation.seed`
+uses the assigned Pod's configured round seed. Legacy callers may still supply
+it; a mismatched seed is rejected. The route retains prompt admission, final
+judging renders, embeddings, identical-result reuse and conflicting-result errors.
+`GET /v1/submissions` returns `{"submissions": {"<prompt_id>": <result>}}`
+from the assigned miner's durable result index for that Pod's round. The Pod's
+frozen `prompt_ids` mapping resolves image SHA256 hashes to the official filename
+IDs used by the submission collector. An empty
+index returns an empty object inside `submissions`; saved failures are retained.
+The response is bounded to a 16 MiB index plus its JSON envelope. Live runners use
+`WitnessClient.get_submitted()` or await `AsyncWitnessClient.get_submitted()`
+to resume a batch or recover a committed result after a lost save reply. Lookup
+performs no inference or rendering and does not wait for an unfinished save.
+Generation/replay witness stubs reject both submission operations; validator
+replay does not query or save results to a Pod. If generation or submission fails,
+the caller reports the failure and leaves the prompt pending for a later pass.
+Repeating identical canonical requests and stable request IDs reuses recordings;
+preview rendering can repeat and changed model requests can start new inference.
 
 ### Capture, failures and restart
 

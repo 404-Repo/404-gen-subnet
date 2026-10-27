@@ -20,7 +20,6 @@ from witness_client.calls import RequestKey
 from witness_client.client import CapturedResponse
 from witness_client.pods import CallView, Snapshot
 from witness_client.response import ModelStream
-from witness_client.state import save
 from witness_client.tunnel import WebSocketTunnel
 from witness_client.types import (
     CredentialProof,
@@ -113,8 +112,9 @@ def test_responses_create_preserves_text_missing_from_terminal_output(
 
 
 @pytest.mark.parametrize("preparations, call_limit", [(1, 4), (3, 4), (3, 2)])
+@pytest.mark.parametrize("legacy_slots", [False, True])
 def test_pod_calls_bound_preparation_and_capture_concurrency(
-    config: WitnessConfig, monkeypatch: pytest.MonkeyPatch, preparations: int, call_limit: int
+    config: WitnessConfig, monkeypatch: pytest.MonkeyPatch, preparations: int, call_limit: int, legacy_slots: bool,
 ) -> None:
     key = Keypair.create_from_mnemonic(Keypair.generate_mnemonic())
     reserved, preparation_full, inference_full, excess, allow_authorization, allow_completion = (
@@ -202,8 +202,8 @@ def test_pod_calls_bound_preparation_and_capture_concurrency(
         )
 
     with WitnessClient(
-        config, hotkey=key, openai_api_key="x" * 80, parallel_preparations=preparations,
-        call_slots=BoundedSemaphore(call_limit)
+        config, hotkey=key, openai_api_key="x" * 80, parallel_calls=call_limit, parallel_preparations=preparations,
+        call_slots=BoundedSemaphore(call_limit) if legacy_slots else None
     ) as witness:
         gateway = witness._gateway
         for name, value in {
@@ -339,7 +339,7 @@ def test_expired_undispatched_failure_uses_a_bounded_recovery_window(
         assert clock[0] < 1005
 
 
-@pytest.mark.parametrize("stage", ["handshake", "proof", "save", "flush"])
+@pytest.mark.parametrize("stage", ["handshake", "proof", "flush"])
 @pytest.mark.parametrize("elapsed", [2, 6])
 def test_capture_deadline_bounds_verification_and_prevents_late_authorization(
     config: WitnessConfig, monkeypatch: pytest.MonkeyPatch, stage: str, elapsed: int,
@@ -356,7 +356,6 @@ def test_capture_deadline_bounds_verification_and_prevents_late_authorization(
 
     timer = SimpleNamespace(monotonic=lambda: clock[0], time=lambda: clock[0], sleep=sleep)
     monkeypatch.setattr("witness_client.client.time", timer)
-    monkeypatch.setattr("witness_client.state.time", timer)
     monkeypatch.setattr("witness_client.tunnel.time", timer)
 
     def start(invocation: RequestKey) -> Snapshot:
@@ -398,11 +397,6 @@ def test_capture_deadline_bounds_verification_and_prevents_late_authorization(
             clock[0] += elapsed
         return cast(CredentialProof, {})
 
-    def save_claim(path: Path, raw: bytes) -> None:
-        save(path, raw)
-        if path.name == "claim.json" and stage == "save":
-            clock[0] += elapsed
-
     def snapshot(exchange_id: str, **kwargs: object) -> Snapshot:
         assert current is not None
         return current
@@ -420,7 +414,6 @@ def test_capture_deadline_bounds_verification_and_prevents_late_authorization(
         cast(Callable[[EarlyDisclosure], None], kwargs["authorize"])(disclosure)
         raise TimeoutError("Fixture response remains unresolved")
 
-    monkeypatch.setattr("witness_client.client._save", save_claim)
     monkeypatch.setattr("witness_client.client.exchange", exchange)
     with WitnessClient(config, hotkey=key, openai_api_key="x" * 80, delivery_timeout=5) as witness:
         monkeypatch.setattr(witness._prover, "prove", prove, raising=False)
@@ -529,3 +522,60 @@ def test_invalid_session_id_fails_before_credentials_or_allocation(
             witness.create(
                 stream=True, model="fixture", input="image", session_id="a\r\nX: injected"
             )
+
+
+def test_sync_saved_recovery_bypasses_busy_capture_and_failure_releases_capacity(
+    config: WitnessConfig, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    entered, release = Event(), Event()
+    key = Keypair.create_from_uri("//Alice")
+    calls: dict[str, Snapshot] = {}
+    opened: list[int] = []
+
+    def start(invocation: RequestKey) -> Snapshot:
+        identifier = str(uuid.uuid5(uuid.NAMESPACE_URL, invocation.id))
+        calls.setdefault(identifier, Snapshot(
+            call=CallView(request=invocation, exchange_id=identifier, deadline=int(time.time()) + 60,
+                          phase="issued" if invocation.request_id == 1 else "assigned"),
+            hotkey=key.ss58_address, session={
+                "id": identifier, "protocol": 2, "provider": "https://api.openai.com/v1/responses",
+                "proof_key_sha256": "a" * 64, "miner": key.ss58_address, "round": "test-0",
+            },
+        ))
+        return calls[identifier]
+
+    @contextmanager
+    def tunnel(identifier: str, *, deadline: float) -> Iterator[WebSocketTunnel]:
+        yield WebSocketTunnel(MagicMock(), identifier)
+
+    def exchange(tunnel: WebSocketTunnel, *args: object, **kwargs: object) -> bytes:
+        number = calls[tunnel.identifier].call.request.request_id
+        opened.append(number)
+        if number == 0:
+            entered.set()
+            assert release.wait(3)
+            raise RuntimeError("Fixture preparation failed")
+        calls[tunnel.identifier].call.phase = "issued"
+        return b""
+
+    def recorded(*args: object, **kwargs: object) -> tuple[Session, int, bytes]:
+        return cast(Session, {}), 200, event({"id": "resp_saved", "status": "completed", "output": []})
+
+    with WitnessClient(config, hotkey=key, openai_api_key="x" * 80, parallel_calls=1, parallel_preparations=1) as client:
+        for name, value in {"start": start, "snapshot": lambda identifier, **kwargs: calls[identifier],
+                            "recorded": recorded, "tunnel": tunnel}.items():
+            monkeypatch.setattr(client._gateway, name, value)
+        monkeypatch.setattr("witness_client.client.exchange", exchange)
+        with ThreadPoolExecutor(max_workers=3) as load:
+            active = load.submit(client.create, model="fixture", input="image", request_id=0)
+            try:
+                assert entered.wait(2)
+                queued = load.submit(client.create, model="fixture", input="image", request_id=2)
+                saved = load.submit(client.create, model="fixture", input="image", request_id=1)
+                assert saved.result(timeout=2).id == "resp_saved"
+                assert opened == [0] and not queued.done()
+            finally:
+                release.set()
+            with pytest.raises(openai.APIConnectionError):
+                active.result(timeout=2)
+            assert queued.result(timeout=2).id == "resp_saved" and opened == [0, 2]

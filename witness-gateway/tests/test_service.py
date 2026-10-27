@@ -721,9 +721,8 @@ def test_lost_start_response_reuses_the_assigned_attempt(
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize("pending", [False, True])
 def test_client_reconnects_to_gateway_current_round(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pending: bool,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def scenario() -> None:
         fixture = Harness(tmp_path, monkeypatch)
@@ -734,11 +733,6 @@ def test_client_reconnects_to_gateway_current_round(
                 first = await asyncio.to_thread(witness.create, model="fixture", input="image")
                 assert first.output_text == "answer-1" and fixture.paid == 1
                 namespace = witness.capture_context.namespace
-                if pending:
-                    gateway._connection.write_bytes(canonical({
-                        "start_id": old_start, "replaces": None,
-                        "round": fixture.scope.round,
-                    }))
                 fixture.scope = Scope(fixture.scope.deployment, "test-1", fixture.scope.hotkey)
                 fixture.gateway.round = fixture.scope.round
                 fixture.services[0].round_end = fixture.runtimes[0].round_end = int(time.time()) - 1
@@ -1350,4 +1344,4 @@ def call_key() -> RequestKey:
 
 
 def exchange_id(witness: WitnessClient) -> str:
-    return max(witness._state.glob("*/outcome.json"), key=lambda path: path.stat().st_mtime_ns).parent.name
+    return next(reversed(witness._gateway._snapshots))

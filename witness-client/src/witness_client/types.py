@@ -27,8 +27,8 @@ class WitnessConfig(TypedDict):
     Attributes:
         witness_url: HTTPS origin of the subnet's public witness gateway.
         proof_parameters: Directory containing the pinned proof parameter files.
-        state_directory: Private directory for exchange recovery files. Defaults
-            to 404-witness-client under XDG_STATE_HOME or ~/.local/state.
+        state_directory: Directory hint for optional execution-host observations.
+            The SDK does not create or use this directory for recovery.
         codex_home: Subscription login directory; defaults to CODEX_HOME or
             ~/.codex.
         codex: Codex executable name or path for login refresh; defaults to codex.
@@ -42,7 +42,7 @@ class WitnessConfig(TypedDict):
 
 
 class Session(TypedDict):
-    """Assigned worker metadata saved locally for recovery.
+    """Assigned worker metadata authenticated through the Pod gateway.
 
     The client reads it through the gateway before starting provider TLS,
     checking the protocol, provider, proof key, and miner against its own values.

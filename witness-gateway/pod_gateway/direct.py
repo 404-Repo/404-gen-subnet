@@ -15,6 +15,7 @@ import httpx
 from aiohttp import WSMsgType, web
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from renderer_client import RenderRejected
+from subnet_common.competition.generations import GenerationsAdapter
 from witness_client.calls import RequestKey
 from witness_client.request import PROVIDERS
 
@@ -305,7 +306,7 @@ class Witness:
         if self.artifacts is None:
             raise AuthRejected("artifact_storage_disabled", 404)
         if generation is not None:
-            if generation.prompt_sha256 not in self.artifacts.prompt_hashes:
+            if generation.prompt_sha256 not in self.artifacts.prompt_ids:
                 raise AuthRejected("unknown_round_prompt", 403)
         return self.artifacts
 
@@ -328,8 +329,12 @@ class Witness:
         )
 
     async def save_choice(self, request: web.Request) -> web.Response:
-        data = SaveChoice.model_validate_json(await request.read())
-        store = self._artifacts(data.generation)
+        value = json.loads(await request.read())
+        store = self._artifacts()
+        if isinstance(value, dict) and isinstance(value.get("generation"), dict):
+            value["generation"].setdefault("seed", store.seed)
+        data = SaveChoice.model_validate(value)
+        self._artifacts(data.generation)
         store.require(data.generation)
         image = None
         if data.source is not None:
@@ -376,6 +381,14 @@ class Witness:
         finally:
             self._pending_saves -= 1
 
+    async def get_choices(self, request: web.Request) -> web.Response:
+        store = self._artifacts()
+        results = await asyncio.to_thread(store.results)
+        return web.Response(
+            body=b'{"submissions":' + GenerationsAdapter.dump_json(results) + b"}",
+            content_type="application/json", headers={"Cache-Control": "no-store"},
+        )
+
     async def get_choice(self, request: web.Request) -> web.Response:
         store = self._artifacts()
         result = await asyncio.to_thread(store.result, request.match_info["prompt"])
@@ -393,6 +406,7 @@ class Witness:
                 web.post("/v1/render/grid", self.render),
                 web.get("/v1/artifacts/context", self.artifact_context),
                 web.post("/v1/submissions", self.save_choice),
+                web.get("/v1/submissions", self.get_choices),
                 web.get("/v1/submissions/{prompt}", self.get_choice),
             ]
         )

@@ -1,6 +1,6 @@
 # RendererClient
 
-A thin synchronous Python client for the existing Three.js renderer. JavaScript,
+Thin synchronous and async Python clients for the existing Three.js renderer. JavaScript,
 Chromium, validation and PNG generation stay in `render-service-js`. The client
 depends only on HTTPX; it does not start containers or install a browser.
 
@@ -66,10 +66,11 @@ new competition output requirements. One theta/phi pair gives a single-view PNG:
 options = RenderOptions(thetas=(30,), phis=(0,), lighting="neutral")
 ```
 
-For the Witness Pod's renderer, use `https://witness.internal/v1` as the
-`RendererClient` base URL and `transport=witness.renderer_transport()`.
-`ArtifactClient` takes the Pod origin (`https://witness.internal`) and uses
-`/v1` for preview rendering, final saves and saved-result lookup.
+For the Witness Pod's renderer, use `witness.render(source, options)` through
+`WitnessClient`, or await it through `AsyncWitnessClient`. It owns authentication
+and routing and needs no renderer identity, URL, transport or separate client.
+The explicit `RendererClient` transport and `ArtifactClient` APIs remain supported
+for existing hosts.
 
 An optional `api_key` supplies a Bearer header for an authenticated renderer proxy.
 The client raises `RenderRejected` for structured 422 responses; `error.details`
@@ -77,6 +78,26 @@ contains the original validation failures and metrics. Transport, authentication
 service and malformed-response failures raise `RenderUnavailable`. It never
 converts these to a missing miner output or retries automatically. Responses are
 bounded to 32 MiB (256 KiB for rejection details).
+
+## Async rendering
+
+```python
+from renderer_client import AsyncRendererClient
+
+async def preview(source, options, renderer_id):
+    async with AsyncRendererClient(
+        "http://127.0.0.1:8000", renderer_id=renderer_id,
+    ) as renderer:
+        return await renderer.render(source, options)
+```
+
+`AsyncRendererClient` accepts the same URL, renderer identity, API key, timeout
+and render options as `RendererClient`, with an async HTTPX `transport` when
+needed. For a Witness Pod, use `await witness.render(source, options)`.
+`AsyncRenderer` is the awaitable render protocol. PNG bytes, structured rejections
+and response bounds match the synchronous API, with no automatic retries. Cancellation closes the active
+response and propagates as `asyncio.CancelledError`. Use an async context manager
+or `await renderer.aclose()` to close the client.
 
 ## Replace rendering during replay
 
@@ -103,14 +124,15 @@ replay.assert_consumed()
 ```
 
 Records bind the renderer identity, exact source hash, all normalized options,
-and either PNG bytes or a structured rejection. Replay consumes them in order,
-including separate occurrences of identical calls, and raises `ReplayMismatch`
-on changed inputs, extra calls or unconsumed observations. Rejections are replayed
+and either PNG bytes or a structured rejection. Replay matches each request to
+an unused observation with the same inputs, regardless of the recording or request
+order. Identical calls consume separate observations. `ReplayMismatch` reports
+changed inputs, extra calls or unconsumed observations. Rejections are replayed
 as the same exception data, so a render/refinement loop can follow the same path.
-Infrastructure failures propagate without becoming render observations. Use one
-ordered recording/replay stream per pipeline. A stream interrupted by a renderer
-failure cannot export `records`, even if a later call succeeds; this prevents a
-partial interaction from looking replayable.
+Concurrent renders may finish in any order. Infrastructure failures propagate
+without becoming render observations. A recording interrupted by a renderer failure
+cannot export `records`, even if a later call succeeds; this prevents a partial
+interaction from looking replayable.
 
 The records are in-memory values, not an authenticated transcript format. The
 validator must establish image provenance or apply its agreed render-comparison

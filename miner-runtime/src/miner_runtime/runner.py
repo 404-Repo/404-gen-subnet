@@ -1,4 +1,4 @@
-"""Runner execution host for generate(image, seed, witness, renderer).
+"""Runner execution host for synchronous and async miner entry points.
 
 The caller must isolate observations and clients from untrusted code. This
 host does not provide a sandbox, environment freeze or renderer determinism.
@@ -8,13 +8,21 @@ from __future__ import annotations
 
 import fcntl
 import uuid
-from collections.abc import Callable
 from typing import Protocol, TypeVar
 
-from witness_client import CaptureContext, CapturedResponse, WitnessClient
+from witness_client import CaptureContext, CapturedResponse
 from witness_client.calls import RequestKey
 
-from .observations import Execution, Inputs, Observation, ObservedWitness, ReplayMismatch, Schedule
+from .observations import (
+    Execution,
+    Generate,
+    Inputs,
+    Observation,
+    ObservedWitness,
+    ReplayMismatch,
+    Schedule,
+    invoke_generate,
+)
 
 R = TypeVar("R")
 
@@ -46,7 +54,7 @@ class _CaptureWitness(ObservedWitness):
 
 
 def run_generation(
-    generate: Callable[[bytes, int, WitnessClient, R], str | None],
+    generate: Generate[R],
     image: bytes,
     seed: int,
     witness: CaptureSource,
@@ -77,7 +85,7 @@ def run_generation(
         )
         schedule.persist()
         try:
-            output = generate(image, seed, _CaptureWitness(witness, schedule), renderer)
+            output = invoke_generate(generate, image, seed, _CaptureWitness(witness, schedule), renderer)
             if output is not None and not isinstance(output, str):
                 raise ValueError("generate() must return JavaScript or None")
             schedule.finish(output)

@@ -34,7 +34,10 @@ IMAGE = "sha256:" + "a" * 64
 COMMIT = "c" * 40
 
 
-async def enable(fixture: Harness, *, fail_first_render: bool = False, commit: str = COMMIT) -> list[str]:
+async def enable(
+    fixture: Harness, *, fail_first_render: bool = False, commit: str = COMMIT,
+    prompt_ids: dict[str, str] | None = None,
+) -> list[str]:
     rendered: list[str] = []
     async def backend(request: web.Request) -> web.Response:
         nonlocal fail_first_render
@@ -62,7 +65,8 @@ async def enable(fixture: Harness, *, fail_first_render: bool = False, commit: s
         index=fixture.state,
         seed=42,
         submission_commit=commit,
-        prompt_hashes=frozenset({hashlib.sha256(fixture.image).hexdigest()}),
+        prompt_ids=({hashlib.sha256(fixture.image).hexdigest(): hashlib.sha256(fixture.image).hexdigest()}
+                    if prompt_ids is None else prompt_ids),
     )
     service.result_saver = ResultSaver(service.artifacts, origin, "fixture-revision", None)
     fixture.monkeypatch.setattr(
@@ -91,7 +95,7 @@ def test_result_saver_saves_every_view_when_larger_render_jobs_time_out(monkeypa
     prompt = hashlib.sha256(PNG).hexdigest()
     store = ArtifactRepository(
         state, Scope("test", "test-0", "5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty"),
-        index=state, seed=42, submission_commit=COMMIT, prompt_hashes=frozenset({prompt}),
+        index=state, seed=42, submission_commit=COMMIT, prompt_ids={prompt: prompt},
     )
     expected = {
         f"{background}/{view.name}.png": PNG + f"{color}:{view.theta}:{view.phi}".encode()
@@ -536,7 +540,7 @@ def test_concurrent_result_index_updates_preserve_each_prompt(monkeypatch: pytes
 
     def repository() -> ArtifactRepository:
         return ArtifactRepository(
-            state, scope, index=state, seed=42, submission_commit=COMMIT, prompt_hashes=frozenset(prompts)
+            state, scope, index=state, seed=42, submission_commit=COMMIT, prompt_ids={prompt: prompt for prompt in prompts}
         )
 
     first, second = repository(), repository()
@@ -602,7 +606,7 @@ def test_final_saves_complete_without_generating_again(
                 images = [fixture.image, b"second prompt", b"third prompt"]
                 sources = [SOURCE, SOURCE + "\n// second", SOURCE + "\n// third"]
                 prompts = [hashlib.sha256(image).hexdigest() for image in images]
-                store.prompt_hashes |= set(prompts)
+                store.prompt_ids.update({prompt: prompt for prompt in prompts})
                 arrived = {prompt: asyncio.Event() for prompt in prompts[1:]}
                 original_require = store.require
 
@@ -693,7 +697,7 @@ def test_save_queue_limits_and_failures_release_the_next_job(
                 service, runtime = fixture.services[-1], fixture.runtimes[-1]
                 store = service.artifacts
                 assert store is not None
-                store.prompt_hashes |= {prompt}
+                store.prompt_ids[prompt] = prompt
                 original_require = store.require
 
                 def require(generation: SubmissionContext) -> None:
@@ -952,3 +956,30 @@ def test_managed_batch_recovers_final_save_on_replacement_without_generation(
                 assert fixture.state.get(store.prefix(prompts[0].sha256) + ".js") == generated[0].encode()
 
     asyncio.run(scenario())
+
+
+def test_identifying_saved_results_preserves_a_concurrent_submission(monkeypatch: pytest.MonkeyPatch) -> None:
+    state = MemoryState()
+    scope = Scope("test", "test-0", "5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty")
+    first_hash, second_hash = "a" * 64, "b" * 64
+    store = ArtifactRepository(
+        state, scope, index=state, seed=42, submission_commit=COMMIT,
+        prompt_ids={first_hash: "official-chair", second_hash: "official-empty"},
+    )
+    first = GenerationResult(js="existing.js", views="existing", size=10)
+    second = GenerationResult(failure_reason="generation_failed")
+    state.put(store.index_key, GenerationsAdapter.dump_json({first_hash: first}))
+    original = state.save
+    submitted = False
+
+    def save(key: str, data: bytes, expected: str | None) -> Snapshot:
+        nonlocal submitted
+        if not submitted:
+            submitted = True
+            original(key, GenerationsAdapter.dump_json({first_hash: first, "official-empty": second}), expected)
+        return original(key, data, expected)
+
+    monkeypatch.setattr(state, "save", save)
+    expected = {"official-chair": first, "official-empty": second}
+    assert store.results() == expected
+    assert GenerationsAdapter.validate_json(state.get(store.index_key) or b"{}") == expected

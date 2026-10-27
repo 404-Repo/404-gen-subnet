@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import threading
@@ -17,9 +18,17 @@ from miner_runtime.accounting import BudgetRejected
 from miner_runtime.observations import Inputs, ReplayMismatch
 from miner_runtime.runner import run_generation
 from miner_runtime.validator import ReplayWitness, run_replay
+from renderer_client import (
+    RecordingRenderer,
+    RenderOptions,
+    RenderRecord,
+    RenderRejected,
+    RenderRequest,
+    ReplayRenderer,
+)
 from support import MemoryState
 from test_recording import PRICING, SCOPE
-from witness_client import WitnessClient, WitnessError
+from witness_client import AsyncWitnessClient, WitnessClient, WitnessError
 from witness_client.calls import RequestKey, canonical
 from witness_client.client import CapturedResponse
 from witness_client.pods import PodGatewayClient
@@ -46,14 +55,18 @@ class Capture(WitnessClient):
         self.records, self.budget = CallRecords(self.state), Budget(self.state, pricing)
         self.pricing = pricing
         self.paid = 0
+        self.captured: dict[str, CapturedResponse] = {}
         self.outcome: tuple[int, bytes, dict[str, int] | None] | None = None
         self.failures: dict[int, str] = {}
         self.gate: threading.Event | None = None
 
+    def saved_response(self, exchange_id: str) -> CapturedResponse:
+        return self.captured[exchange_id]
+
     def _capture(self, key: RequestKey, body: bytes, session_id: str | None) -> CapturedResponse:
         call = self.records.reserve(SCOPE, key)
         if call.phase == "issued":
-            return self._saved_response(call.exchange_id)
+            return self.saved_response(call.exchange_id)
         assigned = self.records.assign(SCOPE, key, START, "pod")
         assert self.records.claim(SCOPE, key, "pod", assigned.capture_id or "")
         failure = self.failures.pop(key.request_id, "")
@@ -122,9 +135,8 @@ class Capture(WitnessClient):
             self.state.put(prefix + name, content)
         self.budget.settle(SCOPE, key, usage)
         self.records.issued(SCOPE, key, "pod", manifest, exchange_id=call.exchange_id)
-        (self._state / call.exchange_id).mkdir(mode=0o700)
         result = CapturedResponse(call.exchange_id, status, response)
-        self._save_response(result)
+        self.captured[call.exchange_id] = result
         if failure in ("delivery", "timeout"):
             raise WitnessError("Delivery unavailable", call.exchange_id, source="gateway",
                                code="capture_timeout" if failure == "timeout" else "delivery_failed")
@@ -312,3 +324,117 @@ def test_each_prompt_is_charged_for_reused_calls_and_credit_limit_is_exact(
             with pytest.raises(BudgetRejected, match="exceeds"):
                 replay.finish(expected)
     assert live.paid == 2
+
+
+@pytest.mark.parametrize("reject_render", [False, True])
+def test_async_three_argument_entry_replays_concurrent_models_and_supplied_renderer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    reject_render: bool,
+) -> None:
+    live = Capture(tmp_path)
+    live.gate = threading.Event()
+    live.failures[1] = "failed"
+    order = [0, 1]
+    grid = RenderOptions(lighting="neutral")
+    png = b"\x89PNG\r\n\x1a\nfixture"
+
+    class Renderer:
+        renderer_id = "fixture"
+
+        def render(self, source: str, options: RenderOptions = grid) -> bytes:
+            assert source == "completed0failed1" and options == grid
+            if reject_render:
+                raise RenderRejected('{"error":"validation_failed","failures":[]}')
+            return png
+
+    renderer = RecordingRenderer(Renderer())
+
+    async def generate(image: bytes, seed: int, witness: AsyncWitnessClient) -> str:
+        async def call(index: int) -> str:
+            value = await witness.responses.create(model="fixture", input="image", request_id=index)
+            if index == 1:
+                assert live.gate is not None
+                live.gate.set()
+            return str(value.status) + value.output_text
+
+        values = dict(zip(order, await asyncio.gather(*(call(i) for i in order)), strict=True))
+        source = values[0] + values[1]
+        try:
+            assert await witness.render(source, grid) == png
+        except RenderRejected as error:
+            return source + str(error)
+        return source
+
+    expected = run_generation(generate, b"PNG", 42, live, renderer)
+    bundle = live.export(tmp_path / "bundle")
+    order.reverse()
+    replay_renderer = ReplayRenderer(renderer.records, renderer_id="fixture")
+
+    def forbidden(*args: object, **kwargs: object) -> None:
+        pytest.fail("Replay must not construct a live client")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(httpx, "Client", forbidden)
+        patch.setattr(httpx, "AsyncClient", forbidden)
+        assert run_replay(generate, b"PNG", 42, ReplayWitness(bundle, timeout=2), replay_renderer) == expected
+    replay_renderer.assert_consumed()
+    assert run_generation(generate, b"PNG", 42, live, Renderer()) == expected
+    assert live.paid == 2
+
+
+def test_async_three_argument_entry_replays_stream_iteration_and_close(tmp_path: Path) -> None:
+    live = Capture(tmp_path)
+
+    async def generate(image: bytes, seed: int, witness: AsyncWitnessClient) -> str:
+        async with await witness.responses.create(model="fixture", input="image", stream=True) as stream:
+            return ",".join([event.type async for event in stream])
+
+    expected = run_generation(generate, b"PNG", 42, live, None)
+    bundle = live.export(tmp_path / "bundle")
+    assert run_replay(generate, b"PNG", 42, ReplayWitness(bundle), None) == expected == "response.completed"
+    assert run_generation(generate, b"PNG", 42, live, None) == expected
+    assert live.paid == 1
+
+
+@pytest.mark.parametrize("operation", ["submit", "get_submitted", "resume"])
+def test_async_entry_keeps_live_runner_operations_outside_generation(tmp_path: Path, operation: str) -> None:
+    live = Capture(tmp_path)
+
+    async def generate(image: bytes, seed: int, witness: AsyncWitnessClient) -> None:
+        if operation == "submit":
+            await witness.submit(image, None)
+        elif operation == "get_submitted":
+            await witness.get_submitted()
+        else:
+            await witness.resume("exchange")
+
+    with pytest.raises(ReplayMismatch):
+        run_generation(generate, b"PNG", 42, live, None)
+    assert live.paid == 0
+
+
+def test_async_replay_matches_concurrent_render_inputs_and_duplicate_counts(tmp_path: Path) -> None:
+    live = Capture(tmp_path)
+    grid = RenderOptions(lighting="neutral")
+    png = b"\x89PNG\r\n\x1a\n"
+    records = tuple(
+        RenderRecord(RenderRequest.from_source("fixture", "0-" + name, grid), png=png + name.encode())
+        for name in ("b", "a", "a")
+    )
+
+    async def generate(image: bytes, seed: int, witness: AsyncWitnessClient) -> str:
+        response = await witness.responses.create(model="fixture", input="image")
+        previews = await asyncio.gather(*(
+            witness.render(response.output_text + "-" + name, grid) for name in ("a", "b", "a")
+        ))
+        return "".join(preview[-1:].decode() for preview in previews)
+
+    original_renderer = ReplayRenderer(records, renderer_id="fixture")
+    expected = run_generation(generate, b"PNG", 42, live, original_renderer)
+    original_renderer.assert_consumed()
+    bundle = live.export(tmp_path / "bundle")
+    replay_renderer = ReplayRenderer(reversed(records), renderer_id="fixture")
+    assert run_replay(generate, b"PNG", 42, ReplayWitness(bundle), replay_renderer) == expected == "aba"
+    replay_renderer.assert_consumed()
+    assert live.paid == 1

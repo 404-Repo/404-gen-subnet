@@ -1,5 +1,6 @@
-"""Ordered, in-memory render observations for an injected replay implementation."""
+"""In-memory render observations matched by inputs during replay."""
 
+from collections import deque
 from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import cast
@@ -16,7 +17,7 @@ from .client import (
 
 
 class ReplayMismatch(RendererError):
-    """The pipeline's render inputs differ from the next recorded observation."""
+    """The pipeline's render inputs do not match a remaining observation."""
 
 
 @dataclass(frozen=True)
@@ -38,7 +39,7 @@ class RecordingRenderer:
     """Record successful PNGs and deterministic rejections from another Renderer.
 
     Infrastructure failures propagate without being converted to replay observations.
-    Use one ordered instance per pipeline; persistence/provenance belongs to validation.
+    Concurrent renders are recorded as they complete; persistence/provenance belongs to validation.
     """
 
     def __init__(self, renderer: Renderer) -> None:
@@ -78,21 +79,23 @@ class ReplayRenderer:
         if not renderer_id:
             raise ValueError("renderer_id must identify the pinned renderer image")
         self.renderer_id = renderer_id
-        self._records = tuple(records)
-        self._position = 0
+        self._records: dict[RenderRequest, deque[RenderRecord]] = {}
+        for record in records:
+            self._records.setdefault(record.request, deque()).append(record)
 
     def render(self, source: str, options: RenderOptions = DEFAULT_OPTIONS) -> bytes:
         request = RenderRequest.from_source(self.renderer_id, source, options)
-        if self._position == len(self._records):
-            raise ReplayMismatch("No recorded render remains")
-        record = self._records[self._position]
-        if request != record.request:
-            raise ReplayMismatch(f"Render inputs differ at observation {self._position}")
-        self._position += 1
+        try:
+            record = self._records[request].popleft()
+        except (KeyError, IndexError) as error:
+            if any(self._records.values()):
+                raise ReplayMismatch("Render inputs differ from remaining observations") from error
+            raise ReplayMismatch("No recorded render remains") from error
         if record.rejection_json is not None:
             raise RenderRejected(record.rejection_json)
         return cast(bytes, record.png)  # RenderRecord enforces exactly one outcome.
 
     def assert_consumed(self) -> None:
-        if self._position != len(self._records):
-            raise ReplayMismatch(f"{len(self._records) - self._position} recorded render(s) were not consumed")
+        remaining = sum(len(records) for records in self._records.values())
+        if remaining:
+            raise ReplayMismatch(f"{remaining} recorded render(s) were not consumed")

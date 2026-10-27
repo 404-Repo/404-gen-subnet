@@ -3,8 +3,9 @@
 import hashlib
 from pathlib import Path
 
+import httpx
 import pytest
-from miner_runtime.observations import Execution
+from miner_runtime.observations import Execution, ReplayMismatch
 from miner_runtime.runner import run_generation
 from miner_runtime.validator import ReplayWitness, run_replay
 from renderer_client import RecordingRenderer, ReplayRenderer
@@ -18,7 +19,7 @@ from miner_reference.pipeline import normalize, run
 
 
 @pytest.mark.parametrize("repair", [False, True])
-def test_complete_pipeline_reconstructs_from_execution(tmp_path: Path, repair: bool) -> None:
+def test_complete_pipeline_reconstructs_from_execution(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, repair: bool) -> None:
     live = Witness()
     renderer = Renderer()
     if repair:
@@ -28,6 +29,10 @@ def test_complete_pipeline_reconstructs_from_execution(tmp_path: Path, repair: b
     previews = RecordingRenderer(renderer)
 
     def generate(image: bytes, seed: int, witness: WitnessClient, renderer: RendererProtocol) -> str | None:
+        with pytest.raises(ReplayMismatch, match="live runner"):
+            witness.submit(image, None)
+        with pytest.raises(ReplayMismatch, match="live runner"):
+            witness.get_submitted()
         return run(image, seed, witness.responses, renderer)
 
     expected = run_generation(generate, PNG, 42, live, previews)
@@ -83,6 +88,11 @@ def test_complete_pipeline_reconstructs_from_execution(tmp_path: Path, repair: b
             }
         )
     )
+    def no_network(*args: object, **kwargs: object) -> None:
+        pytest.fail("Validator replay must not contact a live Pod")
+
+    monkeypatch.setattr(httpx.Client, "send", no_network)
+    monkeypatch.setattr(httpx.AsyncClient, "send", no_network)
     for _ in range(2):
         replay = ReplayWitness(bundle)
         rendered = ReplayRenderer(previews.records, renderer_id=previews.renderer_id)

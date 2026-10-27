@@ -2,24 +2,33 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
+import inspect
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import Literal, TypeVar, Unpack, cast, overload
+from typing import Literal, Self, TypeAlias, TypeVar, Unpack, cast, overload
 
 from openai.types.responses import Response, ResponseStreamEvent
 from openai.types.responses.response_create_params import ResponseCreateParamsBase
 from pydantic import BaseModel, ConfigDict, Field
-
+from renderer_client import Renderer, RenderOptions
+from renderer_client.client import DEFAULT_OPTIONS
+from witness_client import AsyncWitnessClient
 from witness_client.calls import Digest, RequestKey, canonical
 from witness_client.client import CapturedResponse, WitnessClient
 from witness_client.errors import ExchangePending, WitnessError
-from witness_client.response import ModelStream, model_error, model_result
+from witness_client.response import AsyncModelStream, ModelStream, model_error, model_result
 from witness_client.state import save
 
 T = TypeVar("T")
+R = TypeVar("R")
+Generate: TypeAlias = (
+    Callable[[bytes, int, WitnessClient, R], str | None]
+    | Callable[[bytes, int, AsyncWitnessClient], Awaitable[str | None]]
+)
 
 
 class ReplayMismatch(WitnessError):
@@ -311,12 +320,18 @@ class ObservedStream(ModelStream):
 
 
 class ObservedWitness(WitnessClient):
-    """Private execution boundary; submitted code only calls the Responses interface."""
+    """Recorded model-call boundary with rendering supplied by the execution host."""
 
     def __init__(self, schedule: Schedule) -> None:
         self.schedule = schedule
         self._mode = schedule.execution.provider
         self.responses = self
+        self._renderer: Renderer | None = None
+
+    def render(self, source: str, options: RenderOptions = DEFAULT_OPTIONS) -> bytes:
+        if self._renderer is None:
+            raise ReplayMismatch("Execution host did not supply a renderer")
+        return self._renderer.render(source, options)
 
     def read(
         self, entry: Observation, replay: bool, key: RequestKey, body: bytes
@@ -382,3 +397,113 @@ class ObservedWitness(WitnessClient):
 
     def resume(self, exchange_id: str) -> Response:
         raise ReplayMismatch("Execution code must use responses.create()")
+
+    def get_submitted(self) -> dict[str, dict[str, object]]:
+        raise ReplayMismatch("Submission lookup belongs to the live runner")
+
+    def submit(self, image: bytes, source: str | None) -> dict[str, object]:
+        raise ReplayMismatch("Execution code must return its result; the live runner submits it")
+
+
+class _AsyncObservedStream(AsyncModelStream):
+    async def __anext__(self) -> ResponseStreamEvent:
+        try:
+            event = await asyncio.to_thread(next, self._stream, None)
+        except BaseException:
+            await self.aclose()
+            raise
+        if event is None:
+            raise StopAsyncIteration
+        return event
+
+    async def aclose(self) -> None:
+        await asyncio.to_thread(self._stream.close)
+
+
+class _AsyncObservedWitness(AsyncWitnessClient):
+    def __init__(self, witness: ObservedWitness) -> None:
+        self._observed = witness
+        self.responses = self
+
+    @overload
+    async def create(
+        self,
+        *,
+        request_id: int = 0,
+        stream: Literal[False] = False,
+        session_id: str | None = None,
+        **params: Unpack[ResponseCreateParamsBase],
+    ) -> Response: ...
+
+    @overload
+    async def create(
+        self,
+        *,
+        request_id: int = 0,
+        stream: Literal[True],
+        session_id: str | None = None,
+        **params: Unpack[ResponseCreateParamsBase],
+    ) -> AsyncModelStream: ...
+
+    async def create(
+        self,
+        *,
+        request_id: int = 0,
+        stream: bool = False,
+        session_id: str | None = None,
+        **params: Unpack[ResponseCreateParamsBase],
+    ) -> Response | AsyncModelStream:
+        if stream:
+            result = await asyncio.to_thread(
+                lambda: self._observed.create(
+                    request_id=request_id,
+                    stream=True,
+                    session_id=session_id,
+                    **params,
+                ),
+            )
+            return _AsyncObservedStream(result)
+        return await asyncio.to_thread(
+            lambda: self._observed.create(
+                request_id=request_id,
+                stream=False,
+                session_id=session_id,
+                **params,
+            ),
+        )
+
+    async def render(self, source: str, options: RenderOptions = DEFAULT_OPTIONS) -> bytes:
+        return await asyncio.to_thread(self._observed.render, source, options)
+
+    async def resume(self, exchange_id: str) -> Response:
+        return self._observed.resume(exchange_id)
+
+    async def get_submitted(self) -> dict[str, dict[str, object]]:
+        return self._observed.get_submitted()
+
+    async def submit(self, image: bytes, source: str | None) -> dict[str, object]:
+        return self._observed.submit(image, source)
+
+    async def aclose(self) -> None:
+        pass
+
+    async def __aenter__(self) -> Self:
+        return self
+
+
+def invoke_generate(
+    generate: Generate[R],
+    image: bytes,
+    seed: int,
+    witness: ObservedWitness,
+    renderer: R,
+) -> str | None:
+    witness._renderer = cast(Renderer | None, renderer)
+    if inspect.iscoroutinefunction(generate):
+
+        async def run() -> str | None:
+            entry = cast(Callable[[bytes, int, AsyncWitnessClient], Awaitable[str | None]], generate)
+            return await entry(image, seed, _AsyncObservedWitness(witness))
+
+        return asyncio.run(run())
+    return cast(Callable[[bytes, int, WitnessClient, R], str | None], generate)(image, seed, witness, renderer)

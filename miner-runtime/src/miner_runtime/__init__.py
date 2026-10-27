@@ -1,1 +1,1 @@
-"""Runner and validator execution for generate(image, seed, witness, renderer)."""
+"""Runner and validator execution for synchronous and async miner entry points."""

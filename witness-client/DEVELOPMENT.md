@@ -17,11 +17,14 @@ bundle without an inference client. See the [full contract](../witness-gateway/P
 Configure `witness_url` and matching `proof_parameters` in `WitnessConfig`.
 The gateway selects the round at allocation/reconnect; model requests carry no
 round field. `ArtifactClient.load_context()` reads the approved source commit
-from the authenticated Pod for checkpoint validation. The runner submits the returned
-JavaScript or `None` with the prompt hash and seed; the Pod assigns the round and
-makes the fixed final renders. Generation previews use `RendererClient` without
-Pod or R2 persistence. Final-save checkpoint reuse checks the prompt hash, seed,
-renderer and refreshed source commit.
+from the authenticated Pod for execution-host metadata. The runner submits the returned
+JavaScript or `None` through `submit(image, source)`; the Pod supplies the round
+and seed and makes the fixed final renders. Generation previews use
+`render(source, options)` through the same Pod connection, with a 240-second
+request timeout and no retries or preview persistence. `get_submitted()` reads
+saved prompt identities and result metadata, including a submitted `None`. A later pass
+skips those identities and reruns generation for pending prompts, reusing retained
+responses for identical canonical model requests and stable request IDs.
 Pass the caller's loaded sr25519 `hotkey`. The private key stays local.
 `openai_api_key` and `subscription="codex"` are mutually exclusive. `codex_home`
 and `codex` select subscription credential storage/refresh. Provider TLS uses
@@ -38,13 +41,19 @@ is a verified routing header. Background generation is rejected. Subscription
 normalization forces `store=false`. Request bodies are bounded to 8 MiB.
 
 `WitnessError.exchange_id` identifies an attempt for recovery. `resume()` polls
-that exchange using saved local job state and retrieves its durable Response.
+that exchange through the authenticated Pod and verifies its retained Response.
+The SDK does not persist allocation, job, proof, response or final-result recovery
+files. A fresh client repeats the same canonical requests and request IDs to join
+retained calls.
+`parallel_calls` and `parallel_preparations` each default to three (range 1-32)
+and are enforced internally across calls sharing either client. Completed response
+reuse bypasses active capture limits.
 `delivery_timeout` is a positive per-phase wait/retry window (default 600 seconds).
 Capture and recovery share one window, including safe
 replacement attempts, bounded also by the server's capture deadline. REST
 requests each time out after thirty seconds. Access deadlines and retention
 remain server-owned.
-Keep local state private/persistent. No SDK inference retry is enabled.
+No additional SDK inference retry is enabled.
 
 Trusted hosts use `capture_context`, `capture_response(key, body)` and
 `saved_response(exchange_id)` for capture and recovery. The immutable
@@ -53,7 +62,9 @@ local namespace derived from the gateway origin, hotkey, assigned round and
 provider.
 `capture_response` returns a `CapturedResponse` with the exchange ID, HTTP status
 and retained response bytes; an existing logical call follows the same recovery
-path as `responses.create()`. `saved_response` only reads retained local bytes.
+path as `responses.create()`. `saved_response` downloads and verifies the Pod's
+retained recording without issuing inference. `state_directory` remains a hint
+for optional execution hosts; the SDK does not create it.
 `miner_runtime.runner.CaptureSource` defines this interface for trusted hosts; the
 runtime owns execution paths, locking and observations.
 

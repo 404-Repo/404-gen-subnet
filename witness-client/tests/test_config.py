@@ -1,4 +1,4 @@
-"""Configuration must preserve secure defaults and private recovery storage."""
+"""Configuration preserves authentication and TLS defaults."""
 
 import json
 import ssl
@@ -42,34 +42,6 @@ def test_configuration_is_copied_or_loaded_as_utf8(
     with WitnessClient(source, openai_api_key=TOKEN, hotkey=key) as client:
         config["codex_home"] = "changed"
         assert client._config["codex_home"] == "учётная-запись"
-
-
-@pytest.mark.parametrize("xdg", [None, "", "relative", "absolute"])
-@pytest.mark.parametrize("explicit", [False, True])
-def test_state_directory_selection_and_permissions(
-    config: WitnessConfig,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    xdg: str | None,
-    explicit: bool,
-    key: Keypair,
-) -> None:
-    home = tmp_path / "home"
-    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
-    if xdg is None:
-        monkeypatch.delenv("XDG_STATE_HOME", raising=False)
-    else:
-        monkeypatch.setenv(
-            "XDG_STATE_HOME", str(tmp_path / "xdg") if xdg == "absolute" else xdg
-        )
-    expected = Path(config["state_directory"])
-    if not explicit:
-        del config["state_directory"]
-        base = tmp_path / "xdg" if xdg == "absolute" else home / ".local" / "state"
-        expected = base / "404-witness-client"
-    with WitnessClient(config, openai_api_key=TOKEN, hotkey=key) as client:
-        assert client._state == expected
-        assert expected.stat().st_mode & 0o777 == 0o700
 
 
 @pytest.mark.parametrize(
@@ -129,21 +101,6 @@ def test_invalid_configuration_is_rejected_before_setup(
     assert not Path(config["state_directory"]).exists()
 
 
-def test_insecure_state_directory_is_rejected_before_setup(
-    config: WitnessConfig, monkeypatch: pytest.MonkeyPatch, key: Keypair
-) -> None:
-    def forbidden(*args: object, **kwargs: object) -> None:
-        pytest.fail("Private state must be checked before initializing prover or HTTP")
-
-    monkeypatch.setattr("witness_client.client.Prover", forbidden)
-    monkeypatch.setattr("witness_client.client.httpx.Client", forbidden)
-    state = Path(config["state_directory"])
-    state.mkdir()
-    state.chmod(0o755)
-    with pytest.raises(ValueError, match="private"):
-        WitnessClient(config, hotkey=key, openai_api_key=TOKEN)
-
-
 @pytest.mark.parametrize("mode", ["api", "codex"])
 def test_configuration_cannot_override_certificate_trust_or_provider(
     config: WitnessConfig,
@@ -185,3 +142,27 @@ def test_configuration_cannot_override_certificate_trust_or_provider(
             if mode == "api"
             else "https://chatgpt.com/backend-api/codex/responses"
         )
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize("field", ["parallel_calls", "parallel_preparations"])
+@pytest.mark.parametrize("limit", [0, -1, 33, True, 1.5, "3"])
+def test_numeric_concurrency_limits_are_validated_before_resources(
+    config: WitnessConfig, monkeypatch: pytest.MonkeyPatch, key: Keypair,
+    asynchronous: bool, field: str, limit: int,
+) -> None:
+    from witness_client import AsyncWitnessClient
+
+    def forbidden(*args: object, **kwargs: object) -> None:
+        pytest.fail("Invalid concurrency must not initialize prover or HTTP resources")
+
+    monkeypatch.setattr("witness_client.client.Prover", forbidden)
+    monkeypatch.setattr(httpx, "Client", forbidden)
+    monkeypatch.setattr(httpx, "AsyncClient", forbidden)
+    constructor = AsyncWitnessClient if asynchronous else WitnessClient
+    with pytest.raises(ValueError, match=field):
+        if field == "parallel_calls":
+            constructor(config, hotkey=key, openai_api_key=TOKEN, parallel_calls=limit)
+        else:
+            constructor(config, hotkey=key, openai_api_key=TOKEN, parallel_preparations=limit)
+    assert not Path(config["state_directory"]).exists()

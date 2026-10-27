@@ -45,7 +45,7 @@ client, proof parameters and configuration in the
 ## Artifact storage
 
 The Pod saves final results in the existing public `404-gen` bucket under
-`rounds/<full-round-name>/<hotkey>/submitted/<prompt-sha256>`. The JavaScript is
+`rounds/<full-round-name>/<hotkey>/submitted/<prompt-id>`. The JavaScript is
 `<prefix>.js`; white and gray judging views, `grid.png` and `embeddings.npz` are
 stored under `<prefix>/`.
 
@@ -60,7 +60,7 @@ two queue errors within its configured save timeout, using the same output.
 Preview rendering uses the renderer's existing concurrency limit.
 
 The Pod publishes `rounds/<full-round-name>/<hotkey>/submitted.json`, mapping
-prompt hashes to records containing `js`, `views`, `failure_reason` and `size`;
+official prompt IDs to records containing `js`, `views`, `failure_reason` and `size`;
 `js` and `views` are storage keys. A saved final output cannot be replaced;
 retrying the same output returns its saved result without rendering again.
 Conditional writes merge concurrent index updates without losing other prompts.
@@ -85,13 +85,16 @@ Set `WITNESS_ARTIFACTS` to JSON in the gateway/revivor environment:
     "bootstrap_sha256": null
   },
   "seed": 42,
-  "prompt_hashes": ["REPLACE_WITH_FROZEN_PROMPT_SHA256"],
+  "prompt_ids": {"REPLACE_WITH_IMAGE_SHA256": "REPLACE_WITH_OFFICIAL_PROMPT_ID"},
   "commits": {"REPLACE_WITH_ADMITTED_HOTKEY": "REPLACE_WITH_40_CHARACTER_SOURCE_COMMIT"}
 }
 ```
 
-Use the immutable `WITNESS_IMAGE` digest, frozen round seed and prompt hashes, and
-admitted source commits. Only the packaged renderer is supported;
+Use the immutable `WITNESS_IMAGE` digest, frozen round seed and admitted source
+commits. `prompt_ids` maps the SHA256 of each frozen image to its official
+filename stem from the round's prompt URLs. Supply the mapping from the same
+frozen round metadata; image hashes and filename IDs are separate identities.
+Each image must resolve to one distinct prompt ID. Only the packaged renderer is supported;
 `bootstrap_sha256` must be null. Compute its profile hash from the exact build
 context, from the repository root:
 

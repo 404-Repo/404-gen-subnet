@@ -127,6 +127,9 @@ class Witness(WitnessClient):
         self.lose_reply_once = False
         self.submissions: dict[str, str | None] = {}
 
+    def saved_response(self, exchange_id: str) -> CapturedResponse:
+        return next(value for value in self.recorded.values() if value.exchange_id == exchange_id)
+
     def renderer_transport(self) -> httpx.BaseTransport:
         def submit(request: httpx.Request) -> httpx.Response:
             if request.url.path == "/v1/artifacts/context":
@@ -161,11 +164,9 @@ class Witness(WitnessClient):
                 params = json.loads(body)
                 response = Calls().create(request_id=key.request_id, **params)
                 identifier = str(uuid.uuid4())
-                (self._state / identifier).mkdir(mode=0o700)
                 captured = CapturedResponse(identifier, 200, b"data: " + json.dumps({
                     "type": "response.completed", "response": response.model_dump(),
                 }).encode() + b"\n\n")
-                self._save_response(captured)
                 with self.lock:
                     self.recorded[key.id] = captured
                     if self.lose_reply_once:

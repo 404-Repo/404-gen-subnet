@@ -1,7 +1,9 @@
 import base64
 import hashlib
 import json
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
+from threading import Event
 
 import httpx
 import pytest
@@ -222,11 +224,16 @@ def test_replay_checks_source_and_image_identity():
 
 def test_duplicate_renders_are_distinct_observations_and_tail_is_checked():
     record = RenderRecord(RenderRequest.from_source(IMAGE, SOURCE, RenderOptions()), png=PNG)
-    replay = ReplayRenderer([record, record], renderer_id=IMAGE)
+    other_options = RenderOptions(lighting="neutral")
+    other = RenderRecord(RenderRequest.from_source(IMAGE, SOURCE, other_options), png=PNG + b"neutral")
+    replay = ReplayRenderer([record, other, record], renderer_id=IMAGE)
     assert replay.render(SOURCE) == PNG
-    with pytest.raises(ReplayMismatch, match="not consumed"):
+    with pytest.raises(ReplayMismatch, match="2 recorded render.*not consumed"):
         replay.assert_consumed()
     assert replay.render(SOURCE) == PNG
+    with pytest.raises(ReplayMismatch, match="Render inputs differ"):
+        replay.render(SOURCE)
+    assert replay.render(SOURCE, other_options) == PNG + b"neutral"
     replay.assert_consumed()
     with pytest.raises(ReplayMismatch, match="No recorded render"):
         replay.render(SOURCE)
@@ -264,3 +271,45 @@ def test_record_rejects_ambiguous_outcome_and_malformed_payload():
     for kwargs in ({}, {"png": PNG, "rejection_json": json.dumps(DETAILS)}, {"png": b"invalid"}):
         with pytest.raises(ValueError):
             RenderRecord(request, **kwargs)
+
+
+@pytest.mark.parametrize("reject_first", [False, True])
+def test_replay_matches_inputs_when_concurrent_renders_complete_out_of_order(reject_first):
+    entered, release = Event(), Event()
+    other_source = SOURCE + " "
+
+    class Renderer:
+        renderer_id = IMAGE
+
+        def render(self, source, options=None):
+            if source == SOURCE:
+                entered.set()
+                assert release.wait(3)
+                if reject_first:
+                    raise RenderRejected(json.dumps(DETAILS))
+                return PNG + b"first"
+            return PNG + b"second"
+
+    recording = RecordingRenderer(Renderer())
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(recording.render, SOURCE)
+        try:
+            assert entered.wait(3)
+            assert pool.submit(recording.render, other_source).result(timeout=3) == PNG + b"second"
+        finally:
+            release.set()
+        if reject_first:
+            with pytest.raises(RenderRejected):
+                first.result(timeout=3)
+        else:
+            assert first.result(timeout=3) == PNG + b"first"
+
+    replay = ReplayRenderer(recording.records, renderer_id=IMAGE)
+    if reject_first:
+        with pytest.raises(RenderRejected) as rejected:
+            replay.render(SOURCE)
+        assert rejected.value.details == DETAILS
+    else:
+        assert replay.render(SOURCE) == PNG + b"first"
+    assert replay.render(other_source) == PNG + b"second"
+    replay.assert_consumed()

@@ -149,8 +149,6 @@ def test_queued_connection_keeps_the_accepted_id_within_its_deadline(
         finally:
             gateway.close()
     assert len(posted) == 2 and posted[0] != accepted and posted[1] == accepted
-    saved = json.loads(next(tmp_path.glob("pod-connect-*.json")).read_bytes())
-    assert saved["start_id"] == accepted and saved["replaces"] is None
 
 
 def test_retiring_connection_waits_within_its_deadline_without_replacing_the_worker(
@@ -230,7 +228,8 @@ def test_retirement_after_discovery_recovers_within_the_original_deadline(
                 assert actual == (successor if completion == "successor" else posted[0]["start_id"])
                 assert clock[0] == 2
             assert len(posted) == (0 if completion == "successor" else 1)
-            saved = json.loads(gateway._connection.read_bytes())
+            saved = gateway._allocation_request
+            assert saved is not None
             assert saved["start_id"] == (successor if completion == "successor" else posted[0]["start_id"])
             assert saved["replaces"] == previous
         finally:

@@ -104,9 +104,7 @@ class RenderRequest:
     def from_source(cls, renderer_id: str, source: str, options: RenderOptions) -> Self:
         if not renderer_id:
             raise ValueError("renderer_id must identify the pinned renderer image")
-        encoded = source.encode("utf-8")
-        if len(encoded) > MAX_SOURCE_BYTES:
-            raise ValueError("Source exceeds the renderer's 1 MiB limit")
+        encoded = _source_bytes(source)
         return cls(renderer_id, hashlib.sha256(encoded).hexdigest(), options)
 
 
@@ -151,22 +149,9 @@ class RendererClient:
         RenderRequest.from_source(self.renderer_id, source, options)
         try:
             with self._http.stream("POST", self._url, params=options.query(), json={"source": source}) as response:
-                if response.status_code == 422:
-                    body = _read_bounded(response, MAX_ERROR_BYTES)
-                    try:
-                        rejection = RenderRejected(body.decode("utf-8"))
-                    except (UnicodeError, ValueError) as error:
-                        raise RenderUnavailable("Invalid renderer rejection response") from error
-                    raise rejection
-                response.raise_for_status()
-                if response.headers.get("content-type", "").split(";", 1)[0].lower() != "image/png":
-                    raise RenderUnavailable("Renderer did not return image/png")
-                png = _read_bounded(response, MAX_RESPONSE_BYTES)
+                return _render_response(response)
         except httpx.HTTPError as error:
             raise RenderUnavailable(f"Renderer request failed: {error}") from error
-        if not png.startswith(PNG_SIGNATURE):
-            raise RenderUnavailable("Renderer returned an invalid PNG signature")
-        return png
 
     def close(self) -> None:
         self._http.close()
@@ -190,3 +175,27 @@ def _read_bounded(response: httpx.Response, limit: int) -> bytes:
             raise RenderUnavailable("Renderer response exceeds the size limit")
         body.extend(chunk)
     return bytes(body)
+
+
+def _source_bytes(source: str) -> bytes:
+    encoded = source.encode("utf-8")
+    if len(encoded) > MAX_SOURCE_BYTES:
+        raise ValueError("Source exceeds the renderer's 1 MiB limit")
+    return encoded
+
+
+def _render_response(response: httpx.Response) -> bytes:
+    if response.status_code == 422:
+        body = _read_bounded(response, MAX_ERROR_BYTES)
+        try:
+            rejection = RenderRejected(body.decode("utf-8"))
+        except (UnicodeError, ValueError) as error:
+            raise RenderUnavailable("Invalid renderer rejection response") from error
+        raise rejection
+    response.raise_for_status()
+    if response.headers.get("content-type", "").split(";", 1)[0].lower() != "image/png":
+        raise RenderUnavailable("Renderer did not return image/png")
+    png = _read_bounded(response, MAX_RESPONSE_BYTES)
+    if not png.startswith(PNG_SIGNATURE):
+        raise RenderUnavailable("Renderer returned an invalid PNG signature")
+    return png

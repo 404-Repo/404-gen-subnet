@@ -25,4 +25,4 @@ line-length = 120
 python_version = "3.11"
 files = ["src"]
 strict = true
-mypy_path = ["../witness-client/src"]
+mypy_path = ["../witness-client/src", "../renderer-client/src"]
