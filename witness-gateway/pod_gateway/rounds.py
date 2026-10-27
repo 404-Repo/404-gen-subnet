@@ -121,7 +121,7 @@ class RoundImages:
 
     def put(self, key: str, data: bytes, content_type: str = "application/octet-stream") -> None:
         try:
-            self.state.save(key, data, None)
+            self.state.save(key, data, None, content_type=content_type)
         except StateConflict:
             if self.get(key) != data:
                 raise ValueError("Stored prompt bytes differ") from None
@@ -159,12 +159,14 @@ class RoundController:
             return f"https://raw.githubusercontent.com/{self.repository}/{revision}/{quote(value, safe='/')}"
         if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.fragment:
             raise ValueError("Prompt references must use HTTPS")
+        repo_path = f"/{self.repository}/"
         for origin, prefix in (
-            ("raw.githubusercontent.com", f"/{self.repository}/{self.branch}/"),
-            ("github.com", f"/{self.repository}/blob/{self.branch}/"),
+            ("raw.githubusercontent.com", f"{self.branch}/"),
+            ("github.com", f"blob/{self.branch}/"),
         ):
-            if parsed.hostname == origin and parsed.path.lower().startswith(prefix.lower()):
-                path = parsed.path[len(prefix):]
+            if (parsed.hostname == origin and parsed.path[:len(repo_path)].lower() == repo_path
+                    and parsed.path[len(repo_path):].startswith(prefix)):
+                path = parsed.path[len(repo_path) + len(prefix):]
                 return f"https://raw.githubusercontent.com/{self.repository}/{revision}/{path}"
         return value
 
@@ -179,7 +181,7 @@ class RoundController:
             raise ValueError("Expected round prompts")
         semaphore = asyncio.Semaphore(8)
 
-        async def image(value: str) -> tuple[PromptImage, bytes]:
+        async def image(value: str) -> tuple[PromptImage, bytes, str]:
             url = self._image_url(value, revision)
             name = PurePosixPath(unquote(urlsplit(value).path)).stem
             async with semaphore:
@@ -187,13 +189,14 @@ class RoundController:
             if not data or len(data) > 8 * 1024 * 1024:
                 raise ValueError("Prompt image exceeds its size limit")
             with Image.open(io.BytesIO(data)) as picture:
+                content_type = Image.MIME.get(picture.format or "", "application/octet-stream")
                 picture.verify()
             digest = hashlib.sha256(data).hexdigest()
             key = f"{schedule.witness_storage_prefix}competition-inputs/v1/{digest}"
-            return PromptImage(id=name, source_url=url, sha256=digest, image_key=key), data
+            return PromptImage(id=name, source_url=url, sha256=digest, image_key=key), data, content_type
 
         downloaded = await asyncio.gather(*(image(url) for url in urls))
-        prompts = tuple(prompt for prompt, _ in downloaded)
+        prompts = tuple(prompt for prompt, _, _ in downloaded)
         if len({p.id for p in prompts}) != len(prompts) or len({p.sha256 for p in prompts}) != len(prompts):
             raise ValueError("Round prompts must have distinct official IDs and image hashes")
         inputs = RoundInputs(
@@ -202,8 +205,8 @@ class RoundController:
             generation_deadline_block=schedule.generation_deadline_block,
             storage_prefix=schedule.witness_storage_prefix, save_submissions=schedule.witness_save_submissions,
         )
-        for prompt, data in downloaded:
-            await asyncio.to_thread(self.objects.put, prompt.image_key, data)
+        for prompt, data, content_type in downloaded:
+            await asyncio.to_thread(self.objects.put, prompt.image_key, data, content_type)
         return await asyncio.to_thread(self._pin, inputs)
 
     def _pin_key(self, round_name: str) -> str:

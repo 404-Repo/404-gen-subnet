@@ -106,7 +106,9 @@ class R2StateStore:
             raise ValueError("Allocation journal exceeds its size limit")
         return Snapshot(self._etag(result), data)
 
-    def save(self, key: str, data: bytes, expected: str | None) -> Snapshot:
+    def save(
+        self, key: str, data: bytes, expected: str | None, *, content_type: str = "application/json"
+    ) -> Snapshot:
         if len(data) > self.max_bytes:
             raise ValueError("Allocation journal exceeds its size limit")
         condition = {"IfNoneMatch": "*"} if expected is None else {"IfMatch": expected}
@@ -116,7 +118,7 @@ class R2StateStore:
                     Bucket=self.bucket,
                     Key=key,
                     Body=data,
-                    ContentType="application/json",
+                    ContentType=content_type,
                     CacheControl="no-store",
                     **condition,
                 )

@@ -273,6 +273,36 @@ def test_repository_relative_prompt_content_is_pinned_to_the_selected_commit() -
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize("host,route", [("raw.githubusercontent.com", ""), ("github.com", "blob/")])
+@pytest.mark.parametrize("image_branch", ["Persistent/Witness", "persistent/witness"])
+def test_repository_image_urls_pin_the_exact_selected_branch_name(host: str, route: str, image_branch: str) -> None:
+    async def scenario() -> None:
+        files = publication()
+        url = f"https://{host}/404-Repo/404-active-competition/{route}{image_branch}/images/chair.png"
+        files["rounds/0/prompts.txt"] = url
+        competition = Competition(files, branch="Persistent/Witness")
+        await competition.controller.refresh()
+        expected = (
+            "https://raw.githubusercontent.com/404-repo/404-active-competition/" + "a" * 40 + "/images/chair.png"
+            if image_branch == "Persistent/Witness" else url
+        )
+        assert competition.downloaded == [expected]
+    asyncio.run(scenario())
+
+
+def test_frozen_prompt_objects_keep_their_image_media_type() -> None:
+    from test_state import FakeS3
+    from pod_gateway.rounds import RoundImages
+    from pod_gateway.state import R2StateStore
+
+    s3 = FakeS3()
+    images = RoundImages(R2StateStore(s3, "private"))
+    content = png()
+    images.put("journal", content, "image/png")
+    assert images.get("journal") == content
+    assert s3.puts[0]["ContentType"] == "image/png"
+
+
 def test_missing_explicit_deadline_and_invalid_images_are_not_unbounded_rounds() -> None:
     async def scenario() -> None:
         files = publication()
