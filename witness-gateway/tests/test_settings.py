@@ -82,6 +82,31 @@ def test_gateway_admission_settings_are_bounded_and_forwarded(values: dict[str, 
             Settings.model_validate({**values, name: "0"})
 
 
+@pytest.mark.parametrize("token", [None, ""])
+def test_round_refresh_requires_a_github_token(values: dict[str, object], token: str | None) -> None:
+    if token is None:
+        values.pop("WITNESS_GITHUB_TOKEN")
+    else:
+        values["WITNESS_GITHUB_TOKEN"] = token
+    with pytest.raises(ValueError, match="WITNESS_GITHUB_TOKEN"):
+        Settings.model_validate(values)
+
+
+def test_round_refresh_defaults_keep_policy_fresh_between_checks(values: dict[str, object]) -> None:
+    settings = Settings.model_validate(values)
+    assert settings.round_refresh_seconds == 60
+    assert settings.round_policy_seconds == 120
+
+
+@pytest.mark.parametrize("refresh,policy", [(60, 60), (61, 120)])
+def test_round_refresh_rejects_intervals_outside_policy_bounds(
+    values: dict[str, object], refresh: int, policy: int,
+) -> None:
+    with pytest.raises(ValueError):
+        Settings.model_validate({**values, "WITNESS_ROUND_REFRESH_SECONDS": refresh,
+                                 "WITNESS_ROUND_POLICY_SECONDS": policy})
+
+
 @pytest.fixture
 def values(tmp_path: Path) -> dict[str, object]:
     pricing = tmp_path / "pricing.json"
@@ -90,6 +115,7 @@ def values(tmp_path: Path) -> dict[str, object]:
         "WITNESS_DEPLOYMENT": "competition",
         "WITNESS_ACTIVE_ROUND": "test-0",
         "WITNESS_ROUND_END": "2000000000",
+        "WITNESS_GITHUB_TOKEN": "fixture-read-only-token",
         "WITNESS_GATEWAY_OWNER_HOTKEY": Keypair.create_from_mnemonic(Keypair.generate_mnemonic()).ss58_address,
         "WITNESS_GATEWAY_URL": "https://witness.test",
         "WITNESS_MASTER_KEY": "ab" * 32,

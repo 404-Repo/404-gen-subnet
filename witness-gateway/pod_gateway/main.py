@@ -59,7 +59,7 @@ async def application(settings: GatewaySettings, worker_spec: PodSpec) -> web.Ap
     source_http = httpx.AsyncClient(timeout=30, trust_env=False)
     github = GitHubClient(
         repository(settings.competition_repo),
-        token=None if settings.github_token is None else settings.github_token.get_secret_value(),
+        token=settings.github_token.get_secret_value(),
     )
 
     async def head() -> tuple[int, float]:

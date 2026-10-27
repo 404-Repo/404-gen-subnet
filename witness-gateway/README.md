@@ -119,7 +119,7 @@ writes the per-miner result index to Git.
 Configure `WITNESS_COMPETITION_REPO` with a GitHub repository URL or `owner/repo`
 and `WITNESS_COMPETITION_BRANCH` with the operator's chosen branch. Both default
 to `404-Repo/404-active-competition` and `main`. Every branch follows the same
-rules. A read-only `WITNESS_GITHUB_TOKEN` is optional and is never sent to workers.
+rules. A read-only `WITNESS_GITHUB_TOKEN` is required and is never sent to workers.
 Finney membership, allocation capabilities, selected-Pod fencing and pricing
 remain required. `WITNESS_TEST_HOTKEY` is unsupported. `WITNESS_ACTIVE_ROUND` and `WITNESS_ROUND_END` are not used for
 automatic competition admission.
@@ -139,9 +139,9 @@ the assigned miner. Inputs are durably pinned per repository, branch and round.
 Changing seed, prompt content/IDs, deadline or storage scope for an existing round
 closes admission; publish a new round to use different inputs.
 
-The gateway refreshes state every `WITNESS_ROUND_REFRESH_SECONDS` (default 10)
+The gateway refreshes state every `WITNESS_ROUND_REFRESH_SECONDS` (default 60)
 and sends policies over authenticated control sockets. Policies expire after
-`WITNESS_ROUND_POLICY_SECONDS` (default 30, maximum 120). New allocations,
+`WITNESS_ROUND_POLICY_SECONDS` (default 120, maximum 120). New allocations,
 generation, previews and final saves require a fresh policy for the exact frozen
 inputs and current `miner_generation` round. Finite schedules also require a fresh
 Finney block below `generation_deadline_block`; leases are capped at the estimated
