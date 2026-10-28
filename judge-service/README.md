@@ -87,8 +87,8 @@ Final winner metadata comes from the submitted repository and commit, or the
 existing leader record on a defense. `winner.json` needs no Docker image or GPU
 declaration. The integrated round-manager uses this source identity and writes
 `docker=""` for new leaders; the shared leader model retains that empty-default
-string for legacy weight setters. The pending producer migrations are listed in
-[shared/README.md](../shared/README.md#required-producer-migrations).
+string for legacy weight setters. The required producers are listed in
+[shared/README.md](../shared/README.md#required-producers).
 
 ## Duel judge (the multi-stage judge)
 

@@ -55,21 +55,15 @@ Validation requests now use `validation_requests.json`; the legacy
 `require_audit.json` file is not read or converted. Producers must use the renamed
 channel at cutover. The source-audit channel, schema and API remain unchanged.
 
-## Required producer migrations
+## Required producers
 
-This is a judge/shared semantic migration. The unmodified legacy generation
-orchestrator imports removed contracts and cannot run with this shared version.
-Complete its migration and provide a replay validator before competition cutover.
+The competition requires leader generation, replay validation and independent
+source auditing before judging can complete.
 
-- **Generation orchestrator:** `generation_iteration.py` must retire the candidate
-  audit/regeneration loop and its generation-report/generation-audit feedback.
-  Keep previous-leader generation for new prompts, executing the leader source
-  identified by repository/commit. `miner_runner.py` and `pod_session.py` must
-  produce `leader/generated.json` through the new execution path, without
-  candidate repeats or submitted-versus-regenerated comparisons.
-  `generation_summary.py` and the regeneration-report methods in `discord.py`
-  depend on the removed `GenerationReport`, `RepeatStats` and
-  `GenerationAuditResult` contracts and must be retired with that loop.
+- **Leader generation:** the operator runs the previous leader's Python source,
+  identified by repository/commit, on the published round prompts and seed. Publish
+  `rounds/{n}/leader/generated.json` using the `GenerationResult` schema above,
+  with canonical Three.js and rendered-view locations.
 - **Replay validator:** consume `validation_requests.json`, replay the exact submitted
   Python source using the published prompts/seed and recorded witness evidence,
   verify the canonical outputs and competition budgets, then publish one terminal
@@ -88,17 +82,6 @@ The integrated round-manager propagates source identity and explicitly writes
 legacy weight setters, and historical Docker strings remain intact. Python
 generation does not use that field. Weight and schedule behavior and the
 source-audit storage module are unchanged.
-
-## Legacy-only code and later cleanup
-
-Docker build tracking, provider/pod execution and their diagnostics still belong
-to the old orchestrator and miner runtime. The integrated submission models no
-longer carry GPU metadata or export GPU defaults. Retiring consumers such as
-`build_info.py` and the generation orchestrator still reference those removed
-contracts; their migration is outside judge eligibility. Replace the required
-execution path as described above; removing unused shared build/pod helpers after
-cutover is optional cleanup. No broad legacy extraction or stylistic refactor is
-included in the judge migration.
 
 ## Development
 

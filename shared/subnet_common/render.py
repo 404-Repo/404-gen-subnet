@@ -4,8 +4,8 @@ The render service exposes `POST /render` (see render-service-js/src/server.js).
 call renders N views in one shot — `thetas` and `phis` are pairwise lists, the
 response is `{"images": [base64, ...], "count": N, ...}`.
 
-The view sets and camera parameters here are used by the generation orchestrator
-and witness Pods to render and save results. The judge reads the saved PNGs from
+The view sets and camera parameters here are used by witness Pods to render and
+save results. The judge reads the saved PNGs from
 `{prefix}/white/{view}.png` and `{prefix}/gray/{view}.png`.
 """
 

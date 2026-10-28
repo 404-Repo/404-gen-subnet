@@ -16,9 +16,9 @@ The competition follows a **winner-stays-in** format with a **proof-of-work mode
 3. **VLM judges**: A vision-language model compares miners' outputs in pairwise tournament duels.
 4. **Validators replay**: The judge requests one validation pass per candidate. A separate validator replays its source against recorded requests/responses and publishes one pass/fail verdict. Independent source audit is also required for eligibility.
 
-The judge/shared contracts implement this validation boundary. The generation
-orchestrator still needs its Python leader-generation migration before the new
-competition can run; see [required producer migrations](shared/README.md#required-producer-migrations).
+Before judging each round, the operator must generate the previous leader's
+results from its pinned Python source and the published prompts/seed, then publish
+`rounds/{n}/leader/generated.json`. See [required producers](shared/README.md#required-producers).
 
 All competition state is stored in a public git repository, making every decision auditable and every transition traceable.
 
@@ -48,10 +48,8 @@ FINALIZING ──► OPEN ──► MINER_GENERATION ──► COLLECTING ──
 | Service | Description |
 |---------|-------------|
 | `submission-collector` | Monitors the round schedule, collects miner submissions, and records generated and submitted results. Owns OPEN, MINER_GENERATION, and COLLECTING stages. |
-| `generation-orchestrator` | Legacy Docker/regeneration implementation awaiting migration. Its remaining role is generating the previous leader's canonical results for new prompts. |
 | `render-service-js` | Renders miner Three.js submissions to multi-view PNG images via headless Chromium with WebGL. |
 | `miner-reference` | Miner guide, token budgets, a Three.js validator, examples and local tools. |
-| `image-distance-service` | Computes perceptual distance between images using DINOv3 embeddings. Used to verify regenerated outputs match submissions. |
 | `judge-service` | Runs VLM-based pairwise duels, requests verification for winners, selects the round winner. Owns the DUELS stage. |
 | `round-manager` | Updates the global leader, creates new rounds with schedules, decides when the competition ends. Owns the FINALIZING stage. |
 | `vllm` | External vLLM instance hosting the vision-language model for pairwise comparisons. |
@@ -77,7 +75,6 @@ All state is stored in the competition git repository.
 | `seed.json` | submission-collector | Random seed for deterministic generation |
 | `prompts.txt` | submission-collector | Selected prompts for the round |
 | `submissions.json` | submission-collector | Miner submissions from chain |
-| `builds.json` | legacy generation-orchestrator | Docker build status; outside the new judge eligibility contract |
 | `validation_requests.json` | judge-service | One validation request per candidate hotkey |
 | `validation_results.json` | validator | One terminal passed/failed result per candidate; absent while pending |
 | `source_audit.json` | source auditor | Independent source-level verdict per miner |
@@ -129,15 +126,6 @@ When a leader successfully defends, their weight decays (down to a floor). New w
 
 - **Git repository**: All state files and competition history
 - **R2 (Cloudflare)**: Miner submissions and rendered PNG previews
-
-## GPU Providers
-
-The generation-orchestrator supports multiple serverless GPU providers:
-
-- **Targon**: Default provider
-- **Verda**: Optional backup
-
-Configure via `GPU_PROVIDERS` env var (e.g., `"targon,verda"` for Targon-first with Verda fallback).
 
 ## Development
 

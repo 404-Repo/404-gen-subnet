@@ -3,14 +3,6 @@ from typing import Self
 
 import httpx
 from loguru import logger
-from pydantic import BaseModel
-
-
-class GitHubJob(BaseModel):
-    id: int
-    name: str
-    status: str  # queued, in_progress, completed
-    conclusion: str | None  # success, failure, cancelled, skipped
 
 
 class GitHubClient:
@@ -120,43 +112,6 @@ class GitHubClient:
 
         logger.info(f"Committed to {branch}: {new_commit_sha}")
         return new_commit_sha
-
-    async def find_run_by_commit_message(self, message: str) -> int | None:
-        """Find a workflow run ID with the commit message that has a specified ending."""
-        response = await self.client.get(f"/repos/{self.repo}/actions/runs")
-        response.raise_for_status()
-
-        for run in response.json().get("workflow_runs", []):
-            if run["head_commit"]["message"].endswith(message):
-                logger.debug(f"Found run {run['id']} for message: {message[:50]}")
-                return int(run["id"])
-
-        return None
-
-    async def get_jobs(self, run_id: int) -> list[GitHubJob]:
-        """Get all jobs for a workflow run."""
-        jobs: list[GitHubJob] = []
-        page = 1
-
-        while True:
-            response = await self.client.get(
-                f"/repos/{self.repo}/actions/runs/{run_id}/jobs",
-                params={"per_page": 100, "page": page},
-            )
-            response.raise_for_status()
-
-            batch = response.json().get("jobs", [])
-            if not batch:
-                break
-
-            jobs.extend(GitHubJob(**j) for j in batch)
-
-            if len(batch) < 100:
-                break
-            page += 1
-
-        logger.debug(f"Fetched {len(jobs)} jobs for run {run_id}")
-        return jobs
 
     async def _get_tree_sha(self, commit_sha: str) -> str:
         response = await self.client.get(f"/repos/{self.repo}/git/commits/{commit_sha}")
