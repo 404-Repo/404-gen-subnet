@@ -310,6 +310,7 @@ async def run(args: argparse.Namespace) -> None:
                 {
                     "submitted": len(rows),
                     "expected": len(manifest["prompts"]),
+                    "pending": sorted(set(manifest["prompts"]) - set(rows)),
                     "failures": sum(bool(row["failure_reason"]) for row in rows.values()),
                 },
             )
@@ -328,6 +329,24 @@ async def run(args: argparse.Namespace) -> None:
                 await response.aclose()
             await self.get_submitted()
             return result
+
+    if getattr(args, "command", "run") == "fail":
+        selected = set(args.prompt)
+        if not selected or selected - set(manifest["prompts"]):
+            raise ValueError("Select official prompt IDs explicitly")
+        failure_file = root / "operator_failures.json"
+        failed = set(json.loads(failure_file.read_bytes())) if failure_file.exists() else set()
+        async with LeaderWitness(config, hotkey=hotkey, subscription="codex") as witness:
+            submitted = await witness.get_submitted()
+            if any(prompt in submitted and submitted[prompt]["js"] is not None for prompt in selected):
+                raise ValueError("Cannot replace saved JavaScript with a failure")
+            for prompt in sorted(selected):
+                if prompt not in submitted:
+                    await witness.submit((root / "prompts" / prompt).read_bytes(), None)
+                failed.add(prompt)
+                save(failure_file, sorted(failed))
+        print(f"Saved {len(selected)} explicit failures without model calls; handoff requires all official prompts.")
+        return
 
     sys.dont_write_bytecode = True
     sys.path.insert(0, str(root / "source"))
@@ -417,7 +436,15 @@ async def handoff(args: argparse.Namespace) -> None:
             "runner_commit",
         )
     }
+    failure_file = root / "operator_failures.json"
+    operator_failures = json.loads(failure_file.read_bytes()) if failure_file.exists() else []
+    if any(
+        prompt not in rows or rows[prompt]["js"] is not None or not rows[prompt]["failure_reason"]
+        for prompt in operator_failures
+    ):
+        raise ValueError("Operator failure decisions differ from saved terminal outcomes")
     provenance.update(
+        operator_failed_prompts=operator_failures,
         witness=identity,
         submitted_index=index_url,
         submitted_index_sha256=sha(response.content),
@@ -459,14 +486,24 @@ def main() -> None:
     launch.add_argument("--parallel-prompts", type=int, default=8)
     launch.add_argument("--parallel-calls", type=int, default=12)
     launch.add_argument("--attempts", type=int, default=3)
+    failure = commands.add_parser(
+        "fail", help="Save explicit no-output outcomes for selected prompts without model calls"
+    )
+    failure.add_argument("--witness-config", type=Path, required=True)
+    failure.add_argument("--wallet-name", default="miner")
+    failure.add_argument("--wallet-hotkey", default="default")
+    failure.add_argument("--wallet-path", type=Path, default=Path("~/.bittensor/wallets"))
+    failure.add_argument(
+        "--prompt", action="append", required=True, help="Official ID to mark failed; repeat explicitly"
+    )
     publish = commands.add_parser(
         "handoff",
         help="Verify the saved index and artifacts, then write the local judge bundle",
     )
     publish.add_argument("--competition", type=Path, required=True)
-    for command in (freeze, launch, publish):
+    for command in (freeze, launch, failure, publish):
         command.add_argument("--run-dir", type=Path, required=True)
-    for command in (launch, publish):
+    for command in (launch, failure, publish):
         command.add_argument("--cdn-url", default="https://subnet404.xyz")
     args = parser.parse_args()
     args.run_dir = args.run_dir.expanduser().resolve()
@@ -477,9 +514,9 @@ def main() -> None:
     args.cdn_url = args.cdn_url.rstrip("/")
     with (args.run_dir / "invocation.lock").open("a+b") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        if args.command == "run":
+        if args.command in ("run", "fail"):
             args.witness_config = args.witness_config.expanduser().resolve()
-            if min(args.attempts, args.parallel_prompts, args.parallel_calls) < 1:
+            if args.command == "run" and min(args.attempts, args.parallel_prompts, args.parallel_calls) < 1:
                 parser.error("Attempts and concurrency must be positive")
             asyncio.run(run(args))
         else:

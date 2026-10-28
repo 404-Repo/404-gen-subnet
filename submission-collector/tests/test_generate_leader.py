@@ -271,3 +271,70 @@ async def test_gateway_round_mismatch_stops_before_allocation_or_generation(
     )
     with pytest.raises(WitnessError, match="Gateway round differs"):
         await leader.run(world)
+
+
+@pytest.mark.parametrize("save_error", [False, True])
+async def test_explicit_failure_uses_pod_saving_without_source_or_model_calls(
+    world: argparse.Namespace,
+    monkeypatch: pytest.MonkeyPatch,
+    save_error: bool,
+) -> None:
+    import bittensor_wallet
+    import witness_client.async_client
+    from witness_client import AsyncWitnessClient
+    from witness_client.async_pods import AsyncPodGatewayClient
+
+    await prepared(world, monkeypatch)
+    (world.run_dir / "identity.json").unlink()
+    world.command, world.prompt = "fail", ["b"]
+    world.wallet_name, world.wallet_hotkey, world.wallet_path = "miner", "default", Path("/unused-wallet")
+    world.witness_config = world.run_dir / "witness.json"
+    leader.save(world.witness_config, {"witness_url": "https://witness.subnet404.xyz", "proof_parameters": "/unused"})
+    key = bittensor_wallet.Keypair.create_from_uri("//Alice")
+    rows = json.loads(json.dumps(saved()).replace("authenticated-operator", key.ss58_address))
+    del rows["b"]
+    posts = []
+    monkeypatch.setattr(bittensor_wallet, "Wallet", lambda **kwargs: SimpleNamespace(hotkey=key))
+    monkeypatch.setattr(witness_client.async_client, "Prover", lambda *args: None)
+    monkeypatch.setattr(AsyncPodGatewayClient, "_allocation_json", AsyncMock(return_value={"round": "gpt-0"}))
+
+    def forbidden(*args: object, **kwargs: object) -> None:
+        pytest.fail("Explicit failure saving must not execute Python source or make model calls")
+
+    async def send(self: AsyncPodGatewayClient, request: httpx.Request) -> httpx.Response:
+        await self._allocation_json("GET", "/v1/pods/current", deadline=99999999999)
+        if request.url.path == "/v1/artifacts/context":
+            return httpx.Response(200, json={"submission_commit": None}, request=request)
+        assert request.url.path == "/v1/submissions"
+        if request.method == "GET":
+            return httpx.Response(200, json={"submissions": rows}, request=request)
+        body = json.loads(request.content)
+        posts.append(body)
+        assert body["source"] is None and body["prompt_image"] is None
+        assert body["generation"] == {"seed": 123, "prompt_sha256": leader.sha(b"/b.png")}
+        if save_error:
+            raise httpx.ReadError("Synthetic save failure", request=request)
+        rows["b"] = {"failure_reason": "generation_failed"}
+        return httpx.Response(200, json={"submission": rows["b"]}, request=request)
+
+    monkeypatch.setattr(leader, "load_module", forbidden)
+    monkeypatch.setattr(AsyncWitnessClient, "_resolve", forbidden)
+    monkeypatch.setattr(AsyncPodGatewayClient, "send", send)
+    if save_error:
+        with pytest.raises(httpx.ReadError):
+            await leader.run(world)
+        assert not (world.run_dir / "operator_failures.json").exists()
+        assert json.loads((world.run_dir / "progress.json").read_bytes())["pending"] == ["b"]
+        return
+    await leader.run(world)
+    await leader.run(world)
+    assert len(posts) == 1
+    assert json.loads((world.run_dir / "operator_failures.json").read_bytes()) == ["b"]
+    assert json.loads((world.run_dir / "progress.json").read_bytes())["pending"] == []
+    world.prompt = ["a"]
+    with pytest.raises(ValueError, match="Cannot replace"):
+        await leader.run(world)
+    mock_http(monkeypatch, lambda request: httpx.Response(200, json=rows))
+    await leader.handoff(world)
+    provenance = json.loads((world.competition / "rounds/0/leader/source.json").read_bytes())
+    assert provenance["operator_failed_prompts"] == ["b"]

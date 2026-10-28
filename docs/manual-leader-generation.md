@@ -63,7 +63,8 @@ file. Codex owns refresh-token storage and rotation. This launcher supplies
 Keep the login directory writable and the Codex executable available throughout
 the run. If login is revoked, refresh fails or subscription allowance is exhausted,
 the finite runner attempts can finish with pending prompts. Restore the login or
-allowance and rerun the same command; do not erase the witness's retained work.
+allowance and resume pending work; issued provider-error recordings remain retained.
+Do not erase the witness's retained work.
 
 Use one operator process per round/hotkey and one credential owner for the login
 directory. The launcher locks its run directory and serializes SDK preparation
@@ -141,6 +142,23 @@ reads `get_submitted()` before loading images and skips saved prompt IDs,
 including explicit `None` outcomes. Pending generation reuses retained responses
 for identical canonical model requests and request IDs. Preview rendering repeats;
 its bytes must match for downstream requests to reuse recordings.
+
+Retained provider errors or unrenderable scenes can keep failing with the same
+frozen source. After inspecting the prompt's failure, explicitly save its
+no-output outcome through the Pod. This command does not execute source, load
+subscription tokens or issue model calls; it retains existing evidence and usage:
+
+```sh
+"$LEADER_PY" "$LEADER_TOOL" fail \
+  --run-dir "$LEADER_RUN" --witness-config "$LEADER_CONFIG" \
+  --wallet-name miner --wallet-hotkey default --prompt OFFICIAL_PROMPT_ID
+```
+
+Repeat `--prompt` to select more IDs. `progress.json` lists pending IDs. There is
+no implicit "fail all missing" operation. An existing source cannot be replaced
+with a failure. These choices appear in `source.json` as
+`operator_failed_prompts`; they are distinguished from the source returning `None`.
+A failed save remains pending, and the handoff still requires every official ID.
 
 The Pod saves its canonical result index at:
 
