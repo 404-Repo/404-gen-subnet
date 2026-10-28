@@ -16,14 +16,14 @@ For the complete miner setup, use the [launch quickstart](../miner-reference/REA
 It installs the separate async base miner, authenticates your wallet, and runs
 model calls, previews and final submission through your assigned Pod.
 
-The launch source tag is `witness-client-v0.2.13rc9`. Its packages are
-`404-witness-client==0.2.13rc9`, `404-renderer-client==0.1.3rc1`, and the optional
-`404-miner-runtime==0.1.1rc1`. They are installed from source; registry publication
+The launch source tag is `witness-client-v0.2.14`. Its packages are
+`404-witness-client==0.2.14`, `404-renderer-client==0.1.4`, and the optional
+`404-miner-runtime==0.1.2`. They are installed from source; registry publication
 is separate. Use Python 3.11+ on Linux x86_64 with glibc 2.34+, Go 1.27.3 and a C
 compiler. The base miner requires Python 3.13. To install just the clients:
 
 ```sh
-git clone --branch witness-client-v0.2.13rc9 --depth 1 \
+git clone --branch witness-client-v0.2.14 --depth 1 \
   https://github.com/404-Repo/404-subnet.git 404-sdk
 cd 404-sdk
 python3.13 -m venv .venv

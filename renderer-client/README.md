@@ -6,8 +6,8 @@ depends only on HTTPX; it does not start containers or install a browser.
 
 ## Miner installation and Pod rendering
 
-The launch package is `404-renderer-client==0.1.3rc1`, paired with
-`404-witness-client==0.2.13rc9` from source tag `witness-client-v0.2.13rc9`.
+The launch package is `404-renderer-client==0.1.4`, paired with
+`404-witness-client==0.2.14` from source tag `witness-client-v0.2.14`.
 Follow the [miner quickstart](../miner-reference/README.md#launch-quickstart) to
 install both. The recommended async base miner renders through
 `await witness.render(source, RenderOptions(lighting="neutral"))`; the witness

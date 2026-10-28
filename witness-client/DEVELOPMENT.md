@@ -74,9 +74,9 @@ The distribution name is `404-witness-client`; the Python import remains
 `witness_client`. Wheels use the filename prefix `404_witness_client-`.
 
 Artifact hashes, validation results, and the exact source tag and commit are
-recorded in [release.json](release.json). The launch set is witness `0.2.13rc9`,
-renderer `0.1.3rc1` and optional miner runtime `0.1.1rc1`, built from
-`witness-client-v0.2.13rc9`. The manifest identifies the exact source commit; its
+recorded in [release.json](release.json). The launch set is witness `0.2.14`,
+renderer `0.1.4` and optional miner runtime `0.1.2`, built from
+`witness-client-v0.2.14`. The manifest identifies the exact source commit; its
 checks apply only to the listed bytes. Historical releases remain under `releases/`. When using a release wheel,
 check its SHA-256 against the record and use the checkout of its source tag.
 For the current checkout, follow the [README installation steps](README.md#install).
@@ -107,10 +107,10 @@ before the next release. Updating the compiler does not require new proof parame
 For the Linux target (from the repository root):
 
 ```sh
-docker build --platform linux/amd64 -f witness-client/Dockerfile -t 404-witness-python:0.2.13rc9 .
+docker build --platform linux/amd64 -f witness-client/Dockerfile -t 404-witness-python:0.2.14 .
 docker run --rm --network none --platform linux/amd64 \
   -v "$PWD/witness-server/verifier/params:/app/witness-server/verifier/params:ro" \
-  404-witness-python:0.2.13rc9
+  404-witness-python:0.2.14
 ```
 
 The Docker build runs `auditwheel repair` and checks the resulting
@@ -122,9 +122,9 @@ older renderer from a registry. All three wheels are under
 `/app/witness-client/dist` in that image. Extract them without starting the container:
 
 ```sh
-container=$(docker create --platform linux/amd64 404-witness-python:0.2.13rc9)
-mkdir -p dist/0.2.13rc9
-docker cp "$container:/app/witness-client/dist/." dist/0.2.13rc9/
+container=$(docker create --platform linux/amd64 404-witness-python:0.2.14)
+mkdir -p dist/0.2.14
+docker cp "$container:/app/witness-client/dist/." dist/0.2.14/
 docker rm "$container"
 ```
 

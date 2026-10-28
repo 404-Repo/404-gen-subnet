@@ -18,12 +18,12 @@ witness origin is **https://witness.subnet404.xyz**. The gateway assigns your
 round and Pod; generation, rendering and submission use that authenticated Pod.
 
 Install these matching launch sources into sibling directories. The SDK packages
-are `404-witness-client==0.2.13rc9` and `404-renderer-client==0.1.3rc1`.
-`404-miner-runtime==0.1.1rc1` is optional for the synchronous execution/replay
+are `404-witness-client==0.2.14` and `404-renderer-client==0.1.4`.
+`404-miner-runtime==0.1.2` is optional for the synchronous execution/replay
 helpers and is not needed by this base miner.
 
 ```sh
-git clone --branch witness-client-v0.2.13rc9 --depth 1 \
+git clone --branch witness-client-v0.2.14 --depth 1 \
   https://github.com/404-Repo/404-subnet.git 404-sdk
 git clone https://github.com/404-Repo/404-base-miner-gpt.git 404-base-miner
 git -C 404-base-miner checkout 26c3ad32f9c4f202c9cd896c955695ab1964b75c

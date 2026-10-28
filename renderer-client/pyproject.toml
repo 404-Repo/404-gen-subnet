@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "404-renderer-client"
-version = "0.1.3rc1"
+version = "0.1.4"
 description = "Thin Python client and replay interface for the 404 Three.js renderer"
 readme = "README.md"
 requires-python = ">=3.11"
