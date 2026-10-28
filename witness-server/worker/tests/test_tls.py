@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import socket
 import ssl
@@ -200,10 +201,6 @@ def test_real_tls_gate_records_large_exchange_even_when_miner_leaves(
         connected_channels(identifier) as (tunnel, channel),
     ):
         client._gateway.http = http
-        (client._state / identifier).mkdir(mode=0o700)
-        (client._state / identifier / "job.json").write_bytes(
-            json_bytes({"deadline": int(time.time()) + 180})
-        )
         server.bind(("127.0.0.1", 0))
         server.listen()
 
@@ -304,9 +301,6 @@ def test_real_tls_gate_records_large_exchange_even_when_miner_leaves(
             assert GatewayClient(http, hotkey, client._state, 180).response(identifier) == response_body
             if session_id is not None:
                 invocation = RequestKey.from_body(provider_name, body, session_id=session_id)
-                (client._state / identifier / "job.json").write_bytes(
-                    json_bytes({"request": invocation.model_dump(mode="json")})
-                )
                 session: Session = {
                     "id": identifier, "protocol": 2, "round": "1",
                     "miner": hotkey.ss58_address,
@@ -316,6 +310,7 @@ def test_real_tls_gate_records_large_exchange_even_when_miner_leaves(
                 call = CallView(
                     request=invocation, exchange_id=identifier,
                     deadline=int(time.time()) + 180, phase="issued", authorized=True,
+                    manifest_sha256=hashlib.sha256(store.objects[prefix_key + "/manifest.json"]).hexdigest(),
                 )
                 assert isinstance(client._gateway, PodGatewayClient)
                 with pytest.MonkeyPatch.context() as patch:
