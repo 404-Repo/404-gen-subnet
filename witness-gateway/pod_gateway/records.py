@@ -138,8 +138,6 @@ class CallRecords:
             if (
                 call.exchange_id == exchange_id
                 and call.phase == "failed"
-                and call.not_dispatched
-                and not call.authorized
             ):
                 record.attempts[call.exchange_id] = call.model_copy(deep=True)
                 record.call = Call(
@@ -160,8 +158,6 @@ class CallRecords:
             if (
                 call.exchange_id == expected_exchange_id
                 and call.phase == "failed"
-                and call.not_dispatched
-                and not call.authorized
             ):
                 record.attempts[call.exchange_id] = call.model_copy(deep=True)
                 call = record.call = Call(
@@ -225,6 +221,7 @@ class CallRecords:
         *,
         exchange_id: str,
         not_dispatched: bool = False,
+        manifest: bytes | None = None,
     ) -> None:
         def change(record: CallRecord) -> None:
             call = record.call if record.call.exchange_id == exchange_id else record.attempts.get(exchange_id)
@@ -236,5 +233,7 @@ class CallRecords:
                 raise RecordingConflict("Cannot replace an existing result with an error")
             call.phase, call.failure = "failed", failure
             call.not_dispatched = not_dispatched and not call.authorized
+            if manifest is not None:
+                call.manifest_sha256 = hashlib.sha256(manifest).hexdigest()
 
         self._change(scope, request, change)

@@ -26,6 +26,10 @@ from pod_gateway.state import R2StateStore, Snapshot, StateConflict, WriteUncert
 START = "00000000-0000-4000-8000-000000000001"
 PROOF = "c" * 64
 USAGE = {"input_tokens": 10, "output_tokens": 2}
+RESPONSE = b"data: " + canonical({
+    "type": "response.completed",
+    "response": {"id": "fixture", "status": "completed", "output": [], "usage": USAGE},
+}) + b"\n\n"
 
 
 def capture(state: MemoryState) -> tuple[CallRecords, Budget, RequestKey, Call]:
@@ -42,7 +46,7 @@ def capture(state: MemoryState) -> tuple[CallRecords, Budget, RequestKey, Call]:
 
 
 def evidence(budget: Budget, item: RequestKey, call: Call) -> dict[str, bytes]:
-    response = b"complete captured response"
+    response = RESPONSE
     metadata = {
         "call_id": item.id,
         "request_key": item.model_dump(),
@@ -324,11 +328,47 @@ def test_failed_finalization_preserves_a_durable_response(tmp_path: Path, alread
         worker.executor.shutdown(wait=True)
 
 
+@pytest.mark.parametrize("not_dispatched", [False, True])
+def test_unreserved_retry_failure_does_not_block_the_next_attempt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, not_dispatched: bool,
+) -> None:
+    state = MemoryState()
+    records, budget, item, first = capture(state)
+    budget.settle(SCOPE, item, None, exchange_id=first.exchange_id)
+    records.failed(SCOPE, item, "pod-one", "InvalidProviderResponse", exchange_id=first.exchange_id)
+    spending = budget.summary(SCOPE, item)
+    second = records.assign(SCOPE, item, START, "pod-one", expected_exchange_id=first.exchange_id)
+    assert records.claim(SCOPE, item, "pod-one", second.capture_id or "")
+    worker = runtime(state, records, budget, tmp_path / "spool")
+    (worker.spool / second.exchange_id).mkdir(mode=0o700)
+    monkeypatch.setattr(worker, "_retry_upload", lambda operation: operation())
+    try:
+        worker._finalize(item, second, None, "SetupTimeout", not_dispatched=not_dispatched)
+    finally:
+        worker.executor.shutdown(wait=True)
+    failed = records.locate(SCOPE, second.exchange_id)
+    assert failed is not None and failed[1].phase == "failed"
+    assert budget.summary(SCOPE, item) == spending
+    assert json.loads(state.get(prefix(second) + "status.json") or b"{}")["error_type"] == "SetupTimeout"
+
+    third = records.assign(SCOPE, item, START, "pod-one", expected_exchange_id=second.exchange_id)
+    assert third.request == item and third.exchange_id != second.exchange_id
+    assert records.claim(SCOPE, item, "pod-one", third.capture_id or "")
+    budget.reserve(SCOPE, item, third.exchange_id, BODY, failed_exchanges=(first.exchange_id, second.exchange_id))
+    records.authorize(SCOPE, item, "pod-one", exchange_id=third.exchange_id)
+    budget.settle(SCOPE, item, USAGE, exchange_id=third.exchange_id)
+    records.issued(SCOPE, item, "pod-one", evidence(budget, item, third)["manifest.json"], exchange_id=third.exchange_id)
+    saved = records.load(SCOPE, item.id)
+    assert saved is not None and saved.call.phase == "issued"
+    assert budget.summary(SCOPE, item)["possible_dispatches"] == 2
+    assert budget.summary(SCOPE, item)["pending_usage"] == 1
+
+
 @pytest.mark.parametrize("stage", [
     "before_budget", "budget", "budget_read", "budget_conflicts", "authorization", "after_authorization",
 ])
 @pytest.mark.parametrize("committed", [False, True])
-def test_capture_retry_requires_proven_failure_before_dispatch_reservation(
+def test_failed_capture_retries_without_erasing_dispatch_history(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stage: str, committed: bool,
 ) -> None:
     class UncertainState(MemoryState):
@@ -388,10 +428,7 @@ def test_capture_retry_requires_proven_failure_before_dispatch_reservation(
     located = records.locate(SCOPE, original.exchange_id)
     assert located is not None and located[1].phase == "failed"
     retried = records.retry(SCOPE, item, original.exchange_id)
-    if stage in ("before_budget", "budget_read", "budget_conflicts"):
-        assert retried.exchange_id != original.exchange_id and retried.phase == "reserved"
-    else:
-        assert retried.exchange_id == original.exchange_id and retried.phase == "failed"
+    assert retried.exchange_id != original.exchange_id and retried.phase == "reserved"
     summary = budget.summary(SCOPE, item)
     reserved = stage in ("authorization", "after_authorization") or stage == "budget" and committed
     assert summary["possible_dispatches"] == summary["pending_usage"] == int(reserved)
@@ -448,9 +485,7 @@ def test_capture_retries_rejected_budget_writes_but_not_uncertain_writes(
     assert summary["possible_dispatches"] == summary["pending_usage"] == reserved
     s3.mode = "ok"
     retried = records.retry(SCOPE, item, original.exchange_id)
+    assert retried.exchange_id != original.exchange_id and retried.phase == "reserved"
     if mode in ("status-400", "status-403", "status-429"):
-        assert retried.exchange_id != original.exchange_id and retried.phase == "reserved"
         budget.reserve(SCOPE, item, retried.exchange_id, BODY)
         assert budget.summary(SCOPE, item)["possible_dispatches"] == 1
-    else:
-        assert retried.exchange_id == original.exchange_id and retried.phase == "failed"

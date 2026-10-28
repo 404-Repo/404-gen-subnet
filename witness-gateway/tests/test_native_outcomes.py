@@ -15,7 +15,6 @@ from typing import cast
 import openai
 import pytest
 from channel import Channel
-from miner_runtime.accounting import BudgetRejected
 from miner_runtime.runner import run_generation
 from miner_runtime.validator import ReplayWitness, run_replay
 from openai.types.responses import Response
@@ -61,6 +60,8 @@ def outcome_body(outcome: str) -> tuple[int, bytes]:
             response["error"] = {"code": "server_error", "message": "Synthetic failure"}
         if outcome == "incomplete":
             response["incomplete_details"] = {"reason": "max_output_tokens"}
+        if outcome == "embedded-error":
+            first["error"] = {"message": "Synthetic malformed stream"}
         events = [first, {"type": "response." + status, "response": response}]
     return 200, b"".join(b"data: " + json.dumps(event).encode() + b"\n\n" for event in events)
 
@@ -76,6 +77,7 @@ def outcome_body(outcome: str) -> tuple[int, bytes]:
         ("incomplete", False),
         ("http-error", False),
         ("sse-error", True),
+        ("embedded-error", True),
         ("truncated-http", False),
     ],
 )
@@ -194,7 +196,7 @@ def test_native_provider_outcome_is_recorded_and_replays_without_provider_access
 
                 def generate(image: bytes, seed: int, witness: WitnessClient, renderer: None) -> str:
                     observed = []
-                    for _ in range(2):
+                    for _ in range(1 if outcome in ("http-error", "sse-error", "embedded-error", "truncated-http") else 2):
                         try:
                             result = (
                                 witness.create(model="fixture", input="Synthetic fixture", stream=True)
@@ -253,12 +255,9 @@ def test_native_provider_outcome_is_recorded_and_replays_without_provider_access
                     verify=lambda provider, directory: verify("replay", directory, provider=provider),
                 )
                 replay = ReplayWitness(bundle)
-                if outcome in ("http-error", "sse-error", "truncated-http"):
-                    assert generate(fixture.image, 42, replay, None) == expected
-                    with pytest.raises(BudgetRejected, match="unknown usage"):
-                        replay.finish(expected)
-                else:
-                    assert run_replay(generate, fixture.image, 42, replay, None) == expected
+                assert run_replay(generate, fixture.image, 42, replay, None) == expected
+                if outcome in ("http-error", "sse-error", "embedded-error", "truncated-http"):
+                    assert replay.budget.charges == {}
                 if outcome == "structured" and not stream:
                     evidence_prefix = next(
                         k.removesuffix("manifest.json")

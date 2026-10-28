@@ -165,11 +165,12 @@ def test_native_direct_tls_durable_completion_and_exact_recovery(
 
                     def run() -> None:
                         if status != 200:
-                            for stream in (False, True):
-                                with pytest.raises(openai.APIStatusError) as rejected:
-                                    bound.create(stream=stream, model="fixture", input="x" * (1024 * 1024))
-                                assert rejected.value.status_code == status
-                                assert rejected.value.response.content == response_body
+                            with pytest.raises(openai.APIStatusError) as rejected:
+                                bound.create(model="fixture", input="x" * (1024 * 1024))
+                            assert rejected.value.status_code == status
+                            assert rejected.value.response.content == response_body
+                            with pytest.raises(openai.APIStatusError):
+                                witness.resume(exchange_id(witness))
                             return
                         answer = bound.create(model="fixture", input="x" * (1024 * 1024))
                         assert answer.output_text == text
@@ -186,7 +187,7 @@ def test_native_direct_tls_durable_completion_and_exact_recovery(
                     recording = fixture.records.load(fixture.scope, key.id)
                     assert recording is not None
                     call = recording.call
-                    assert call.phase == "issued"
+                    assert call.phase == ("issued" if status == 200 else "failed")
                     assert (
                         fixture.state.get(f"rounds/test-0/{fixture.scope.hotkey}/{call.exchange_id}/response.sse")
                         == response_body

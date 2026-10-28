@@ -24,7 +24,7 @@ from channel import WorkerChannel
 from pod import PodRuntime
 from support import MemoryState
 from test_recording import BODY, PRICING, SCOPE, invocation
-from test_recovery import PROOF, START, evidence, prefix, runtime
+from test_recovery import PROOF, RESPONSE, START, evidence, prefix, runtime
 
 from pod_gateway.budget import Budget
 from pod_gateway.records import CallRecords
@@ -79,7 +79,7 @@ def provider_fixture() -> Iterator[tuple[str, list[bytes]]]:
     class Handler(BaseHTTPRequestHandler):
         def do_POST(self) -> None:
             requests.append(self.rfile.read(int(self.headers["Content-Length"])))
-            response = b"complete captured response"
+            response = RESPONSE
             self.send_response(200)
             self.send_header("Content-Length", str(len(response)))
             self.end_headers()
@@ -256,9 +256,10 @@ def test_sigkill_capture_recovers_without_repeating_a_possible_dispatch(
         elif stage in ("before_authorization", "reserved"):
             assert recovered.phase == ("failed" if retain_spool else "capturing")
         else:
-            assert recovered.phase == "capturing", "An uncertain paid attempt must not become retryable"
+            assert recovered.phase == ("failed" if retain_spool else "capturing")
             assert budget.summary(SCOPE, item)["pending_usage"] == 1
-            assert records.retry(SCOPE, item, call.exchange_id).exchange_id == call.exchange_id
+            retry = records.retry(SCOPE, item, call.exchange_id)
+            assert (retry.exchange_id != call.exchange_id) == retain_spool
         assert recovered.deadline == call.deadline
         assert len(requests) == int(stage in ("active_response", "response_spooled", "response_saved", "manifest_saved", "settled", "issued"))
         assert budget.summary(SCOPE, item)["possible_dispatches"] == int(stage != "before_authorization")

@@ -35,6 +35,7 @@ from witness_client.pods import PodGatewayClient
 
 from pod_gateway.budget import Budget
 from pod_gateway.records import CallRecords
+from pod_gateway.recovery import response_failure
 from pod_gateway.replay import export_bundle
 
 START = "00000000-0000-4000-8000-000000000001"
@@ -67,13 +68,19 @@ class Capture(WitnessClient):
         call = self.records.reserve(SCOPE, key)
         if call.phase == "issued":
             return self.saved_response(call.exchange_id)
+        if call.phase == "failed":
+            call = self.records.retry(SCOPE, key, call.exchange_id)
         assigned = self.records.assign(SCOPE, key, START, "pod")
         assert self.records.claim(SCOPE, key, "pod", assigned.capture_id or "")
         failure = self.failures.pop(key.request_id, "")
         if failure == "before":
             self.records.failed(SCOPE, key, "pod", "BeforeDispatch", exchange_id=call.exchange_id, not_dispatched=True)
             raise WitnessError("Unavailable before dispatch", call.exchange_id, source="gateway", code="capture_failed")
-        self.budget.reserve(SCOPE, key, call.exchange_id, body)
+        history = self.records.load(SCOPE, key.id)
+        self.budget.reserve(
+            SCOPE, key, call.exchange_id, body,
+            failed_exchanges=() if history is None else tuple(history.attempts),
+        )
         self.records.authorize(SCOPE, key, "pod", exchange_id=call.exchange_id)
         self.paid += 1
         if self.gate is not None and key.request_id == 0:
@@ -134,7 +141,13 @@ class Capture(WitnessClient):
         }.items():
             self.state.put(prefix + name, content)
         self.budget.settle(SCOPE, key, usage)
-        self.records.issued(SCOPE, key, "pod", manifest, exchange_id=call.exchange_id)
+        rejected = response_failure(json.loads(manifest), response)
+        if rejected is None:
+            self.records.issued(SCOPE, key, "pod", manifest, exchange_id=call.exchange_id)
+        else:
+            self.records.failed(SCOPE, key, "pod", rejected, exchange_id=call.exchange_id, manifest=manifest)
+            if status == 200:
+                raise WitnessError("Unusable provider response", call.exchange_id, code="capture_failed", source="gateway")
         result = CapturedResponse(call.exchange_id, status, response)
         self.captured[call.exchange_id] = result
         if failure in ("delivery", "timeout"):
@@ -213,7 +226,7 @@ def test_original_failures_replay_even_when_current_delivery_would_succeed(tmp_p
 
 
 @pytest.mark.parametrize("failure", ["provider", "unknown"])
-def test_unknown_usage_is_reproduced_but_cannot_pass_prompt_budget(tmp_path: Path, failure: str) -> None:
+def test_failed_attempt_is_reproduced_without_a_competition_charge(tmp_path: Path, failure: str) -> None:
     live = Capture(tmp_path)
     live.failures[0] = failure
 
@@ -229,9 +242,44 @@ def test_unknown_usage_is_reproduced_but_cannot_pass_prompt_budget(tmp_path: Pat
     expected = run_generation(generate, b"PNG", 42, live, None)
     replay = ReplayWitness(live.export(tmp_path / "bundle"))
     assert generate(b"PNG", 42, replay, None) == expected
-    with pytest.raises(BudgetRejected, match="unknown usage"):
-        replay.finish(expected)
+    replay.finish(expected)
+    assert replay.budget.charges == {}
     assert live.paid == 1
+
+
+@pytest.mark.parametrize("failure", ["unknown", "provider"])
+@pytest.mark.parametrize("asynchronous", [False, True])
+def test_same_request_id_retries_failed_attempt_and_replays_only_successful_charge(
+    tmp_path: Path, failure: str, asynchronous: bool,
+) -> None:
+    pricing = canonical({**json.loads(PRICING), "calls_per_prompt": 1})
+    live = Capture(tmp_path, pricing=pricing)
+    live.failures[0] = failure
+
+    def generate(image: bytes, seed: int, witness: WitnessClient, renderer: None) -> str:
+        try:
+            witness.create(model="fixture", input="image", request_id=0)
+        except openai.APIError:
+            return witness.create(model="fixture", input="image", request_id=0).output_text
+        raise AssertionError("The failed attempt must be visible to caller code")
+
+    async def async_generate(image: bytes, seed: int, witness: AsyncWitnessClient) -> str:
+        try:
+            await witness.create(model="fixture", input="image", request_id=0)
+        except openai.APIError:
+            return (await witness.create(model="fixture", input="image", request_id=0)).output_text
+        raise AssertionError("The failed attempt must be visible to caller code")
+
+    entry = async_generate if asynchronous else generate
+    expected = run_generation(entry, b"PNG", 42, live, None)
+    replay = ReplayWitness(live.export(tmp_path / "bundle"))
+    assert run_replay(entry, b"PNG", 42, replay, None) == expected == "0"
+    assert live.paid == 2 and len(replay.budget.charges) == 1
+    execution = replay.schedule.execution
+    first, second = execution.observations
+    assert first.request == second.request and first.exchange_id != second.exchange_id
+    assert run_generation(entry, b"PNG", 42, live, None) == expected
+    assert live.paid == 2
 
 
 @pytest.mark.parametrize("limit,accepted", [(2, True), (1, False)])

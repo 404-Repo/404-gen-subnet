@@ -21,7 +21,7 @@ from channel import Channel
 from pod_gateway.budget import Budget, BudgetNotReserved
 from pod_gateway.models import Scope, identifier, json_bytes, object_dict
 from pod_gateway.records import Call, CallRecords
-from pod_gateway.recovery import recover_issued
+from pod_gateway.recovery import recover_issued, response_failure
 from pod_gateway.renderer import render_service
 from pod_gateway.selection import Selection
 from pod_gateway.state import WriteUncertain
@@ -223,6 +223,11 @@ class PodRuntime:
                 self.records, self.budget, self.evidence.get, self.scope, invocation, call, self.proof_hash
             )
             if call.phase in ("issued", "failed"):
+                if call.phase == "failed":
+                    self.evidence.put(
+                        f"rounds/{self.scope.round}/{self.scope.hotkey}/{exchange_id}/status.json",
+                        json_bytes({"status": "failed", "error_type": call.failure}),
+                    )
                 self._cleanup(exchange_id)
                 return
             directory = self.spool / exchange_id
@@ -253,8 +258,7 @@ class PodRuntime:
                     )
                 except Exception as error:  # noqa: BLE001 - retain evidence until verification completes
                     metadata, failure = None, type(error).__name__
-                    # A dead process cannot establish how much of a paid response
-                    # was lost. Keep this attempt pending so it cannot be retried.
+                    # Transient verification outages retain the spool for another check.
                     self.evidence.put(
                         f"rounds/{self.scope.round}/{self.scope.hotkey}/{exchange_id}/status.json",
                         json_bytes({
@@ -264,7 +268,6 @@ class PodRuntime:
                     )
                     if not isinstance(error, ValueError):
                         raise
-                    return
             self._finalize(invocation, call, metadata, failure, not_dispatched=not_dispatched)
 
         self._retry_upload(recover)
@@ -352,8 +355,12 @@ class PodRuntime:
                     # An uncertain reservation write can still become durable.
                     not_dispatched = False
                     try:
+                        history = self.records.load(self.scope, invocation.id)
                         self.budget.reserve(
-                            self.scope, invocation, call.exchange_id, body
+                            self.scope, invocation, call.exchange_id, body,
+                            failed_exchanges=() if history is None else tuple(
+                                attempt.exchange_id for attempt in history.attempts.values() if attempt.phase == "failed"
+                            ),
                         )
                     except BudgetNotReserved:
                         not_dispatched = True
@@ -444,7 +451,12 @@ class PodRuntime:
                 recovered = recover_issued(
                     self.records, self.budget, self.evidence.get, self.scope, invocation, current, self.proof_hash
                 )
-                if recovered.phase == "issued":
+                if recovered.manifest_sha256 is not None:
+                    if recovered.phase == "failed":
+                        self.evidence.put(
+                            prefix + "/status.json",
+                            json_bytes({"status": "failed", "error_type": recovered.failure}),
+                        )
                     return
                 self.publish(call.exchange_id, final)
                 manifest = json_bytes(final)
@@ -464,7 +476,17 @@ class PodRuntime:
                     ),
                 )
                 self.budget.settle(self.scope, invocation, final.get("usage"), exchange_id=call.exchange_id)
-                self.records.issued(self.scope, invocation, self.pod_id, manifest, exchange_id=call.exchange_id)
+                rejected = response_failure(final, (directory / "response.sse").read_bytes())
+                if rejected is None:
+                    self.records.issued(self.scope, invocation, self.pod_id, manifest, exchange_id=call.exchange_id)
+                else:
+                    self.records.failed(
+                        self.scope, invocation, self.pod_id, rejected, exchange_id=call.exchange_id, manifest=manifest,
+                    )
+                    self.evidence.put(
+                        prefix + "/status.json",
+                        json_bytes({"status": "failed", "error_type": rejected, "provider_status": final["provider_status"]}),
+                    )
 
             self._retry_upload(issued)
         else:
@@ -476,7 +498,12 @@ class PodRuntime:
                 recovered = recover_issued(
                     self.records, self.budget, self.evidence.get, self.scope, invocation, located[1], self.proof_hash
                 )
-                if recovered.phase == "issued":
+                if recovered.manifest_sha256 is not None:
+                    if recovered.phase == "failed":
+                        self.evidence.put(
+                            prefix + "/status.json",
+                            json_bytes({"status": "failed", "error_type": recovered.failure}),
+                        )
                     return
                 for file in directory.iterdir():
                     if file.name in {
@@ -487,6 +514,8 @@ class PodRuntime:
                         "authorization.json",
                         "handshake.json",
                         "request.json",
+                        "response.sse",
+                        "manifest.json",
                     }:
                         self.evidence.put(
                             prefix + "/" + file.name, file.read_bytes()

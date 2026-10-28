@@ -204,6 +204,50 @@ class PodService:
         )
 
 
+def test_async_failed_capture_allows_same_id_retry(
+    config: WitnessConfig, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        key = Keypair.create_from_uri("//Alice")
+        first, second = str(uuid.uuid4()), str(uuid.uuid4())
+        current: Snapshot | None = None
+
+        async def start(
+            invocation: RequestKey, *, expected_exchange_id: str | None = None, deadline: float | None = None,
+        ) -> Snapshot:
+            nonlocal current
+            if current is None:
+                current = Snapshot(
+                    call=CallView(request=invocation, exchange_id=first, deadline=int(time.time()) + 60,
+                                  phase="capturing", authorized=True),
+                    hotkey=key.ss58_address, session=None,
+                )
+            elif expected_exchange_id == first:
+                current = current.model_copy(deep=True)
+                current.call.exchange_id, current.call.phase = second, "issued"
+            return current
+
+        async def snapshot(identifier: str, **kwargs: object) -> Snapshot:
+            assert current is not None
+            if current.call.exchange_id == first:
+                current.call.phase = "failed"
+            return current
+
+        async def recorded(*args: object, **kwargs: object) -> tuple[object, int, bytes]:
+            return {}, 200, event({"id": "retry", "status": "completed", "output": []})
+
+        async with AsyncWitnessClient(config, hotkey=key, openai_api_key="x" * 80) as witness:
+            monkeypatch.setattr(witness._gateway, "start", start)
+            monkeypatch.setattr(witness._gateway, "snapshot", snapshot)
+            monkeypatch.setattr(witness._gateway, "recorded", recorded)
+            with pytest.raises(openai.APIConnectionError):
+                await witness.create(model="fixture", input="image", request_id=7)
+            assert (await witness.create(model="fixture", input="image", request_id=7)).id == "retry"
+            assert (await witness.create(model="fixture", input="image", request_id=7)).id == "retry"
+
+    asyncio.run(scenario())
+
+
 @pytest.mark.parametrize("mode", ["api", "codex"])
 def test_async_create_stream_request_ids_and_sync_restart_reuse_saved_evidence(
     config: WitnessConfig,

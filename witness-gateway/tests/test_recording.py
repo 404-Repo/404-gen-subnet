@@ -77,7 +77,7 @@ def test_live_usage_has_no_per_prompt_admission_limit() -> None:
 
 
 @pytest.mark.parametrize("authorized", [False, True])
-def test_unknown_dispatch_cannot_retry_or_erase_unknown_usage(authorized: bool) -> None:
+def test_failed_dispatch_retries_without_erasing_unknown_operational_usage(authorized: bool) -> None:
     state = MemoryState()
     records, budget, item = CallRecords(state), Budget(state, PRICING), invocation()
     call = records.reserve(SCOPE, item)
@@ -88,9 +88,14 @@ def test_unknown_dispatch_cannot_retry_or_erase_unknown_usage(authorized: bool) 
         records.authorize(SCOPE, item, "pod", exchange_id=call.exchange_id)
     budget.settle(SCOPE, item, None)
     records.failed(SCOPE, item, "pod", "Interrupted", exchange_id=call.exchange_id)
-    assert records.assign(
+    retried = records.assign(
         SCOPE, item, assigned.start_id or "", "pod", expected_exchange_id=call.exchange_id,
-    ).exchange_id == call.exchange_id
+    )
+    assert retried.exchange_id != call.exchange_id and retried.phase == "assigned"
+    budget.reserve(SCOPE, item, retried.exchange_id, BODY, failed_exchanges=(call.exchange_id,))
+    budget.settle(SCOPE, item, {"input_tokens": 10, "output_tokens": 2}, exchange_id=retried.exchange_id)
+    budget.settle(SCOPE, item, None, exchange_id=call.exchange_id)
+    assert budget.summary(SCOPE, item)["possible_dispatches"] == 2
     assert budget.summary(SCOPE, item)["pending_usage"] == 1
 
 
@@ -130,11 +135,20 @@ def test_expired_unclaimed_assignment_can_resume_without_extending_a_claim(
     assert active.phase == "capturing" and active.deadline == resumed.deadline
 
 
-def test_concurrent_retries_grant_exactly_one_capture_claim() -> None:
+@pytest.mark.parametrize("failed", [False, True])
+def test_concurrent_retries_grant_exactly_one_capture_claim(failed: bool) -> None:
     records = CallRecords(MemoryState())
+    previous = None
+    if failed:
+        call = records.assign(SCOPE, invocation(), "00000000-0000-4000-8000-000000000001", "pod-one")
+        assert records.claim(SCOPE, invocation(), "pod-one", call.capture_id or "")
+        records.authorize(SCOPE, invocation(), "pod-one", exchange_id=call.exchange_id)
+        records.failed(SCOPE, invocation(), "pod-one", "InvalidProviderResponse", exchange_id=call.exchange_id)
+        previous = call.exchange_id
     with ThreadPoolExecutor(max_workers=8) as pool:
         calls = list(pool.map(lambda _: records.assign(
             SCOPE, invocation(), "00000000-0000-4000-8000-000000000001", "pod-one", allow_reassign=True,
+            expected_exchange_id=previous,
         ), range(8)))
     assert len({call.exchange_id for call in calls}) == 1
     assert len({call.capture_id for call in calls}) == 1

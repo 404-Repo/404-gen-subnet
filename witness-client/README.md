@@ -108,12 +108,14 @@ support, buffered until the capture is sealed; it does not expose token timing.
 Background generation and raw SDK transport options are unsupported. Connection
 failures use `openai.APIConnectionError`; an expired wait uses
 `openai.APITimeoutError`. Their cause retains the `WitnessError` and exchange ID.
-An ambiguously dispatched paid request is never automatically repeated.
+The SDK does not automatically repeat a paid request after a provider or capture
+failure. Caller code can retry with the same request and `request_id` once the
+attempt has durably failed; an unfinished capture is joined instead.
 
 A direct `WitnessClient.responses.create()` also works for other work during the
 round's access window. Equal provider/body/`request_id`/subscription-`session_id`
-keys reuse a saved outcome throughout the miner's allocation scope. Use a stable,
-different `request_id` for intentionally fresh inference. It is distinct from the
+keys reuse a saved successful outcome throughout the miner's allocation scope.
+Use a stable, different `request_id` for intentionally fresh inference. It is distinct from the
 generation seed and is not sent to OpenAI as a randomness seed.
 
 ### Async calls
@@ -372,10 +374,13 @@ exchange-scoped R2 URLs and are checked against those hashes. Keep the bucket
 private; an object fetched from an arbitrary CDN URL alone is insufficient.
 
 Use the same gateway, hotkey, provider and canonical request identity.
-Repeating `responses.create()` with the same request and `request_id` retrieves or
-continues waiting for that call, including through a fresh client after losing
-all generated local state. `resume(exchange_id)` retrieves and verifies a saved
-attempt during the access window using the exchange ID from `WitnessError`.
+Repeating `responses.create()` with the same request and `request_id` retrieves a
+saved successful response, joins an unfinished capture, or starts another attempt
+after a durable failure. This also works through a fresh client or replacement
+Pod. Failed attempts retain their own exchange UUID for evidence storage; that
+UUID does not change `request_id` or make the failure a reusable model response.
+`resume(exchange_id)` retrieves and verifies that specific attempt during the
+access window using the exchange ID from `WitnessError`, without starting inference.
 The SDK downloads retained request bytes when needed to verify their identity.
 
 The validator combines host observations with native-verified captures, then supplies retained responses during replay. It matches per-key occurrences, causal delivery order, stream operations and output bytes. The [Pod guide](../witness-gateway/PODS.md) describes verified offline
@@ -387,8 +392,11 @@ The validator checks the frozen per-prompt allowance during replay, using distin
 captured calls consumed by the expected prompt. Reuse within one replay charges
 once; each prompt consuming that call is charged independently. Other round work
 need not be consumed. All input tokens use their full frozen weight, including
-cached input; output includes reasoning once. Unknown usage remains unknown and
-prevents budget acceptance. Proven non-dispatch failures have no paid charge.
+cached input; output includes reasoning once. Operator-recorded failed attempts,
+including provider HTTP errors and unusable responses, consume neither the token
+allowance nor the call cap. Their actual spending remains in the operational
+ledger, with missing usage retained as unknown. Unresolved captures cannot pass
+budget acceptance.
 
 Private provider evidence remains under `rounds/<round>/<hotkey>/<exchange>/`.
 Execution observations belong to the host, separate from those captures.

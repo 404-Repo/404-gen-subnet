@@ -74,7 +74,10 @@ class Budget:
     def charge_key(invocation: RequestKey) -> str:
         return invocation.id
 
-    def reserve(self, scope: Scope, invocation: RequestKey, exchange_id: str, body: bytes) -> None:
+    def reserve(
+        self, scope: Scope, invocation: RequestKey, exchange_id: str, body: bytes, *,
+        failed_exchanges: tuple[str, ...] = (),
+    ) -> None:
         if request_digest(body) != invocation.request_sha256:
             raise BudgetNotReserved("Verified request differs from reserved request hash")
         request = json.loads(body)
@@ -88,8 +91,10 @@ class Budget:
             except Exception as error:
                 raise BudgetNotReserved("Call ledger could not be read") from error
             if base in ledger.charges:
-                # A prior authorization can have released HTTP. Never issue it again.
-                raise BudgetRejected("This call already has a possible dispatch")
+                previous = ledger.charges[base]
+                if previous.exchange_id == exchange_id or previous.exchange_id not in failed_exchanges:
+                    raise BudgetRejected("This call already has a possible dispatch")
+                ledger.charges[previous.exchange_id] = previous
             ledger.charges[base] = Charge(exchange_id=exchange_id, model=model)
             ledger.revision = str(uuid.uuid4())
             try:
@@ -117,7 +122,11 @@ class Budget:
             base = self.charge_key(invocation)
             charge = ledger.charges.get(base)
             if exchange_id is not None and charge is not None and charge.exchange_id != exchange_id:
-                raise BudgetRejected("Settlement belongs to a different capture attempt")
+                charge = ledger.charges.get(exchange_id)
+                if charge is None and normalized is None:
+                    return
+                if charge is None or charge.exchange_id != exchange_id:
+                    raise BudgetRejected("Settlement belongs to a different capture attempt")
             if charge is None:
                 if normalized is not None:
                     raise BudgetRejected("Usage has no reserved dispatch")

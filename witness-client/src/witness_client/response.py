@@ -128,6 +128,11 @@ def completed_response(
     deltas: dict[tuple[int, int], list[str]] = {}
     for value in sse_events(body):
         kind = value.get("type")
+        if kind == "error" or value.get("error"):
+            details: object = value
+            if not isinstance(value.get("error"), dict):
+                details = {"error": value}
+            raise provider_error(200, json.dumps(details).encode())
         key = (value.get("output_index", 0), value.get("content_index", 0))
         if kind == "response.output_text.delta":
             deltas.setdefault(key, []).append(value["delta"])
@@ -146,11 +151,6 @@ def completed_response(
             completed = value["response"]
             if completed.get("status") != kind.removeprefix("response."):
                 raise ValueError("Inconsistent terminal response status")
-        elif kind == "error":
-            details = (
-                value if isinstance(value.get("error"), dict) else {"error": value}
-            )
-            raise provider_error(200, json.dumps(details).encode())
     if completed is None:
         raise ValueError("Missing completed OpenAI response")
     if not completed.get("output") and items:

@@ -60,7 +60,7 @@ class ReplayWitness(ObservedWitness):
         metadata = json.loads(manifest)
         if (
             call.request != key
-            or call.phase != "issued"
+            or call.phase not in ("issued", "failed")
             or hashlib.sha256(manifest).hexdigest() != call.manifest_sha256
             or metadata.get("response_sha256") != hashlib.sha256(response).hexdigest()
             or metadata.get("request_key") != key.model_dump()
@@ -81,6 +81,8 @@ class ReplayWitness(ObservedWitness):
             call = CallView.model_validate(item["call"])
             if call.request != entry.request:
                 raise ReplayMismatch("Accounting evidence belongs to a different call")
+            if call.phase == "failed":
+                continue
             self.budget.consume(
                 entry.request.id,
                 item["model"],

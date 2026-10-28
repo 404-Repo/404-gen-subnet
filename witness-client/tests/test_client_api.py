@@ -237,7 +237,7 @@ def test_pod_calls_bound_preparation_and_capture_concurrency(
 
 
 @pytest.mark.parametrize("authorized, not_dispatched", [(False, False), (True, False), (True, True)])
-def test_pod_failed_capture_without_non_dispatch_proof_remains_unresolved(
+def test_pod_failed_capture_allows_same_id_retry(
     config: WitnessConfig, monkeypatch: pytest.MonkeyPatch, authorized: bool, not_dispatched: bool,
 ) -> None:
     key = Keypair.create_from_mnemonic(Keypair.generate_mnemonic())
@@ -246,12 +246,20 @@ def test_pod_failed_capture_without_non_dispatch_proof_remains_unresolved(
     snapshots: list[str] = []
     current: Snapshot | None = None
 
-    def start(invocation: RequestKey) -> Snapshot:
+    def start(
+        invocation: RequestKey, *, expected_exchange_id: str | None = None, deadline: float | None = None,
+    ) -> Snapshot:
         nonlocal current
+        if current is not None:
+            if expected_exchange_id == identifier:
+                current = current.model_copy(deep=True)
+                current.call.exchange_id = str(uuid.uuid4())
+                current.call.phase = "issued"
+            return current
         current = Snapshot(
             call=CallView(
                 request=invocation, exchange_id=identifier,
-                deadline=1002, phase="failed", authorized=authorized, not_dispatched=not_dispatched,
+                deadline=1002, phase="capturing", authorized=authorized, not_dispatched=not_dispatched,
             ),
             hotkey=key.ss58_address, session=None,
         )
@@ -260,6 +268,8 @@ def test_pod_failed_capture_without_non_dispatch_proof_remains_unresolved(
     def snapshot(exchange_id: str, **kwargs: object) -> Snapshot:
         snapshots.append(exchange_id)
         assert current is not None
+        if current.call.exchange_id == identifier:
+            current.call.phase = "failed"
         return current
 
     def sleep(seconds: float) -> None:
@@ -284,9 +294,13 @@ def test_pod_failed_capture_without_non_dispatch_proof_remains_unresolved(
         assert connection.value.__cause__.code == "capture_failed"
         with pytest.raises(WitnessError) as error:
             witness.resume(identifier)
-        assert error.value.code == "capture_in_progress"
+        assert error.value.code == "capture_failed"
         assert error.value.exchange_id == identifier and error.value.source == "gateway"
-        assert len(snapshots) > 1 and set(snapshots) == {identifier}
+        monkeypatch.setattr(witness._gateway, "recorded", lambda *args, **kwargs: (
+            cast(Session, {}), 200, event({"id": "retry", "status": "completed", "output": []}),
+        ))
+        assert witness.create(model="fixture", input="image").id == "retry"
+        assert witness.create(model="fixture", input="image").id == "retry"
 
 
 @pytest.mark.parametrize("recovered", [False, True])

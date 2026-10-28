@@ -8,13 +8,14 @@ from typing import cast
 
 import openai
 import pytest
-from miner_runtime.accounting import BudgetRejected
 from miner_runtime.runner import run_generation
 from miner_runtime.validator import ReplayWitness, run_replay
 from openai.types.responses import Response
+from test_recording import PRICING, SCOPE
 from test_replay import Capture
 from witness_client import WitnessClient
-from witness_client.calls import canonical
+from witness_client.calls import RequestKey, canonical
+from witness_client.client import CapturedResponse
 from witness_client.response import ModelStream
 
 
@@ -79,10 +80,66 @@ def test_retained_outcomes_replay_exact_events_errors_text_and_usage(
 
     expected = run_generation(generate, b"PNG", 42, live, None)
     replay = ReplayWitness(live.export(tmp_path / "bundle"))
+    assert run_replay(generate, b"PNG", 42, replay, None) == expected
     if outcome in ("missing-usage", "sse-error"):
-        assert generate(b"PNG", 42, replay, None) == expected
-        with pytest.raises(BudgetRejected, match="unknown usage"):
-            replay.finish(expected)
-    else:
-        assert run_replay(generate, b"PNG", 42, replay, None) == expected
+        assert replay.budget.charges == {}
     assert live.paid == 1
+
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("error_event", ["response.created", "response.completed"])
+def test_embedded_stream_error_allows_same_id_retry_without_charging_the_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stream: bool, error_event: str,
+) -> None:
+    pricing = canonical({**json.loads(PRICING), "calls_per_prompt": 1})
+    live = Capture(tmp_path, pricing=pricing)
+    usage = {"input_tokens": 10, "output_tokens": 2, "total_tokens": 12}
+    events: list[dict[str, object]] = [
+        {"type": "response.created", "response": {"id": "fixture", "status": "in_progress"}},
+        {"type": "response.completed", "response": {
+            "id": "fixture", "status": "completed", "output": [], "usage": usage,
+        }},
+    ]
+    for event in events:
+        if event["type"] == error_event:
+            event["error"] = {"message": "Fixture malformed stream"}
+    failed_response = b"".join(b"data: " + canonical(event) + b"\n\n" for event in events)
+    live.outcome = (200, failed_response, usage)
+    capture_response = live._capture
+
+    def capture_once(key: RequestKey, body: bytes, session_id: str | None) -> CapturedResponse:
+        try:
+            return capture_response(key, body, session_id)
+        finally:
+            live.outcome = None
+
+    monkeypatch.setattr(live, "_capture", capture_once)
+
+    def generate(image: bytes, seed: int, witness: WitnessClient, renderer: None) -> str:
+        try:
+            result = (
+                witness.create(model="fixture", input="image", request_id=7, stream=True)
+                if stream
+                else witness.create(model="fixture", input="image", request_id=7)
+            )
+            if stream:
+                list(cast(ModelStream, result))
+        except openai.APIError:
+            return witness.create(model="fixture", input="image", request_id=7).output_text
+        raise AssertionError("The malformed response must fail")
+
+    expected = run_generation(generate, b"PNG", 42, live, None)
+    assert expected == "7"
+    assert live.create(model="fixture", input="image", request_id=7).output_text == expected
+    located = live.records.locate(SCOPE, next(iter(live.captured)))
+    assert located is not None
+    key, _call = located
+    recording = live.records.load(SCOPE, key.id)
+    assert recording is not None and len(recording.attempts) == 1
+    failed = next(iter(recording.attempts.values()))
+    assert failed.phase == "failed" and failed.failure == "InvalidProviderResponse"
+    assert live.state.get(f"rounds/{SCOPE.round}/{SCOPE.hotkey}/{failed.exchange_id}/response.sse") == failed_response
+    assert live.budget.summary(SCOPE, key)["known_credits"] == "4.0"
+    replay = ReplayWitness(live.export(tmp_path / "bundle"))
+    assert run_replay(generate, b"PNG", 42, replay, None) == expected
+    assert live.paid == 2 and len(replay.budget.charges) == 1

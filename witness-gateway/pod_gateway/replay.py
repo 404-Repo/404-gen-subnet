@@ -16,6 +16,7 @@ from witness_client.calls import request_digest
 
 from .models import Scope, json_bytes
 from .records import CallRecords
+from .recovery import response_failure
 from .server import Evidence
 
 Verify = Callable[[str, Path], dict[str, object]]
@@ -87,7 +88,7 @@ def export_bundle(
                 if content is not None:
                     (directory / name).write_bytes(content)
             model, usage = "", None
-            if call.phase == "issued":
+            if call.manifest_sha256 is not None:
                 manifest_bytes = (directory / "manifest.json").read_bytes()
                 manifest = json.loads(manifest_bytes)
                 request, response = (directory / "request.json").read_bytes(), (directory / "response.sse").read_bytes()
@@ -120,6 +121,9 @@ def export_bundle(
                 ):
                     raise ValueError("TLS verification differs from retained outcome")
                 model, usage = json.loads(request)["model"], verified.get("usage")
+                rejected = response_failure(manifest, response)
+                if rejected is not None:
+                    call = call.model_copy(update={"phase": "failed", "failure": rejected})
             elif entry.failure is None:
                 raise ValueError("Successful observation has no issued capture")
             captures[call.exchange_id] = {

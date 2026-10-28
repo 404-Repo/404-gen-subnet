@@ -452,21 +452,22 @@ billable features need explicit evidence and accounting before being allowed.
 
 ### Calls and failures
 
-Every distinct request dispatched to OpenAI counts once, including HTTP 429 and
-other provider rejections. Sending another request after an error counts again if
-dispatched. Recovering or downloading the same exchange does not add a call or
-charge its tokens again.
+Each distinct usable captured call consumed by a prompt counts once. Recovering
+or downloading the same successful exchange does not add a call or charge its
+tokens again. Provider HTTP errors and unusable responses consume neither the
+competition call cap nor its token allowance; caller code can retry with the same
+request and `request_id` after the attempt has durably failed.
 
 Proven pre-dispatch failures, worker allocation, proof setup, polling, rendering,
 uploads and evidence reads are not model calls. An allocated exchange ID alone
-does not prove dispatch. Confirmed dispatches count even when final token usage
-is unknown; unknown dispatch state stays unresolved.
+does not prove dispatch. Operational accounting retains every possible dispatch,
+including failed attempts, separately from competition allowances.
 
-Charge all verified final input/output usage, even for failed or discarded work.
-Unknown usage stays pending, with a known subtotal and no claimed remaining
-balance. A timeout does not prove zero usage. Settlement rules for proven unbilled
-rejections and unresolved exchanges are still open. A known limit breach remains
-a breach while another exchange is unresolved.
+Charge verified final input/output usage from usable responses, including
+discarded candidates and typed failed/incomplete Responses with verified usage.
+Physical usage missing from a failed attempt stays unknown in the operational
+ledger. An unresolved capture prevents budget acceptance; a durably failed attempt
+does not. A known limit breach remains a breach while another exchange is unresolved.
 
 The runtime assembles accounting automatically; miners do not build a ledger.
 Budget checking may happen during validation, without a realtime budget service.
@@ -491,16 +492,17 @@ has no live inference access. Calls, their order and final JavaScript bytes or
 The execution host keeps witness observations outside miner scratch space. Logical
 model calls are identified by provider, canonical request body, `request_id` and
 optional subscription routing header inside the authenticated miner/round scope.
-Identical keys reuse a captured outcome across prompts; generation seed is not a
-model-call identifier or an OpenAI randomness seed. Causal entry/delivery order
+Identical keys reuse a successful captured outcome across prompts and Pod
+replacements; generation seed is not a model-call identifier or an OpenAI randomness
+seed. Causal entry/delivery order
 and per-key occurrences reproduce visible results, failures and stream use without
 using a global ordinal as the logical request identity.
 
 The validator attributes budget by executing the expected prompt. Reuse of one
 captured call inside that replay charges once. A different prompt consuming the
 same call is independently charged the full verified cost. Unrelated captured work
-need not be consumed. Known paid failures count; missing usage remains unknown and
-cannot pass budget acceptance. Proven non-dispatch has no paid charge. The live
+need not be consumed. Durably failed provider/capture attempts are exempt from
+competition allowances; unresolved captures cannot pass budget acceptance. The live
 witness permits other work during the round's access window and does not enforce
 prompt labels or a prompt-hash allowlist.
 
@@ -511,9 +513,11 @@ own reproducible outcomes. The witness helpers do not implement the sandbox,
 renderer replay or control arbitrary Python scheduling. These remain requirements
 of the complete runtime described here, not evidence of its deployment.
 
-Recovery joins ambiguously dispatched calls and permits replacement only after
-proven non-dispatch. A process restart restores saved observations; a top-level
-aborted attempt retains its trace separately and can retry using saved calls.
+Recovery joins unfinished captures. A durably failed attempt permits a caller
+retry with the same request ID and a new internal exchange UUID for its evidence.
+Failed response bytes and the failure reason remain in R2 for diagnostics and
+are not reused as a model response. A process restart restores saved observations;
+a top-level aborted attempt retains its trace separately and can retry using saved calls.
 Completed executions keep their original visible errors even if a later delivery
 would succeed. Provider HTTP failures use SDK exceptions; failed/incomplete
 Responses remain typed objects. Infrastructure failures remain separate and can

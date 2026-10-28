@@ -5,10 +5,23 @@ import json
 from collections.abc import Callable
 
 from witness_client.calls import RequestKey, request_digest
+from witness_client.response import completed_response
 
 from .budget import Budget
 from .models import Scope, object_dict
 from .records import Call, CallRecords, RecordingConflict
+
+
+def response_failure(metadata: dict[str, object], response: bytes) -> str | None:
+    if metadata.get("provider_status") != 200:
+        return "ProviderHTTPError"
+    if metadata.get("usage") is None:
+        return "InvalidProviderResponse"
+    try:
+        completed_response(response, raise_failed=False)
+    except Exception:  # noqa: BLE001 - unusable provider output is retained as a failed attempt
+        return "InvalidProviderResponse"
+    return None
 
 
 def recover_issued(
@@ -55,7 +68,15 @@ def recover_issued(
             return call
     # Both writes are idempotent. A restart between them repeats settlement, never
     # provider inference, and issued still means accounting and evidence are durable.
+    failure = response_failure(metadata, response)
     budget.settle(scope, invocation, metadata.get("usage"), exchange_id=call.exchange_id)
     assert call.pod_id is not None
-    records.issued(scope, invocation, call.pod_id, manifest, exchange_id=call.exchange_id)
-    return call.model_copy(update={"phase": "issued", "manifest_sha256": hashlib.sha256(manifest).hexdigest()})
+    if failure is None:
+        records.issued(scope, invocation, call.pod_id, manifest, exchange_id=call.exchange_id)
+    else:
+        records.failed(scope, invocation, call.pod_id, failure, exchange_id=call.exchange_id, manifest=manifest)
+    return call.model_copy(update={
+        "phase": "issued" if failure is None else "failed",
+        "failure": failure,
+        "manifest_sha256": hashlib.sha256(manifest).hexdigest(),
+    })

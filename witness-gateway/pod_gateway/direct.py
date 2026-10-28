@@ -136,7 +136,7 @@ class Witness:
         )
         session = self.session(invocation, call) if call.phase == "assigned" else None
         completion = (
-            await asyncio.to_thread(self.completion, scope, invocation, call) if call.phase == "issued" else None
+            await asyncio.to_thread(self.completion, scope, invocation, call) if call.manifest_sha256 is not None else None
         )
         return {
             "call": call.model_dump(exclude={"capture_id"}),
@@ -166,9 +166,7 @@ class Witness:
             if call.request != invocation:
                 raise RecordingConflict("Call identity differs")
             if call.phase in ("issued", "capturing") or (
-                call.phase == "failed" and (
-                    expected != call.exchange_id or call.authorized or not call.not_dispatched
-                )
+                call.phase == "failed" and expected != call.exchange_id
             ):
                 return await self._call_response(scope, invocation, call)
         if time.time() >= self.round_end:

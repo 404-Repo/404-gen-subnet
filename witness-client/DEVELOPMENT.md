@@ -36,7 +36,9 @@ an SDK `Response` by default or buffered typed events for `stream=True`. Provide
 HTTP errors use SDK exceptions; failed/incomplete Responses remain objects.
 The client polls unfinished calls internally. Infrastructure failures use SDK
 connection/timeout errors with the original `WitnessError` as their cause.
-`request_id` selects fresh capture identity, and optional subscription `session_id`
+`request_id` distinguishes logical calls; retries keep the same value. A saved
+successful response is reused, an unfinished attempt is joined, and a durably
+failed attempt permits a new capture. Optional subscription `session_id`
 is a verified routing header. Background generation is rejected. Subscription
 normalization forces `store=false`. Request bodies are bounded to 8 MiB.
 

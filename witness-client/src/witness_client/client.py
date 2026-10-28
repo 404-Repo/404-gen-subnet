@@ -372,12 +372,14 @@ class WitnessClient(_ClientState):
                 or snapshot.call.request.provider != self._mode
             ):
                 raise WitnessError("Witness recording differs", identifier, code="invalid_recording")
-            if snapshot.call.phase == "issued":
+            if snapshot.call.manifest_sha256 is not None:
                 _session, status, response = self._gateway.recorded(
                     snapshot.call.request, snapshot.call, self._prover.verifying_key_sha256,
                 )
+                if snapshot.call.phase == "failed" and status == 200:
+                    raise WitnessError("Unusable provider response", identifier, code="capture_failed", source="gateway")
                 return CapturedResponse(identifier, status, response)
-            if snapshot.call.phase == "failed" and snapshot.call.not_dispatched and not snapshot.call.authorized:
+            if snapshot.call.phase == "failed":
                 raise WitnessError(
                     "Recorded witness capture failed", identifier, code="capture_failed", source="gateway",
                 )
@@ -442,6 +444,10 @@ class WitnessClient(_ClientState):
         raw_response: bytes | None = None
         try:
             snapshot = self._gateway.start(key)
+            if snapshot.call.phase == "failed" and (
+                snapshot.call.authorized or not snapshot.call.not_dispatched
+            ):
+                snapshot = self._gateway.start(key, expected_exchange_id=snapshot.call.exchange_id)
             identifier = snapshot.call.exchange_id
             identify_exchange(identifier)
             if (
@@ -574,7 +580,7 @@ class WitnessClient(_ClientState):
                     snapshot = self._gateway.snapshot(identifier, deadline=deadline)
                     if snapshot.call.phase != "issued":
                         time.sleep(min(0.5, max(0, deadline - time.monotonic())))
-            if snapshot.call.phase == "failed":
+            if snapshot.call.phase == "failed" and snapshot.call.manifest_sha256 is None:
                 raise WitnessError(
                     "Recorded witness capture failed",
                     identifier,
@@ -588,6 +594,8 @@ class WitnessClient(_ClientState):
                 request=body,
                 raw_response=raw_response,
             )
+            if snapshot.call.phase == "failed" and status == 200:
+                raise WitnessError("Unusable provider response", identifier, code="capture_failed", source="gateway")
             return CapturedResponse(identifier, status, response)
         except WitnessError as error:
             error.exchange_id = error.exchange_id or identifier

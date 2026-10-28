@@ -156,8 +156,9 @@ an object with `provider`, the normalized request-body `request_sha256`,
 returns `202 Accepted` with
 the same durable exchange, a `Location: /v1/calls/<exchange_id>` header and a
 `Retry-After` hint. An assigned call includes its proof/capture WebSocket session;
-HTTP acceptance alone cannot authorize a provider request. A completed call
-returns `200` with its saved completion metadata, including provider failures.
+HTTP acceptance alone cannot authorize a provider request. A sealed attempt
+returns `200` with its completion metadata, including evidence of provider errors.
+Its call phase distinguishes a reusable response from a failed attempt.
 An expired unclaimed assignment can renew its deadline for the same exchange,
 fencing its previous claim token. Claimed captures retain their original deadline.
 `GET /v1/calls/<exchange_id>` returns the current snapshot. The supplied client's
@@ -174,18 +175,21 @@ match the reserved key before any billable HTTP bytes leave. Frozen model/tier
 eligibility remains enforced; live per-prompt admission is absent.
 
 Authorization and a possible-dispatch ledger entry become durable before release.
-A missing acknowledgement can mean dispatch occurred. It never permits a fresh
-paid request. Recovery finalizes retained ciphertext or joins the same exchange;
-an unresolved paid attempt keeps unknown usage and its retained spool. Losing
-unuploaded spool bytes can prevent completion. Only durable non-dispatch evidence
-permits an internal replacement attempt; earlier attempts remain addressable.
-To recover setup, the same `POST /v1/calls` body includes `expected_exchange_id`.
+A missing acknowledgement can mean dispatch occurred. Recovery finalizes retained
+ciphertext or joins the same exchange; an unresolved paid attempt keeps unknown
+usage and its retained spool. Losing unuploaded spool bytes can prevent completion.
+A durably failed attempt permits a caller retry with the same logical request and
+`request_id`; earlier attempts remain addressable for diagnostics and replay.
+The same `POST /v1/calls` body includes `expected_exchange_id` for replacement.
 The Pod atomically creates and assigns a replacement only when that exchange is
-still current, durably failed, proven undispatched and unauthorized. Delayed or
-duplicate recovery requests return the current attempt without replacing it.
-The client allows two such replacements per `create()`, with one/two-second delays,
-within the same capture/recovery wait window.
-No inference retry follows a provider rejection or an ambiguously dispatched call.
+still current and durably failed. Delayed or duplicate replacement requests return
+the current attempt without replacing it. A replacement has a new exchange UUID
+for its evidence, with the same logical key. Successful saved responses remain
+reusable through client restarts and Pod replacement without another inference.
+The client automatically allows two proven undispatched setup replacements per
+`create()`, with one/two-second delays within the same wait window. Provider and
+capture failures return to caller code; a subsequent `create()` retries the same
+request ID. An in-flight capture remains joined until its outcome is known.
 
 The worker captures independently of client delivery and saves the response,
 verified usage, manifest and settlement before issuing a result. Delivery outages
@@ -224,11 +228,13 @@ calls consumed by that execution. Repeated use of one retained call in a replay
 is charged once. Each different prompt consuming the same retained call is
 independently charged its full verified cost; reuse does not transfer allowance.
 
-A proven pre-dispatch failure has no paid dispatch charge. A provider failure or
-lost delivery after possible dispatch counts once and needs verified usage.
-Missing usage remains unknown and prevents budget acceptance, even for HTTP
-rejections. Exactly the frozen call/credit limit is accepted; exceeding either
-is rejected. Pricing uses Decimal arithmetic, full input weight including cached
+A durably failed attempt, including a provider HTTP error or unusable response,
+consumes neither the competition call cap nor its token allowance. Failed response
+bytes and their failure reason remain under that attempt's exchange UUID in R2;
+they are not a reusable successful response. The operational dispatch ledger
+retains actual known spending and unknown usage separately. An unresolved capture
+still prevents budget acceptance. Exactly the frozen call/credit limit is accepted;
+exceeding either is rejected. Pricing uses Decimal arithmetic, full input weight including cached
 tokens, output/reasoning once, and the existing long-context tier. Failed and
 discarded candidates count if their calls were consumed. Replay has no inference
 client and never appends evidence to satisfy missing work.
@@ -660,8 +666,9 @@ The exporter reads retained evidence and rechecks the credential/TLS proof using
 the authorization snapshot, sealed certificate time and final ciphertext. It
 compares the actual request, response, status, routing header and usage. Failed
 infrastructure observations retain their operator call snapshot/partial evidence;
-they cannot invent a provider result. Unknown usage can be exported and replayed,
-but cannot pass prompt budget acceptance. `miner_runtime.validator.ReplayWitness(bundle)`
+they cannot invent a provider result. Failed attempts can be exported and replayed
+without a competition charge, even when physical usage is unknown. Unresolved
+captures cannot pass prompt budget acceptance. `miner_runtime.validator.ReplayWitness(bundle)`
 has no network, prover or inference client. Supply it to
 `miner_runtime.validator.run_replay` with the expected frozen
 image, seed, submitted code and reproducible renderer.
