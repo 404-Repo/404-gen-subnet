@@ -1,19 +1,22 @@
 {
   "distribution": "404-witness-client",
   "import_package": "witness_client",
-  "version": "0.2.14",
+  "version": "0.2.15",
   "status": "built and verified stable release; registry publication pending",
-  "source_commit": "6010e3c7d1268cb9f36c1ba0ed2af723617e61cf",
-  "source_snapshot": "clean git archive",
-  "release_tag": "witness-client-v0.2.14",
-  "release_tag_scope": "The release tag adds only release manifests to source_commit; package and build inputs are identical.",
+  "source_commit": "d63a15da1cf73dbfabf7ae275597ddea7344a301",
+  "source_snapshot": "clean git archive of annotated source tag",
+  "source_archive_sha256": "89a1163d17ebb9e29c1f6bf5a517841e51d24639ba1100507f15ffcd630c7ebc",
+  "release_tag": "witness-client-v0.2.15",
+  "release_tag_object": "b6647b273134f9d0c70c31c004ea80600e31fe87",
+  "release_tag_scope": "Annotated tag pins source_commit exactly. This release manifest is recorded on RC after the artifact checks.",
+  "implementation_squash_commit": "67040d1cac2d6f74f60736b86ab280ff546b8dcb",
   "supported_protocols": [
     2
   ],
   "native_proof_abi": 2,
   "proof_key_sha256": "6478059e4ad0d39e8c157c76cea9c6dd777c2ab5143cf8694876094facf39b16",
   "proof_parameters_source": {
-    "source_commit": "6010e3c7d1268cb9f36c1ba0ed2af723617e61cf",
+    "source_commit": "d63a15da1cf73dbfabf7ae275597ddea7344a301",
     "path": "witness-server/verifier/params",
     "included_in_wheel": false
   },
@@ -33,6 +36,9 @@
   },
   "native_builder_image": "golang:1.27.3-bookworm@sha256:972b4110ba0f47539a975c31e52c64765e1ff19f2d74469ae4a595c6676e80a5",
   "python_builder_image": "python:3.11-slim-bookworm@sha256:a36c24f9cbdf4fd0f52d67f0823eeac19c2028c637cecc392d97f980d4fec56b",
+  "package_build_image": "sha256:338ade69d8f1dceff3ee4c528bce59d1773e5dca404bf48f78cfec371ebacf8d",
+  "dockerfile_sha256": "2a2ab5e53566763251fc90d05fc19d3a3cb7d26dbbdaeea2037f092b52901088",
+  "build_host": "Darwin arm64; Docker linux/amd64 emulation",
   "platform": "Linux x86_64, glibc 2.34+, Python 3.11+; base miner requires Python 3.13",
   "native_library_sha256": "17d5473f4f2e1581c088124672bd26bbd4dc02ca48bbf89af687164b80b1e9cb",
   "native_go_version": "go1.27.3",
@@ -62,8 +68,8 @@
   ],
   "packages": {
     "404-witness-client": {
-      "version": "0.2.14",
-      "filename": "404_witness_client-0.2.14-py3-none-manylinux_2_34_x86_64.whl",
+      "version": "0.2.15",
+      "filename": "404_witness_client-0.2.15-py3-none-manylinux_2_34_x86_64.whl",
       "requires_dist": [
         "404-renderer-client<0.2,>=0.1.4",
         "tlslite-ng<0.9,>=0.8.2",
@@ -77,7 +83,8 @@
         "types-setuptools<85,>=84.0.0.20260812; extra == \"dev\"",
         "pytest<10,>=9.0.3; extra == \"dev\""
       ],
-      "license_expression": "MIT AND Apache-2.0 AND BSD-3-Clause AND BSD-1-Clause AND SunPro AND LicenseRef-Go-Cephes"
+      "license_expression": "MIT AND Apache-2.0 AND BSD-3-Clause AND BSD-1-Clause AND SunPro AND LicenseRef-Go-Cephes",
+      "source_commit": "d63a15da1cf73dbfabf7ae275597ddea7344a301"
     },
     "404-renderer-client": {
       "version": "0.1.4",
@@ -89,7 +96,9 @@
         "mypy==1.18.2; extra == \"dev\"",
         "build==1.3.0; extra == \"dev\""
       ],
-      "license_expression": "MIT"
+      "license_expression": "MIT",
+      "source_commit": "6010e3c7d1268cb9f36c1ba0ed2af723617e61cf",
+      "artifact_source": "Unchanged wheel retained from release 0.2.14."
     },
     "404-miner-runtime": {
       "version": "0.1.2",
@@ -97,21 +106,23 @@
       "requires_dist": [
         "404-witness-client<0.3,>=0.2.14"
       ],
-      "license_expression": "MIT"
+      "license_expression": "MIT",
+      "source_commit": "6010e3c7d1268cb9f36c1ba0ed2af723617e61cf",
+      "artifact_source": "Unchanged wheel retained from release 0.2.14."
     }
   },
   "files": {
-    "404_witness_client-0.2.14-py3-none-manylinux_2_34_x86_64.whl": {
-      "sha256": "c585ff526df2a271523f2b8a8efd9b6e33395aa27cdab185ccb76388ab2756b2",
-      "bytes": 8079591
+    "404_miner_runtime-0.1.2-py3-none-any.whl": {
+      "sha256": "c21cc062da3447c94d991e1e279fd9adfaecf18f1e6e02ca4f203520d9407c14",
+      "bytes": 10690
     },
     "404_renderer_client-0.1.4-py3-none-any.whl": {
       "sha256": "35b1b77efe479a18713a0d817bd60749089cc7d0725c1738edbbcd8caccaa4fa",
       "bytes": 13575
     },
-    "404_miner_runtime-0.1.2-py3-none-any.whl": {
-      "sha256": "c21cc062da3447c94d991e1e279fd9adfaecf18f1e6e02ca4f203520d9407c14",
-      "bytes": 10690
+    "404_witness_client-0.2.15-py3-none-manylinux_2_34_x86_64.whl": {
+      "sha256": "8c008e61282217bf96a2af3d4148dfc4019f5e8bfaebfc5b586fdb635ee72fbb",
+      "bytes": 8080735
     }
   },
   "tested_linux_environments": {
@@ -134,8 +145,10 @@
         "auditwheel": "6.8.2",
         "patchelf": "0.19.1.0",
         "pyproject_hooks": "1.3.3",
-        "cryptography": "50.0.2",
         "404-renderer-client": "0.1.4",
+        "404-witness-client": "0.2.15",
+        "404-miner-runtime": "0.1.2",
+        "cryptography": "50.0.2",
         "pluggy": "1.7.0",
         "openai": "3.40.0",
         "ecdsa": "0.19.2",
@@ -162,10 +175,13 @@
         "httpcore": "1.0.9",
         "truststore": "0.10.5",
         "h11": "0.16.0",
-        "404-miner-runtime": "0.1.2",
-        "404-witness-client": "0.2.14",
         "pydantic_core": "2.50.1",
         "sniffio": "1.3.1"
+      },
+      "module_paths": {
+        "witness_client": "/venv/lib/python3.11/site-packages/witness_client/__init__.py",
+        "renderer_client": "/venv/lib/python3.11/site-packages/renderer_client/__init__.py",
+        "miner_runtime": "/venv/lib/python3.11/site-packages/miner_runtime/__init__.py"
       }
     },
     "python3.13": {
@@ -175,6 +191,8 @@
         "glibc",
         "2.36"
       ],
+      "native_abi": 2,
+      "proof_key_sha256": "6478059e4ad0d39e8c157c76cea9c6dd777c2ab5143cf8694876094facf39b16",
       "environment": {
         "cryptography": "50.0.2",
         "404-renderer-client": "0.1.4",
@@ -209,70 +227,89 @@
         "h11": "0.16.0",
         "404-miner-runtime": "0.1.2",
         "loguru": "0.7.3",
-        "404-witness-client": "0.2.14",
         "pydantic_core": "2.50.1",
         "sniffio": "1.3.1",
-        "aiofiles": "25.1.0"
+        "aiofiles": "25.1.0",
+        "404-witness-client": "0.2.15"
+      },
+      "module_paths": {
+        "witness_client": "/wheel-env/lib/python3.13/site-packages/witness_client/__init__.py",
+        "renderer_client": "/wheel-env/lib/python3.13/site-packages/renderer_client/__init__.py",
+        "miner_runtime": "/wheel-env/lib/python3.13/site-packages/miner_runtime/__init__.py"
       }
     }
   },
   "validation": {
     "date": "2026-10-28",
-    "artifact_build": "witness-client/Dockerfile builds all three wheels; auditwheel repair/show validates the witness manylinux_2_34_x86_64 wheel",
-    "artifact_integrity": "Wheel RECORD hashes, packaged Python source, py.typed, dependency metadata and license files checked against source_commit",
-    "native_library": "Installed wheel loads ABI 2, authenticates the pinned proof parameters and generates a synthetic credential proof; go version -m reports go1.27.3",
+    "artifact_build": "witness-client/Dockerfile and its pinned images; auditwheel repair/show validates the manylinux_2_34_x86_64 witness wheel",
+    "matching_packages": "The renderer 0.1.4 and optional miner-runtime 0.1.2 release wheels are retained byte-for-byte; these exact files were installed during verification.",
+    "artifact_integrity": "Every wheel RECORD hash, all 22 packaged Python/type members, dependency metadata and license files checked against the clean source tag archive",
+    "native_library": "Installed wheel loads ABI 2 and authenticates the pinned proof parameters; existing proof tests generate and verify synthetic credential proofs. Packaged native bytes match release 0.2.14 and report Go 1.27.3.",
     "native_go_tests": {
-      "command": "GOTOOLCHAIN=local GOMAXPROCS=2 GOMEMLIMIT=768MiB go test ./...",
+      "command": "GOTOOLCHAIN=local GOPROXY=off GOMAXPROCS=2 GOMEMLIMIT=768MiB go test ./...",
       "status": "passed",
-      "network": "disabled"
+      "network": "disabled",
+      "source": "d63a15da1cf73dbfabf7ae275597ddea7344a301"
+    },
+    "strict_type_check": {
+      "command": "python -m mypy src tests setup.py build_wheel.py",
+      "status": "passed",
+      "source_files": 41
     },
     "installed_wheel_tests": {
       "network": "disabled during execution",
-      "pythonpath": "No source-package paths; miner-reference tests add only their own unbundled reference code",
+      "pythonpath": "Installed packages only; miner-reference tests add only their unbundled reference code",
       "python3.11": {
+        "pip-check": {
+          "exit_code": 0
+        },
         "witness": {
-          "passed": 391,
-          "warnings": 1
+          "exit_code": 0,
+          "passed": 416
         },
         "renderer": {
+          "exit_code": 0,
           "passed": 61,
           "skipped": 2
         },
-        "miner_reference_and_runtime": {
-          "passed": 21,
-          "warnings": 1
-        }
-      },
-      "python3.13": {
-        "witness": {
-          "passed": 391
-        },
-        "renderer": {
-          "passed": 61,
-          "skipped": 2
-        },
-        "miner_reference_and_runtime": {
+        "miner-reference-and-runtime": {
+          "exit_code": 0,
           "passed": 21
         }
       },
-      "skips": "Standalone renderer integration tests require a running renderer; no real rendering service was exercised.",
+      "python3.13": {
+        "pip-check": {
+          "exit_code": 0
+        },
+        "witness": {
+          "exit_code": 0,
+          "passed": 416
+        },
+        "renderer": {
+          "exit_code": 0,
+          "passed": 61,
+          "skipped": 2
+        },
+        "miner-reference-and-runtime": {
+          "exit_code": 0,
+          "passed": 21
+        }
+      },
+      "skips": "Two standalone renderer integration tests require a running rendering service.",
       "warnings": "Python 3.11: tlslite asyncore deprecation."
     },
-    "pip_check": "passed in the Python 3.11 wheel environment, Python 3.13 source-install environment and separate Python 3.13 wheel environment",
-    "base_miner_install": {
+    "base_miner_compatibility": {
       "repository": "https://github.com/404-Repo/404-base-miner-gpt",
       "commit": "26c3ad32f9c4f202c9cd896c955695ab1964b75c",
       "python": "3.13.16",
-      "source_install": "python -m pip install ./404-base-miner with sibling 404-sdk source; native library supplied by the current clean source build",
-      "cli": "python main.py --help passed",
-      "public_apis": "AsyncWitnessClient, responses.create, render, submit(image, source), get_submitted, RenderOptions and the async three-argument base-miner entry point load from installed packages; API-key and subscription constructors initialized without credentials or service access",
-      "synchronous_reference": "generate(image, seed, witness, renderer) imports with the same installed packages; existing execution/replay tests passed"
+      "test": "Committed main.py --help with the installed release wheels",
+      "status": "passed"
     },
-    "live_gateway_and_pod": "not exercised; registration, live model calls, Pod rendering and final network submission remain live-operation checks",
+    "live_gateway_and_pod": "Not exercised during wheel verification; no live-wheel deployment acceptance is claimed.",
     "paid_provider_calls": 0,
     "dependency_audit": {
-      "tool": "pip-audit 2.10.1 --strict --disable-pip --no-deps against exact pinned external distributions from each installed environment",
-      "own_packages": "Not on PyPI; verified as local artifacts by hashes and package metadata.",
+      "tool": "pip-audit 2.10.1 --strict --disable-pip --no-deps against the exact external distributions in each tested environment",
+      "own_packages": "Local artifacts verified by SHA-256, packaged-source and metadata checks; excluded from PyPI advisory lookup.",
       "python3.11": {
         "exit_code": 1,
         "unique_findings": [
@@ -281,8 +318,8 @@
             "version": "0.19.2",
             "id": "PYSEC-2026-1325",
             "aliases": [
-              "CVE-2024-23342",
-              "GHSA-wj6h-64fc-37mp"
+              "GHSA-wj6h-64fc-37mp",
+              "CVE-2024-23342"
             ],
             "fix_versions": []
           },
@@ -305,14 +342,14 @@
             "version": "0.19.2",
             "id": "PYSEC-2026-1325",
             "aliases": [
-              "GHSA-wj6h-64fc-37mp",
-              "CVE-2024-23342"
+              "CVE-2024-23342",
+              "GHSA-wj6h-64fc-37mp"
             ],
             "fix_versions": []
           }
         ]
       },
-      "note": "The advisory feed repeated the same ecdsa advisory twice; findings here are deduplicated by package and ID."
+      "note": "Findings are unchanged from release 0.2.14; dependencies and build-tool pins are unchanged."
     }
   },
   "dependency_findings": [
@@ -341,7 +378,7 @@
   },
   "publication": {
     "package_registry": "not published; upload requires separate authorization",
-    "prepared_artifacts": "Use the files and SHA-256 values in this manifest; do not rebuild under the same published version or overwrite existing artifacts."
+    "prepared_artifacts": "Use the files and SHA-256 values in this manifest; do not rebuild under this version or overwrite existing artifacts."
   },
-  "previous_release": "releases/0.2.13rc9.json"
+  "previous_release": "releases/0.2.14.json"
 }
