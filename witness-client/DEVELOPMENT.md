@@ -74,8 +74,10 @@ The distribution name is `404-witness-client`; the Python import remains
 `witness_client`. Wheels use the filename prefix `404_witness_client-`.
 
 Artifact hashes, validation results, and the exact source tag and commit are
-recorded in [release.json](release.json) for the last verified release. That
-record does not describe subsequent source changes. When using a release wheel,
+recorded in [release.json](release.json). The launch set is witness `0.2.13rc9`,
+renderer `0.1.3rc1` and optional miner runtime `0.1.1rc1`, built from
+`witness-client-v0.2.13rc9`. The manifest identifies the exact source commit; its
+checks apply only to the listed bytes. Historical releases remain under `releases/`. When using a release wheel,
 check its SHA-256 against the record and use the checkout of its source tag.
 For the current checkout, follow the [README installation steps](README.md#install).
 Proof parameter sizes and hashes are pinned in
@@ -92,7 +94,8 @@ compiler, Python 3.11+, `build==1.6.1`, `setuptools==84.0.0`, and `wheel==0.48.0
 
 ```sh
 cd witness-client
-python build_wheel.py
+GOTOOLCHAIN=local python build_wheel.py
+python -m pip install ../renderer-client dist/*.whl
 ```
 
 Both native Docker builds pin the Go 1.27.3 image by digest and use
@@ -104,15 +107,39 @@ before the next release. Updating the compiler does not require new proof parame
 For the Linux target (from the repository root):
 
 ```sh
-docker build --platform linux/amd64 -f witness-client/Dockerfile -t 404-witness-python .
-docker run --rm --platform linux/amd64 -v "$PWD/witness-server/verifier/params:/app/witness-server/verifier/params:ro" 404-witness-python
+docker build --platform linux/amd64 -f witness-client/Dockerfile -t 404-witness-python:0.2.13rc9 .
+docker run --rm --network none --platform linux/amd64 \
+  -v "$PWD/witness-server/verifier/params:/app/witness-server/verifier/params:ro" \
+  404-witness-python:0.2.13rc9
 ```
 
 The Docker build runs `auditwheel repair` and checks the resulting
 `manylinux_2_34_x86_64` wheel before installing it. A native `linux_x86_64`
 development wheel is not a PyPI release artifact.
-The release wheel is under `/app/witness-client/dist` in that image. Copy it out
-with `docker cp` for distribution.
+The Docker build also builds the matching renderer and optional miner-runtime
+wheels from this checkout, then installs all three together. It never resolves an
+older renderer from a registry. All three wheels are under
+`/app/witness-client/dist` in that image. Extract them without starting the container:
+
+```sh
+container=$(docker create --platform linux/amd64 404-witness-python:0.2.13rc9)
+mkdir -p dist/0.2.13rc9
+docker cp "$container:/app/witness-client/dist/." dist/0.2.13rc9/
+docker rm "$container"
+```
+
+The matching proof parameters are already tracked under
+`witness-server/verifier/params/`. Verify their sizes and SHA-256 values against
+`proof_parameter_members` in the manifest. The v1 archive is an existing immutable
+parameter set, not an artifact rebuilt for each Python release.
+
+Use a fresh virtual environment to install the exact extracted wheels, run
+`pip check`, initialize `witness_client.proof.Prover` with the matching parameters,
+and run the existing tests with `-o pythonpath=` so imports resolve to installed
+packages. Test without provider access; fixture tests do not establish live
+gateway admission, Pod availability or paid generation. Never describe historical
+live checks as validation of a new wheel. Registry upload requires separate
+authorization; retain and publish the same tested bytes.
 
 ## Licence packaging
 

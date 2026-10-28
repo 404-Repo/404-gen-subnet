@@ -4,6 +4,21 @@ Thin synchronous and async Python clients for the existing Three.js renderer. Ja
 Chromium, validation and PNG generation stay in `render-service-js`. The client
 depends only on HTTPX; it does not start containers or install a browser.
 
+## Miner installation and Pod rendering
+
+The launch package is `404-renderer-client==0.1.3rc1`, paired with
+`404-witness-client==0.2.13rc9` from source tag `witness-client-v0.2.13rc9`.
+Follow the [miner quickstart](../miner-reference/README.md#launch-quickstart) to
+install both. The recommended async base miner renders through
+`await witness.render(source, RenderOptions(lighting="neutral"))`; the witness
+owns Pod authentication and routing. It needs no local renderer container,
+renderer URL or image identity. Final submission uses
+`await witness.submit(image, source)` outside `generate()`.
+
+The standalone renderer setup below is for local previews and execution hosts
+that supply a separate `Renderer`. Its synchronous and async interfaces remain
+supported.
+
 ## Start the pinned renderer
 
 From the repository root:

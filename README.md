@@ -3,6 +3,9 @@
 A decentralized 3D content generation competition running on Bittensor Subnet 17.
 Miners submit open-source solutions for AI-powered 3D model generation, and validators run transparent competitions to determine the best solution.
 
+For miner installation, authentication, generation and final submission, follow the
+[launch quickstart](miner-reference/README.md#launch-quickstart).
+
 ## Competitions
 
 Miners compete by providing the best 3D generation solution. Competition descriptions are in the `Competitions/` folder.

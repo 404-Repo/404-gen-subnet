@@ -3,6 +3,99 @@
 Submit a Python repository with a `generate` function in its root `main.py`.
 The sandbox calls it for each prompt image and receives a Three.js module.
 
+Use the [async base miner](https://github.com/404-Repo/404-base-miner-gpt)
+for the launch path below. It exports `async generate(image, seed, witness)`,
+uses `AsyncWitnessClient` for model calls and Pod previews, and submits the
+returned JavaScript through `await witness.submit(image, source)` in its runner.
+The synchronous four-argument reference program in this directory is also
+supported; its helper and replay documentation follows the quickstart.
+
+## Launch quickstart
+
+Use Linux x86_64 with glibc 2.34+, Python 3.13, Go 1.27.3, a C compiler and Git.
+Use a local sr25519 wallet hotkey registered on **Finney netuid 17**. The public
+witness origin is **https://witness.subnet404.xyz**. The gateway assigns your
+round and Pod; generation, rendering and submission use that authenticated Pod.
+
+Install these matching launch sources into sibling directories. The SDK packages
+are `404-witness-client==0.2.13rc9` and `404-renderer-client==0.1.3rc1`.
+`404-miner-runtime==0.1.1rc1` is optional for the synchronous execution/replay
+helpers and is not needed by this base miner.
+
+```sh
+git clone --branch witness-client-v0.2.13rc9 --depth 1 \
+  https://github.com/404-Repo/404-subnet.git 404-sdk
+git clone https://github.com/404-Repo/404-base-miner-gpt.git 404-base-miner
+git -C 404-base-miner checkout 26c3ad32f9c4f202c9cd896c955695ab1964b75c
+python3.13 -m venv .venv
+. .venv/bin/activate
+python -m pip install build==1.6.1 setuptools==84.0.0 wheel==0.48.0
+(cd 404-sdk/witness-client && GOTOOLCHAIN=local python build_wheel.py)
+python -m pip install ./404-base-miner
+python -m pip check
+cd 404-base-miner
+```
+
+The base miner's package metadata resolves the clients from `../404-sdk/`.
+These pip commands build and install those local packages without relying on a
+previous Poetry lock. Keep the SDK checkout and its three proof-parameter files.
+Create `witness.json` at the base miner's root with the absolute parameter path:
+
+```sh
+python - <<'PYCONFIG'
+import json
+from pathlib import Path
+config = {
+    "witness_url": "https://witness.subnet404.xyz",
+    "proof_parameters": str(Path("../404-sdk/witness-server/verifier/params").resolve()),
+}
+Path("witness.json").write_text(json.dumps(config, indent=2) + "\n")
+PYCONFIG
+```
+
+No `state_directory`, separate renderer or local result checkpoint is needed.
+For API billing, set `OPENAI_API_KEY` in your environment and add `--api` below.
+For subscription billing, install the [Codex CLI](https://learn.chatgpt.com/docs/codex/cli#install-codex)
+and sign in with your ChatGPT subscription on the miner machine:
+
+```sh
+codex -c 'cli_auth_credentials_store="file"' login
+```
+
+The witness reads the local file login from `CODEX_HOME` or `~/.codex`; a keyring-only
+login is insufficient. Set `codex_home` in `witness.json` for another login
+directory, and keep that directory private. See the official
+[authentication guide](https://learn.chatgpt.com/docs/auth). Load/unlock the named
+wallet locally; its private key stays on your machine.
+
+Download the current round's frozen `prompts.txt` and published seed from the
+[active competition](https://github.com/404-Repo/404-active-competition).
+`prompts.txt` contains one image URL per line. Use that round's integer seed;
+keep official prompt filenames when downloading individual images.
+
+```sh
+python main.py --prompts /absolute/path/to/prompts.txt --seed PUBLISHED_SEED \
+  --wallet-name miner --wallet-hotkey default
+# For API billing, add --api to the same command.
+```
+
+The runner awaits `generate(image, seed, witness)` for each pending image.
+Inside generation, await `witness.responses.create(...)` and
+`witness.render(source, RenderOptions(lighting="neutral"))`. It then submits
+`await witness.submit(image, source)` outside generation. The Pod stores the
+final source, judging views and embeddings for collection; there is no second
+upload command. `None` is a submitted failure outcome.
+
+Each pass calls `await witness.get_submitted()` and skips saved prompt IDs,
+including saved failures. It makes up to three passes by default. Rerun the
+same command for remaining work; identical canonical model requests and stable
+request IDs reuse retained Pod recordings. Keep source, images, seed, models,
+hotkey and authentication mode fixed. Preview bytes must reproduce the same
+model request body. No paid requests are needed for installation checks:
+`python main.py --help` only loads the CLI.
+
+## Synchronous reference program
+
 Copy [main.py](main.py), [output_specifications.md](output_specifications.md) and
 the [miner_reference package](miner_reference/) into your repository root.
 For each image, the example generates one Astra and two Sol candidates concurrently,
@@ -127,8 +220,10 @@ by your runtime. The runner in `miner_runtime.runner` owns generation and recove
 execution observations; `miner_runtime.validator` owns offline replay and prompt
 budget acceptance. From this checkout, install `miner-runtime` with
 `python -m pip install -e miner-runtime` and put `miner-reference` on `PYTHONPATH`. The witness
-configuration must include the gateway URL, proof parameters,
-and a persistent private `state_directory`; see the [CPU Pod guide](../witness-gateway/PODS.md).
+configuration includes the public gateway URL and matching proof parameters; see
+the [client configuration](../witness-client/README.md#configure). `state_directory`
+is an optional hint for execution-host observations, not an SDK recovery requirement.
+This reference driver keeps its own private `--output` checkpoints.
 The renderer URL and identity refer to an existing renderer. Authentication uses
 the named local wallet and Codex subscription, or `--api` with `OPENAI_API_KEY`.
 Set `RENDERER_API_KEY` when the renderer requires authentication.
@@ -166,7 +261,7 @@ unless `--renderer-url` selects another preview renderer. Intermediate previews 
 local to the runner; the Pod and R2 retain only the final submission. Final saving sends the returned JavaScript
 or explicit `None` to the Pod. The Pod saves the JavaScript, prepares and saves the
 judging views, grid and embeddings, then reports success. Saving errors are returned
-for retry; only one save runs at a time per Pod. The runner checkpoints returned bytes before final-save delivery. Reuse checks the
+for retry; save capacity is controlled by the Pod. The runner checkpoints returned bytes before final-save delivery. Reuse checks the
 prompt hash, seed, renderer identity and approved source commit read from the Pod.
 Retry the same batch output directory after a lost acknowledgement or Pod replacement;
 it resumes final saving without rerunning completed generation. Infrastructure failures
@@ -176,7 +271,7 @@ remain pending. The gateway must have matching [artifact configuration](../witne
 render and concurrency counts. It does not load credentials or contact services.
 Use `run` in place of `check` to execute. A 128-prompt successful workflow has 896 model calls and
 640 grid renders. Invalid or refused candidates are excluded; no valid initial
-candidate or an invalid selection returns `None`. There is no paid repair loop.
+candidate or an invalid selection returns `None`. A rejected candidate may use the bounded repair calls described above.
 
 Console progress shows prompt IDs, stage numbers, input/output tokens and session
 elapsed time. The private output directory contains `run.json`, `progress.json`

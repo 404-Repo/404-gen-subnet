@@ -12,47 +12,49 @@ witness.
 
 ## Install
 
-You need:
+For the complete miner setup, use the [launch quickstart](../miner-reference/README.md#launch-quickstart).
+It installs the separate async base miner, authenticates your wallet, and runs
+model calls, previews and final submission through your assigned Pod.
 
-- Linux x86_64 with Python 3.11+ and glibc 2.34 or newer.
-- A checkout of this repository, including the
-  [proof parameters](../witness-server/verifier/params/).
-- Go 1.27.3 or newer and a C compiler to build the native proof library.
-- A registered sr25519 hotkey in your local Bittensor wallet.
-- For subscriptions, [Codex CLI][codex-cli] installed on the same machine.
-
-The commands below use the code in this checkout. From the repository root,
-build and install it in a virtual environment and keep this working directory
-for the examples below:
+The launch source tag is `witness-client-v0.2.13rc9`. Its packages are
+`404-witness-client==0.2.13rc9`, `404-renderer-client==0.1.3rc1`, and the optional
+`404-miner-runtime==0.1.1rc1`. They are installed from source; registry publication
+is separate. Use Python 3.11+ on Linux x86_64 with glibc 2.34+, Go 1.27.3 and a C
+compiler. The base miner requires Python 3.13. To install just the clients:
 
 ```sh
-cd witness-client
-python -m venv .venv
-source .venv/bin/activate
+git clone --branch witness-client-v0.2.13rc9 --depth 1 \
+  https://github.com/404-Repo/404-subnet.git 404-sdk
+cd 404-sdk
+python3.13 -m venv .venv
+. .venv/bin/activate
 python -m pip install build==1.6.1 setuptools==84.0.0 wheel==0.48.0
-python build_wheel.py
-python -m pip install -e ../renderer-client
-python -m pip install -e .
+(cd witness-client && GOTOOLCHAIN=local python build_wheel.py)
+python -m pip install ./renderer-client ./witness-client/dist/*.whl
+python -m pip check
 ```
 
-The editable install uses Python code directly from this checkout. After
-updating it, rerun the commands to rebuild the native library and refresh
-package metadata. For an operator-provided wheel, use the documentation and
-proof parameters from its matching release tag.
+Keep this checkout for its matching public proof parameters. No parameter download
+or local state directory is required. Use an absolute parameter path in the
+configuration below. An editable install is optional for development; rebuild the
+native library and refresh metadata after changing source. See the
+[development guide](DEVELOPMENT.md#build-and-verification) for the Linux release
+wheels, verification and macOS source builds. Exact prepared artifact hashes and
+verification scope are recorded in [release.json](release.json) on the public branch;
+that manifest names the source commit used to build them.
 
-Use the distribution name `404-witness-client`; `witness-client` on PyPI is a
-different package. See the [development guide](DEVELOPMENT.md#build-and-verification)
-for release builds or macOS.
+Use the distribution name `404-witness-client`; `witness-client` is a different
+package.
 
 ## Configure
 
-Use the HTTPS gateway origin supplied by the operator. Save the configuration
+Use the public gateway origin `https://witness.subnet404.xyz`. Save the configuration
 as `witness.json`, replacing the paths:
 
 ```json
 {
-  "witness_url": "https://witness.example.org",
-  "proof_parameters": "/home/miner/404-subnet/witness-server/verifier/params"
+  "witness_url": "https://witness.subnet404.xyz",
+  "proof_parameters": "/home/miner/404-sdk/witness-server/verifier/params"
 }
 ```
 
@@ -75,7 +77,7 @@ job, proof, response, result or receipt files for recovery. A confirmed terminal
 allocation permits a replacement.
 
 Use absolute paths for proof parameters. The client checks those files before
-loading them. Load and unlock your wallet in the trusted runner and pass its
+loading them. Use a registered Finney netuid 17 hotkey. Load and unlock your wallet in the trusted runner and pass its
 sr25519 hotkey to the client. Configuration, wallet material, subscription
 credentials and proof parameters remain local inputs.
 
@@ -90,12 +92,14 @@ Python and other non-Go allocations. See the
 An async miner exports `generate(image, seed, witness)` and awaits its model calls
 and previews through the supplied witness. The execution host also supports
 synchronous `generate(image, seed, witness, renderer)` programs. Model calls work
-without prompt binding or recording lifecycle APIs:
+without prompt binding or recording lifecycle APIs. With the async client:
 
 ```python
-response = witness.responses.create(model=model, input=prompt, instructions="Return JavaScript.")
+response = await witness.responses.create(model=model, input=prompt, instructions="Return JavaScript.")
 source = response.output_text
 ```
+
+With `WitnessClient`, use the same call without `await`.
 
 The default result is an OpenAI `Response`, including output items and typed usage.
 Failed/incomplete Responses retain their status. Provider HTTP failures use SDK
