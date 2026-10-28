@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from dataclasses import replace
 
 import pytest
@@ -7,7 +8,7 @@ from pod_gateway.control import DrainControl
 from pod_gateway.lifecycle import Allocator, InventoryConflict
 from pod_gateway.models import Pod, PodSpec, Scope
 from pod_gateway.selection import Selection
-from pod_gateway.state import StateConflict
+from pod_gateway.state import Snapshot, StateConflict
 
 SCOPE = Scope("competition", "test-0", "5" * 48)
 START = "00000000-0000-4000-8000-000000000001"
@@ -119,3 +120,48 @@ def test_missing_selected_pod_retires_its_newer_duplicate_and_allows_replacement
     replacement = restarted.acquire(SCOPE, NEXT)
     assert replacement.phase == "allocated" and replacement.pod_id is not None
     assert selection.selected(SCOPE, NEXT, replacement.pod_id)
+
+
+@pytest.mark.parametrize("grant_wins", [False, True])
+def test_access_grant_and_unserved_retirement_are_mutually_exclusive(grant_wins: bool) -> None:
+    class State(MemoryState):
+        before_save: Callable[[], None] | None = None
+
+        def save(self, key: str, data: bytes, expected: str | None) -> Snapshot:
+            callback, self.before_save = self.before_save, None
+            if callback is not None:
+                callback()
+            return super().save(key, data, expected)
+
+    state, provider = State(), Provider()
+    selection = Selection(state)
+    session = Allocator(provider, DrainControl(), SPEC, selection=selection).acquire(SCOPE, START)
+    pod = provider.get(session.pod_id or "")
+    assert pod is not None
+    competing: list[bool] = []
+
+    def compete() -> None:
+        restarted = Selection(state)
+        competing.append(restarted.grant(pod) if grant_wins else restarted.revoke_unserved(pod))
+
+    state.before_save = compete
+    assert not (selection.revoke_unserved(pod) if grant_wins else selection.grant(pod))
+    assert competing == [True]
+    assert Selection(state).selected(SCOPE, START, pod.id) is grant_wins
+    assert Selection(state).grant(pod) is grant_wins
+    assert Selection(state).revoke_unserved(pod) is not grant_wins
+
+
+def test_interrupted_activation_retains_proof_that_access_was_never_granted() -> None:
+    class Interrupted(Provider):
+        def rename(self, pod_id: str, name: str) -> Pod:
+            super().rename(pod_id, name)
+            raise RuntimeError("Gateway interrupted after activation")
+
+    state, provider = MemoryState(), Interrupted()
+    allocator = Allocator(provider, DrainControl(), SPEC, selection=Selection(state))
+    with pytest.raises(RuntimeError, match="interrupted"):
+        allocator.acquire(SCOPE, START)
+    pod, = provider.list()
+    assert Selection(state).revoke_unserved(pod)
+    assert not Selection(state).grant(pod)

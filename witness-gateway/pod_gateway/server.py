@@ -26,6 +26,7 @@ from .security import capability, miner_access
 from .state import StateConflict, WriteUncertain
 
 T = TypeVar("T")
+STARTUP_SECONDS = 600
 
 
 class Evidence(Protocol):
@@ -77,6 +78,7 @@ class Gateway:
         self._sessions: dict[tuple[Scope, str], Session] = {}
         self._grants: dict[Scope, dict[str, object]] = {}
         self._due: dict[Scope, float] = {}
+        self._startup_due: dict[Scope, float] = {}
         self._grant_due: dict[Scope, float] = {}
         self._retiring: set[str] = set()
         self._wake = asyncio.Event()
@@ -399,6 +401,7 @@ class Gateway:
             assert winner is not None
             if scope not in previous or previous[scope].pod_id != winner.id:
                 self._grant_due.pop(scope, None)
+                self._startup_due.pop(scope, None)
             self._current[scope] = winner.session()
             for pod in pods:
                 key = (scope, pod.markers["WITNESS_START_ID"])
@@ -409,6 +412,7 @@ class Gateway:
                         if scope in self._current and grant.get("pod_id") == self._current[scope].pod_id}
         retained = set(grouped) | {scope for scope, _ in self.queue.entries()}
         self._due = {scope: at for scope, at in self._due.items() if scope in retained}
+        self._startup_due = {scope: at for scope, at in self._startup_due.items() if scope in grouped}
         self._grant_due = {scope: at for scope, at in self._grant_due.items() if scope in grouped}
         self._retiring.intersection_update(self._pods)
 
@@ -437,7 +441,7 @@ class Gateway:
         if (pod is None or not pod.matches(scope, session) or pod.lifecycle != "active" or pod.status != "RUNNING" or
                 self.allocator.spec.port not in pod.tcp or
                 not self.allocator.selected(scope, session.start_id, session.pod_id) or selection is None or
-                not selection.selected(scope, session.start_id, session.pod_id)):
+                not selection.grant(pod)):
             return None
         address, port = pod.tcp[self.allocator.spec.port]
         expires = int(time.time()) + 600
@@ -445,6 +449,17 @@ class Gateway:
                 "pod_id": session.pod_id, "start_id": session.start_id,
                 "access": miner_access(capability(self.secret, scope, session.start_id), scope,
                                        session.start_id, session.pod_id, expires), "expires": expires}
+
+    def _expire_unserved(self, scope: Scope, session: Session) -> Session | None:
+        selection = self.allocator.selection
+        if session.pod_id is None or selection is None or not self.fence():
+            return None
+        pod = self.allocator.provider.get(session.pod_id)
+        if (pod is None or not pod.matches(scope, session) or
+                self.allocator.clock() - pod.epoch_ns / 1_000_000_000 < STARTUP_SECONDS or
+                not selection.revoke_unserved(pod)):
+            return None
+        return self.allocator.retire(scope, session.start_id, pod.id, drain=False)
 
     async def _fences(self) -> None:
         while True:
@@ -536,6 +551,23 @@ class Gateway:
                     await self._write(partial(self.queue.complete, scope, entry.start_id,
                                               rejected=result.phase == "rejected"))
                     self._progress.pop(scope, None)
+            break
+        for scope, session in sorted(self._current.items(), key=lambda item: self._startup_due.get(item[0], 0)):
+            if not round_ready:
+                break
+            if (scope in self._grants or self.queue.pending(scope) is not None or
+                    self._startup_due.get(scope, 0) > now):
+                continue
+            starting_pod = self._pods.get(session.pod_id or "")
+            if starting_pod is None or now - starting_pod.epoch_ns / 1_000_000_000 < STARTUP_SECONDS:
+                continue
+            self._startup_due[scope] = now + self.poll_seconds
+            try:
+                expired = await self._run(self._worker, partial(self._expire_unserved, scope, session))
+            except Exception:  # noqa: BLE001 - retry this worker without delaying other workers' access
+                break
+            if expired is not None:
+                self._current[scope] = self._sessions[scope, session.start_id] = expired
             break
         for scope, session in self._current.items():
             if self.queue.pending(scope) is not None or self._due.get(scope, 0) > now:

@@ -218,6 +218,8 @@ class Allocator:
                 or winner.markers["WITNESS_POD_SPEC"] != self.spec.fingerprint
             ):
                 return self.retire(scope, winner.markers["WITNESS_START_ID"], winner.id)
+            if self.selection is not None:
+                self.selection.update(winner, active=True)
             winner = self._rename(winner, "active")
         if self.selection is not None:
             self.selection.update(winner, active=True)
@@ -345,6 +347,7 @@ class Allocator:
             ))
         if self.before_create is not None:
             self.before_create(scope, operation.session.start_id)
+        operation.epoch_ns = max(operation.epoch_ns, int(self.clock() * 1_000_000_000))
         operation.submitted = True
         operation.session = replace(operation.session, phase="creating")
         try:

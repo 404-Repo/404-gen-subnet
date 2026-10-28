@@ -345,6 +345,14 @@ before returning an endpoint. Rate-limit errors retain their `Retry-After` heade
 Requests without this preference return immediately with the configured polling
 interval. Pod startup does not repeat for subsequent model calls or renders.
 
+A newly selected worker has ten minutes from its creation request to obtain its
+first direct access grant. After that deadline, the gateway fences and retires a
+worker recorded as never granted access, without waiting for a control connection
+or drain acknowledgement. A subsequent allocation request can replace it after
+deletion is confirmed. Access history persists across gateway restarts; workers
+with previous grants or unknown access history retain normal drain and replacement
+behavior.
+
 All copies boot dormant. A confirmed active copy wins over a late dormant copy of
 the same connection; newer connection epochs supersede older ones. Cleanup adopts a sole
 valid late create, and drains superseded or duplicate resources before deleting

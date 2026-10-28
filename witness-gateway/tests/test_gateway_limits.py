@@ -377,6 +377,194 @@ def test_timed_out_start_wait_resumes_the_same_pod() -> None:
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize("hold_deletion", [False, True])
+def test_never_ready_worker_expires_across_restart_and_allows_replacement(hold_deletion: bool) -> None:
+    class SlowDelete(Provider):
+        hold = hold_deletion
+
+        def delete(self, pod_id: str) -> None:
+            if not self.hold:
+                super().delete(pod_id)
+
+    async def scenario() -> None:
+        provider, state, clock = SlowDelete(), MemoryState(), [1000.0]
+        async with coordinator(provider, state, clock) as gateway:
+            scope = gateway.scope(KEYS[0].ss58_address)
+            gateway.queue.enqueue(scope, FIRST, None)
+            await gateway._step()
+            pod = next(iter(provider.pods.values()))
+            provider.pods[pod.id] = replace(pod, tcp={})
+            clock[0] = 1599
+            gateway._publish(provider.list())
+            await gateway._step()
+            assert provider.get(pod.id) is not None
+
+        clock[0] = 1601
+        async with coordinator(provider, state, clock) as gateway:
+            gateway.queue.load()
+            gateway._publish(provider.list())
+            await gateway._step()
+            assert gateway.allocator.selection is not None
+            assert not gateway.allocator.selection.selected(scope, FIRST, pod.id)
+            assert (provider.get(pod.id) is not None) is hold_deletion
+
+        provider.hold = False
+        clock[0] += 31
+        async with coordinator(provider, state, clock) as gateway:
+            gateway.queue.load()
+            gateway._publish(provider.list())
+            await gateway._step()
+            assert provider.get(pod.id) is None
+            gateway._publish(provider.list())
+            reply = await gateway._reply(make_mocked_request("GET", "/v1/pods/current"), scope,
+                                         gateway._cached(scope))
+            value = json.loads(cast(bytes, reply.body))
+            assert value["ready"] is False and value["witness"] is None
+            assert value["session"]["phase"] == "lost"
+            clock[0] += 31
+            gateway.queue.enqueue(scope, SECOND, FIRST)
+            await gateway._step()
+            assert provider.creates == 2
+            replacement, = provider.list()
+            assert replacement.id != pod.id and replacement.markers["WITNESS_START_ID"] == SECOND
+
+    asyncio.run(scenario())
+
+
+def test_startup_deadline_begins_after_waiting_for_previous_round_to_drain() -> None:
+    from test_lifecycle import Drain
+
+    async def scenario() -> None:
+        provider, state, clock = Provider(), MemoryState(), [1000.0]
+        async with coordinator(provider, state, clock) as gateway:
+            scope = gateway.scope(KEYS[0].ss58_address)
+            drain = Drain(False)
+            gateway.allocator.control = drain
+            previous = Allocator(provider, drain, gateway.allocator.spec,
+                                 clock=lambda: clock[0], selection=gateway.allocator.selection)
+            old = previous.acquire(replace(scope, round="test-0"), FIRST)
+            assert old.pod_id is not None and gateway.allocator.selection is not None
+            assert gateway.allocator.selection.grant(provider.pods[old.pod_id])
+            gateway._publish(provider.list())
+            gateway.queue.enqueue(scope, SECOND, None)
+            await gateway._step()
+            assert provider.creates == 1 and provider.get(old.pod_id) is not None
+
+            clock[0] += 700
+            drain.ready = True
+            gateway._publish(provider.list())
+            await gateway._step()
+            new, = provider.list()
+            assert new.id != old.pod_id
+            gateway._publish(provider.list())
+            await gateway._step()
+            assert provider.get(new.id) is not None
+
+            clock[0] += 599
+            gateway._publish(provider.list())
+            await gateway._step()
+            assert provider.get(new.id) is not None
+            clock[0] += 2
+            gateway._publish(provider.list())
+            await gateway._step()
+            assert provider.get(new.id) is None
+
+    asyncio.run(scenario())
+
+
+def test_startup_lookup_failure_does_not_block_other_workers_grant_renewal(monkeypatch: pytest.MonkeyPatch) -> None:
+    class Unavailable(Provider):
+        broken = ""
+
+        def get(self, pod_id: str) -> Pod | None:
+            if pod_id == self.broken:
+                raise ProviderUnavailable("Fixture lookup unavailable")
+            return super().get(pod_id)
+
+    async def scenario() -> None:
+        provider, clock = Unavailable(), [1000.0]
+        epoch = time.time() - clock[0]
+        monkeypatch.setattr(time, "time", lambda: epoch + clock[0])
+        async with coordinator(provider, MemoryState(), clock) as gateway:
+            bad, good = (gateway.scope(key.ss58_address) for key in KEYS)
+            gateway.queue.enqueue(bad, FIRST, None)
+            await gateway._step()
+            clock[0] += 10
+            gateway._publish(provider.list())
+            gateway.queue.enqueue(good, SECOND, None)
+            await gateway._step()
+            gateway._publish(provider.list())
+            pod = next(item for item in provider.list() if item.scope() == good)
+            gateway.registry.peers[pod.id] = Peer(cast(web.WebSocketResponse, SimpleNamespace(closed=False)),
+                                                 good, SECOND, pod.id, ready=True, certificate="offline-ca")
+            await gateway._step()
+            endpoint = await gateway._endpoint(good, gateway._cached(good))
+            assert endpoint is not None
+            expires = int(str(endpoint["expires"]))
+            provider.broken = next(item.id for item in provider.list() if item.scope() == bad)
+            clock[0] += 700
+            for _ in range(3):
+                gateway._publish(provider.list())
+                await gateway._step()
+                clock[0] += 31
+            renewed = await gateway._endpoint(good, gateway._cached(good))
+            assert renewed is not None and int(str(renewed["expires"])) > expires
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_access_history_protects_workers_after_control_loss_and_restart(legacy: bool) -> None:
+    async def scenario() -> None:
+        provider, state, clock = Provider(), MemoryState(), [1000.0]
+        async with coordinator(provider, state, clock) as gateway:
+            scope = gateway.scope(KEYS[0].ss58_address)
+            gateway.queue.enqueue(scope, FIRST, None)
+            await gateway._step()
+            gateway._publish(provider.list())
+            pod = next(iter(provider.pods.values()))
+            if legacy:
+                key = Selection.key(scope)
+                saved = state.load(key)
+                assert saved is not None
+                value = json.loads(saved.data)
+                value.pop("access_granted", None)
+                state.save(key, json_bytes(value), saved.etag)
+            else:
+                gateway.registry.peers[pod.id] = Peer(cast(web.WebSocketResponse, SimpleNamespace(closed=False)),
+                                                     scope, FIRST, pod.id, ready=True, certificate="offline-ca")
+                await gateway._step()
+                assert await gateway._endpoint(scope, gateway._cached(scope)) is not None
+                gateway.allocator.reconcile(scope)
+            clock[0] += 10
+            other = gateway.scope(KEYS[1].ss58_address)
+            gateway.queue.enqueue(other, SECOND, None)
+            await gateway._step()
+            unready = next(item for item in provider.list() if item.scope() == other)
+
+        provider.pods[pod.id] = replace(pod, tcp={})
+        clock[0] += 3601
+        async with coordinator(provider, state, clock) as gateway:
+            gateway.queue.load()
+            gateway._publish(provider.list())
+            await gateway._step()
+            assert provider.get(pod.id) is not None and provider.creates == 2
+            assert await gateway._endpoint(scope, gateway._cached(scope)) is None
+            assert gateway.allocator.selection is not None
+            assert gateway.allocator.selection.selected(scope, FIRST, pod.id)
+            clock[0] += 31
+            gateway._publish(provider.list())
+            await gateway._step()
+            assert provider.get(unready.id) is None and provider.get(pod.id) is not None
+            provider.pods[pod.id] = replace(provider.pods[pod.id], status="ERROR")
+            clock[0] += 31
+            gateway._publish(provider.list())
+            await gateway._step()
+            assert provider.get(pod.id) is None
+
+    asyncio.run(scenario())
+
+
 def test_connection_does_not_reissue_access_to_a_revoked_pod() -> None:
     async def scenario() -> None:
         provider = PausedProvider()
