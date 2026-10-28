@@ -101,6 +101,8 @@ class PodGatewayClient:
     def start(
         self, invocation: RequestKey, *, expected_exchange_id: str | None = None, deadline: float | None = None,
     ) -> Snapshot:
+        if expected_exchange_id is None:
+            self.ensure_pod(deadline=deadline)
         value: dict[str, object] = {"request": invocation.model_dump()}
         if expected_exchange_id is not None:
             value["expected_exchange_id"] = str(uuid.UUID(expected_exchange_id))
@@ -119,7 +121,7 @@ class PodGatewayClient:
         return snapshot
 
     def _allocation_json(self, method: str, path: str, value: object | None = None,
-                         *, deadline: float) -> dict[str, object]:
+                         *, deadline: float, expected_round: str | None = None) -> dict[str, object]:
         body = b"" if value is None else canonical(value)
 
         def attempt() -> bytes | None:
@@ -131,6 +133,8 @@ class PodGatewayClient:
         result = json.loads(raw or b"{}")
         if not isinstance(result, dict):
             raise WitnessError("Invalid allocation reply", source="gateway")
+        if expected_round is not None and result.get("round") != expected_round:
+            raise WitnessError("The allocated round is no longer available", source="gateway", code="round_closed")
         return result
 
     def _attach(self, reply: dict[str, object]) -> bool:
@@ -163,7 +167,7 @@ class PodGatewayClient:
         self.round_number = round_number
         return True
 
-    def ensure_pod(self, *, deadline: float | None = None) -> str:
+    def ensure_pod(self, *, deadline: float | None = None, renew: bool = False) -> str:
         if deadline is None:
             deadline = time.monotonic() + self.delivery_timeout
         if not self._pod_lock.acquire(timeout=max(0, deadline - time.monotonic())):
@@ -174,7 +178,22 @@ class PodGatewayClient:
             if self._direct is not None and time.time() < self._expires - 30:
                 assert self._start_id is not None
                 return self._start_id
-            reply = self._allocation_json("GET", "/v1/pods/current", deadline=deadline)
+            expected_round = self.round_number if renew else None
+            reply = None
+            if renew and self._start_id is not None:
+                try:
+                    reply = self._allocation_json("GET", f"/v1/pods/{self._start_id}",
+                                                  deadline=deadline, expected_round=expected_round)
+                except WitnessError as error:
+                    if error.code != "session_not_found":
+                        raise
+                if reply is not None:
+                    previous = reply.get("session")
+                    if not isinstance(previous, dict) or previous.get("phase") in ("rejected", "lost", "retired"):
+                        reply = None
+            if reply is None:
+                reply = self._allocation_json("GET", "/v1/pods/current", deadline=deadline,
+                                              expected_round=expected_round)
             allocation = self._allocation_request if self._allocation_round == reply.get("round") else None
             current = reply.get("session")
             while isinstance(current, dict) and current.get("phase") == "retiring":
@@ -187,7 +206,8 @@ class PodGatewayClient:
                 if time.monotonic() >= deadline:
                     raise WitnessError("Pod retirement remains unresolved; retry the same connection",
                                        source="gateway", code="pod_provisioning_pending")
-                reply = self._allocation_json("GET", "/v1/pods/current", deadline=deadline)
+                reply = self._allocation_json("GET", "/v1/pods/current", deadline=deadline,
+                                              expected_round=expected_round)
                 current = reply.get("session")
             if not isinstance(current, dict) or current.get("phase") in ("rejected", "lost", "retired"):
                 if allocation is None or (
@@ -197,7 +217,7 @@ class PodGatewayClient:
                                   if isinstance(current, dict) else None}
                     self._allocation_request, self._allocation_round = allocation, str(reply["round"])
                 reply = self._allocation_json("POST", "/v1/pods/start", allocation,
-                                               deadline=deadline)
+                                               deadline=deadline, expected_round=expected_round)
             retiring: str | None = None
             while True:
                 session = reply.get("session")
@@ -207,7 +227,8 @@ class PodGatewayClient:
                     ):
                         allocation = {"start_id": str(uuid.uuid4()), "replaces": retiring}
                         self._allocation_request, self._allocation_round = allocation, str(reply["round"])
-                        reply = self._allocation_json("POST", "/v1/pods/start", allocation, deadline=deadline)
+                        reply = self._allocation_json("POST", "/v1/pods/start", allocation,
+                                                      deadline=deadline, expected_round=expected_round)
                         retiring = None
                         continue
                     if session.get("start_id") != retiring:
@@ -233,12 +254,12 @@ class PodGatewayClient:
                     raise WitnessError("Pod provisioning remains unresolved; retry the same connection",
                                        source="gateway", code="pod_provisioning_pending")
                 reply = self._allocation_json("GET", "/v1/pods/current" if retiring is not None else
-                                               f"/v1/pods/{start_id}", deadline=deadline)
+                                               f"/v1/pods/{start_id}", deadline=deadline, expected_round=expected_round)
         finally:
             self._pod_lock.release()
 
     def _service(self, *, deadline: float | None = None) -> SignedTransport:
-        self.ensure_pod(deadline=deadline)
+        self.ensure_pod(deadline=deadline, renew=True)
         assert self._direct is not None
         return self._direct
 

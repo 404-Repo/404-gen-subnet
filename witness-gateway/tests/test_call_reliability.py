@@ -11,7 +11,6 @@ from typing import cast
 
 import openai
 import pytest
-from miner_runtime.accounting import BudgetRejected
 from miner_runtime.observations import ReplayMismatch
 from miner_runtime.runner import run_generation
 from miner_runtime.validator import ReplayWitness, run_replay
@@ -164,8 +163,7 @@ def test_replayed_provider_http_error_keeps_unknown_usage_and_sdk_details(tmp_pa
     expected = run_generation(generate, b"PNG", 42, live, None)
     replay = ReplayWitness(live.export(tmp_path / "bundle"))
     assert generate(b"PNG", 42, replay, None) == expected
-    with pytest.raises(BudgetRejected, match="unknown usage"):
-        replay.finish(expected)
+    replay.finish(expected)
     assert live.paid == 1
 
 

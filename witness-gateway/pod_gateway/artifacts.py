@@ -76,10 +76,12 @@ class ArtifactRepository:
         seed: int,
         prompt_ids: dict[str, str],
         submission_commit: str | None = None,
+        storage_prefix: str = "",
     ) -> None:
         self.objects, self.scope, self.index = objects, scope, index
         self.seed, self.submission_commit, self.prompt_ids = seed, submission_commit, prompt_ids
-        self.index_key = f"rounds/{scope.round}/{scope.hotkey}/submitted.json"
+        self.storage_prefix = storage_prefix
+        self.index_key = f"{storage_prefix}rounds/{scope.round}/{scope.hotkey}/submitted.json"
         self._saved: Snapshot | None = None
 
     def require(self, generation: SubmissionContext) -> None:
@@ -91,7 +93,7 @@ class ArtifactRepository:
     def prefix(self, prompt: str) -> str:
         if prompt not in self.prompt_ids:
             raise ValueError("Prompt is not admitted")
-        return f"rounds/{self.scope.round}/{self.scope.hotkey}/submitted/{self.prompt_ids[prompt]}"
+        return f"{self.storage_prefix}rounds/{self.scope.round}/{self.scope.hotkey}/submitted/{self.prompt_ids[prompt]}"
 
     def result(self, prompt: str) -> GenerationResult | None:
         self.prefix(prompt)

@@ -328,7 +328,8 @@ class Allocator:
             )):
                 continue
             if (
-                self.retire(owner, pod.markers["WITNESS_START_ID"], pod.id, drain=scope.round == "gateway").phase
+                self.retire(owner, pod.markers["WITNESS_START_ID"], pod.id,
+                            drain=scope.round == "gateway" or owner.round != scope.round).phase
                 != "retired"
             ):
                 return operation.session

@@ -51,6 +51,7 @@ def export_bundle(
     proof_hash: str,
     pricing: bytes,
     verify: Verify,
+    storage_prefix: str = "",
 ) -> None:
     """Combine trusted host observations with independently verified provider evidence."""
     raw = execution.read_bytes()
@@ -73,7 +74,7 @@ def export_bundle(
             key, call = located
             directory = temporary / call.exchange_id
             directory.mkdir(mode=0o700)
-            prefix = f"rounds/{scope.round}/{scope.hotkey}/{call.exchange_id}/"
+            prefix = f"{storage_prefix}rounds/{scope.round}/{scope.hotkey}/{call.exchange_id}/"
             for name in (
                 "client.bin",
                 "server.bin",

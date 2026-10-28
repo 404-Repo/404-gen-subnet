@@ -82,6 +82,31 @@ def test_gateway_admission_settings_are_bounded_and_forwarded(values: dict[str, 
             Settings.model_validate({**values, name: "0"})
 
 
+@pytest.mark.parametrize("token", [None, ""])
+def test_round_refresh_requires_a_github_token(values: dict[str, object], token: str | None) -> None:
+    if token is None:
+        values.pop("WITNESS_GITHUB_TOKEN")
+    else:
+        values["WITNESS_GITHUB_TOKEN"] = token
+    with pytest.raises(ValueError, match="WITNESS_GITHUB_TOKEN"):
+        Settings.model_validate(values)
+
+
+def test_round_refresh_defaults_keep_policy_fresh_between_checks(values: dict[str, object]) -> None:
+    settings = Settings.model_validate(values)
+    assert settings.round_refresh_seconds == 60
+    assert settings.round_policy_seconds == 120
+
+
+@pytest.mark.parametrize("refresh,policy", [(60, 60), (61, 120)])
+def test_round_refresh_rejects_intervals_outside_policy_bounds(
+    values: dict[str, object], refresh: int, policy: int,
+) -> None:
+    with pytest.raises(ValueError):
+        Settings.model_validate({**values, "WITNESS_ROUND_REFRESH_SECONDS": refresh,
+                                 "WITNESS_ROUND_POLICY_SECONDS": policy})
+
+
 @pytest.fixture
 def values(tmp_path: Path) -> dict[str, object]:
     pricing = tmp_path / "pricing.json"
@@ -90,6 +115,7 @@ def values(tmp_path: Path) -> dict[str, object]:
         "WITNESS_DEPLOYMENT": "competition",
         "WITNESS_ACTIVE_ROUND": "test-0",
         "WITNESS_ROUND_END": "2000000000",
+        "WITNESS_GITHUB_TOKEN": "fixture-read-only-token",
         "WITNESS_GATEWAY_OWNER_HOTKEY": Keypair.create_from_mnemonic(Keypair.generate_mnemonic()).ss58_address,
         "WITNESS_GATEWAY_URL": "https://witness.test",
         "WITNESS_MASTER_KEY": "ab" * 32,
@@ -141,7 +167,7 @@ def test_string_launch_values_remain_literal(values: dict[str, object]) -> None:
         }
     )
     settings = Settings.model_validate(values)
-    for name in ("WITNESS_ROUND_END", "WITNESS_MAX_PODS", "WITNESS_IDLE_SECONDS"):
+    for name in ("WITNESS_MAX_PODS", "WITNESS_IDLE_SECONDS"):
         assert gateway_spec(settings).env[name] == values[name]
     assert "WITNESS_CPU_ID" not in gateway_spec(settings).env
     assert worker_spec(settings).env["WITNESS_IDLE_SECONDS"] == "01800"
@@ -188,6 +214,7 @@ def test_artifact_commits_do_not_restrict_gateway_membership(
     gateway.return_value.application.return_value = web.Application()
     monkeypatch.setattr(main, "Gateway", gateway)
     monkeypatch.setattr("pod_gateway.main.R2StateStore.connect", Mock(return_value=MemoryState()))
+    monkeypatch.setattr(main, "RoundImages", Mock(return_value=MemoryState()))
     monkeypatch.setattr("pod_gateway.main.RunPodClient.http_client", Mock())
     monkeypatch.setattr("pod_gateway.main.httpx.Client", Mock())
     settings = GatewaySettings.model_validate(values)
@@ -223,6 +250,14 @@ def test_assigned_pod_starts_artifact_storage_without_a_source_commit(
         "WITNESS_ROUND": "test-0", "WITNESS_HOTKEY": str(values["WITNESS_GATEWAY_OWNER_HOTKEY"]),
         "WITNESS_START_ID": "00000000-0000-4000-8000-000000000001", "RUNPOD_POD_ID": "fixture-worker",
         "WITNESS_POD_CAPABILITY": "fixture-token", "WITNESS_RENDERER_ENABLED": "1",
+        "WITNESS_ROUND_INPUTS": json.dumps({
+            "repository": "404-repo/404-active-competition", "branch": "fixture", "revision": "a" * 40,
+            "round": "test-0", "number": 0, "seed": 42, "generation_deadline_block": None,
+            "storage_prefix": "", "save_submissions": True,
+            "prompts": [{"id": "official-chair", "sha256": "d" * 64,
+                         "source_url": "https://prompts.test/official-chair.png",
+                         "image_key": "competition-inputs/v1/" + "d" * 64}],
+        }),
         "WITNESS_PRICING_SHA256": hashlib.sha256(pricing.read_bytes()).hexdigest(), "DINOV3_REVISION": "fixture",
         "WITNESS_ARTIFACTS": json.dumps({
             "profile": {"image_digest": "sha256:" + "a" * 64, "validation_sha256": "b" * 64},

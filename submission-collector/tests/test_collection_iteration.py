@@ -142,6 +142,41 @@ async def test_miner_generation_before_deadline_returns_eta(git: MockGitHubClien
     assert not collect.called
 
 
+async def test_explicit_unbounded_generation_remains_open_with_a_null_eta(
+    git: MockGitHubClient, settings: Settings,
+) -> None:
+    add_state(git, stage=RoundStage.MINER_GENERATION, round_num=1)
+    add_schedule(git, generation_deadline_block=None)
+    download = SpyCollectFn()
+    for block in (300, 99_000_000):
+        assert await collection_iteration(
+            git=git, get_block=make_get_block(block), get_commitments=make_get_commitments(),
+            get_hotkey_owners=make_get_hotkey_owners(), get_locked_alpha=make_get_locked_alpha(),
+            collect_fn=download, settings=settings,
+        ) is None
+    assert not download.called and git.committed == {}
+
+
+async def test_open_round_can_publish_an_explicit_unbounded_generation_deadline(
+    git: MockGitHubClient, settings: Settings,
+) -> None:
+    add_state(git, stage=RoundStage.OPEN, round_num=0)
+    add_schedule(git, round_num=0, latest_reveal_block=200, generation_deadline_block=None)
+    add_config(git, prompts_per_round=1, carryover_prompts=0)
+    add_prompts(git, ["https://prompts.test/chair.png"])
+    download = SpyCollectFn()
+    result = await collection_iteration(
+        git=git, get_block=make_get_block(200),
+        get_commitments=make_get_commitments({HOTKEY: make_commitment(block=150)}),
+        get_hotkey_owners=make_get_hotkey_owners({HOTKEY: "coldkey-1"}), get_locked_alpha=make_get_locked_alpha(),
+        collect_fn=download, settings=settings,
+    )
+    state = CompetitionState.model_validate_json(git.committed["state.json"])
+    assert result is None and state.stage == RoundStage.MINER_GENERATION and state.next_stage_eta is None
+    assert "rounds/0/seed.json" in git.committed and "rounds/0/prompts.txt" in git.committed
+    assert not download.called
+
+
 async def test_miner_generation_past_deadline_transitions_to_collecting_and_calls_collect(
     git: MockGitHubClient, settings: Settings
 ) -> None:
@@ -373,6 +408,52 @@ async def test_collection_replaces_previously_collected_results(git: MockGitHubC
     assert results["chair"].views == f"{settings.cdn_url}/chair"
     assert results["table"].js is None
     assert results["table"].failure_reason == "not_submitted"
+
+
+async def test_collection_uses_the_round_storage_prefix_and_retains_artifact_pointers(
+    git: MockGitHubClient, settings: Settings,
+) -> None:
+    state = add_state(git, stage=RoundStage.COLLECTING)
+    add_prompts(git, ["https://prompts.test/chair.png"], round_num=1)
+    schedule = add_schedule(git, generation_deadline_block=None)
+    schedule.witness_storage_prefix = "isolated/"
+    git.files["rounds/1/schedule.json"] = schedule.model_dump_json()
+    git.files["rounds/1/submissions.json"] = json.dumps(
+        {HOTKEY: dict(repo="test/model", commit="c" * 40, revealed_at_block=150, tie_breaker="0" * 128, round="test-1")}
+    )
+    index = f"{settings.cdn_url}/isolated/rounds/test-1/{HOTKEY}/submitted.json"
+    root = f"isolated/rounds/test-1/{HOTKEY}/submitted/chair"
+    transport = httpx.MockTransport(lambda request: httpx.Response(
+        200, json={"chair": {"js": root + ".js", "views": root}},
+    ) if str(request.url) == index else httpx.Response(404))
+    batcher = GitBatcher(git=git, base_sha="ref", branch=settings.github_branch)
+    async with httpx.AsyncClient(transport=transport) as client:
+        await ResultCollector(batcher, client, settings).collect(state, "ref")
+    await batcher.flush()
+    result = GenerationsAdapter.validate_json(git.committed[f"rounds/1/{HOTKEY}/generated.json"])["chair"]
+    assert result.js == f"{settings.cdn_url}/{root}.js" and result.views == f"{settings.cdn_url}/{root}"
+
+
+@pytest.mark.parametrize("url,prompt", [
+    ("https://prompts.test/chair%2Dlarge.png", "chair-large"),
+    ("https://prompts.test/chair.png?token=a.b", "chair"),
+])
+async def test_collection_keeps_saved_results_for_encoded_and_signed_prompt_urls(
+    git: MockGitHubClient, settings: Settings, url: str, prompt: str,
+) -> None:
+    state = add_state(git, stage=RoundStage.COLLECTING)
+    add_prompts(git, [url], round_num=1)
+    git.files["rounds/1/submissions.json"] = json.dumps({HOTKEY: dict(
+        repo="test/model", commit="c" * 40, revealed_at_block=150, tie_breaker="0" * 128, round="test-1",
+    )})
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, json={prompt: {"js": "saved.js"}}))
+    batcher = GitBatcher(git=git, base_sha="ref", branch=settings.github_branch)
+    async with httpx.AsyncClient(transport=transport) as http:
+        await ResultCollector(batcher, http, settings).collect(state, "ref")
+    await batcher.flush()
+    results = GenerationsAdapter.validate_json(git.committed[f"rounds/1/{HOTKEY}/generated.json"])
+    assert results[prompt].js == f"{settings.cdn_url}/saved.js"
+    assert results[prompt].failure_reason is None
 
 
 async def test_retry_wait_allows_another_miner_to_be_collected(

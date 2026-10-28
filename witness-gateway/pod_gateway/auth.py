@@ -219,6 +219,19 @@ class MembershipRefresher:
             values[string(item[0])] = string(item[1])
         return [values[k] for k in keys]
 
+    def generation_head(self) -> tuple[int, float]:
+        """Read a timestamped current Finney block for generation deadlines."""
+        if self._rpc("chain_getBlockHash", [0]) != FINNEY_GENESIS:
+            raise ValueError("RPC is not Finney")
+        block = string(self._rpc("chain_getBlockHash", []))
+        if re.fullmatch(r"0x[0-9a-f]{64}", block) is None:
+            raise ValueError("Invalid generation block")
+        height = string(object_dict(self._rpc("chain_getHeader", [block]))["number"])
+        timestamp = self._storage([storage_key("Timestamp", "Now")], block)[0]
+        if re.fullmatch(r"0x[0-9a-f]{16}", timestamp) is None or re.fullmatch(r"0x[0-9a-f]+", height) is None:
+            raise ValueError("Invalid generation block timestamp")
+        return int(height, 16), int.from_bytes(bytes.fromhex(timestamp[2:]), "little") / 1000
+
     def refresh(self) -> None:
         if self._rpc("chain_getBlockHash", [0]) != FINNEY_GENESIS:
             raise ValueError("RPC is not Finney")

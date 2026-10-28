@@ -13,9 +13,15 @@ separately; the collector does not execute miner code or install dependencies.
 
 The Pod saves JavaScript, 12 judging views, a grid and embeddings in the existing
 public R2 bucket (`404-gen`). It publishes one result index at
-`rounds/<full-round-name>/<hotkey>/submitted.json`, mapping prompt IDs to records
+`<witness_storage_prefix>rounds/<full-round-name>/<hotkey>/submitted.json`, mapping prompt IDs to records
 with four fields: `js`, `views`, `failure_reason` and `size`. The prompt ID is the
 stem of its published prompt URL.
+
+`witness_storage_prefix` comes from the round's `schedule.json`; its empty default
+preserves official storage paths. An isolated branch can supply a prefix ending
+in `/`. `generation_deadline_block` is required: an integer closes generation at
+that block, while an explicit null keeps `miner_generation` open indefinitely.
+`state.json`'s approximate `next_stage_eta` does not change that deadline.
 
 The collector reads one complete index per miner over HTTP through `CDN_URL`,
 expands the storage keys with that URL, and replaces `generated.json` for each miner

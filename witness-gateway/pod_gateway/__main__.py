@@ -26,6 +26,7 @@ def main() -> None:
         export.add_argument("--" + name, required=True)
     export.add_argument("--execution", type=Path, required=True)
     export.add_argument("--output", type=Path, required=True)
+    export.add_argument("--storage-prefix", default="")
     root = Path(__file__).resolve().parents[2]
     export.add_argument(
         "--parameters", type=Path, default=root / "witness-server/verifier/params"
@@ -53,7 +54,10 @@ def main() -> None:
         from .models import Scope
         from .records import CallRecords
         from .replay import export_bundle, native_verifier
-        from .state import R2StateStore
+        from .state import PrefixedState, R2StateStore
+        from subnet_common.competition.schedule import RoundSchedule
+
+        RoundSchedule.storage_prefix(args.storage_prefix)
 
         state = R2StateStore.connect(
             endpoint=os.environ["R2_ENDPOINT"],
@@ -62,7 +66,7 @@ def main() -> None:
             bucket=os.environ["R2_BUCKET"],
         )
         export_bundle(
-            records=CallRecords(state),
+            records=CallRecords(PrefixedState(state, args.storage_prefix)),
             evidence=state,
             scope=Scope(args.deployment, args.round, args.hotkey),
             execution=args.execution,
@@ -72,6 +76,7 @@ def main() -> None:
             ).hexdigest(),
             pricing=args.pricing.read_bytes(),
             verify=native_verifier(args.verifier, args.parameters),
+            storage_prefix=args.storage_prefix,
         )
     elif role == "worker":
         sys.path.insert(0, str(root / "witness-server/worker"))

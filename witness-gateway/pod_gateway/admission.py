@@ -97,6 +97,7 @@ class QueueState(BaseModel):
     pending: dict[str, PendingStart] = Field(default_factory=dict)
     attempts: dict[str, CreateAttempt] = Field(default_factory=dict)
     history: dict[str, dict[str, CreateAttempt]] = Field(default_factory=dict)
+    retained: dict[str, CreateAttempt] = Field(default_factory=dict)
 
 
 class StartQueue:
@@ -176,7 +177,13 @@ class StartQueue:
             return attempt if attempt is not None and attempt.round == scope.round else None
 
     def unresolved(self) -> set[tuple[Scope, str]]:
-        return {(scope, entry.start_id) for scope, entry in self.entries() if entry.submitted}
+        current = {(scope, entry.start_id) for scope, entry in self.entries() if entry.submitted}
+        with self._read_lock:
+            for key, attempt in self._state.retained.items():
+                hotkey, start_id = key.split("/", 1)
+                if self.clock() - attempt.at < 600:
+                    current.add((Scope(self.deployment, attempt.round, hotkey), identifier(start_id)))
+        return current
 
     def enqueue(self, scope: Scope, start_id: str, replaces: str | None) -> PendingStart:
         identifier(start_id)
@@ -234,6 +241,23 @@ class StartQueue:
 
         self._change(change)
 
+    def release_authorization(self, scope: Scope, start_id: str) -> None:
+        """Return a confirmed undispatched intent to the queue."""
+        def change(state: QueueState) -> None:
+            entry = state.pending.get(scope.hotkey)
+            if entry is None or (entry.round, entry.start_id) != (scope.round, start_id) or not entry.submitted:
+                return
+            history = state.history[scope.hotkey]
+            history[start_id] = history[start_id].model_copy(update={"submitted": False})
+            state.pending[scope.hotkey] = entry.model_copy(update={"submitted": False})
+            previous = [attempt for attempt in history.values() if attempt.round == scope.round and attempt.submitted]
+            if previous:
+                state.attempts[scope.hotkey] = max(previous, key=lambda attempt: attempt.at)
+            else:
+                state.attempts.pop(scope.hotkey, None)
+
+        self._change(change)
+
     def complete(self, scope: Scope, start_id: str, *, rejected: bool = False) -> None:
         def change(state: QueueState) -> None:
             entry = state.pending.get(scope.hotkey)
@@ -268,4 +292,21 @@ class StartQueue:
                                      if attempt.round == round_number}
                              for hotkey, attempts in state.history.items()}
 
+        self._change(change)
+
+    def rollover(self, round_number: str) -> None:
+        """Free old FIFO slots while accounting for uncertain creates through discovery grace."""
+        def change(state: QueueState) -> None:
+            for hotkey, entry in state.pending.items():
+                if entry.round != round_number and entry.submitted:
+                    attempt = state.attempts[hotkey]
+                    state.retained[f"{hotkey}/{entry.start_id}"] = attempt
+            state.retained = {key: attempt for key, attempt in state.retained.items()
+                              if self.clock() - attempt.at < 600}
+            state.pending = {hotkey: entry for hotkey, entry in state.pending.items() if entry.round == round_number}
+            state.attempts = {hotkey: attempt for hotkey, attempt in state.attempts.items()
+                              if attempt.round == round_number}
+            state.history = {hotkey: {start_id: attempt for start_id, attempt in attempts.items()
+                                     if attempt.round == round_number}
+                             for hotkey, attempts in state.history.items()}
         self._change(change)

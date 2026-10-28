@@ -1,6 +1,7 @@
 import asyncio
 import random
 from pathlib import Path
+from urllib.parse import unquote, urlsplit
 
 import httpx
 from loguru import logger
@@ -11,6 +12,7 @@ from subnet_common.competition.generations import (
     save_generations,
 )
 from subnet_common.competition.prompts import require_prompts
+from subnet_common.competition.schedule import get_schedule
 from subnet_common.competition.state import CompetitionState
 from subnet_common.competition.submissions import MinerSubmission, require_submissions
 from subnet_common.git_batcher import GitBatcher
@@ -48,7 +50,9 @@ class ResultCollector:
         """Read each miner's complete index and save results for the round's prompts."""
         submissions = await require_submissions(git=self.git_batcher.git, round_num=state.current_round, ref=ref)
         prompt_urls = await require_prompts(git=self.git_batcher.git, round_num=state.current_round, ref=ref)
-        prompts = [Path(url).stem for url in prompt_urls]
+        schedule = await get_schedule(self.git_batcher.git, state.current_round, ref)
+        storage_prefix = "" if schedule is None else schedule.witness_storage_prefix
+        prompts = [Path(unquote(urlsplit(url).path)).stem for url in prompt_urls]
         hotkeys = list(submissions.keys())
         random.shuffle(hotkeys)
         logger.info(f"Collecting {len(hotkeys)} result indexes for {len(prompts)} prompts")
@@ -59,6 +63,7 @@ class ResultCollector:
                 submission=submissions[hotkey],
                 prompts=prompts,
                 round_num=state.current_round,
+                storage_prefix=storage_prefix,
             )
             for hotkey in hotkeys
         ]
@@ -71,13 +76,14 @@ class ResultCollector:
         submission: MinerSubmission,
         prompts: list[str],
         round_num: int,
+        storage_prefix: str = "",
     ) -> GenerationsMap:
         """Fetch one miner's index and replace its collected results in Git."""
         if self.settings.download_jitter_seconds > 0:
             jitter = random.uniform(0, self.settings.download_jitter_seconds)  # nosec B311 # noqa: S311
             await asyncio.sleep(jitter)
 
-        key = f"rounds/{submission.round}/{hotkey}/submitted.json"
+        key = f"{storage_prefix}rounds/{submission.round}/{hotkey}/submitted.json"
         saved = await self._fetch_index(key)
         generations = {}
         for prompt in prompts:

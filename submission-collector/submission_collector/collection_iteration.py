@@ -138,6 +138,9 @@ async def collection_iteration(
         )
 
     if state.stage == RoundStage.MINER_GENERATION:
+        schedule = await require_schedule(git=git, round_num=state.current_round, ref=ref)
+        if schedule.generation_deadline_block is None:
+            return None
         if eta := await _generation_deadline_eta(git=git, state=state, ref=ref, get_block=get_block):
             return eta
         ref = await _transition_stage(git=git, state=state, ref=ref, settings=settings, stage=RoundStage.COLLECTING)
@@ -226,7 +229,10 @@ async def _collect_submissions(
     prompts = await select_prompts(git=git, round_num=state.current_round, config=config, seed=seed, ref=ref)
 
     state.stage = RoundStage.MINER_GENERATION
-    state.next_stage_eta = _get_block_eta(current_block=block, target_block=schedule.generation_deadline_block)
+    state.next_stage_eta = (
+        None if schedule.generation_deadline_block is None
+        else _get_block_eta(current_block=block, target_block=schedule.generation_deadline_block)
+    )
 
     round_dir = f"rounds/{state.current_round}"
     await git.commit_files(
@@ -273,6 +279,8 @@ async def _generation_deadline_eta(
 
     block = await get_block()
 
+    if schedule.generation_deadline_block is None:
+        raise ValueError("An unbounded generation round has no deadline ETA")
     if block < schedule.generation_deadline_block:
         eta = _get_block_eta(current_block=block, target_block=schedule.generation_deadline_block)
         logger.info(f"Waiting for generation deadline: {eta}")

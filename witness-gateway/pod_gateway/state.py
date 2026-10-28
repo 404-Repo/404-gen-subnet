@@ -36,6 +36,19 @@ class StateStore(Protocol):
     def save(self, key: str, data: bytes, expected: str | None) -> Snapshot: ...
 
 
+class PrefixedState:
+    """Apply a round's storage namespace to calls and accounting journals."""
+
+    def __init__(self, store: StateStore, prefix: str) -> None:
+        self.store, self.prefix = store, prefix
+
+    def load(self, key: str) -> Snapshot | None:
+        return self.store.load(self.prefix + key)
+
+    def save(self, key: str, data: bytes, expected: str | None) -> Snapshot:
+        return self.store.save(self.prefix + key, data, expected)
+
+
 class Body(Protocol):
     def read(self, amount: int) -> bytes: ...
     def close(self) -> None: ...
@@ -93,7 +106,9 @@ class R2StateStore:
             raise ValueError("Allocation journal exceeds its size limit")
         return Snapshot(self._etag(result), data)
 
-    def save(self, key: str, data: bytes, expected: str | None) -> Snapshot:
+    def save(
+        self, key: str, data: bytes, expected: str | None, *, content_type: str = "application/json"
+    ) -> Snapshot:
         if len(data) > self.max_bytes:
             raise ValueError("Allocation journal exceeds its size limit")
         condition = {"IfNoneMatch": "*"} if expected is None else {"IfMatch": expected}
@@ -103,7 +118,7 @@ class R2StateStore:
                     Bucket=self.bucket,
                     Key=key,
                     Body=data,
-                    ContentType="application/json",
+                    ContentType=content_type,
                     CacheControl="no-store",
                     **condition,
                 )
