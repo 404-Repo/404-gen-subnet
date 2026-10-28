@@ -154,6 +154,22 @@ class AsyncPodGatewayClient:
         self.round_number: str | None = None
         self._allocation_request: dict[str, object] | None = None
         self._allocation_round: str | None = None
+        self._replacement_generation = 0
+        self._replacement_pending = False
+        self._replacement_pod: str | None = None
+
+    async def replace_pod(self) -> None:
+        await self.ensure_pod(replace=True)
+
+    def _replacement_intent(self, round_number: str, replaces: str | None) -> dict[str, object]:
+        identity = (
+            f"witness-pod-replacement/v1/{self.http.base_url}/{round_number}/"
+            f"{self.hotkey.ss58_address}/{replaces or 'initial'}"
+        )
+        return {
+            "start_id": str(uuid.uuid5(uuid.NAMESPACE_URL, identity)),
+            "replaces": replaces,
+        }
 
     async def _json(
         self,
@@ -264,7 +280,9 @@ class AsyncPodGatewayClient:
         self.round_number = round_number
         return True
 
-    async def ensure_pod(self, *, deadline: float | None = None) -> str:
+    async def ensure_pod(self, *, deadline: float | None = None, replace: bool = False) -> str:
+        observed = self._start_id
+        generation = self._replacement_generation
         if deadline is None:
             deadline = time.monotonic() + self.delivery_timeout
         try:
@@ -278,13 +296,37 @@ class AsyncPodGatewayClient:
                 raise WitnessError(
                     "Pod connection wait timed out", source="gateway", code="capture_timeout"
                 )
-            if self._direct is not None and time.time() < self._expires - 30:
+            replace = replace and generation == self._replacement_generation
+            if (
+                not replace and not self._replacement_pending
+                and self._direct is not None and time.time() < self._expires - 30
+            ):
                 assert self._start_id is not None
                 return self._start_id
             reply = await self._allocation_json("GET", "/v1/pods/current", deadline=deadline)
             allocation = self._allocation_request if self._allocation_round == reply.get("round") else None
             current = reply.get("session")
-            if not isinstance(current, dict) or current.get("phase") in (
+            continuing = self._replacement_pending
+            if replace:
+                if self.round_number is not None and reply.get("round") != self.round_number:
+                    raise WitnessError("Gateway round changed before replacement", code="round_mismatch", source="gateway")
+                self._replacement_generation += 1
+                self._replacement_pending = True
+                self._direct, self._expires = None, 0
+            if isinstance(current, dict) and current.get("phase") == "allocated" and (
+                replace and not continuing and (observed is None or current.get("start_id") == observed)
+                or continuing and allocation is not None
+                and current.get("start_id") == allocation.get("replaces")
+            ):
+                old_start = str(uuid.UUID(str(current["start_id"])))
+                if allocation is None or allocation.get("replaces") != old_start:
+                    allocation = self._replacement_intent(str(reply["round"]), old_start)
+                    self._allocation_request, self._allocation_round = allocation, str(reply["round"])
+                self._replacement_pod = str(current["pod_id"])
+                self._direct, self._expires = None, 0
+                reply = await self._allocation_json("POST", "/v1/pods/start", allocation, deadline=deadline)
+                current = reply.get("session")
+            elif not isinstance(current, dict) or current.get("phase") in (
                 "rejected",
                 "lost",
                 "retired",
@@ -292,19 +334,31 @@ class AsyncPodGatewayClient:
                 if allocation is None or (
                     isinstance(current, dict) and current.get("start_id") == allocation["start_id"]
                 ):
-                    allocation = {
-                        "start_id": str(uuid.uuid4()),
-                        "replaces": current.get("start_id") if isinstance(current, dict) else None,
-                    }
+                    previous = current.get("start_id") if isinstance(current, dict) else None
+                    allocation = (
+                        self._replacement_intent(str(reply["round"]), str(previous) if previous else None)
+                        if replace else {"start_id": str(uuid.uuid4()), "replaces": previous}
+                    )
                     self._allocation_request, self._allocation_round = allocation, str(reply["round"])
                 reply = await self._allocation_json(
                     "POST", "/v1/pods/start", allocation, deadline=deadline
                 )
+            retiring: str | None = None
             while True:
                 session = reply.get("session")
+                if retiring is not None and (not isinstance(session, dict) or (
+                    session.get("start_id") == retiring and session.get("phase") in ("rejected", "lost", "retired")
+                )):
+                    allocation = self._replacement_intent(str(reply["round"]), retiring)
+                    self._allocation_request, self._allocation_round = allocation, str(reply["round"])
+                    reply = await self._allocation_json("POST", "/v1/pods/start", allocation, deadline=deadline)
+                    retiring = None
+                    continue
                 if not isinstance(session, dict):
                     raise WitnessError("Invalid Pod allocation", source="gateway")
                 start_id = str(uuid.UUID(str(session["start_id"])))
+                if self._replacement_pending and session.get("phase") == "retiring":
+                    retiring = start_id
                 if session.get("phase") in ("rejected", "lost", "retired"):
                     raise WitnessError(
                         "Pod allocation did not become ready",
@@ -316,6 +370,11 @@ class AsyncPodGatewayClient:
                     allocation = accepted
                     self._allocation_request, self._allocation_round = allocation, str(reply["round"])
                 if self._attach(reply):
+                    if self._replacement_pod is not None and session.get("pod_id") == self._replacement_pod:
+                        self._direct, self._expires = None, 0
+                        raise WitnessError("Gateway returned the Pod being replaced", code="pod_replacement_unconfirmed", source="gateway")
+                    self._replacement_pod = None
+                    self._replacement_pending = False
                     return start_id
                 hint = reply.get("retry_after", 1)
                 if (
@@ -332,7 +391,7 @@ class AsyncPodGatewayClient:
                         code="pod_provisioning_pending",
                     )
                 reply = await self._allocation_json(
-                    "GET", f"/v1/pods/{start_id}", deadline=deadline
+                    "GET", "/v1/pods/current" if retiring is not None else f"/v1/pods/{start_id}", deadline=deadline
                 )
         finally:
             self._pod_lock.release()

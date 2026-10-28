@@ -125,6 +125,15 @@ class AsyncWitnessClient(_ClientState):
         ).hexdigest()
         return CaptureContext(namespace, self._mode, self._state, self._gateway.delivery_timeout)
 
+    async def replace_pod(self) -> None:
+        """Replace the assigned Pod, or join an allocation already in progress.
+
+        Creates one Pod if none exists and waits for its direct connection grant.
+        Call from the live runner, outside generate() and validator replay, after
+        stopping work on the current Pod. Durable calls and results are retained.
+        """
+        await self._gateway.replace_pod()
+
     async def capture_response(self, key: RequestKey, body: bytes) -> CapturedResponse:
         return await self._resolve(key, body, key.session_id)
 

@@ -152,6 +152,31 @@ Trusted async hosts can await `client.capture_context()`,
 Both client concurrency limits apply to async calls; excess calls wait inside
 the SDK.
 
+### Replacing an async Pod
+
+Call `await client.replace_pod()` from the live runner to replace the assigned
+Pod and wait for its direct connection grant. If no Pod exists, it creates one.
+If allocation or replacement is already pending, it joins that operation.
+Concurrent calls for the same observed allocation share a replacement intent.
+
+Entering `async with` prepares local resources. Pod allocation remains lazy, so
+a runner can request a new Pod before its first witness operation:
+
+```python
+async with AsyncWitnessClient(
+    "witness.json", hotkey=hotkey, subscription="codex",
+) as witness:
+    if args.new_pod:
+        await witness.replace_pod()
+    await run_pending(witness)
+```
+
+Stop work on the current Pod before replacing it. Keep this call outside
+`generate()` and validator replay. Replacement retains durable call identities,
+recordings and saved submissions; it does not replay model calls or submissions.
+The existing `delivery_timeout` bounds the wait. After cancellation or an
+unresolved readiness wait, the next witness operation resumes the allocation.
+
 ### Model request options
 
 Pass OpenAI Responses request-body parameters to `responses.create()`, such as
