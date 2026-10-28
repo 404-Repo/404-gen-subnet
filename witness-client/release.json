@@ -1,11 +1,11 @@
 {
   "distribution": "404-witness-client",
   "import_package": "witness_client",
-  "version": "0.2.13rc9",
-  "status": "built and verified release candidate; registry publication pending",
-  "source_commit": "3924635e996e0785083d3143b05b32ec80f0e06a",
+  "version": "0.2.14",
+  "status": "built and verified stable release; registry publication pending",
+  "source_commit": "6010e3c7d1268cb9f36c1ba0ed2af723617e61cf",
   "source_snapshot": "clean git archive",
-  "release_tag": "witness-client-v0.2.13rc9",
+  "release_tag": "witness-client-v0.2.14",
   "release_tag_scope": "The release tag adds only release manifests to source_commit; package and build inputs are identical.",
   "supported_protocols": [
     2
@@ -13,7 +13,7 @@
   "native_proof_abi": 2,
   "proof_key_sha256": "6478059e4ad0d39e8c157c76cea9c6dd777c2ab5143cf8694876094facf39b16",
   "proof_parameters_source": {
-    "source_commit": "3924635e996e0785083d3143b05b32ec80f0e06a",
+    "source_commit": "6010e3c7d1268cb9f36c1ba0ed2af723617e61cf",
     "path": "witness-server/verifier/params",
     "included_in_wheel": false
   },
@@ -48,7 +48,7 @@
     }
   },
   "requires_dist": [
-    "404-renderer-client<0.2,>=0.1.3rc1",
+    "404-renderer-client<0.2,>=0.1.4",
     "tlslite-ng<0.9,>=0.8.2",
     "cryptography<51,>=50.0.2",
     "httpx<0.29,>=0.28.1",
@@ -62,10 +62,10 @@
   ],
   "packages": {
     "404-witness-client": {
-      "version": "0.2.13rc9",
-      "filename": "404_witness_client-0.2.13rc9-py3-none-manylinux_2_34_x86_64.whl",
+      "version": "0.2.14",
+      "filename": "404_witness_client-0.2.14-py3-none-manylinux_2_34_x86_64.whl",
       "requires_dist": [
-        "404-renderer-client<0.2,>=0.1.3rc1",
+        "404-renderer-client<0.2,>=0.1.4",
         "tlslite-ng<0.9,>=0.8.2",
         "cryptography<51,>=50.0.2",
         "httpx<0.29,>=0.28.1",
@@ -80,8 +80,8 @@
       "license_expression": "MIT AND Apache-2.0 AND BSD-3-Clause AND BSD-1-Clause AND SunPro AND LicenseRef-Go-Cephes"
     },
     "404-renderer-client": {
-      "version": "0.1.3rc1",
-      "filename": "404_renderer_client-0.1.3rc1-py3-none-any.whl",
+      "version": "0.1.4",
+      "filename": "404_renderer_client-0.1.4-py3-none-any.whl",
       "requires_dist": [
         "httpx==0.28.1",
         "pytest==8.3.5; extra == \"dev\"",
@@ -92,26 +92,26 @@
       "license_expression": "MIT"
     },
     "404-miner-runtime": {
-      "version": "0.1.1rc1",
-      "filename": "404_miner_runtime-0.1.1rc1-py3-none-any.whl",
+      "version": "0.1.2",
+      "filename": "404_miner_runtime-0.1.2-py3-none-any.whl",
       "requires_dist": [
-        "404-witness-client<0.3,>=0.2.13rc9"
+        "404-witness-client<0.3,>=0.2.14"
       ],
       "license_expression": "MIT"
     }
   },
   "files": {
-    "404_witness_client-0.2.13rc9-py3-none-manylinux_2_34_x86_64.whl": {
-      "sha256": "80f40c236c95984b938e66c412b618c6ed2f5d2c686c15b629e8edc4cd015dd0",
-      "bytes": 8079648
+    "404_witness_client-0.2.14-py3-none-manylinux_2_34_x86_64.whl": {
+      "sha256": "c585ff526df2a271523f2b8a8efd9b6e33395aa27cdab185ccb76388ab2756b2",
+      "bytes": 8079591
     },
-    "404_renderer_client-0.1.3rc1-py3-none-any.whl": {
-      "sha256": "6d91fa41daeb0cff582c671589fc7ee8160d9b4a46d9a9bc392ceb73c8bd59db",
-      "bytes": 13614
+    "404_renderer_client-0.1.4-py3-none-any.whl": {
+      "sha256": "35b1b77efe479a18713a0d817bd60749089cc7d0725c1738edbbcd8caccaa4fa",
+      "bytes": 13575
     },
-    "404_miner_runtime-0.1.1rc1-py3-none-any.whl": {
-      "sha256": "d05bbd97ba11fadafc015bd640d32f216f4eefcc388558abaf8fbbb49a8341b4",
-      "bytes": 10727
+    "404_miner_runtime-0.1.2-py3-none-any.whl": {
+      "sha256": "c21cc062da3447c94d991e1e279fd9adfaecf18f1e6e02ca4f203520d9407c14",
+      "bytes": 10690
     }
   },
   "tested_linux_environments": {
@@ -135,6 +135,7 @@
         "patchelf": "0.19.1.0",
         "pyproject_hooks": "1.3.3",
         "cryptography": "50.0.2",
+        "404-renderer-client": "0.1.4",
         "pluggy": "1.7.0",
         "openai": "3.40.0",
         "ecdsa": "0.19.2",
@@ -147,7 +148,6 @@
         "httpx": "0.28.1",
         "jiter": "0.18.0",
         "six": "1.17.0",
-        "404-renderer-client": "0.1.3rc1",
         "httpx2": "2.16.0",
         "typing_extensions": "4.16.0",
         "annotated-types": "0.8.0",
@@ -155,15 +155,15 @@
         "bittensor-wallet": "4.1.1",
         "certifi": "2026.10.23",
         "anyio": "4.15.1",
-        "404-witness-client": "0.2.13rc9",
         "idna": "3.20",
         "iniconfig": "2.3.1",
         "httpcore2": "2.16.0",
-        "404-miner-runtime": "0.1.1rc1",
         "websockets": "17.3",
         "httpcore": "1.0.9",
         "truststore": "0.10.5",
         "h11": "0.16.0",
+        "404-miner-runtime": "0.1.2",
+        "404-witness-client": "0.2.14",
         "pydantic_core": "2.50.1",
         "sniffio": "1.3.1"
       }
@@ -177,6 +177,7 @@
       ],
       "environment": {
         "cryptography": "50.0.2",
+        "404-renderer-client": "0.1.4",
         "pluggy": "1.7.0",
         "packaging": "26.3",
         "ecdsa": "0.19.2",
@@ -190,7 +191,6 @@
         "httpx": "0.28.1",
         "jiter": "0.18.0",
         "six": "1.17.0",
-        "404-renderer-client": "0.1.3rc1",
         "httpx2": "2.16.0",
         "typing_extensions": "4.16.0",
         "annotated-types": "0.8.0",
@@ -198,18 +198,18 @@
         "bittensor-wallet": "4.1.0",
         "certifi": "2026.10.23",
         "anyio": "4.15.1",
-        "404-witness-client": "0.2.13rc9",
         "websockets": "17.2",
         "pip": "26.2.1",
         "idna": "3.20",
         "numpy": "2.5.4",
         "iniconfig": "2.3.1",
         "httpcore2": "2.16.0",
-        "404-miner-runtime": "0.1.1rc1",
         "httpcore": "1.0.9",
         "truststore": "0.10.5",
         "h11": "0.16.0",
+        "404-miner-runtime": "0.1.2",
         "loguru": "0.7.3",
+        "404-witness-client": "0.2.14",
         "pydantic_core": "2.50.1",
         "sniffio": "1.3.1",
         "aiofiles": "25.1.0"
@@ -223,7 +223,8 @@
     "native_library": "Installed wheel loads ABI 2, authenticates the pinned proof parameters and generates a synthetic credential proof; go version -m reports go1.27.3",
     "native_go_tests": {
       "command": "GOTOOLCHAIN=local GOMAXPROCS=2 GOMEMLIMIT=768MiB go test ./...",
-      "status": "passed"
+      "status": "passed",
+      "network": "disabled"
     },
     "installed_wheel_tests": {
       "network": "disabled during execution",
@@ -239,7 +240,7 @@
         },
         "miner_reference_and_runtime": {
           "passed": 21,
-          "warnings": 2
+          "warnings": 1
         }
       },
       "python3.13": {
@@ -255,7 +256,7 @@
         }
       },
       "skips": "Standalone renderer integration tests require a running renderer; no real rendering service was exercised.",
-      "warnings": "Python 3.11: tlslite asyncore deprecation; read-only pytest cache for reference tests."
+      "warnings": "Python 3.11: tlslite asyncore deprecation."
     },
     "pip_check": "passed in the Python 3.11 wheel environment, Python 3.13 source-install environment and separate Python 3.13 wheel environment",
     "base_miner_install": {
@@ -304,8 +305,8 @@
             "version": "0.19.2",
             "id": "PYSEC-2026-1325",
             "aliases": [
-              "CVE-2024-23342",
-              "GHSA-wj6h-64fc-37mp"
+              "GHSA-wj6h-64fc-37mp",
+              "CVE-2024-23342"
             ],
             "fix_versions": []
           }
@@ -342,5 +343,5 @@
     "package_registry": "not published; upload requires separate authorization",
     "prepared_artifacts": "Use the files and SHA-256 values in this manifest; do not rebuild under the same published version or overwrite existing artifacts."
   },
-  "previous_release": "releases/0.2.13rc1.json"
+  "previous_release": "releases/0.2.13rc9.json"
 }
