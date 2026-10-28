@@ -21,6 +21,7 @@ from witness_client.calls import RequestKey, canonical
 from pod_gateway.budget import Budget
 from pod_gateway.records import Call, CallRecords, RecordingConflict
 from pod_gateway.recovery import recover_issued
+from pod_gateway.rounds import PromptImage, RoundInputs
 from pod_gateway.state import R2StateStore, Snapshot, StateConflict, WriteUncertain
 
 START = "00000000-0000-4000-8000-000000000001"
@@ -181,6 +182,39 @@ def test_restarted_worker_finishes_durable_capture(tmp_path: Path, completed: bo
     assert located is not None and located[1].phase == "issued"
     assert budget.summary(SCOPE, item)["pending_usage"] == 0
     assert not directory.exists()
+
+
+def test_restarted_failed_capture_saves_status_with_its_storage_prefix(tmp_path: Path) -> None:
+    state = MemoryState()
+    records, budget, item, call = capture(state)
+    storage_prefix = "isolated/"
+    files = evidence(budget, item, call)
+    response = canonical({"error": {"message": "Fixture provider rejection"}})
+    metadata = json.loads(files["manifest.json"])
+    metadata.update(provider_status=404, usage=None, response_sha256=hashlib.sha256(response).hexdigest())
+    files["manifest.json"], files["response.sse"] = canonical(metadata), response
+    for name, content in files.items():
+        state.put(storage_prefix + prefix(call) + name, content)
+    status_key = storage_prefix + prefix(call) + "status.json"
+    state.put(status_key, canonical({"status": "issued"}))
+    directory = tmp_path / "spool" / call.exchange_id
+    directory.mkdir(parents=True, mode=0o700)
+    directory.parent.chmod(0o700)
+    inputs = RoundInputs(
+        repository="404-repo/404-active-competition", branch="main", revision="a" * 40,
+        round=SCOPE.round, number=0, seed=42, generation_deadline_block=None, storage_prefix=storage_prefix,
+        prompts=(PromptImage(id="chair", source_url="https://images.test/chair.png", sha256="d" * 64,
+                             image_key=storage_prefix + "competition-inputs/v1/" + "d" * 64),),
+    )
+    restarted = PodRuntime(
+        evidence=state, records=records, budget=budget, scope=SCOPE, start_id=START, pod_id="pod-one",
+        token="fixture", origin="https://witness.test", proof_hash=PROOF,
+        round_end=None, spool=directory.parent, round_inputs=inputs,
+    )
+    restarted.executor.shutdown(wait=True)
+    status = state.get(status_key)
+    assert status is not None
+    assert json.loads(status) == {"status": "failed", "error_type": "ProviderHTTPError"}
 
 
 @pytest.mark.parametrize("manifest_saved", [False, True])

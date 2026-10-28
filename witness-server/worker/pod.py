@@ -259,7 +259,7 @@ class PodRuntime:
             if call.phase in ("issued", "failed"):
                 if call.phase == "failed":
                     self.evidence.put(
-                        f"rounds/{self.scope.round}/{self.scope.hotkey}/{exchange_id}/status.json",
+                        f"{self.storage_prefix}rounds/{self.scope.round}/{self.scope.hotkey}/{exchange_id}/status.json",
                         json_bytes({"status": "failed", "error_type": call.failure}),
                     )
                 self._cleanup(exchange_id)
