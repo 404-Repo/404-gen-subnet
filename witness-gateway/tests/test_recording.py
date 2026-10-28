@@ -3,14 +3,10 @@ from __future__ import annotations
 import json
 from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal
-from pathlib import Path
-from typing import Literal
 
 import pytest
-from miner_runtime.accounting import credits as replay_credits
 from support import MemoryState
 from witness_client.calls import RequestKey, canonical, request_digest
-from witness_client.request import serialize_body
 
 from pod_gateway.budget import Budget, BudgetRejected
 from pod_gateway.models import Scope
@@ -182,33 +178,6 @@ def test_subscription_cached_tokens_use_the_full_input_rate() -> None:
     )
     assert Decimal(str(budget.summary(SCOPE, item)["known_credits"])) == Decimal("3.8")
     assert budget.summary(SCOPE, item)["possible_dispatches"] == 1
-
-
-@pytest.mark.parametrize("provider", ["api", "codex"])
-@pytest.mark.parametrize(
-    "input_tokens,expected",
-    [(3, "38"), (272000, "272035"), (272001, "544054.5")],
-)
-def test_terra_61_uses_competition_rates_for_capture_and_replay(
-    provider: Literal["api", "codex"], input_tokens: int, expected: str
-) -> None:
-    pricing = (Path(__file__).resolve().parents[2] / "miner-reference/budgets/pricing.json").read_bytes()
-    body = serialize_body(
-        {"model": "gpt-6.1-terra", "input": "image", "stream": True, "service_tier": "default"}, provider
-    )
-    item = RequestKey.from_body(provider, body)
-    budget = Budget(MemoryState(), pricing)
-    budget.reserve(SCOPE, item, "terra-exchange", body)
-    usage = {
-        "input_tokens": input_tokens,
-        "output_tokens": 7,
-        "total_tokens": input_tokens + 7,
-        "input_tokens_details": {"cached_tokens": input_tokens},
-        "output_tokens_details": {"reasoning_tokens": 5},
-    }
-    budget.settle(SCOPE, item, usage)
-    assert Decimal(str(budget.summary(SCOPE, item)["known_credits"])) == Decimal(expected)
-    assert replay_credits(json.loads(pricing), json.loads(body)["model"], usage) == Decimal(expected)
 
 
 @pytest.mark.parametrize(

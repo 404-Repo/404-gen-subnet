@@ -416,8 +416,8 @@ change competition accounting. The runtime and validator must enforce this on
 both API and subscription routes, explicitly defaulting to Standard so account
 defaults cannot select Flex.
 
-The [rate file](budgets/pricing.json) contains all eight candidate
-models, checked 2026-10-27. Values below are **credits per token**. With this credit
+The [rate file](budgets/pricing.json) contains all seven candidate
+models, checked 2026-10-19. Values below are **credits per token**. With this credit
 scale, the numbers also equal the published USD price per million tokens: 2 credits
 per token represents $2 per million tokens.
 
@@ -425,7 +425,6 @@ per token represents $2 per million tokens.
 | --- | ---: | ---: | ---: | ---: |
 | `gpt-6-astra` | 10 | 50 | 20 | 75 |
 | `gpt-6.1-sol` | 2 | 10 | 4 | 15 |
-| `gpt-6.1-terra` | 1 | 5 | 2 | 7.5 |
 | `gpt-6-sol` | 2 | 10 | 4 | 15 |
 | `gpt-6-luna` | 0.10 | 0.50 | 0.20 | 0.75 |
 | `gpt-5.6-sol` | 4 | 20 | 8 | 30 |
@@ -450,11 +449,6 @@ Responses routes; access and usage support must be confirmed for each allowed
 combination. UI labels and undocumented aliases do not establish a pricing
 identity. Unknown model IDs cannot receive a guessed rate. Other providers or
 billable features need explicit evidence and accounting before being allowed.
-
-GPT-6.1 Terra (`gpt-6.1-terra`) is available through the
-[Responses API](https://developers.openai.com/api/docs/models/gpt-6.1-terra) and
-[Codex subscriptions](https://learn.chatgpt.com/docs/pricing#feature-availability)
-on eligible plans; subscription access depends on workspace controls.
 
 ### Calls and failures
 
