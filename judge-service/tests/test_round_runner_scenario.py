@@ -53,7 +53,7 @@ _SUBMISSIONS_ADAPTER = TypeAdapter(dict[str, MinerSubmission])
 
 # A generations file body with every prompt stem delivered (has a usable js URL).
 _GENERATIONS_JSON = GenerationsAdapter.dump_json(
-    {p.removesuffix(".png"): GenerationResult(js="https://cdn/x.js") for p in PROMPTS},
+    {p.removesuffix(".png"): GenerationResult(js="https://cdn/x.js", views="https://cdn/x") for p in PROMPTS},
     indent=2,
 ).decode()
 
@@ -424,3 +424,34 @@ async def test_shutdown_while_scoring_discards_partial_result(
     assert discord.round_finalized == []
     matrix = await get_match_matrix(git, 1, git.ref_sha)
     assert matrix.get(LEADER, HK_A) is None
+
+
+@pytest.mark.parametrize(
+    "baseline", [None, "{}", '{"p0": {"js": "https://cdn/x.js", "views": "https://cdn/x"}}', '{"p0": {}, "p1": {}}']
+)
+async def test_missing_or_incomplete_baseline_waits_without_judging(settings: Settings, baseline: str | None) -> None:
+    git = _world([HK_A])
+    path = f"rounds/1/{LEADER}/generated.json"
+    if baseline is None:
+        del git.files[path]
+    else:
+        git.files[path] = baseline
+    discord, calls, waits = await _run_round(git, {}, [], settings)
+    assert calls == []
+    assert waits == 0
+    assert "rounds/1/winner.json" not in git.committed
+    assert "state.json" not in git.committed
+    assert discord.round_finalized == []
+    git.files[path] = _GENERATIONS_JSON
+    await _run_round(git, {(LEADER, HK_A): [-1.0]}, [], settings)
+    assert _winner(git) == LEADER
+
+
+async def test_empty_official_prompt_set_does_not_complete_a_baseline(settings: Settings) -> None:
+    git = _world([HK_A])
+    git.files["rounds/1/prompts.txt"] = ""
+    git.files[f"rounds/1/{LEADER}/generated.json"] = "{}"
+    discord, calls, _ = await _run_round(git, {}, [], settings)
+    assert calls == []
+    assert "rounds/1/winner.json" not in git.committed
+    assert discord.round_finalized == []

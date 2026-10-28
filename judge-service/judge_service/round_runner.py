@@ -8,6 +8,8 @@ Run available matches while checks are pending. Finalize the round once
 every miner in the surviving chain of winners has passed both checks.
 """
 
+from pathlib import Path
+
 from loguru import logger
 from openai import AsyncOpenAI
 from subnet_common.competition.config import require_competition_config
@@ -140,6 +142,19 @@ class RoundRunner:
         request validation for chain members, finalize OR run next unit of work."""
         if not self._hotkeys:
             await self._finalize(winner="leader", reason="No submissions found")
+            return
+
+        baseline = await get_generations(self._git, self._round_num, "leader", ref=self._ref)
+        expected = {Path(prompt).stem for prompt in self._prompts}
+        if (
+            not expected
+            or set(baseline) != expected
+            or any(
+                not result.failure_reason and (result.js is None or result.views is None)
+                for result in baseline.values()
+            )
+        ):
+            logger.info("Waiting for the complete leader baseline")
             return
 
         await self._reload_external_state()

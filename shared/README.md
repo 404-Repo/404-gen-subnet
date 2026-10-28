@@ -63,7 +63,9 @@ source auditing before judging can complete.
 - **Leader generation:** the operator runs the previous leader's Python source,
   identified by repository/commit, on the published round prompts and seed. Publish
   `rounds/{n}/leader/generated.json` using the `GenerationResult` schema above,
-  with canonical Three.js and rendered-view locations.
+  with canonical Three.js and rendered-view locations. Use the
+  [manual leader launcher](../docs/manual-leader-generation.md) to freeze inputs,
+  run or resume the base runner, and prepare the complete judge bundle.
 - **Replay validator:** consume `validation_requests.json`, replay the exact submitted
   Python source using the published prompts/seed and recorded witness evidence,
   verify the canonical outputs and competition budgets, then publish one terminal
