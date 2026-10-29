@@ -195,8 +195,8 @@ def test_native_direct_tls_durable_completion_and_exact_recovery(
                     summary = fixture.runtimes[0].budget.summary(
                         fixture.scope, fixture.records.locate(fixture.scope, call.exchange_id)[0]  # type: ignore[index]
                     )
-                    assert summary["possible_dispatches"] == 1
-                    assert summary["pending_usage"] == (0 if status == 200 else 1)
+                    assert summary["possible_dispatches"] == int(status == 200)
+                    assert summary["pending_usage"] == 0
 
         asyncio.run(scenario())
         captured.result(timeout=5)

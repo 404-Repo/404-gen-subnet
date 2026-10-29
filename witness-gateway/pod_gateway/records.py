@@ -45,7 +45,7 @@ class CallRecord(BaseModel):
     revision: str
     scope_key: str
     call: Call
-    attempts: dict[str, Call] = Field(default_factory=dict)
+    attempts: dict[str, Call] = Field(default_factory=dict, exclude=True)
 
 
 class CallRecords:
@@ -123,11 +123,18 @@ class CallRecords:
             return None
         record = self.load(scope, json.loads(saved.data)["call_id"])
         if record is None:
-            raise RecordingConflict("Call is missing")
+            return None
         call = record.call if record.call.exchange_id == exchange_id else record.attempts.get(exchange_id)
         if call is None:
-            raise RecordingConflict("Exchange identity differs")
+            return None
         return call.request, call
+
+    def replaced(self, scope: Scope, exchange_id: str) -> bool:
+        saved = self.store.load(self.index_key(scope, exchange_id))
+        if saved is None:
+            return False
+        record = self.load(scope, json.loads(saved.data)["call_id"])
+        return record is not None and record.call.exchange_id != exchange_id
 
     def retry(self, scope: Scope, request: RequestKey, exchange_id: str) -> Call:
         def change(record: CallRecord) -> Call:
@@ -136,7 +143,6 @@ class CallRecords:
                 call.exchange_id == exchange_id
                 and call.phase == "failed"
             ):
-                record.attempts[call.exchange_id] = call.model_copy(deep=True)
                 record.call = Call(
                     request=request, exchange_id=str(uuid.uuid4())
                 )
@@ -156,7 +162,6 @@ class CallRecords:
                 call.exchange_id == expected_exchange_id
                 and call.phase == "failed"
             ):
-                record.attempts[call.exchange_id] = call.model_copy(deep=True)
                 call = record.call = Call(
                     request=request, exchange_id=str(uuid.uuid4())
                 )
@@ -222,10 +227,12 @@ class CallRecords:
         manifest: bytes | None = None,
     ) -> None:
         def change(record: CallRecord) -> None:
-            call = record.call if record.call.exchange_id == exchange_id else record.attempts.get(exchange_id)
-            if call is None:
-                raise RecordingConflict("Capture attempt was superseded")
+            if record.call.exchange_id != exchange_id:
+                return
+            call = record.call
             if call.phase == "failed" and call.failure == failure:
+                if call.pod_id == pod_id and call.manifest_sha256 is None and manifest is not None:
+                    call.manifest_sha256 = hashlib.sha256(manifest).hexdigest()
                 return
             if call.phase != "capturing" or call.pod_id != pod_id:
                 raise RecordingConflict("Cannot replace an existing result with an error")

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import threading
@@ -7,9 +8,10 @@ import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from aiohttp import web
 from botocore.exceptions import EndpointConnectionError
 from channel import WorkerChannel
 from pod import PodRuntime
@@ -19,7 +21,8 @@ from test_state import FakeS3, s3_error
 from witness_client.calls import RequestKey, canonical
 
 from pod_gateway.budget import Budget
-from pod_gateway.records import Call, CallRecords, RecordingConflict
+from pod_gateway.direct import Witness
+from pod_gateway.records import Call, CallRecord, CallRecords, RecordingConflict
 from pod_gateway.recovery import recover_issued
 from pod_gateway.rounds import PromptImage, RoundInputs
 from pod_gateway.state import R2StateStore, Snapshot, StateConflict, WriteUncertain
@@ -86,6 +89,286 @@ def runtime(state: MemoryState, records: CallRecords, budget: Budget, spool: Pat
         token="fixture", origin="https://witness.test", proof_hash=PROOF,
         round_end=int(time.time()) + 600, spool=spool,
     )
+
+
+@pytest.mark.parametrize("provider_status", [404, 200])
+@pytest.mark.parametrize("upload", ["server.bin", "manifest.json", "public"])
+def test_failed_artifact_upload_does_not_block_an_ordinary_same_id_retry(
+    tmp_path: Path, provider_status: int, upload: str,
+) -> None:
+    upload_failed = threading.Event()
+
+    class ArtifactOutage(MemoryState):
+        offline = False
+
+        def put(self, key: str, data: bytes, content_type: str = "application/octet-stream") -> None:
+            blocked = key.startswith("evidence/v1/") if upload == "public" else key.endswith("/" + upload)
+            if self.offline and blocked:
+                upload_failed.set()
+                raise EndpointConnectionError(endpoint_url="https://offline.invalid")
+            super().put(key, data, content_type)
+
+    state = ArtifactOutage()
+    records, budget, item, call = capture(state)
+    worker = runtime(state, records, budget, tmp_path / "spool")
+    worker.accepting = True
+    directory = worker.spool / call.exchange_id
+    directory.mkdir(mode=0o700)
+    files = evidence(budget, item, call)
+    response = (
+        canonical({"error": {"message": "Fixture provider rejection"}})
+        if provider_status == 404 else b"unusable provider response"
+    )
+    metadata = json.loads(files.pop("manifest.json"))
+    metadata.update(provider_status=provider_status, usage=None, response_sha256=hashlib.sha256(response).hexdigest())
+    files["response.sse"] = response
+    for name, content in files.items():
+        (directory / name).write_bytes(content)
+        if name != "response.sse":
+            state.put(prefix(call) + name, b"earlier provider handshake" if name == "server.bin" else content)
+    state.offline = True
+    future = worker.executor.submit(worker._finalize, item, call, metadata, "CaptureInterrupted")
+    try:
+        assert upload_failed.wait(timeout=5)
+        failed = records.load(SCOPE, item.id)
+        assert failed is not None and failed.call.phase == "failed"
+        assert failed.call.failure == ("ProviderHTTPError" if provider_status == 404 else "InvalidProviderResponse")
+        summary = budget.summary(SCOPE, item)
+        assert summary["possible_dispatches"] == summary["pending_usage"] == 0
+        assert directory.is_dir()
+        request = MagicMock(spec=web.Request)
+        request.read = AsyncMock(return_value=canonical({"request": item.model_dump()}))
+        service = Witness(worker, lambda key: "https://witness.test/" + key)
+        retry_response = asyncio.run(service.start(request))
+        assert isinstance(retry_response.body, bytes)
+        retry = Call.model_validate(json.loads(retry_response.body)["call"])
+        assert retry.phase == "assigned" and retry.request == item
+        assert retry.exchange_id != call.exchange_id
+        budget.reserve(SCOPE, item, retry.exchange_id, BODY)
+        state.offline = False
+        future.result(timeout=10)
+        assert not directory.exists()
+        assert state.get(prefix(call) + "response.sse") == response
+        saved = json.loads(state.get(prefix(call) + "failure.json") or b"{}")
+        assert saved["error_type"] == failed.call.failure
+        assert budget.summary(SCOPE, item)["possible_dispatches"] == 1
+    finally:
+        state.offline = False
+        try:
+            future.result(timeout=10)
+        finally:
+            worker.executor.shutdown(wait=True)
+
+
+@pytest.mark.parametrize("provider_status", [404, 200])
+def test_completed_failed_response_remains_readable_without_reusing_the_failure(
+    tmp_path: Path, provider_status: int,
+) -> None:
+    state = MemoryState()
+    records, budget, item, call = capture(state)
+    worker = runtime(state, records, budget, tmp_path / "spool")
+    worker.accepting = True
+    directory = worker.spool / call.exchange_id
+    directory.mkdir(mode=0o700)
+    files = evidence(budget, item, call)
+    response = (
+        canonical({"error": {"message": "Fixture provider rejection"}})
+        if provider_status == 404 else b"unusable provider response"
+    )
+    metadata = json.loads(files.pop("manifest.json"))
+    metadata.update(provider_status=provider_status, usage=None, response_sha256=hashlib.sha256(response).hexdigest())
+    files["response.sse"] = response
+    for name, content in files.items():
+        (directory / name).write_bytes(content)
+    state.put(prefix(call) + "session.json", files["session.json"])
+    try:
+        worker._finalize(item, call, metadata, "CaptureInterrupted")
+        located = records.locate(SCOPE, call.exchange_id)
+        assert located is not None and located[1].phase == "failed"
+        service = Witness(worker, lambda key: "https://witness.test/" + key)
+        completion = service.completion(SCOPE, item, located[1])
+        manifest = completion["manifest"]
+        assert isinstance(manifest, str)
+        saved = json.loads(manifest)
+        assert saved["provider_status"] == provider_status
+        assert saved["response_sha256"] == hashlib.sha256(response).hexdigest()
+        assert budget.summary(SCOPE, item)["possible_dispatches"] == 0
+        request = MagicMock(spec=web.Request)
+        request.read = AsyncMock(return_value=canonical({"request": item.model_dump()}))
+        retry_response = asyncio.run(service.start(request))
+        assert isinstance(retry_response.body, bytes)
+        retry = Call.model_validate(json.loads(retry_response.body)["call"])
+        assert retry.phase == "assigned" and retry.exchange_id != call.exchange_id
+    finally:
+        worker.executor.shutdown(wait=True)
+
+
+@pytest.mark.parametrize("operation", ["partial", "http", "recover"])
+def test_failed_diagnostic_write_does_not_block_an_ordinary_same_id_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str,
+) -> None:
+    class DiagnosticOutage(MemoryState):
+        offline = True
+
+        def put(self, key: str, data: bytes, content_type: str = "application/octet-stream") -> None:
+            if self.offline and key.endswith("/failure.json"):
+                raise EndpointConnectionError(endpoint_url="https://offline.invalid")
+            super().put(key, data, content_type)
+
+    state = DiagnosticOutage()
+    records, budget, item, call = capture(state)
+    worker = runtime(state, records, budget, tmp_path / "spool")
+    worker.accepting = True
+    directory = worker.spool / call.exchange_id
+    directory.mkdir(mode=0o700)
+    files = evidence(budget, item, call)
+    metadata = json.loads(files["manifest.json"])
+    response = canonical({"error": {"message": "Fixture provider rejection"}})
+    metadata.update(provider_status=404, usage=None, response_sha256=hashlib.sha256(response).hexdigest())
+    files["manifest.json"], files["response.sse"] = canonical(metadata), response
+    if operation == "partial":
+        files.pop("manifest.json")
+        files.pop("response.sse")
+    for name, content in files.items():
+        if operation != "http" or name != "manifest.json":
+            state.put(prefix(call) + name, content)
+        (directory / name).write_bytes(content)
+    monkeypatch.setattr(worker, "_retry_upload", lambda operation: operation())
+    try:
+        with pytest.raises(EndpointConnectionError):
+            if operation == "recover":
+                recover_issued(records, budget, state.read, SCOPE, item, call, PROOF, worker.save_failure)
+            else:
+                worker._finalize(item, call, metadata if operation == "http" else None, "CaptureInterrupted")
+        failed = records.load(SCOPE, item.id)
+        assert failed is not None and failed.call.phase == "failed"
+        summary = budget.summary(SCOPE, item)
+        assert summary["possible_dispatches"] == summary["pending_usage"] == 0
+        assert directory.is_dir()
+        request = MagicMock(spec=web.Request)
+        request.read = AsyncMock(return_value=canonical({"request": item.model_dump()}))
+        service = Witness(worker, lambda key: "https://witness.test/" + key)
+        retry_response = asyncio.run(service.start(request))
+        assert isinstance(retry_response.body, bytes)
+        retry = json.loads(retry_response.body)["call"]
+        assert retry["phase"] == "assigned" and retry["exchange_id"] != call.exchange_id
+        assert retry["request"] == item.model_dump()
+        budget.reserve(SCOPE, item, retry["exchange_id"], BODY)
+        assert budget.summary(SCOPE, item)["possible_dispatches"] == 1
+        state.offline = False
+        if operation == "recover":
+            worker._recover(call.exchange_id)
+        else:
+            worker._finalize(item, call, metadata if operation == "http" else None, "CaptureInterrupted")
+        assert not directory.exists()
+        saved_failure = json.loads(state.get(prefix(call) + "failure.json") or b"{}")
+        assert saved_failure["error_type"] == ("CaptureInterrupted" if operation == "partial" else "ProviderHTTPError")
+        assert budget.summary(SCOPE, item)["possible_dispatches"] == 1
+    finally:
+        worker.executor.shutdown(wait=True)
+
+
+@pytest.mark.parametrize("replaced", [False, True])
+def test_expired_capture_saves_partial_evidence_before_cleanup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, replaced: bool,
+) -> None:
+    class EvidenceOutage(MemoryState):
+        offline = False
+
+        def put(self, key: str, data: bytes, content_type: str = "application/octet-stream") -> None:
+            if self.offline:
+                raise EndpointConnectionError(endpoint_url="https://offline.invalid")
+            super().put(key, data, content_type)
+
+    state = EvidenceOutage()
+    records, budget, item, call = capture(state)
+    worker = runtime(state, records, budget, tmp_path / "spool")
+    worker.accepting = True
+    directory = worker.spool / call.exchange_id
+    directory.mkdir(mode=0o700)
+    files = evidence(budget, item, call)
+    files.pop("manifest.json")
+    files.pop("response.sse")
+    files["server.bin"] = b"provider handshake ciphertext"
+    files["authorization-server.bin"] = files["server.bin"]
+    files["authorization.json"] = canonical({"sessionId": item.session_id})
+    for name, content in files.items():
+        state.put(prefix(call) + name, content)
+        (directory / name).write_bytes(content)
+    partial = files["server.bin"] + b" plus partial provider response ciphertext"
+    (directory / "server.bin").write_bytes(partial)
+
+    def expire(record: CallRecord) -> None:
+        record.call.deadline = int(time.time()) - 1
+
+    records._change(SCOPE, item, expire)
+    expired = records.load(SCOPE, item.id)
+    assert expired is not None
+    service = Witness(worker, lambda key: "https://witness.test/" + key)
+    try:
+        snapshot = asyncio.run(service._snapshot(SCOPE, item, expired.call))
+        assert Call.model_validate(snapshot["call"]).phase == "failed"
+        if replaced:
+            retry = records.assign(SCOPE, item, START, "pod-one", expected_exchange_id=call.exchange_id)
+            budget.reserve(SCOPE, item, retry.exchange_id, BODY)
+        monkeypatch.setattr(worker, "_retry_upload", lambda operation: operation())
+        state.offline = True
+        with pytest.raises(EndpointConnectionError):
+            worker._recover(call.exchange_id)
+        assert directory.is_dir() and (directory / "server.bin").read_bytes() == partial
+        state.offline = False
+        worker._recover(call.exchange_id)
+        assert not directory.exists()
+        assert state.get(prefix(call) + "server.bin") == partial
+        assert json.loads(state.get(prefix(call) + "failure.json") or b"{}")["error_type"] == "CaptureExpired"
+        if replaced:
+            assert budget.summary(SCOPE, item)["possible_dispatches"] == 1
+    finally:
+        worker.executor.shutdown(wait=True)
+
+
+@pytest.mark.parametrize("operation", ["issued", "failed", "recover"])
+@pytest.mark.parametrize("status", [None, "issued"])
+def test_replaced_failed_capture_cleans_up_without_failure_diagnostics(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str, status: str | None,
+) -> None:
+    state = MemoryState()
+    records, budget, item, call = capture(state)
+    worker = runtime(state, records, budget, tmp_path / "spool")
+    directory = worker.spool / call.exchange_id
+    directory.mkdir(mode=0o700)
+    files = evidence(budget, item, call)
+    response = canonical({"error": {"message": "Fixture provider rejection"}})
+    metadata = json.loads(files["manifest.json"])
+    metadata.update(provider_status=404, usage=None, response_sha256=hashlib.sha256(response).hexdigest())
+    files["manifest.json"], files["response.sse"] = canonical(metadata), response
+    for name, content in files.items():
+        state.put(prefix(call) + name, content)
+        (directory / name).write_bytes(content)
+    monkeypatch.setattr(worker, "_retry_upload", lambda operation: operation())
+    try:
+        assert recover_issued(
+            records, budget, state.read, SCOPE, item, call, PROOF, worker.save_failure,
+        ).phase == "failed"
+        retry = records.assign(SCOPE, item, START, "pod-one", expected_exchange_id=call.exchange_id)
+        budget.reserve(SCOPE, item, retry.exchange_id, BODY)
+        budget.settle(SCOPE, item, USAGE, exchange_id=retry.exchange_id)
+        if status is None:
+            state.delete(prefix(call) + "failure.json")
+        else:
+            state.put(prefix(call) + "status.json", canonical({"status": status}))
+        if operation == "recover":
+            worker._recover(call.exchange_id)
+        else:
+            worker._finalize(item, call, metadata if operation == "issued" else None, "CaptureInterrupted")
+        assert not directory.exists()
+        current = records.load(SCOPE, item.id)
+        assert current is not None and current.call.exchange_id == retry.exchange_id
+        assert budget.summary(SCOPE, item)["known_credits"] == "2.0"
+        if status is not None:
+            assert json.loads(state.get(prefix(call) + "failure.json") or b"{}")["error_type"] == "ProviderHTTPError"
+    finally:
+        worker.executor.shutdown(wait=True)
 
 
 def test_permanently_drained_worker_reconnects_until_retirement_is_confirmed(
@@ -184,7 +467,7 @@ def test_restarted_worker_finishes_durable_capture(tmp_path: Path, completed: bo
     assert not directory.exists()
 
 
-def test_restarted_failed_capture_saves_status_with_its_storage_prefix(tmp_path: Path) -> None:
+def test_restarted_failed_capture_saves_failure_with_its_storage_prefix(tmp_path: Path) -> None:
     state = MemoryState()
     records, budget, item, call = capture(state)
     storage_prefix = "isolated/"
@@ -195,8 +478,8 @@ def test_restarted_failed_capture_saves_status_with_its_storage_prefix(tmp_path:
     files["manifest.json"], files["response.sse"] = canonical(metadata), response
     for name, content in files.items():
         state.put(storage_prefix + prefix(call) + name, content)
-    status_key = storage_prefix + prefix(call) + "status.json"
-    state.put(status_key, canonical({"status": "issued"}))
+    status_key = storage_prefix + prefix(call) + "failure.json"
+    state.put(storage_prefix + prefix(call) + "status.json", canonical({"status": "issued"}))
     directory = tmp_path / "spool" / call.exchange_id
     directory.mkdir(parents=True, mode=0o700)
     directory.parent.chmod(0o700)
@@ -214,7 +497,8 @@ def test_restarted_failed_capture_saves_status_with_its_storage_prefix(tmp_path:
     restarted.executor.shutdown(wait=True)
     status = state.get(status_key)
     assert status is not None
-    assert json.loads(status) == {"status": "failed", "error_type": "ProviderHTTPError"}
+    assert json.loads(status)["error_type"] == "ProviderHTTPError"
+    assert budget.summary(SCOPE, item)["possible_dispatches"] == 0
 
 
 @pytest.mark.parametrize("manifest_saved", [False, True])
@@ -368,7 +652,7 @@ def test_unreserved_retry_failure_does_not_block_the_next_attempt(
 ) -> None:
     state = MemoryState()
     records, budget, item, first = capture(state)
-    budget.settle(SCOPE, item, None, exchange_id=first.exchange_id)
+    budget.discard(SCOPE, item, first.exchange_id)
     records.failed(SCOPE, item, "pod-one", "InvalidProviderResponse", exchange_id=first.exchange_id)
     spending = budget.summary(SCOPE, item)
     second = records.assign(SCOPE, item, START, "pod-one", expected_exchange_id=first.exchange_id)
@@ -383,26 +667,26 @@ def test_unreserved_retry_failure_does_not_block_the_next_attempt(
     failed = records.locate(SCOPE, second.exchange_id)
     assert failed is not None and failed[1].phase == "failed"
     assert budget.summary(SCOPE, item) == spending
-    assert json.loads(state.get(prefix(second) + "status.json") or b"{}")["error_type"] == "SetupTimeout"
+    assert json.loads(state.get(prefix(second) + "failure.json") or b"{}")["error_type"] == "SetupTimeout"
 
     third = records.assign(SCOPE, item, START, "pod-one", expected_exchange_id=second.exchange_id)
     assert third.request == item and third.exchange_id != second.exchange_id
     assert records.claim(SCOPE, item, "pod-one", third.capture_id or "")
-    budget.reserve(SCOPE, item, third.exchange_id, BODY, failed_exchanges=(first.exchange_id, second.exchange_id))
+    budget.reserve(SCOPE, item, third.exchange_id, BODY)
     records.authorize(SCOPE, item, "pod-one", exchange_id=third.exchange_id)
     budget.settle(SCOPE, item, USAGE, exchange_id=third.exchange_id)
     records.issued(SCOPE, item, "pod-one", evidence(budget, item, third)["manifest.json"], exchange_id=third.exchange_id)
     saved = records.load(SCOPE, item.id)
     assert saved is not None and saved.call.phase == "issued"
-    assert budget.summary(SCOPE, item)["possible_dispatches"] == 2
-    assert budget.summary(SCOPE, item)["pending_usage"] == 1
+    assert budget.summary(SCOPE, item)["possible_dispatches"] == 1
+    assert budget.summary(SCOPE, item)["pending_usage"] == 0
 
 
 @pytest.mark.parametrize("stage", [
     "before_budget", "budget", "budget_read", "budget_conflicts", "authorization", "after_authorization",
 ])
 @pytest.mark.parametrize("committed", [False, True])
-def test_failed_capture_retries_without_erasing_dispatch_history(
+def test_failed_capture_releases_its_charge_before_a_retry(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stage: str, committed: bool,
 ) -> None:
     class UncertainState(MemoryState):
@@ -464,11 +748,9 @@ def test_failed_capture_retries_without_erasing_dispatch_history(
     retried = records.retry(SCOPE, item, original.exchange_id)
     assert retried.exchange_id != original.exchange_id and retried.phase == "reserved"
     summary = budget.summary(SCOPE, item)
-    reserved = stage in ("authorization", "after_authorization") or stage == "budget" and committed
-    assert summary["possible_dispatches"] == summary["pending_usage"] == int(reserved)
-    if not reserved and stage in ("budget_read", "budget_conflicts"):
-        budget.reserve(SCOPE, item, retried.exchange_id, BODY)
-        assert budget.summary(SCOPE, item)["possible_dispatches"] == 1
+    assert summary["possible_dispatches"] == summary["pending_usage"] == 0
+    budget.reserve(SCOPE, item, retried.exchange_id, BODY)
+    assert budget.summary(SCOPE, item)["possible_dispatches"] == 1
 
 
 @pytest.mark.parametrize("mode", [
@@ -502,7 +784,10 @@ def test_capture_retries_rejected_budget_writes_but_not_uncertain_writes(
         directory = args[3]
         assert isinstance(directory, Path)
         (directory / "authorization.json").write_bytes(b"{}")
-        before_release(BODY)
+        try:
+            before_release(BODY)
+        finally:
+            s3.mode = "ok"
         released += 1
         raise TimeoutError("Fixture failed after provider release")
 
@@ -516,10 +801,9 @@ def test_capture_retries_rejected_budget_writes_but_not_uncertain_writes(
     summary = budget.summary(SCOPE, item)
     reserved = int(mode == "timeout-after")
     assert released == reserved
-    assert summary["possible_dispatches"] == summary["pending_usage"] == reserved
+    assert summary["possible_dispatches"] == summary["pending_usage"] == 0
     s3.mode = "ok"
     retried = records.retry(SCOPE, item, original.exchange_id)
     assert retried.exchange_id != original.exchange_id and retried.phase == "reserved"
-    if mode in ("status-400", "status-403", "status-429"):
-        budget.reserve(SCOPE, item, retried.exchange_id, BODY)
-        assert budget.summary(SCOPE, item)["possible_dispatches"] == 1
+    budget.reserve(SCOPE, item, retried.exchange_id, BODY)
+    assert budget.summary(SCOPE, item)["possible_dispatches"] == 1

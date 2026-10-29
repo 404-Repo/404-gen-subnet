@@ -11,7 +11,7 @@ import tempfile
 from collections.abc import Callable
 from pathlib import Path
 
-from miner_runtime.observations import Execution, Schedule
+from miner_runtime.observations import Execution
 from witness_client.calls import request_digest
 
 from .models import Scope, json_bytes
@@ -56,7 +56,6 @@ def export_bundle(
     """Combine trusted host observations with independently verified provider evidence."""
     raw = execution.read_bytes()
     observed = Execution.model_validate_json(raw)
-    Schedule(observed)
     if not observed.finished or any(entry.exited is None for entry in observed.observations):
         raise ValueError("Execution observations are incomplete")
     if output.exists():
@@ -66,12 +65,17 @@ def export_bundle(
     captures: dict[str, object] = {}
     try:
         for entry in observed.observations:
-            if entry.action != "create" or entry.exchange_id is None or entry.exchange_id in captures:
+            if entry.action != "create":
                 continue
-            located = records.locate(scope, entry.exchange_id)
-            if located is None or located[0] != entry.request:
-                raise ValueError("Execution references an unknown captured call")
-            key, call = located
+            record = records.load(scope, entry.request.id)
+            if record is None or record.call.phase != "issued":
+                continue
+            call = record.call
+            key = call.request
+            if key != entry.request:
+                raise ValueError("Execution request differs from its saved call")
+            if call.exchange_id in captures:
+                continue
             directory = temporary / call.exchange_id
             directory.mkdir(mode=0o700)
             prefix = f"{storage_prefix}rounds/{scope.round}/{scope.hotkey}/{call.exchange_id}/"
@@ -124,20 +128,21 @@ def export_bundle(
                 model, usage = json.loads(request)["model"], verified.get("usage")
                 rejected = response_failure(manifest, response)
                 if rejected is not None:
-                    call = call.model_copy(update={"phase": "failed", "failure": rejected})
-            elif entry.failure is None:
+                    raise ValueError("Saved response is unusable")
+            else:
                 raise ValueError("Successful observation has no issued capture")
             captures[call.exchange_id] = {
                 "call": call.model_dump(exclude={"capture_id"}),
                 "model": model,
                 "usage": usage,
             }
+        raw = observed.model_copy(update={"observations": []}).model_dump_json().encode()
         (temporary / "execution.json").write_bytes(raw)
         (temporary / "pricing.json").write_bytes(pricing)
         (temporary / "verified.json").write_bytes(
             json_bytes(
                 {
-                    "version": 2,
+                    "version": 3,
                     "execution_sha256": hashlib.sha256(raw).hexdigest(),
                     "scope_key": scope.key,
                     "proof_key_sha256": proof_hash,

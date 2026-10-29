@@ -99,7 +99,7 @@ routing header is included in matching and checked against the TLS authorization
 
 The logical key is `(provider, canonical-body SHA256, request_id, session_id)`
 inside an authenticated allocation scope `(deployment, round, miner)`.
-`request_id` is an integer, default zero. Equal keys reuse the retained outcome,
+`request_id` is an integer, default zero. Equal keys reuse a retained successful outcome,
 including concurrent duplicates and reuse across prompts. A different identifier
 permits fresh inference for an otherwise identical request. Serialized request
 keys and call hashes use the `request_id` field.
@@ -158,7 +158,9 @@ the same durable exchange, a `Location: /v1/calls/<exchange_id>` header and a
 `Retry-After` hint. An assigned call includes its proof/capture WebSocket session;
 HTTP acceptance alone cannot authorize a provider request. A sealed attempt
 returns `200` with its completion metadata, including evidence of provider errors.
-Its call phase distinguishes a reusable response from a failed attempt.
+Complete provider HTTP errors use the completed-capture envelope so existing
+clients can raise the corresponding status exception. They remain failed outcomes
+in call storage and are retryable.
 Unstarted calls have a null `deadline`. Authorization saves the capture deadline
 immediately before provider release; its default window is thirty minutes.
 Joining or recovering an authorized capture retains that saved deadline.
@@ -188,27 +190,35 @@ eligibility remains enforced; live per-prompt admission is absent.
 
 Authorization and a possible-dispatch ledger entry become durable before release.
 A missing acknowledgement can mean dispatch occurred. Recovery finalizes retained
-ciphertext or joins the same exchange; an unresolved paid attempt keeps unknown
-usage and its retained spool. Losing unuploaded spool bytes can prevent completion.
-A durably failed attempt permits a caller retry with the same logical request and
-`request_id`; earlier attempts remain addressable for diagnostics and replay.
-The same `POST /v1/calls` body includes `expected_exchange_id` for replacement.
-The Pod atomically creates and assigns a replacement only when that exchange is
-still current and durably failed. Delayed or duplicate replacement requests return
-the current attempt without replacing it. A replacement has a new exchange UUID
-for its evidence, with the same logical key. Successful saved responses remain
+ciphertext or joins the same exchange; an unresolved paid attempt keeps its
+reservation and retained spool. Losing unuploaded spool bytes can prevent completion.
+A replacement Pod recovers a completed saved response first. If its capturing Pod
+was replaced, or its deadline expired with no active local capture, the unfinished
+attempt fails and releases its reservation. A failed attempt permits a caller retry
+with the same logical request and `request_id`.
+An ordinary `POST /v1/calls` with the unchanged request starts the next attempt;
+the caller needs no previous exchange UUID or retry handshake. The Pod atomically
+replaces its current failed attempt, so concurrent starts join one replacement.
+The optional `expected_exchange_id` remains accepted for existing callers.
+A replacement has a new exchange UUID for its evidence, with the same logical key.
+The logical call retains only its current attempt. Saved failure responses and
+evidence remain under their own UUIDs for diagnostics, with the reason in
+`failure.json`. Replaced attempts return
+404 from the status endpoint.
+Successful saved responses remain
 reusable through client restarts and Pod replacement without another inference.
 The client automatically allows two proven undispatched setup replacements per
 `create()`, with one/two-second delays within the same wait window. Provider and
 capture failures return to caller code; a subsequent `create()` retries the same
 request ID. An in-flight capture remains joined until its outcome is known.
+The server never starts another provider request from polling, recovery, or a
+failed capture; another attempt requires a new caller start request.
 
 The worker captures independently of client delivery and saves the response,
 verified usage, manifest and settlement before issuing a result. Delivery outages
-retry retrieval. If an outage escapes to submitted code, its exact witnessed error
-is retained by the execution host, separately from the provider outcome. Replay
-restores that observation even if delivery would now succeed. It never replaces
-unknown usage with zero or manufactures a provider response for missing evidence.
+retry retrieval. Replay supplies verified successful responses by logical request
+key. Failed-attempt diagnostics are not needed for replay or cleanup. Missing
+successful evidence leaves replay unresolved without starting inference.
 
 The host saves observation entry before attempting work and its outcome before
 returning to the caller. A process restart resumes saved observations and pending
@@ -219,18 +229,11 @@ Completed traces and their visible failures cannot be rewritten by a restart.
 
 ### Observation order and validator accounting
 
-Each invocation has a per-logical-key occurrence number, independent of other
-calls' arrival order. Concurrent identical keys are indistinguishable at this
-boundary. Code requiring different branch-specific observations must supply stable,
-distinct request IDs; the evidence cannot reconstruct thread roles from equal
-arguments. Stream `next`/`close` operations also have observation
-identities. Entry/exit event positions preserve causal overlap and delivery order;
-they do not identify a model request. Replay permits overlapping invocations to
-arrive in a different order, waits for their recorded predecessors, and rejects
-missing/extra/changed operations, mismatched stream use or impossible order within
-its timeout. Final JavaScript/None must match exactly. Ordering is enforced at
-this boundary, not at arbitrary subsequent Python instructions. Programs whose
-output still depends on uncontrolled scheduling fail output reproduction.
+Generation helpers retain per-key observations for local execution recovery.
+Offline replay looks up successful responses by the original logical key and
+does not reproduce failed attempts or their delivery order. Final JavaScript/None
+must match exactly. Missing evidence or an output mismatch needs investigation;
+the helper does not publish a miner-failure verdict or prove fault tolerance.
 
 Only the expected prompt's execution observations are required. Other captured
 work in the round remains available and need not be consumed by that replay.
@@ -243,8 +246,8 @@ independently charged its full verified cost; reuse does not transfer allowance.
 A durably failed attempt, including a provider HTTP error or unusable response,
 consumes neither the competition call cap nor its token allowance. Failed response
 bytes and their failure reason remain under that attempt's exchange UUID in R2;
-they are not a reusable successful response. The operational dispatch ledger
-retains actual known spending and unknown usage separately. An unresolved capture
+they are not a reusable successful response. Closing a failed attempt clears its
+dispatch reservation without retaining failed-attempt charges. An unresolved capture
 still prevents budget acceptance. Exactly the frozen call/credit limit is accepted;
 exceeding either is rejected. Pricing uses Decimal arithmetic, full input weight including cached
 tokens, output/reasoning once, and the existing long-context tier. Failed and
@@ -254,10 +257,8 @@ client and never appends evidence to satisfy missing work.
 Example (letters denote logical keys, not global sequence numbers):
 
 ```text
-original: enter A[0], enter B[0], deliver B[0]=HTTP failure,
-          deliver A[0]=Response, enter C[0](A output), deliver C[0], output JS
-replay:   B[0] may arrive before A[0]; both must enter before B's recorded
-          delivery; restore the same failure, then A, then C and identical JS
+original: A fails, caller retries A, A succeeds, C(A output) succeeds, output JS
+replay:   A returns its saved success, C returns its saved success, compare JS
 other U:  captured elsewhere in the round; absent from this execution
 reuse A:  A[1] gets the saved outcome; A's verified cost is charged once here
 ```
@@ -274,7 +275,7 @@ The verified bundle and its descriptor must remain in trusted validator storage.
 | provider | Client claim, verified TLS host/path | RequestKey, execution, session; capture/replay | API and subscription requests could match different routes |
 | request_sha256, request_id, optional session_id | Client key; body/header verified before dispatch | Call records, manifest; deduplication/replay | Changed work could reuse a capture; identical fresh requests could not be distinguished |
 | actual request JSON | TLS request verifier | Private request.json and authorized ciphertext; exporter | Cannot check full parameters or derive requested model and canonical hash |
-| exchange_id, historical attempts | Server UUID/CAS history | Call document/index and evidence directory; recovery/export | Cannot locate/fence a particular attempt or preserve safe retry history |
+| exchange_id | Server UUID/CAS assignment | Current call, exchange index and evidence directory; recovery/export | Cannot locate/fence a capture or retrieve its saved outcome |
 | phase, authorized, not_dispatched, failure | Worker/control writes, never miner assertions | CAS call state; capture, recovery, export | Cannot distinguish reusable result, safe retry and ambiguous paid dispatch |
 | deadline | Server reservation clock | Call/local job state; worker/client | Cannot bound capture lifetime across reconnects |
 | start_id, pod_id, capture_id | Allocator/selected worker; private claim fence | Call state (capture_id private); authorization/recovery | Old allocation or claimant could authorize a replacement |
@@ -286,9 +287,9 @@ The verified bundle and its descriptor must remain in trusted validator storage.
 | pricing_sha256, model, charge state, usage, credits | Frozen operator policy, verified request/usage | Per-call dispatch journal and verified bundle; settlement/budget | Cannot price consistently, fence uncertain dispatch or distinguish unknown from zero |
 | provider_status and response SSE | Authenticated provider HTTP/TLS | Manifest/response.sse; SDK decoder | Cannot reproduce results, errors, event contents, refusals or failed Responses |
 | image_sha256, generation seed | Execution host's frozen inputs; validator rechecks expected inputs | Local execution.json; execution host/replay | Cannot select/resume/check the same execution inputs; never call attribution |
-| occurrence, action, index, stream | Execution boundary | Execution observations; replay | Cannot distinguish repeated invocations and stream operations using one capture |
-| entered, exited, outcome | Execution boundary's serialized event clock | Execution observations; replay scheduler | Cannot restore causal overlap/visible delivery or detect incomplete work |
-| observed exchange_id and failure message/code/status/source/pending | Execution boundary; exchange checked against operator call state | Execution observations; replay | A delivery/infrastructure failure could disappear or become a different exception |
+| occurrence, action, index, stream | Execution boundary | Local execution observations | Cannot resume repeated invocations and stream operations within a recorded generation |
+| entered, exited, outcome | Execution boundary's serialized event clock | Local execution recovery | Cannot restore a generation's causal observations after a local restart |
+| observed exchange_id and failure message/code/status/source/pending | Execution boundary | Local execution recovery | Cannot restore that local execution's observed error; offline replay does not use it |
 | finished, aborted, output_sha256, output_is_none | Execution host | Execution observations; restart/export/replay | Cannot distinguish crash/abort/completion or compare None versus empty JS |
 | execution/pricing hashes and captures in verified.json | Operator exporter after native checks | Trusted local bundle; ReplayWitness | Cannot bind the validated observations to the retained outcomes and accounting |
 
@@ -676,13 +677,13 @@ python -m pod_gateway export --deployment competition --round test-0 \
   --output /private/replay/bundle
 ```
 
-The exporter reads retained evidence and rechecks the credential/TLS proof using
+The exporter selects current successful calls by logical request key, reads their
+retained evidence and rechecks the credential/TLS proof using
 the authorization snapshot, sealed certificate time and final ciphertext. It
-compares the actual request, response, status, routing header and usage. Failed
-infrastructure observations retain their operator call snapshot/partial evidence;
-they cannot invent a provider result. Failed attempts can be exported and replayed
-without a competition charge, even when physical usage is unknown. Unresolved
-captures cannot pass prompt budget acceptance. `miner_runtime.validator.ReplayWitness(bundle)`
+compares the actual request, response, status, routing header and usage. Version 3
+bundles contain successful captures and the expected inputs/output; failed-attempt
+observations and diagnostic evidence are not included. A missing required success
+leaves replay unresolved and incurs no failure charge. `miner_runtime.validator.ReplayWitness(bundle)`
 has no network, prover or inference client. Supply it to
 `miner_runtime.validator.run_replay` with the expected frozen
 image, seed, submitted code and reproducible renderer.

@@ -339,6 +339,29 @@ async def generated_source(witness: WitnessClient | AsyncWitnessClient) -> str:
     return (await asyncio.to_thread(witness.responses.create, model="fixture", input="image", request_id=7)).output_text
 
 
+@pytest.mark.parametrize("failure", ["unknown", "http404", "malformed"])
+def test_async_caller_retries_a_failed_request_with_the_same_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str,
+) -> None:
+    async def scenario() -> None:
+        fixture = Harness(tmp_path, monkeypatch)
+        fixture.failures = [failure]
+        model_transport(fixture)
+        async with fixture.running(), live_client(fixture, "async") as witness:
+            assert isinstance(witness, AsyncWitnessClient)
+            with pytest.raises(openai.APIError) as error:
+                await witness.responses.create(model="fixture", input="image", request_id=7)
+            if failure == "http404":
+                assert isinstance(error.value, openai.NotFoundError)
+            assert fixture.paid == 1
+            response = await witness.responses.create(model="fixture", input="image", request_id=7)
+            assert response.output_text == "answer-2" and fixture.paid == 2
+            saved = await witness.responses.create(model="fixture", input="image", request_id=7)
+            assert saved.model_dump() == response.model_dump() and fixture.paid == 2
+
+    asyncio.run(scenario())
+
+
 @pytest.mark.parametrize("mode", ["sync", "async"])
 def test_fresh_client_recovers_a_lost_model_result_without_local_state_or_duplicate_inference(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: Mode,

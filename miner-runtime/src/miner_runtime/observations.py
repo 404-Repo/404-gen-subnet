@@ -118,11 +118,12 @@ class Schedule:
     """Match per-key occurrences and restore causal observation order."""
 
     def __init__(
-        self, execution: Execution, *, path: Path | None = None, timeout: float = 30
+        self, execution: Execution, *, path: Path | None = None, timeout: float = 30, record: bool = False,
     ) -> None:
         if timeout <= 0:
             raise ValueError("Replay timeout must be positive")
         self.execution, self.path, self.timeout = execution, path, timeout
+        self.record = record or path is not None
         self.condition = threading.Condition()
         self.steps = {entry.identity: entry for entry in execution.observations}
         times = [
@@ -194,7 +195,7 @@ class Schedule:
                 raise ReplayMismatch(self.failure)
             entry = self.steps.get(identity)
             if entry is None:
-                if self.path is None or self.execution.finished:
+                if not self.record or self.execution.finished:
                     self.mismatch(
                         "Execution changed a request, request_id, stream operation or occurrence"
                     )

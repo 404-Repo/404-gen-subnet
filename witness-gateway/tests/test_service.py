@@ -24,6 +24,7 @@ from openai.types.responses import ResponseStreamEvent
 from aiohttp import web
 from aiohttp.test_utils import make_mocked_request
 from bittensor_wallet import Keypair
+from miner_runtime.observations import Execution
 from miner_runtime.runner import run_generation
 from miner_runtime.validator import ReplayWitness, run_replay
 from channel import Channel, WorkerChannel
@@ -632,9 +633,6 @@ def test_public_create_bounds_safe_setup_recovery(
                         await asyncio.to_thread(witness.responses.create, model="fixture", input="image")
                     assert isinstance(error.value.__cause__, WitnessError)
                     assert error.value.__cause__.code == "capture_failed" and fixture.paid == 0
-                record = fixture.records.load(fixture.scope, call_key().id)
-                assert record is not None and len(record.attempts) == 2
-                assert all(call.not_dispatched and not call.authorized for call in record.attempts.values())
 
     asyncio.run(scenario())
 
@@ -673,7 +671,7 @@ def test_replaced_unclaimed_pod_recovers_in_the_same_create(
                 assert len(fixture.runtimes) == 2 and fixture.paid == 1
                 record = fixture.records.load(fixture.scope, call_key().id)
                 assert record is not None and record.call.exchange_id == first
-                assert record.call.pod_id == fixture.runtimes[-1].pod_id and not record.attempts
+                assert record.call.pod_id == fixture.runtimes[-1].pod_id
 
     asyncio.run(scenario())
 
@@ -697,7 +695,63 @@ def test_expired_unclaimed_call_recovers_in_public_create(
                 assert response.output_text == "answer-1" and fixture.paid == 1
                 record = fixture.records.load(fixture.scope, call_key().id)
                 assert record is not None and record.call.exchange_id == first.call.exchange_id
-                assert record.call.phase == "issued" and not record.attempts
+                assert record.call.phase == "issued"
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("replace_pod,expired", [(True, False), (True, True), (False, True)])
+def test_interrupted_capture_allows_an_ordinary_same_id_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, replace_pod: bool, expired: bool,
+) -> None:
+    class PodKilled(BaseException):
+        pass
+
+    async def scenario() -> None:
+        fixture = Harness(tmp_path, monkeypatch)
+
+        def killed_relay(
+            store: MemoryState, prefix: str, deadline: float | None, directory: Path,
+            verifier: object, channel: Channel, **kwargs: object,
+        ) -> dict[str, object]:
+            data = bytearray()
+            setup_deadline = time.monotonic() + 30
+            while len(data) < 8 or len(data) < 8 + int.from_bytes(data[:8], "big"):
+                data.extend(channel.recv(setup_deadline))
+            (directory / "authorization.json").write_bytes(b"{}")
+            cast(Callable[[bytes], float], kwargs["before_release"])(bytes(data[8:]))
+            fixture.paid += 1
+            channel.finish()
+            raise PodKilled()
+
+        async with fixture.running():
+            monkeypatch.setattr("pod.relay", killed_relay)
+            with fixture.client() as witness:
+                witness._gateway.delivery_timeout = 5
+                with pytest.raises(openai.APIError):
+                    await asyncio.to_thread(witness.create, model="fixture", input="image")
+                record = fixture.records.load(fixture.scope, call_key().id)
+                assert record is not None and record.call.phase == "capturing"
+                if expired:
+                    def expire(value: CallRecord) -> None:
+                        value.call.deadline = int(time.time()) - 1
+
+                    fixture.records._change(fixture.scope, call_key(), expire)
+                if replace_pod:
+                    previous = fixture.provider.list()[0]
+                    fixture.selection.update(previous, active=False)
+                    fixture.provider.delete(previous.id)
+                    witness._gateway._invalidate_for("pod_not_selected")
+                    await asyncio.to_thread(witness._gateway.ensure_pod)
+                    assert len(fixture.runtimes) == 2
+                monkeypatch.setattr("pod.relay", fixture.relay)
+                snapshot = await asyncio.to_thread(witness._gateway.snapshot, record.call.exchange_id)
+                assert snapshot.call.phase == "failed" and fixture.paid == 1
+                result = await asyncio.to_thread(witness.create, model="fixture", input="image")
+                assert result.output_text == "answer-2" and fixture.paid == 2
+                summary = fixture.runtimes[-1].budget.summary(fixture.scope, call_key())
+                assert summary["possible_dispatches"] == 1 and summary["pending_usage"] == 0
+                assert summary["known_credits"] == "2.0"
 
     asyncio.run(scenario())
 
@@ -970,9 +1024,42 @@ def test_failed_dispatch_retries_same_id_after_pod_replacement(tmp_path: Path, m
                 assert located is not None
                 item, call = located
                 summary = fixture.runtimes[-1].budget.summary(fixture.scope, item)
-                assert fixture.paid == summary["possible_dispatches"] == 2
-                assert summary["pending_usage"] == 1 and len(recording.attempts) == 1
+                assert fixture.paid == 2 and summary["possible_dispatches"] == 1
+                assert summary["pending_usage"] == 0
                 assert call.authorized and not call.not_dispatched
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("failure", ["unknown", "http404", "malformed"])
+def test_failed_capture_accepts_an_ordinary_same_id_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str,
+) -> None:
+    async def scenario() -> None:
+        fixture = Harness(tmp_path, monkeypatch)
+        fixture.failures = [failure]
+        async with fixture.running():
+            def run() -> None:
+                with fixture.client() as witness:
+                    with pytest.raises(openai.APIError):
+                        witness.create(model="fixture", input="image")
+                    previous = fixture.records.load(fixture.scope, call_key().id)
+                    assert previous is not None and previous.call.phase == "failed"
+                    for _ in range(3):
+                        status = witness._gateway.snapshot(previous.call.exchange_id)
+                        assert status.call.exchange_id == previous.call.exchange_id
+                        assert status.call.failure == previous.call.failure
+                    summary = fixture.runtimes[-1].budget.summary(fixture.scope, call_key())
+                    assert summary["possible_dispatches"] == summary["pending_usage"] == 0
+                    assert fixture.paid == 1
+                    replacement = witness._gateway.start(call_key())
+                    assert replacement.call.phase == "assigned"
+                    assert replacement.call.exchange_id != previous.call.exchange_id
+                    assert fixture.paid == 1
+                    assert witness.create(model="fixture", input="image").output_text == "answer-2"
+                    assert fixture.paid == 2
+
+            await asyncio.wait_for(asyncio.to_thread(run), 20)
 
     asyncio.run(scenario())
 
@@ -988,12 +1075,11 @@ def test_failed_attempt_returns_error_then_same_id_retry_is_saved_and_replayed(
             def run() -> None:
                 def generate(image: bytes, seed: int, client: WitnessClient, renderer: None) -> str:
                     try:
-                        client.create(model="fixture", input="image")
+                        return client.create(model="fixture", input="image").output_text
                     except openai.APIError as error:
                         if failure == "http404":
                             assert isinstance(error, openai.NotFoundError)
                         return client.create(model="fixture", input="image").output_text
-                    raise AssertionError("Caller code must receive the first attempt's error")
 
                 with fixture.client() as witness:
                     expected = run_generation(generate, fixture.image, 42, witness, None)
@@ -1002,12 +1088,17 @@ def test_failed_attempt_returns_error_then_same_id_retry_is_saved_and_replayed(
                     execution = next(witness._state.glob("executions/*/*/execution.json"))
                     assert fixture.paid == 2
                 recording = fixture.records.load(fixture.scope, call_key().id)
-                assert recording is not None and len(recording.attempts) == 1
-                failed = next(iter(recording.attempts.values()))
-                assert failed.phase == "failed" and failed.exchange_id != recording.call.exchange_id
-                prefix = f"rounds/{fixture.scope.round}/{fixture.scope.hotkey}/{failed.exchange_id}/"
-                status = json.loads(fixture.state.get(prefix + "status.json") or b"{}")
-                assert status["status"] == "failed" and status["error_type"] == failed.failure
+                assert recording is not None
+                observed = Execution.model_validate_json(execution.read_bytes())
+                original = next(entry.exchange_id for entry in observed.observations if entry.action == "create")
+                assert original is not None
+                assert original != recording.call.exchange_id
+                prefix = f"rounds/{fixture.scope.round}/{fixture.scope.hotkey}/{original}/"
+                status = json.loads(fixture.state.get(prefix + "failure.json") or b"{}")
+                assert status["status"] == "failed"
+                assert status["error_type"] == {
+                    "unknown": "TimeoutError", "http404": "ProviderHTTPError", "malformed": "InvalidProviderResponse",
+                }[failure]
                 if failure != "unknown":
                     assert fixture.state.get(prefix + "response.sse") is not None
                 output = tmp_path / "bundle"

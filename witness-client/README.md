@@ -388,7 +388,10 @@ UUID does not change `request_id` or make the failure a reusable model response.
 access window using the exchange ID from `WitnessError`, without starting inference.
 The SDK downloads retained request bytes when needed to verify their identity.
 
-The validator combines host observations with native-verified captures, then supplies retained responses during replay. It matches per-key occurrences, causal delivery order, stream operations and output bytes. The [Pod guide](../witness-gateway/PODS.md) describes verified offline
+The replay helper supplies native-verified successful responses by logical request
+key and compares final output bytes. It does not reproduce transient failures or
+require failed-attempt diagnostics. Missing evidence or an output mismatch remains
+unresolved for investigation. The [Pod guide](../witness-gateway/PODS.md) describes verified offline
 replay, storage layout and lifecycle.
 
 ## Usage and evidence
@@ -399,8 +402,8 @@ once; each prompt consuming that call is charged independently. Other round work
 need not be consumed. All input tokens use their full frozen weight, including
 cached input; output includes reasoning once. Operator-recorded failed attempts,
 including provider HTTP errors and unusable responses, consume neither the token
-allowance nor the call cap. Their actual spending remains in the operational
-ledger, with missing usage retained as unknown. Unresolved captures cannot pass
+allowance nor the call cap. Closing a failed attempt clears its dispatch
+reservation; its response and failure reason remain in R2. Unresolved captures cannot pass
 budget acceptance.
 
 Private provider evidence remains under `rounds/<round>/<hotkey>/<exchange>/`.

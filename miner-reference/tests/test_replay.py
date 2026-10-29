@@ -81,7 +81,7 @@ def test_complete_pipeline_reconstructs_from_execution(tmp_path: Path, monkeypat
     (bundle / "verified.json").write_bytes(
         canonical(
             {
-                "version": 2,
+                "version": 3,
                 "execution_sha256": hashlib.sha256(execution).hexdigest(),
                 "pricing_sha256": hashlib.sha256(pricing).hexdigest(),
                 "captures": captures,

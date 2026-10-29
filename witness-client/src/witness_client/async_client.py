@@ -335,10 +335,6 @@ class AsyncWitnessClient(_ClientState):
         raw_response: bytes | None = None
         try:
             snapshot = await self._gateway.start(key)
-            if snapshot.call.phase == "failed" and (
-                snapshot.call.authorized or not snapshot.call.not_dispatched
-            ):
-                snapshot = await self._gateway.start(key, expected_exchange_id=snapshot.call.exchange_id)
             identifier = snapshot.call.exchange_id
             identify_exchange(identifier)
             if snapshot.call.request != key or snapshot.hotkey != self._hotkey.ss58_address:

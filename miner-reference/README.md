@@ -460,14 +460,13 @@ request and `request_id` after the attempt has durably failed.
 
 Proven pre-dispatch failures, worker allocation, proof setup, polling, rendering,
 uploads and evidence reads are not model calls. An allocated exchange ID alone
-does not prove dispatch. Operational accounting retains every possible dispatch,
-including failed attempts, separately from competition allowances.
+does not prove dispatch. Closing a failed attempt releases its reservation.
 
 Charge verified final input/output usage from usable responses, including
 discarded candidates and typed failed/incomplete Responses with verified usage.
-Physical usage missing from a failed attempt stays unknown in the operational
-ledger. An unresolved capture prevents budget acceptance; a durably failed attempt
-does not. A known limit breach remains a breach while another exchange is unresolved.
+An unresolved required response leaves validation pending. Failed attempts do not
+consume competition allowances. A known limit breach remains a breach while
+another exchange is unresolved.
 
 The runtime assembles accounting automatically; miners do not build a ledger.
 Budget checking may happen during validation, without a realtime budget service.
@@ -494,9 +493,8 @@ model calls are identified by provider, canonical request body, `request_id` and
 optional subscription routing header inside the authenticated miner/round scope.
 Identical keys reuse a successful captured outcome across prompts and Pod
 replacements; generation seed is not a model-call identifier or an OpenAI randomness
-seed. Causal entry/delivery order
-and per-key occurrences reproduce visible results, failures and stream use without
-using a global ordinal as the logical request identity.
+seed. Local generation observations support execution recovery. Offline replay
+returns saved successful responses without reproducing failed attempts.
 
 The validator attributes budget by executing the expected prompt. Reuse of one
 captured call inside that replay charges once. A different prompt consuming the
@@ -506,8 +504,8 @@ competition allowances; unresolved captures cannot pass budget acceptance. The l
 witness permits other work during the round's access window and does not enforce
 prompt labels or a prompt-hash allowlist.
 
-Replay compares normalized requests, stream operations, causal observations and
-final output against verified evidence. It never issues inference or fabricates
+Replay matches normalized requests and final output against verified successful
+responses. It never issues inference or fabricates
 missing work. Renders still require exact source/options/build behavior and their
 own reproducible outcomes. The witness helpers do not implement the sandbox,
 renderer replay or control arbitrary Python scheduling. These remain requirements
@@ -518,8 +516,10 @@ retry with the same request ID and a new internal exchange UUID for its evidence
 Failed response bytes and the failure reason remain in R2 for diagnostics and
 are not reused as a model response. A process restart restores saved observations;
 a top-level aborted attempt retains its trace separately and can retry using saved calls.
-Completed executions keep their original visible errors even if a later delivery
-would succeed. Provider HTTP failures use SDK exceptions; failed/incomplete
+Local generation recovery retains its observed errors. Offline replay uses saved
+successes; missing evidence or an output mismatch remains unresolved for
+investigation. Replay does not establish that code handles every infrastructure
+failure. Provider HTTP failures use SDK exceptions; failed/incomplete
 Responses remain typed objects. Infrastructure failures remain separate and can
 leave usage unknown. See the [complete capture/replay contract](../witness-gateway/PODS.md#execution-and-replay-contract).
 
@@ -537,9 +537,8 @@ recovery stay within these limits, without nested retry allowances.
 | Miner error, confirmed resource violation, reproducible rejection, changed replay call/output or invalid evidence | Preserve/report the outcome; do not retry to obtain a different result |
 | Infrastructure still unavailable after the retry limit or deadline | Leave the result unresolved |
 
-Both phases share the same prompt's usage ledger. Retries, runner/worker restarts,
-model changes and credential changes reset neither budgets nor attempt/deadline
-limits. Retain known usage and dispatch counts even when no result is returned.
+Retries and restarts reuse successful calls. The prompt budget counts distinct
+usable captured calls consumed by that prompt; failed attempts are excluded.
 A known budget breach remains a breach while other work is unresolved.
 
 Exact source hashes and decoded render pixels are compared. The round must

@@ -205,8 +205,9 @@ class PodService:
         )
 
 
+@pytest.mark.parametrize("phase", ["capturing", "failed"])
 def test_async_failed_capture_allows_same_id_retry(
-    config: WitnessConfig, monkeypatch: pytest.MonkeyPatch,
+    config: WitnessConfig, monkeypatch: pytest.MonkeyPatch, phase: Literal["capturing", "failed"],
 ) -> None:
     async def scenario() -> None:
         key = Keypair.create_from_uri("//Alice")
@@ -220,10 +221,10 @@ def test_async_failed_capture_allows_same_id_retry(
             if current is None:
                 current = Snapshot(
                     call=CallView(request=invocation, exchange_id=first, deadline=int(time.time()) + 60,
-                                  phase="capturing", authorized=True),
+                                  phase=phase, authorized=True),
                     hotkey=key.ss58_address, session=None,
                 )
-            elif expected_exchange_id == first:
+            elif current.call.phase == "failed":
                 current = current.model_copy(deep=True)
                 current.call.exchange_id, current.call.phase = second, "issued"
             return current

@@ -138,14 +138,38 @@ class Witness:
     async def _snapshot(self, scope: Scope, invocation: RequestKey, call: Call) -> dict[str, object]:
         call = await asyncio.to_thread(
             recover_issued, self.records, self.budget, self.runtime.read_evidence,
-            scope, invocation, call, self.proof_hash
+            scope, invocation, call, self.proof_hash, self.runtime.save_failure,
         )
+        if (
+            call.phase == "capturing"
+            and (
+                call.pod_id != self.runtime.pod_id
+                or (
+                    call.deadline is not None
+                    and call.deadline <= time.time()
+                    and call.exchange_id not in self.runtime.active
+                )
+            )
+            and await asyncio.to_thread(self.runtime.selected)
+        ):
+            assert call.pod_id is not None
+            failure = "CaptureInterrupted" if call.pod_id != self.runtime.pod_id else "CaptureExpired"
+            await asyncio.to_thread(
+                self.records.failed, scope, invocation, call.pod_id, failure, exchange_id=call.exchange_id,
+            )
+            await asyncio.to_thread(self.budget.discard, scope, invocation, call.exchange_id)
+            call = call.model_copy(update={"phase": "failed", "failure": failure})
+            await asyncio.to_thread(self.runtime.save_failure, call)
         session = self.session(invocation, call) if call.phase == "assigned" else None
         completion = (
             await asyncio.to_thread(self.completion, scope, invocation, call) if call.manifest_sha256 is not None else None
         )
+        view = call.model_dump(exclude={"capture_id"})
+        if call.phase == "failed" and call.failure == "ProviderHTTPError" and completion is not None:
+            # A complete HTTP error uses the existing capture protocol; it is not a reusable logical result.
+            view["phase"] = "issued"
         return {
-            "call": call.model_dump(exclude={"capture_id"}),
+            "call": view,
             "hotkey": scope.hotkey,
             "session": session,
             "completion": completion,
@@ -171,10 +195,13 @@ class Witness:
         if call is not None:
             if call.request != invocation:
                 raise RecordingConflict("Call identity differs")
-            if call.phase in ("issued", "capturing") or (
-                call.phase == "failed" and expected != call.exchange_id
-            ):
+            if call.phase in ("issued", "capturing"):
                 return await self._call_response(scope, invocation, call)
+            if call.phase == "failed":
+                if expected is not None and expected != call.exchange_id:
+                    return await self._call_response(scope, invocation, call)
+                await asyncio.to_thread(self.budget.discard, scope, invocation, call.exchange_id)
+                expected = call.exchange_id
         await asyncio.to_thread(self._require_generation)
         await asyncio.to_thread(self._require_selected)
         call = await asyncio.to_thread(
@@ -190,7 +217,8 @@ class Witness:
 
     async def exchange_status(self, request: web.Request) -> web.Response:
         scope = self._scope(request)
-        located = await asyncio.to_thread(self.records.locate, scope, identifier(request.match_info["exchange_id"]))
+        exchange_id = identifier(request.match_info["exchange_id"])
+        located = await asyncio.to_thread(self.records.locate, scope, exchange_id)
         if located is None:
             raise AuthRejected("exchange_not_found", 404)
         return web.json_response(await self._snapshot(scope, *located))

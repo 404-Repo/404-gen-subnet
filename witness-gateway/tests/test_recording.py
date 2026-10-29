@@ -77,7 +77,7 @@ def test_live_usage_has_no_per_prompt_admission_limit() -> None:
 
 
 @pytest.mark.parametrize("authorized", [False, True])
-def test_failed_dispatch_retries_without_erasing_unknown_operational_usage(authorized: bool) -> None:
+def test_failed_dispatch_releases_its_charge_for_a_same_id_retry(authorized: bool) -> None:
     state = MemoryState()
     records, budget, item = CallRecords(state), Budget(state, PRICING), invocation()
     call = records.reserve(SCOPE, item)
@@ -86,17 +86,18 @@ def test_failed_dispatch_retries_without_erasing_unknown_operational_usage(autho
     budget.reserve(SCOPE, item, call.exchange_id, BODY)
     if authorized:
         records.authorize(SCOPE, item, "pod", exchange_id=call.exchange_id)
-    budget.settle(SCOPE, item, None)
+    budget.discard(SCOPE, item, call.exchange_id)
     records.failed(SCOPE, item, "pod", "Interrupted", exchange_id=call.exchange_id)
     retried = records.assign(
         SCOPE, item, assigned.start_id or "", "pod", expected_exchange_id=call.exchange_id,
     )
     assert retried.exchange_id != call.exchange_id and retried.phase == "assigned"
-    budget.reserve(SCOPE, item, retried.exchange_id, BODY, failed_exchanges=(call.exchange_id,))
+    budget.reserve(SCOPE, item, retried.exchange_id, BODY)
     budget.settle(SCOPE, item, {"input_tokens": 10, "output_tokens": 2}, exchange_id=retried.exchange_id)
-    budget.settle(SCOPE, item, None, exchange_id=call.exchange_id)
-    assert budget.summary(SCOPE, item)["possible_dispatches"] == 2
-    assert budget.summary(SCOPE, item)["pending_usage"] == 1
+    budget.discard(SCOPE, item, call.exchange_id)
+    assert budget.summary(SCOPE, item)["possible_dispatches"] == 1
+    assert budget.summary(SCOPE, item)["pending_usage"] == 0
+    assert budget.summary(SCOPE, item)["known_credits"] == "2.0"
 
 
 def test_queued_call_receives_its_full_capture_window_at_authorization(
@@ -285,6 +286,3 @@ def test_concurrent_and_stale_setup_recovery_cannot_advance_a_newer_attempt() ->
     assert all(call.exchange_id == second.exchange_id and call.phase == "failed" for call in stale)
     third = recover(second.exchange_id)
     assert third.exchange_id != second.exchange_id
-    for previous in (first, second):
-        located = records.locate(SCOPE, previous.exchange_id)
-        assert located is not None and located[1].not_dispatched

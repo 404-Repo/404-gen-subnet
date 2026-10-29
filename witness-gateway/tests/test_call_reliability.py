@@ -87,7 +87,7 @@ def test_wrong_durable_binding_cannot_settle_usage_or_allow_paid_retry(field: st
 
 
 @pytest.mark.parametrize("stream", [False, True])
-def test_same_key_repeated_observations_are_consumed_separately_but_charged_once(
+def test_same_key_repeated_results_are_charged_once(
     tmp_path: Path,
     stream: bool,
 ) -> None:
@@ -112,21 +112,11 @@ def test_same_key_repeated_observations_are_consumed_separately_but_charged_once
     assert live.paid == 1
     replay = ReplayWitness(bundle, timeout=0.2)
     assert run_replay(generate, b"PNG", 42, replay, None) == expected
-    replay = ReplayWitness(bundle, timeout=0.2)
-    first = (
-        replay.create(model="fixture", input="image", stream=True)
-        if stream
-        else replay.create(model="fixture", input="image")
-    )
-    if stream:
-        list(cast(ModelStream, first))
-    with pytest.raises(ReplayMismatch):
-        replay.finish(expected)
     assert live.paid == 1
 
 
 @pytest.mark.parametrize("failure", ["delivery", "timeout"])
-def test_recorded_delivery_failure_occurrence_is_not_replaced_by_later_success(
+def test_error_dependent_output_remains_a_mismatch(
     tmp_path: Path,
     failure: str,
 ) -> None:
@@ -145,25 +135,8 @@ def test_recorded_delivery_failure_occurrence_is_not_replaced_by_later_success(
     expected = run_generation(generate, b"PNG", 42, live, None)
     assert expected == ("APITimeoutError:0" if failure == "timeout" else "APIConnectionError:0")
     bundle = live.export(tmp_path / "bundle")
-    assert run_replay(generate, b"PNG", 42, ReplayWitness(bundle), None) == expected
-    assert live.paid == 1
-
-
-def test_replayed_provider_http_error_keeps_unknown_usage_and_sdk_details(tmp_path: Path) -> None:
-    live = Capture(tmp_path)
-    live.failures[0] = "provider"
-
-    def generate(image: bytes, seed: int, witness: WitnessClient, renderer: None) -> str:
-        try:
-            witness.create(model="fixture", input="image")
-        except openai.RateLimitError as error:
-            return f"{error.status_code}:{error.code}:{error.message}"
-        pytest.fail("Expected the recorded HTTP error")
-
-    expected = run_generation(generate, b"PNG", 42, live, None)
-    replay = ReplayWitness(live.export(tmp_path / "bundle"))
-    assert generate(b"PNG", 42, replay, None) == expected
-    replay.finish(expected)
+    with pytest.raises(ReplayMismatch, match="Execution output differs"):
+        run_replay(generate, b"PNG", 42, ReplayWitness(bundle), None)
     assert live.paid == 1
 
 

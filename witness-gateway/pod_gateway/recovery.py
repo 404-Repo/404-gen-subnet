@@ -32,6 +32,7 @@ def recover_issued(
     invocation: RequestKey,
     call: Call,
     proof_hash: str,
+    save_failure: Callable[[Call], None] | None = None,
 ) -> Call:
     if call.phase != "capturing" or not call.authorized:
         return call
@@ -66,15 +67,20 @@ def recover_issued(
     for name in ("client.bin", "server.bin", "authorization-server.bin", "claim.json", "session.json"):
         if read(prefix + name) is None:
             return call
-    # Both writes are idempotent. A restart between them repeats settlement, never
-    # provider inference, and issued still means accounting and evidence are durable.
+    # Recovery finishes the saved outcome without another provider request.
     failure = response_failure(metadata, response)
-    budget.settle(scope, invocation, metadata.get("usage"), exchange_id=call.exchange_id)
     assert call.pod_id is not None
     if failure is None:
+        budget.settle(scope, invocation, metadata.get("usage"), exchange_id=call.exchange_id)
         records.issued(scope, invocation, call.pod_id, manifest, exchange_id=call.exchange_id)
     else:
+        failed = call.model_copy(update={
+            "phase": "failed", "failure": failure, "manifest_sha256": hashlib.sha256(manifest).hexdigest(),
+        })
+        budget.discard(scope, invocation, call.exchange_id)
         records.failed(scope, invocation, call.pod_id, failure, exchange_id=call.exchange_id, manifest=manifest)
+        if save_failure is not None:
+            save_failure(failed)
     return call.model_copy(update={
         "phase": "issued" if failure is None else "failed",
         "failure": failure,

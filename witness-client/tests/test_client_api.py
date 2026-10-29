@@ -237,8 +237,10 @@ def test_pod_calls_bound_preparation_and_capture_concurrency(
 
 
 @pytest.mark.parametrize("authorized, not_dispatched", [(False, False), (True, False), (True, True)])
+@pytest.mark.parametrize("phase", ["capturing", "failed"])
 def test_pod_failed_capture_allows_same_id_retry(
     config: WitnessConfig, monkeypatch: pytest.MonkeyPatch, authorized: bool, not_dispatched: bool,
+    phase: Literal["capturing", "failed"],
 ) -> None:
     key = Keypair.create_from_mnemonic(Keypair.generate_mnemonic())
     identifier = str(uuid.uuid4())
@@ -251,7 +253,7 @@ def test_pod_failed_capture_allows_same_id_retry(
     ) -> Snapshot:
         nonlocal current
         if current is not None:
-            if expected_exchange_id == identifier:
+            if current.call.phase == "failed":
                 current = current.model_copy(deep=True)
                 current.call.exchange_id = str(uuid.uuid4())
                 current.call.phase = "issued"
@@ -259,7 +261,7 @@ def test_pod_failed_capture_allows_same_id_retry(
         current = Snapshot(
             call=CallView(
                 request=invocation, exchange_id=identifier,
-                deadline=1002, phase="capturing", authorized=authorized, not_dispatched=not_dispatched,
+                deadline=1002, phase=phase, authorized=authorized, not_dispatched=not_dispatched,
             ),
             hotkey=key.ss58_address, session=None,
         )

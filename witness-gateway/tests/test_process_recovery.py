@@ -260,12 +260,14 @@ def test_sigkill_capture_recovers_without_repeating_a_possible_dispatch(
             assert recovered.phase == ("failed" if retain_spool else "capturing")
         else:
             assert recovered.phase == ("failed" if retain_spool else "capturing")
-            assert budget.summary(SCOPE, item)["pending_usage"] == 1
+            assert budget.summary(SCOPE, item)["pending_usage"] == int(not retain_spool)
             retry = records.retry(SCOPE, item, call.exchange_id)
             assert (retry.exchange_id != call.exchange_id) == retain_spool
         assert recovered.deadline == capture_deadline
         assert len(requests) == int(stage in ("active_response", "response_spooled", "response_saved", "manifest_saved", "settled", "issued"))
-        assert budget.summary(SCOPE, item)["possible_dispatches"] == int(stage != "before_authorization")
+        assert budget.summary(SCOPE, item)["possible_dispatches"] == int(
+            stage != "before_authorization" and recovered.phase != "failed"
+        )
         if stage in ("response_saved", "manifest_saved", "settled", "issued"):
             assert state.get(prefix(call) + "response.sse") == evidence(budget, item, call)["response.sse"]
         summary = budget.summary(SCOPE, item)

@@ -8,6 +8,7 @@ from typing import cast
 
 import openai
 import pytest
+from miner_runtime.observations import Execution, ReplayMismatch
 from miner_runtime.runner import run_generation
 from miner_runtime.validator import ReplayWitness, run_replay
 from openai.types.responses import Response
@@ -17,7 +18,6 @@ from witness_client import WitnessClient
 from witness_client.calls import RequestKey, canonical
 from witness_client.client import CapturedResponse
 from witness_client.response import ModelStream
-
 
 @pytest.mark.parametrize(
     "outcome", ["empty", "refusal", "structured", "failed", "incomplete", "sse-error", "missing-usage"]
@@ -80,9 +80,12 @@ def test_retained_outcomes_replay_exact_events_errors_text_and_usage(
 
     expected = run_generation(generate, b"PNG", 42, live, None)
     replay = ReplayWitness(live.export(tmp_path / "bundle"))
-    assert run_replay(generate, b"PNG", 42, replay, None) == expected
     if outcome in ("missing-usage", "sse-error"):
+        with pytest.raises(ReplayMismatch, match="Saved successful response is missing"):
+            run_replay(generate, b"PNG", 42, replay, None)
         assert replay.budget.charges == {}
+    else:
+        assert run_replay(generate, b"PNG", 42, replay, None) == expected
     assert live.paid == 1
 
 
@@ -126,7 +129,7 @@ def test_embedded_stream_error_allows_same_id_retry_without_charging_the_failure
                 list(cast(ModelStream, result))
         except openai.APIError:
             return witness.create(model="fixture", input="image", request_id=7).output_text
-        raise AssertionError("The malformed response must fail")
+        return witness.create(model="fixture", input="image", request_id=7).output_text
 
     expected = run_generation(generate, b"PNG", 42, live, None)
     assert expected == "7"
@@ -134,12 +137,14 @@ def test_embedded_stream_error_allows_same_id_retry_without_charging_the_failure
     located = live.records.locate(SCOPE, next(iter(live.captured)))
     assert located is not None
     key, _call = located
-    recording = live.records.load(SCOPE, key.id)
-    assert recording is not None and len(recording.attempts) == 1
-    failed = next(iter(recording.attempts.values()))
-    assert failed.phase == "failed" and failed.failure == "InvalidProviderResponse"
-    assert live.state.get(f"rounds/{SCOPE.round}/{SCOPE.hotkey}/{failed.exchange_id}/response.sse") == failed_response
-    assert live.budget.summary(SCOPE, key)["known_credits"] == "4.0"
+    execution = next(live._state.glob("executions/*/*/execution.json"))
+    observed = Execution.model_validate_json(execution.read_bytes())
+    original = next(entry.exchange_id for entry in observed.observations if entry.failure is not None)
+    assert original is not None
+    prefix = f"rounds/{SCOPE.round}/{SCOPE.hotkey}/{original}/"
+    assert json.loads(live.state.get(prefix + "failure.json") or b"{}")["error_type"] == "InvalidProviderResponse"
+    assert live.state.get(prefix + "response.sse") == failed_response
+    assert live.budget.summary(SCOPE, key)["known_credits"] == "2.0"
     replay = ReplayWitness(live.export(tmp_path / "bundle"))
     assert run_replay(generate, b"PNG", 42, replay, None) == expected
     assert live.paid == 2 and len(replay.budget.charges) == 1

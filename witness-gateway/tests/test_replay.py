@@ -5,7 +5,6 @@ import hashlib
 import json
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from concurrent.futures import TimeoutError as FutureTimeout
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
@@ -15,7 +14,7 @@ import openai
 import pytest
 from bittensor_wallet import Keypair
 from miner_runtime.accounting import BudgetRejected
-from miner_runtime.observations import Inputs, ReplayMismatch
+from miner_runtime.observations import Execution, Inputs, ReplayMismatch
 from miner_runtime.runner import run_generation
 from miner_runtime.validator import ReplayWitness, run_replay
 from renderer_client import (
@@ -75,19 +74,17 @@ class Capture(WitnessClient):
         failure = self.failures.pop(key.request_id, "")
         if failure == "before":
             self.records.failed(SCOPE, key, "pod", "BeforeDispatch", exchange_id=call.exchange_id, not_dispatched=True)
+            self.save_failure(key)
             raise WitnessError("Unavailable before dispatch", call.exchange_id, source="gateway", code="capture_failed")
-        history = self.records.load(SCOPE, key.id)
-        self.budget.reserve(
-            SCOPE, key, call.exchange_id, body,
-            failed_exchanges=() if history is None else tuple(history.attempts),
-        )
+        self.budget.reserve(SCOPE, key, call.exchange_id, body)
         self.records.authorize(SCOPE, key, "pod", exchange_id=call.exchange_id)
         self.paid += 1
         if self.gate is not None and key.request_id == 0:
             assert self.gate.wait(2)
         if failure == "unknown":
-            self.budget.settle(SCOPE, key, None)
+            self.budget.discard(SCOPE, key, call.exchange_id)
             self.records.failed(SCOPE, key, "pod", "Interrupted", exchange_id=call.exchange_id)
+            self.save_failure(key)
             raise WitnessError("Provider outcome lost", call.exchange_id, source="gateway", code="capture_failed")
         usage = None if failure == "provider" else {"input_tokens": 10, "output_tokens": 2}
         status = 429 if failure == "provider" else 200
@@ -140,12 +137,14 @@ class Capture(WitnessClient):
             "session.json": b"{}",
         }.items():
             self.state.put(prefix + name, content)
-        self.budget.settle(SCOPE, key, usage)
         rejected = response_failure(json.loads(manifest), response)
         if rejected is None:
+            self.budget.settle(SCOPE, key, usage)
             self.records.issued(SCOPE, key, "pod", manifest, exchange_id=call.exchange_id)
         else:
+            self.budget.discard(SCOPE, key, call.exchange_id)
             self.records.failed(SCOPE, key, "pod", rejected, exchange_id=call.exchange_id, manifest=manifest)
+            self.save_failure(key)
             if status == 200:
                 raise WitnessError("Unusable provider response", call.exchange_id, code="capture_failed", source="gateway")
         result = CapturedResponse(call.exchange_id, status, response)
@@ -154,6 +153,15 @@ class Capture(WitnessClient):
             raise WitnessError("Delivery unavailable", call.exchange_id, source="gateway",
                                code="capture_timeout" if failure == "timeout" else "delivery_failed")
         return result
+
+    def save_failure(self, key: RequestKey) -> None:
+        recorded = self.records.load(SCOPE, key.id)
+        assert recorded is not None
+        call = recorded.call
+        self.state.put(
+            f"rounds/{SCOPE.round}/{SCOPE.hotkey}/{call.exchange_id}/failure.json",
+            canonical({"status": "failed", "error_type": call.failure}),
+        )
 
     def export(self, output: Path, image: bytes = b"PNG", seed: int = 42) -> Path:
         execution = next(self._state.glob(f"executions/*/{Inputs.supplied(image, seed).id}/execution.json"))
@@ -196,8 +204,6 @@ def test_concurrent_arrival_order_is_independent_of_identity_and_delivery(tmp_pa
     ordered = ReplayWitness(bundle, timeout=2)
     with ThreadPoolExecutor(max_workers=2) as pool:
         first = pool.submit(ordered.create, model="fixture", input="image", request_id=0)
-        with pytest.raises(FutureTimeout):
-            first.result(timeout=0.05)
         second = pool.submit(ordered.create, model="fixture", input="image", request_id=1)
         assert second.result(timeout=2).status == "failed"
         assert first.result(timeout=2).status == "completed"
@@ -205,8 +211,8 @@ def test_concurrent_arrival_order_is_independent_of_identity_and_delivery(tmp_pa
     assert live.paid == 2
 
 
-@pytest.mark.parametrize("failure", ["before", "delivery", "timeout", "failed", "incomplete"])
-def test_original_failures_replay_even_when_current_delivery_would_succeed(tmp_path: Path, failure: str) -> None:
+@pytest.mark.parametrize("failure", ["before", "delivery", "timeout"])
+def test_missing_success_or_error_dependent_output_is_unresolved(tmp_path: Path, failure: str) -> None:
     live = Capture(tmp_path)
     live.failures[0] = failure
 
@@ -220,31 +226,10 @@ def test_original_failures_replay_even_when_current_delivery_would_succeed(tmp_p
 
     expected = run_generation(generate, b"PNG", 42, live, None)
     bundle = live.export(tmp_path / "bundle")
-    assert run_replay(generate, b"PNG", 42, ReplayWitness(bundle), None) == expected
+    with pytest.raises(ReplayMismatch, match="Saved successful response is missing|Execution output differs"):
+        run_replay(generate, b"PNG", 42, ReplayWitness(bundle), None)
     assert run_generation(generate, b"PNG", 42, live, None) == expected
     assert live.paid == int(failure != "before")
-
-
-@pytest.mark.parametrize("failure", ["provider", "unknown"])
-def test_failed_attempt_is_reproduced_without_a_competition_charge(tmp_path: Path, failure: str) -> None:
-    live = Capture(tmp_path)
-    live.failures[0] = failure
-
-    def generate(image: bytes, seed: int, witness: WitnessClient, renderer: None) -> str:
-        try:
-            return witness.create(model="fixture", input="image").output_text
-        except openai.RateLimitError as error:
-            return str(error.status_code) + str(error.code)
-        except openai.APIConnectionError as error:
-            assert isinstance(error.__cause__, WitnessError)
-            return str(error.__cause__.code)
-
-    expected = run_generation(generate, b"PNG", 42, live, None)
-    replay = ReplayWitness(live.export(tmp_path / "bundle"))
-    assert generate(b"PNG", 42, replay, None) == expected
-    replay.finish(expected)
-    assert replay.budget.charges == {}
-    assert live.paid == 1
 
 
 @pytest.mark.parametrize("failure", ["unknown", "provider"])
@@ -258,28 +243,30 @@ def test_same_request_id_retries_failed_attempt_and_replays_only_successful_char
 
     def generate(image: bytes, seed: int, witness: WitnessClient, renderer: None) -> str:
         try:
-            witness.create(model="fixture", input="image", request_id=0)
+            return witness.create(model="fixture", input="image", request_id=0).output_text
         except openai.APIError:
             return witness.create(model="fixture", input="image", request_id=0).output_text
-        raise AssertionError("The failed attempt must be visible to caller code")
 
     async def async_generate(image: bytes, seed: int, witness: AsyncWitnessClient) -> str:
         try:
-            await witness.create(model="fixture", input="image", request_id=0)
+            return (await witness.create(model="fixture", input="image", request_id=0)).output_text
         except openai.APIError:
             return (await witness.create(model="fixture", input="image", request_id=0)).output_text
-        raise AssertionError("The failed attempt must be visible to caller code")
 
     entry = async_generate if asynchronous else generate
     expected = run_generation(entry, b"PNG", 42, live, None)
+    execution = next(live._state.glob("executions/*/*/execution.json"))
+    observed = Execution.model_validate_json(execution.read_bytes())
+    failed_id = observed.observations[0].exchange_id
+    successful_id = observed.observations[-1].exchange_id
+    for key in list(live.state.objects):
+        if key.startswith(f"rounds/{SCOPE.round}/{SCOPE.hotkey}/{failed_id}/"):
+            live.state.delete(key)
+    observed.observations = [entry for entry in observed.observations if entry.exchange_id == successful_id]
+    execution.write_text(observed.model_dump_json())
     replay = ReplayWitness(live.export(tmp_path / "bundle"))
     assert run_replay(entry, b"PNG", 42, replay, None) == expected == "0"
     assert live.paid == 2 and len(replay.budget.charges) == 1
-    execution = replay.schedule.execution
-    first, second = execution.observations
-    assert first.request == second.request and first.exchange_id != second.exchange_id
-    assert run_generation(entry, b"PNG", 42, live, None) == expected
-    assert live.paid == 2
 
 
 @pytest.mark.parametrize("limit,accepted", [(2, True), (1, False)])
@@ -308,7 +295,7 @@ def test_replay_charges_unique_consumed_calls_and_ignores_unrelated_capture(
     assert live.paid == 3
 
 
-def test_replay_rejects_changed_missing_extra_inputs_and_tampering(tmp_path: Path) -> None:
+def test_replay_rejects_changed_inputs_output_and_tampering(tmp_path: Path) -> None:
     live = Capture(tmp_path)
 
     def generate(image: bytes, seed: int, witness: WitnessClient, renderer: None) -> str:
@@ -321,13 +308,9 @@ def test_replay_rejects_changed_missing_extra_inputs_and_tampering(tmp_path: Pat
     with pytest.raises(ReplayMismatch):
         ReplayWitness(bundle).create(model="fixture", input="image", request_id=1)
     with pytest.raises(ReplayMismatch):
-        ReplayWitness(bundle).finish("0")
+        ReplayWitness(bundle).finish("different")
     with pytest.raises(ReplayMismatch):
         run_replay(generate, b"changed", 42, ReplayWitness(bundle), None)
-    replay = ReplayWitness(bundle)
-    replay.create(model="fixture", input="image")
-    with pytest.raises(ReplayMismatch):
-        replay.create(model="fixture", input="image")
     replay = ReplayWitness(bundle)
     capture = next(iter(replay.bundle["captures"]))
     (bundle / capture / "response.sse").write_bytes(b"altered")

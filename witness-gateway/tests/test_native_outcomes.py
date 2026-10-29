@@ -15,6 +15,7 @@ from typing import cast
 import openai
 import pytest
 from channel import Channel
+from miner_runtime.observations import ReplayMismatch
 from miner_runtime.runner import run_generation
 from miner_runtime.validator import ReplayWitness, run_replay
 from openai.types.responses import Response
@@ -255,9 +256,12 @@ def test_native_provider_outcome_is_recorded_and_replays_without_provider_access
                     verify=lambda provider, directory: verify("replay", directory, provider=provider),
                 )
                 replay = ReplayWitness(bundle)
-                assert run_replay(generate, fixture.image, 42, replay, None) == expected
                 if outcome in ("http-error", "sse-error", "embedded-error", "truncated-http"):
+                    with pytest.raises(ReplayMismatch, match="Saved successful response is missing"):
+                        run_replay(generate, fixture.image, 42, replay, None)
                     assert replay.budget.charges == {}
+                else:
+                    assert run_replay(generate, fixture.image, 42, replay, None) == expected
                 if outcome == "structured" and not stream:
                     evidence_prefix = next(
                         k.removesuffix("manifest.json")

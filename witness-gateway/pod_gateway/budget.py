@@ -75,8 +75,7 @@ class Budget:
         return invocation.id
 
     def reserve(
-        self, scope: Scope, invocation: RequestKey, exchange_id: str, body: bytes, *,
-        failed_exchanges: tuple[str, ...] = (),
+        self, scope: Scope, invocation: RequestKey, exchange_id: str, body: bytes,
     ) -> None:
         if request_digest(body) != invocation.request_sha256:
             raise BudgetNotReserved("Verified request differs from reserved request hash")
@@ -91,10 +90,7 @@ class Budget:
             except Exception as error:
                 raise BudgetNotReserved("Call ledger could not be read") from error
             if base in ledger.charges:
-                previous = ledger.charges[base]
-                if previous.exchange_id == exchange_id or previous.exchange_id not in failed_exchanges:
-                    raise BudgetRejected("This call already has a possible dispatch")
-                ledger.charges[previous.exchange_id] = previous
+                raise BudgetRejected("This call already has a possible dispatch")
             ledger.charges[base] = Charge(exchange_id=exchange_id, model=model)
             ledger.revision = str(uuid.uuid4())
             try:
@@ -105,6 +101,24 @@ class Budget:
             except WriteRejected as error:
                 raise BudgetNotReserved("Call ledger write was rejected") from error
         raise BudgetNotReserved("Call ledger is busy")
+
+    def discard(self, scope: Scope, invocation: RequestKey, exchange_id: str) -> None:
+        for _ in range(16):
+            ledger, etag = self._load(scope, invocation)
+            base = self.charge_key(invocation)
+            current = ledger.charges.get(base)
+            if current is not None and current.exchange_id != exchange_id:
+                return
+            ledger.charges = {
+                key: charge for key, charge in ledger.charges.items() if charge.exchange_id != exchange_id
+            }
+            ledger.revision = str(uuid.uuid4())
+            try:
+                self.store.save(self.key(scope, invocation), ledger.model_dump_json().encode(), etag)
+                return
+            except StateConflict:
+                continue
+        raise StateConflict("Call ledger is busy")
 
     def settle(self, scope: Scope, invocation: RequestKey, usage: object, *, exchange_id: str | None = None) -> None:
         normalized: dict[str, int] | None = None
