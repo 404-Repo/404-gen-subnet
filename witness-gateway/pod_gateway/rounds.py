@@ -240,8 +240,8 @@ class RoundController:
 
     async def refresh(self) -> None:
         observed = self.clock()
+        revision = await self.git.get_ref_sha(self.branch)
         try:
-            revision = await self.git.get_ref_sha(self.branch)
             state = await require_state(self.git, revision)
             config = await require_competition_config(self.git, revision)
             round_name = f"{config.name}-{state.current_round}"
@@ -282,7 +282,8 @@ class RoundController:
             self.inputs, self.policy = inputs, policy
         except Exception:
             # A newly observed but incomplete publication cannot authorize old work.
-            self.policy = None
+            if self.policy is not None and revision != self.policy.revision:
+                self.policy = None
             raise
 
 

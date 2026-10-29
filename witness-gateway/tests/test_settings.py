@@ -9,7 +9,7 @@ import time
 from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from aiohttp import web
@@ -229,6 +229,46 @@ def test_artifact_commits_do_not_restrict_gateway_membership(
     assert auth.verify("GET", path, b"", hotkey_headers(miner, b"", method="GET", path=path)) == miner.ss58_address
     with pytest.raises(AuthRejected, match="hotkey_not_registered"):
         auth.membership.require(Keypair.create_from_uri("//Bob").ss58_address)
+
+
+def test_gateway_refresh_error_preserves_cached_round_permission(
+    values: dict[str, object], tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pod_gateway import main
+    from test_rounds import Competition
+
+    async def scenario() -> None:
+        competition = Competition()
+        await competition.controller.refresh()
+        frozen = competition.controller.require()
+        published = asyncio.Event()
+        gateway = Mock()
+        gateway.application.return_value = web.Application()
+        gateway.publish_policy = AsyncMock(side_effect=published.set)
+        monkeypatch.setattr(main, "Gateway", Mock(return_value=gateway))
+        monkeypatch.setattr(main, "RoundController", Mock(return_value=competition.controller))
+        monkeypatch.setattr("pod_gateway.main.R2StateStore.connect", Mock(return_value=MemoryState()))
+        monkeypatch.setattr(main, "RoundImages", Mock(return_value=MemoryState()))
+        monkeypatch.setattr("pod_gateway.main.RunPodClient.http_client", Mock())
+        monkeypatch.setattr("pod_gateway.main.MembershipRefresher.refresh", lambda _: None)
+
+        async def unavailable(ref: str) -> str:
+            raise TimeoutError("Competition refresh unavailable")
+
+        monkeypatch.setattr(competition.source, "get_ref_sha", unavailable)
+        (tmp_path / "verifying.bin").write_bytes(b"fixture verification key")
+        settings = GatewaySettings.model_validate({**values, "WITNESS_PARAMETERS": tmp_path,
+            "WITNESS_START_ID": "00000000-0000-4000-8000-000000000001", "RUNPOD_POD_ID": "fixture-gateway"})
+        app = await main.application(settings, worker_spec(settings))
+        runner = web.AppRunner(app)
+        await runner.setup()
+        try:
+            await asyncio.wait_for(published.wait(), 2)
+            assert competition.controller.require() == frozen
+        finally:
+            await runner.cleanup()
+
+    asyncio.run(scenario())
 
 
 @pytest.mark.parametrize("commits", [None, {}, {"5" * 48: "c" * 40}])

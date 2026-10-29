@@ -10,6 +10,7 @@ import time
 from dataclasses import replace
 from pathlib import Path
 
+import httpx
 import pytest
 from PIL import Image
 from subnet_common.github import GitHubClient
@@ -136,6 +137,73 @@ def test_branch_is_resolved_once_even_when_it_moves_during_the_read() -> None:
         await competition.controller.refresh()
         newer = competition.controller.require()
         assert newer.round == "test-1" and newer.seed == 17 and list(newer.prompt_ids.values()) == ["lamp"]
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("failed_read", ["ref", "state", "config", "head"])
+def test_refresh_errors_keep_permission_only_until_its_original_expiry(
+    monkeypatch: pytest.MonkeyPatch, failed_read: str,
+) -> None:
+    async def scenario() -> None:
+        competition = Competition(publication(deadline=100))
+        await competition.controller.refresh()
+        frozen = competition.controller.require()
+        lease = competition.controller.policy
+        assert lease is not None
+        original = competition.source.get_file
+
+        async def unavailable(*args: object) -> str:
+            raise httpx.ReadTimeout("Competition refresh unavailable")
+
+        async def get_file(path: str, ref: str) -> str | None:
+            if path == {"state": "state.json", "config": "config.json"}[failed_read]:
+                raise httpx.ReadTimeout("Competition refresh unavailable")
+            return await original(path, ref)
+
+        with monkeypatch.context() as patch:
+            if failed_read == "ref":
+                patch.setattr(competition.source, "get_ref_sha", unavailable)
+            elif failed_read == "head":
+                patch.setattr(competition.controller, "head", unavailable)
+            else:
+                patch.setattr(competition.source, "get_file", get_file)
+            for now in (lease.expires_at - 2, lease.expires_at - 1, lease.expires_at):
+                competition.now[0] = now
+                with pytest.raises(httpx.ReadTimeout):
+                    await competition.controller.refresh()
+                if now < lease.expires_at:
+                    assert competition.controller.require() == frozen
+                else:
+                    with pytest.raises(AuthRejected, match="round_policy_stale"):
+                        competition.controller.require()
+        await competition.controller.refresh()
+        assert competition.controller.require() == frozen
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("failed_read", ["state.json", "config.json"])
+def test_new_revision_revokes_permission_even_when_its_metadata_read_fails(
+    monkeypatch: pytest.MonkeyPatch, failed_read: str,
+) -> None:
+    async def scenario() -> None:
+        competition = Competition()
+        await competition.controller.refresh()
+        competition.source.publish(publication(number=1, prompt="lamp"))
+        original = competition.source.get_file
+
+        async def get_file(path: str, ref: str) -> str | None:
+            if path == failed_read:
+                raise httpx.ReadTimeout("Competition refresh unavailable")
+            return await original(path, ref)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(competition.source, "get_file", get_file)
+            with pytest.raises(httpx.ReadTimeout):
+                await competition.controller.refresh()
+        with pytest.raises(AuthRejected):
+            competition.controller.require()
+        await competition.controller.refresh()
+        assert competition.controller.require().round == "test-1"
     asyncio.run(scenario())
 
 

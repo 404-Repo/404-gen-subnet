@@ -106,8 +106,7 @@ async def application(settings: GatewaySettings, worker_spec: PodSpec) -> web.Ap
                 try:
                     await rounds.refresh()
                     await gateway.round_changed()
-                except Exception as error:  # noqa: BLE001 - fail closed without privileged diagnostics
-                    rounds.policy = None
+                except Exception as error:  # noqa: BLE001 - never log privileged diagnostics
                     print(json.dumps({"event": "round_refresh_failed", "error_type": type(error).__name__}), flush=True)
                     await gateway.publish_policy()
                 await asyncio.sleep(settings.round_refresh_seconds)

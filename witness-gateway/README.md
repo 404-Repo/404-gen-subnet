@@ -147,8 +147,12 @@ inputs and current `miner_generation` round. Finite schedules also require a fre
 Finney block below `generation_deadline_block`; leases are capped at the estimated
 block boundary. `next_stage_eta` is approximate and is never a generation deadline.
 
-A pause, closed stage, source error or expired policy stops new work without
-draining Pods. Captures check permission immediately before provider release;
+Transient refresh errors retain valid permission until its original expiry and
+never extend it. A newly observed source revision invalidates cached permission,
+even when the new publication cannot be read.
+
+A pause, closed stage or expired policy stops new work without draining Pods.
+Captures check permission immediately before provider release;
 queued saves check when execution begins. Already admitted work finishes retaining
 its evidence. Status, saved-result lookup and identical saved submissions remain
 available. A ready new round applies to new allocations; existing Pods retain
