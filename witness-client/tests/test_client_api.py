@@ -593,3 +593,68 @@ def test_sync_saved_recovery_bypasses_busy_capture_and_failure_releases_capacity
             with pytest.raises(openai.APIConnectionError):
                 active.result(timeout=2)
             assert queued.result(timeout=2).id == "resp_saved" and opened == [0, 2]
+
+
+@pytest.mark.parametrize("waiting_for", ["capture", "preparation"])
+@pytest.mark.parametrize("unstarted_deadline", [None, 1060])
+def test_queued_call_can_finish_after_waiting_longer_than_a_capture_window(
+    config: WitnessConfig, monkeypatch: pytest.MonkeyPatch, waiting_for: str, unstarted_deadline: int | None,
+) -> None:
+    waiting = Event()
+    clock = [1000.0]
+    monkeypatch.setattr("witness_client.client.time", SimpleNamespace(
+        monotonic=lambda: clock[0], time=lambda: clock[0],
+    ))
+
+    class WaitingSemaphore(BoundedSemaphore):
+        def __enter__(self, blocking: bool = True, timeout: float | None = None, /) -> bool:
+            waiting.set()
+            return super().__enter__(blocking, timeout)
+
+    gate = WaitingSemaphore(1)
+    gate.acquire()
+    key = Keypair.create_from_uri("//Alice")
+    identifier = str(uuid.uuid4())
+    session: Session = {
+        "id": identifier, "protocol": 2, "provider": "https://api.openai.com/v1/responses",
+        "proof_key_sha256": "a" * 64, "miner": key.ss58_address, "round": "test-0",
+    }
+    current: Snapshot | None = None
+
+    def start(invocation: RequestKey) -> Snapshot:
+        nonlocal current
+        current = Snapshot(
+            call=CallView(request=invocation, exchange_id=identifier, deadline=unstarted_deadline, phase="assigned"),
+            hotkey=key.ss58_address, session=dict(session),
+        )
+        return current
+
+    @contextmanager
+    def tunnel(identifier: str, *, deadline: float) -> Iterator[WebSocketTunnel]:
+        yield WebSocketTunnel(MagicMock(), identifier)
+
+    def exchange(*args: object, **kwargs: object) -> bytes:
+        clock[0] += 18 + 45
+        return b""
+
+    def snapshot(identifier: str, **kwargs: object) -> Snapshot:
+        assert current is not None
+        current.call.phase = "issued"
+        return current
+
+    def recorded(*args: object, **kwargs: object) -> tuple[Session, int, bytes]:
+        return session, 200, event({"id": "resp_queued", "status": "completed", "output": []})
+
+    with WitnessClient(config, hotkey=key, openai_api_key="x" * 80) as client:
+        monkeypatch.setattr(client, "_capture_slots" if waiting_for == "capture" else "_preparation", gate)
+        for name, operation in {"start": start, "tunnel": tunnel, "snapshot": snapshot, "recorded": recorded}.items():
+            monkeypatch.setattr(client._gateway, name, operation)
+        monkeypatch.setattr("witness_client.client.exchange", exchange)
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            queued = pool.submit(client.create, model="fixture", input="image")
+            try:
+                assert waiting.wait(2)
+                clock[0] += 1801
+            finally:
+                gate.release()
+            assert queued.result(timeout=3).id == "resp_queued"

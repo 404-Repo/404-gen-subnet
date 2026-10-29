@@ -35,7 +35,7 @@ class CallView(BaseModel):
 
     request: RequestKey
     exchange_id: str
-    deadline: int
+    deadline: int | None
     phase: Literal["reserved", "assigned", "capturing", "issued", "failed"]
     start_id: str | None = None
     pod_id: str | None = None

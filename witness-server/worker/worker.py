@@ -81,7 +81,7 @@ def verify(
 def relay(
     store: Store,
     prefix: str,
-    deadline: float,
+    deadline: float | None,
     directory: Path,
     verifier: Verifier,
     channel: Channel,
@@ -90,7 +90,7 @@ def relay(
     hotkey: str,
     host: str,
     port: int = 443,
-    before_release: Callable[[bytes], None] | None = None,
+    before_release: Callable[[bytes], float | None] | None = None,
     extra_metadata: dict[str, object] | None = None,
     seal: Callable[[dict[str, object]], object] | None = None,
     before_delivery: Callable[[dict[str, object]], None] | None = None,
@@ -104,8 +104,11 @@ def relay(
         raise ValueError("Transcript path differs from authenticated identity")
     identify_exchange(prefix.rsplit("/", 1)[1])
     started = time.monotonic()
-    hello_deadline = min(deadline, started + CLIENT_HELLO_TIMEOUT)
-    authorization_deadline = min(deadline, started + AUTHORIZATION_TIMEOUT)
+    hello_deadline = started + CLIENT_HELLO_TIMEOUT
+    authorization_deadline = started + AUTHORIZATION_TIMEOUT
+    if deadline is not None:
+        hello_deadline = min(deadline, hello_deadline)
+        authorization_deadline = min(deadline, authorization_deadline)
     client = bytearray()
     server = bytearray()
     issued = False
@@ -244,9 +247,13 @@ def relay(
                     stage = "dispatch_reservation"
                     (directory / "authorization-server.bin").write_bytes(server)
                     store.put(prefix + "/authorization-server.bin", bytes(server))
-                    before_release((directory / "request.json").read_bytes())
+                    capture_deadline = before_release((directory / "request.json").read_bytes())
+                    if capture_deadline is not None:
+                        deadline = capture_deadline
                     if time.monotonic() >= authorization_deadline:
                         raise TimeoutError("Request authorization deadline reached")
+                if deadline is None:
+                    raise ValueError("Capture deadline is missing")
                 # Durable authorization survives loss of its live acknowledgement.
                 with suppress(OSError, WebSocketException):
                     channel.notify(

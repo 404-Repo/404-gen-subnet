@@ -11,6 +11,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 from threading import Event
+from types import SimpleNamespace
 from typing import Literal, cast
 
 import httpx
@@ -148,7 +149,7 @@ class PodService:
                     call=CallView(
                         request=invocation,
                         exchange_id=identifier,
-                        deadline=int(time.time()) + 60,
+                        deadline=None if self.phase == "assigned" else int(time.time()) + 60,
                         phase=self.phase,
                         authorized=self.phase == "capturing",
                     ),
@@ -361,6 +362,69 @@ def test_async_recovery_preserves_provider_errors_and_rejects_changed_evidence(
             assert isinstance(invalid.value.__cause__, WitnessError)
             assert invalid.value.__cause__.code == "invalid_recording"
             assert len(service.calls) == 1
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("waiting_for", ["capture", "preparation"])
+def test_async_queued_call_can_finish_after_waiting_longer_than_a_capture_window(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch, waiting_for: str,
+) -> None:
+    client_config: WitnessConfig = request.getfixturevalue("config")
+    async def run() -> None:
+        waiting = asyncio.Event()
+        started = time.monotonic()
+        wall = time.time()
+        clock = [started]
+        monkeypatch.setattr("witness_client.async_client.time", SimpleNamespace(
+            monotonic=lambda: clock[0], time=lambda: wall + clock[0] - started,
+        ))
+
+        class WaitingSemaphore(asyncio.BoundedSemaphore):
+            async def __aenter__(self) -> None:
+                waiting.set()
+                await super().__aenter__()
+
+        gate = WaitingSemaphore(1)
+        await gate.acquire()
+        key = Keypair.create_from_uri("//Alice")
+        async with AsyncWitnessClient(client_config, hotkey=key, openai_api_key="x" * 80) as client:
+            monkeypatch.setattr(client, "_capture_slots" if waiting_for == "capture" else "_preparation", gate)
+            _, body = client._request(0, None, {"model": "fixture", "input": "image"})
+            service = PodService(key, body, phase="assigned")
+            await service.connect(client)
+
+            class Socket:
+                async def send(self, message: str | bytes) -> None:
+                    pass
+
+                async def recv(self) -> bytes:
+                    return b""
+
+                async def close(self) -> None:
+                    pass
+
+            @asynccontextmanager
+            async def tunnel(identifier: str, *, deadline: float) -> AsyncIterator[AsyncWebSocketTunnel]:
+                yield AsyncWebSocketTunnel(Socket(), identifier)
+
+            async def exchange(tunnel: AsyncWebSocketTunnel, *args: object, **kwargs: object) -> bytes:
+                clock[0] += 18 + 45
+                service.complete(tunnel.identifier)
+                return (
+                    f"HTTP/1.1 200 OK\r\nContent-Length: {len(service.response)}\r\n\r\n".encode()
+                    + service.response
+                )
+
+            monkeypatch.setattr(client._gateway, "tunnel", tunnel)
+            monkeypatch.setattr("witness_client.async_client.async_exchange", exchange)
+            queued = asyncio.create_task(client.create(model="fixture", input="image"))
+            try:
+                await asyncio.wait_for(waiting.wait(), 2)
+                clock[0] += 1801
+            finally:
+                gate.release()
+            assert (await asyncio.wait_for(queued, 3)).id == "resp_fixture"
 
     asyncio.run(run())
 

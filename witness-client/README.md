@@ -343,7 +343,9 @@ after authorization, so provider inference can overlap with later preparations.
 Native proving remains serialized.
 
 Concurrent async `responses.create()` calls queue inside the SDK when capacity is
-full. Synchronous calls obey the same limits when invoked concurrently. Callers
+full. Synchronous calls obey the same limits when invoked concurrently. The
+delivery wait starts after acquiring initial capacity; queueing does not consume
+the provider's capture window. Callers
 do not need executors, semaphores or locks to enforce either limit. Completed
 response reuse bypasses both capacities; `resume()` retrieves an existing exchange
 without starting inference. Failure and cancellation release acquired capacity,
@@ -366,6 +368,9 @@ retries reuse saved data.
 captures and retrieves the saved outcome internally. Its capture/recovery wait
 uses `delivery_timeout` and the server's capture deadline; safe replacement
 attempts share that wait window. Each REST request has a thirty-second timeout.
+The server's capture deadline is unset until dispatch authorization, immediately
+before provider release. Setup has separate worker limits. Joining an authorized
+capture preserves its existing deadline.
 
 The authenticated Pod supplies trusted completion metadata and expected evidence
 hashes. Normal completion verifies the request and response bytes already held

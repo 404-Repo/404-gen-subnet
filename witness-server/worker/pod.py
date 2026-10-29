@@ -372,7 +372,7 @@ class PodRuntime:
 
             self._retry_upload(ready)
 
-            def authorize(body: bytes) -> None:
+            def authorize(body: bytes) -> float:
                 nonlocal not_dispatched
                 with self.lock:
                     if (
@@ -399,10 +399,11 @@ class PodRuntime:
                     except BudgetNotReserved:
                         not_dispatched = True
                         raise
-                    self.records.authorize(self.scope, invocation, self.pod_id, exchange_id=call.exchange_id)
+                    deadline = self.records.authorize(self.scope, invocation, self.pod_id, exchange_id=call.exchange_id)
                     self.require_generation()
                     if not self.selected():
                         raise RuntimeError("Round ended before provider release")
+                    return time.monotonic() + deadline - time.time()
 
             def complete(final: dict[str, object]) -> None:
                 nonlocal finalized
@@ -412,7 +413,7 @@ class PodRuntime:
             metadata = relay(
                 self.evidence,
                 prefix,
-                time.monotonic() + call.deadline - time.time(),
+                None,
                 directory,
                 partial(verify, provider=invocation.provider),
                 channel,

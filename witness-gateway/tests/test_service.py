@@ -205,21 +205,22 @@ class Harness:
         self,
         store: MemoryState,
         prefix: str,
-        deadline: float,
+        deadline: float | None,
         directory: Path,
         verifier: object,
         channel: Channel,
         **kwargs: object,
     ) -> dict[str, object]:
         data = bytearray()
+        setup_deadline = time.monotonic() + 30
         while len(data) < 8 or len(data) < 8 + int.from_bytes(data[:8], "big"):
-            data.extend(channel.recv(deadline))
+            data.extend(channel.recv(setup_deadline))
         body = bytes(data[8:])
         failure = self.failures.pop(0) if self.failures else ""
         if failure == "before":
             raise TimeoutError("Fixture failed before dispatch")
         (directory / "authorization.json").write_bytes(b"{}")
-        cast(Callable[[bytes], None], kwargs["before_release"])(body)
+        cast(Callable[[bytes], float], kwargs["before_release"])(body)
         if failure == "unknown":
             self.paid += 1
             raise TimeoutError("Fixture lost the provider outcome")

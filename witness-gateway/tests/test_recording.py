@@ -99,25 +99,28 @@ def test_failed_dispatch_retries_without_erasing_unknown_operational_usage(autho
     assert budget.summary(SCOPE, item)["pending_usage"] == 1
 
 
-def test_expired_unstarted_reservation_can_resume_without_extending_an_active_capture(
+def test_queued_call_receives_its_full_capture_window_at_authorization(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     clock = [1000.0]
     monkeypatch.setattr("pod_gateway.records.time.time", lambda: clock[0])
     records, item = CallRecords(MemoryState(), exchange_seconds=60), invocation()
     first = records.reserve(SCOPE, item)
-    clock[0] += 61
+    clock[0] += 1801
     resumed = records.reserve(SCOPE, item)
-    assert resumed.exchange_id == first.exchange_id and resumed.deadline > clock[0]
+    assert resumed.exchange_id == first.exchange_id and resumed.deadline is None
     assigned = records.assign(SCOPE, item, "00000000-0000-4000-8000-000000000001", "pod-one")
     assert records.claim(SCOPE, item, "pod-one", assigned.capture_id or "")
+    clock[0] += 18
+    deadline = records.authorize(SCOPE, item, "pod-one", exchange_id=assigned.exchange_id)
+    assert deadline == clock[0] + 60
     clock[0] += 61
-    assert records.reserve(SCOPE, item).deadline == resumed.deadline
+    assert records.reserve(SCOPE, item).deadline == deadline
     recording = records.load(SCOPE, item.id)
     assert recording is not None and recording.call.exchange_id == first.exchange_id
 
 
-def test_expired_unclaimed_assignment_can_resume_without_extending_a_claim(
+def test_unstarted_reassignment_does_not_start_or_extend_a_capture(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     clock = [1000.0]
@@ -126,13 +129,14 @@ def test_expired_unclaimed_assignment_can_resume_without_extending_a_claim(
     start_id = "00000000-0000-4000-8000-000000000001"
     first = records.assign(SCOPE, item, start_id, "pod-one", allow_reassign=True)
     clock[0] += 61
-    resumed = records.assign(SCOPE, item, start_id, "pod-one", allow_reassign=True)
-    assert resumed.exchange_id == first.exchange_id and resumed.deadline > clock[0]
+    resumed = records.assign(SCOPE, item, start_id, "pod-two", allow_reassign=True)
+    assert resumed.exchange_id == first.exchange_id and resumed.deadline is None
     assert not records.claim(SCOPE, item, "pod-one", first.capture_id or "")
-    assert records.claim(SCOPE, item, "pod-one", resumed.capture_id or "")
+    assert records.claim(SCOPE, item, "pod-two", resumed.capture_id or "")
+    deadline = records.authorize(SCOPE, item, "pod-two", exchange_id=resumed.exchange_id)
     clock[0] += 61
     active = records.assign(SCOPE, item, start_id, "pod-one", allow_reassign=True)
-    assert active.phase == "capturing" and active.deadline == resumed.deadline
+    assert active.phase == "capturing" and active.deadline == deadline
 
 
 @pytest.mark.parametrize("failed", [False, True])

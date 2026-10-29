@@ -232,6 +232,9 @@ def test_sigkill_capture_recovers_without_repeating_a_possible_dispatch(
             if process.poll() is None:
                 process.kill()
                 process.communicate(timeout=5)
+        stopped = records.locate(SCOPE, call.exchange_id)
+        assert stopped is not None
+        capture_deadline = stopped[1].deadline
         if not retain_spool:
             import shutil
 
@@ -260,7 +263,7 @@ def test_sigkill_capture_recovers_without_repeating_a_possible_dispatch(
             assert budget.summary(SCOPE, item)["pending_usage"] == 1
             retry = records.retry(SCOPE, item, call.exchange_id)
             assert (retry.exchange_id != call.exchange_id) == retain_spool
-        assert recovered.deadline == call.deadline
+        assert recovered.deadline == capture_deadline
         assert len(requests) == int(stage in ("active_response", "response_spooled", "response_saved", "manifest_saved", "settled", "issued"))
         assert budget.summary(SCOPE, item)["possible_dispatches"] == int(stage != "before_authorization")
         if stage in ("response_saved", "manifest_saved", "settled", "issued"):
@@ -314,6 +317,7 @@ def test_retained_response_recovers_after_a_temporary_verifier_failure(tmp_path:
             assert pending.poll() is None
             current = records.locate(SCOPE, call.exchange_id)
             assert current is not None and current[1].phase == "capturing" and current[1].authorized
+            capture_deadline = current[1].deadline
             assert records.retry(SCOPE, item, call.exchange_id).exchange_id == call.exchange_id
             assert budget.summary(SCOPE, item)["pending_usage"] == 1
             assert len(requests) == budget.summary(SCOPE, item)["possible_dispatches"] == 1
@@ -329,7 +333,7 @@ def test_retained_response_recovers_after_a_temporary_verifier_failure(tmp_path:
                 pending.communicate(timeout=5)
         current = records.locate(SCOPE, call.exchange_id)
         assert current is not None and current[1].phase == "issued"
-        assert current[1].deadline == call.deadline
+        assert current[1].deadline == capture_deadline
         assert state.get(prefix(call) + "response.sse") == evidence(budget, item, call)["response.sse"]
         assert budget.summary(SCOPE, item)["pending_usage"] == 0
         assert budget.summary(SCOPE, item)["known_credits"] == "2.0"

@@ -100,12 +100,13 @@ def test_miner_cannot_extend_setup_with_silence_or_partial_messages(
     provider.__exit__.assert_called_once()
 
 
-@pytest.mark.parametrize("late_proof", [True, False])
+@pytest.mark.parametrize("late_proof,capture_elapsed", [(True, None), (False, None), (True, 45), (False, 45), (False, 61)])
 def test_setup_deadline_applies_before_release_but_not_during_capture(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     identity: tuple[Keypair, str],
     late_proof: bool,
+    capture_elapsed: int | None,
 ) -> None:
     hotkey, _ = identity
     prefix = f"{miner_prefix('1', hotkey.ss58_address)}/{uuid.uuid4()}"
@@ -127,7 +128,7 @@ def test_setup_deadline_applies_before_release_but_not_during_capture(
         nonlocal reads
         reads += 1
         if reads == 3:
-            clock.now += worker.AUTHORIZATION_TIMEOUT
+            clock.now += capture_elapsed if capture_elapsed is not None else worker.AUTHORIZATION_TIMEOUT
         return record if reads <= 3 else b""
 
     connection.recv.side_effect = receive
@@ -147,6 +148,8 @@ def test_setup_deadline_applies_before_release_but_not_during_capture(
             (directory / "request.json").write_bytes(b"{}")
             if late_proof:
                 clock.now += worker.AUTHORIZATION_TIMEOUT
+            elif capture_elapsed is not None:
+                clock.now += 18
         if mode == "finish":
             (directory / "response.sse").write_bytes(b"response")
             return {"provider_status": 200}
@@ -158,13 +161,14 @@ def test_setup_deadline_applies_before_release_but_not_during_capture(
         return worker.relay(
             store,
             prefix,
-            started + 7 * 86400,
+            None if capture_elapsed is not None else started + 7 * 86400,
             tmp_path,
             verify,
             channel,
             round_number="1",
             hotkey=hotkey.ss58_address,
             host="provider.test",
+            before_release=(lambda body: clock.now + 60) if capture_elapsed is not None else None,
         )
 
     if late_proof:
@@ -172,9 +176,17 @@ def test_setup_deadline_applies_before_release_but_not_during_capture(
             run()
         assert connection.sendall.call_count == 2  # TLS setup only.
         assert store.get(prefix + "/response.sse") is None
+    elif capture_elapsed == 61:
+        with pytest.raises(TimeoutError, match="Provider exchange deadline"):
+            run()
+        assert connection.sendall.call_count == 3
+        assert store.get(prefix + "/response.sse") is None
     else:
         assert run()["provider_status"] == 200
-        assert clock.now >= started + worker.AUTHORIZATION_TIMEOUT
+        if capture_elapsed is not None:
+            assert clock.now == started + 18 + capture_elapsed
+        else:
+            assert clock.now >= started + worker.AUTHORIZATION_TIMEOUT
         assert connection.sendall.call_count == 3
         assert store.get(prefix + "/response.sse") == b"response"
     channel.finish.assert_called_once()

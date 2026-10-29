@@ -27,7 +27,7 @@ class Call(BaseModel):
 
     request: RequestKey
     exchange_id: str
-    deadline: int
+    deadline: int | None = None
     phase: Literal["reserved", "assigned", "capturing", "issued", "failed"] = "reserved"
     start_id: str | None = None
     pod_id: str | None = None
@@ -82,7 +82,6 @@ class CallRecords:
                     call=Call(
                         request=request,
                         exchange_id=str(uuid.uuid5(uuid.NAMESPACE_URL, f"{scope.key}/{request.id}")),
-                        deadline=int(time.time()) + self.exchange_seconds,
                     ),
                 )
             )
@@ -99,8 +98,6 @@ class CallRecords:
 
     def reserve(self, scope: Scope, request: RequestKey) -> Call:
         def change(record: CallRecord) -> Call:
-            if record.call.phase == "reserved" and record.call.deadline <= time.time():
-                record.call.deadline = int(time.time()) + self.exchange_seconds
             return record.call.model_copy(deep=True)
 
         call = self._change(scope, request, change)
@@ -141,7 +138,7 @@ class CallRecords:
             ):
                 record.attempts[call.exchange_id] = call.model_copy(deep=True)
                 record.call = Call(
-                    request=request, exchange_id=str(uuid.uuid4()), deadline=int(time.time()) + self.exchange_seconds
+                    request=request, exchange_id=str(uuid.uuid4())
                 )
             return record.call.model_copy(deep=True)
 
@@ -161,15 +158,14 @@ class CallRecords:
             ):
                 record.attempts[call.exchange_id] = call.model_copy(deep=True)
                 call = record.call = Call(
-                    request=request, exchange_id=str(uuid.uuid4()), deadline=int(time.time()) + self.exchange_seconds
+                    request=request, exchange_id=str(uuid.uuid4())
                 )
             if call.phase == "reserved" or (
                 call.phase == "assigned" and allow_reassign and (
-                    call.start_id != start_id or call.pod_id != pod_id or call.deadline <= time.time()
+                    call.start_id != start_id or call.pod_id != pod_id
                 )
             ):
-                if call.deadline <= time.time():
-                    call.deadline = int(time.time()) + self.exchange_seconds
+                call.deadline = None
                 call.phase, call.start_id, call.pod_id = "assigned", start_id, pod_id
                 call.capture_id = str(uuid.uuid4())
             return call.model_copy(deep=True)
@@ -188,14 +184,16 @@ class CallRecords:
 
         return self._change(scope, request, change)
 
-    def authorize(self, scope: Scope, request: RequestKey, pod_id: str, *, exchange_id: str) -> None:
-        def change(record: CallRecord) -> None:
+    def authorize(self, scope: Scope, request: RequestKey, pod_id: str, *, exchange_id: str) -> int:
+        def change(record: CallRecord) -> int:
             call = record.call
             if call.exchange_id != exchange_id or call.phase != "capturing" or call.pod_id != pod_id or call.authorized:
                 raise RecordingConflict("Capture is no longer eligible for authorization")
             call.authorized = True
+            call.deadline = int(time.time()) + self.exchange_seconds
+            return call.deadline
 
-        self._change(scope, request, change)
+        return self._change(scope, request, change)
 
     def issued(self, scope: Scope, request: RequestKey, pod_id: str, manifest: bytes, *, exchange_id: str) -> None:
         digest = hashlib.sha256(manifest).hexdigest()

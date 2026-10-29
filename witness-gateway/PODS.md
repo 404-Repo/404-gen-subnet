@@ -159,14 +159,26 @@ the same durable exchange, a `Location: /v1/calls/<exchange_id>` header and a
 HTTP acceptance alone cannot authorize a provider request. A sealed attempt
 returns `200` with its completion metadata, including evidence of provider errors.
 Its call phase distinguishes a reusable response from a failed attempt.
-An expired unclaimed assignment can renew its deadline for the same exchange,
-fencing its previous claim token. Claimed captures retain their original deadline.
+Unstarted calls have a null `deadline`. Authorization saves the capture deadline
+immediately before provider release; its default window is thirty minutes.
+Joining or recovering an authorized capture retains that saved deadline.
 `GET /v1/calls/<exchange_id>` returns the current snapshot. The supplied client's
 `responses.create()` handles polling and retrieval and returns a Response or
 buffered stream, or raises a provider, connection or timeout error. Miners do not
 need to call `resume()` for ordinary calls. A capture/recovery wait is bounded by
 `delivery_timeout` and the exchange deadline; REST requests time out after thirty
 seconds.
+
+Timeout terms:
+
+- **SDK queue wait:** time waiting for local capture or preparation capacity;
+  it consumes neither the capture window nor the initial delivery wait.
+- **Setup timeout:** the worker's sixty-second ClientHello limit and five-minute
+  authorization limit, measured from the start of its relay.
+- **Capture deadline:** the persisted end of the provider-response capture window,
+  established once at dispatch authorization.
+- **Delivery timeout:** how long the SDK waits after acquiring initial capacity.
+  Ending that wait does not cancel an already dispatched capture.
 
 A logical call owns a current capture attempt; an exchange UUID identifies an
 attempt, and a private capture capability fences its selected Pod/start. CAS state

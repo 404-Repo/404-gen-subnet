@@ -113,7 +113,7 @@ def test_native_direct_tls_durable_completion_and_exact_recovery(
         def direct_relay(
             store: Store,
             prefix: str,
-            deadline: float,
+            deadline: float | None,
             directory: Path,
             verifier: Verifier,
             channel: Channel,

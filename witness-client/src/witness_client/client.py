@@ -458,8 +458,6 @@ class WitnessClient(_ClientState):
                     "Witness call differs", identifier, code="invalid_recording"
                 )
             attempted = False
-            delivery_deadline = time.monotonic() + self._gateway.delivery_timeout
-            deadline = min(delivery_deadline, time.monotonic() + snapshot.call.deadline - time.time())
             needs_capture = snapshot.call.phase not in ("issued", "failed") or (
                 snapshot.call.phase == "failed" and snapshot.call.not_dispatched and not snapshot.call.authorized
             )
@@ -474,6 +472,10 @@ class WitnessClient(_ClientState):
                 # Release its slot after authorization so inference can overlap.
                 if snapshot.call.phase in ("reserved", "assigned"):
                     preparation.enter_context(self._preparation)
+                delivery_deadline = time.monotonic() + self._gateway.delivery_timeout
+                deadline = delivery_deadline
+                if snapshot.call.authorized and snapshot.call.deadline is not None:
+                    deadline = min(deadline, time.monotonic() + snapshot.call.deadline - time.time())
                 while snapshot.call.phase != "issued":
                     if snapshot.call.phase == "failed" and (
                         snapshot.call.authorized or not snapshot.call.not_dispatched
@@ -508,7 +510,9 @@ class WitnessClient(_ClientState):
                             )
                         identifier = snapshot.call.exchange_id
                         identify_exchange(identifier)
-                        deadline = min(delivery_deadline, time.monotonic() + snapshot.call.deadline - time.time())
+                        deadline = delivery_deadline
+                        if snapshot.call.authorized and snapshot.call.deadline is not None:
+                            deadline = min(deadline, time.monotonic() + snapshot.call.deadline - time.time())
                         attempted = False
                         raw_response = None
                         preparation.close()
