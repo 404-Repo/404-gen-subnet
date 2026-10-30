@@ -676,8 +676,17 @@ capture store and exact frozen pricing bytes:
 ```sh
 python -m pod_gateway export --deployment competition --round test-0 \
   --hotkey "$MINER_HOTKEY" --execution /private/host/execution.json \
-  --output /private/replay/bundle
+  --output /private/replay/bundle --pricing /private/host/pricing.json
 ```
+
+`--pricing` defaults to the checkout's current `miner-reference/budgets/pricing.json`.
+Select the exact pricing snapshot used by the retained captures. The
+[2026-10-19 snapshot](../miner-reference/budgets/pricing-2026-10-19.json) preserves
+SHA-256 `7a39f67c1381fd45f82e9f719776f83041174544124560cb5138e2fb4fcc77d6`;
+from this directory, select it with
+`--pricing ../miner-reference/budgets/pricing-2026-10-19.json`.
+Existing verified bundles contain their own `pricing.json`; keep those bytes
+unchanged when replaying them.
 
 The exporter selects current successful calls by logical request key, reads their
 retained evidence and rechecks the credential/TLS proof using

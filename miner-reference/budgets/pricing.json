@@ -1,5 +1,5 @@
 {
-  "checked_on": "2026-10-19",
+  "checked_on": "2026-10-27",
   "usd_per_credit": 0.000001,
   "credits_per_prompt": 5000000,
   "calls_per_prompt": 60,
@@ -22,6 +22,13 @@
       "long_input_credits_per_token": 4,
       "long_output_credits_per_token": 15,
       "source": "https://developers.openai.com/api/docs/models/gpt-6.1-sol"
+    },
+    "gpt-6.1-terra": {
+      "input_credits_per_token": 1,
+      "output_credits_per_token": 5,
+      "long_input_credits_per_token": 2,
+      "long_output_credits_per_token": 7.5,
+      "source": "https://developers.openai.com/api/docs/models/gpt-6.1-terra"
     },
     "gpt-6-sol": {
       "input_credits_per_token": 2,

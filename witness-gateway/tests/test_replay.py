@@ -178,6 +178,25 @@ class Capture(WitnessClient):
         return output
 
 
+def test_retained_pricing_keeps_validation_captures_replayable(tmp_path: Path) -> None:
+    prices = Path(__file__).resolve().parents[2] / "miner-reference/budgets"
+    retained = (prices / "pricing-2026-10-19.json").read_bytes()
+    assert hashlib.sha256(retained).hexdigest() == "7a39f67c1381fd45f82e9f719776f83041174544124560cb5138e2fb4fcc77d6"
+    live = Capture(tmp_path, pricing=retained)
+
+    def generate(image: bytes, seed: int, witness: WitnessClient, renderer: None) -> str:
+        return witness.create(model="gpt-6.1-sol", input="image").output_text
+
+    expected = run_generation(generate, b"PNG", 42, live, None)
+    bundle = live.export(tmp_path / "bundle")
+    assert run_replay(generate, b"PNG", 42, ReplayWitness(bundle), None) == expected
+    live.pricing = (prices / "pricing.json").read_bytes()
+    with pytest.raises(ValueError, match="Recorded evidence binding differs"):
+        live.export(tmp_path / "mismatched")
+    assert run_replay(generate, b"PNG", 42, ReplayWitness(bundle), None) == expected
+    assert live.paid == 1
+
+
 def test_concurrent_arrival_order_is_independent_of_identity_and_delivery(tmp_path: Path) -> None:
     live = Capture(tmp_path)
     live.gate = threading.Event()
