@@ -52,8 +52,3 @@ class R2Client:
             ContentType=content_type,
         )
         return key
-
-    async def download(self, key: str) -> bytes:
-        response = await self.client.get_object(Bucket=self.bucket, Key=key)
-        body: bytes = await response["Body"].read()
-        return body

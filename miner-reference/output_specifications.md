@@ -1,6 +1,7 @@
 # Three.js Output Specification
 
-> **Note:** This document specifies what miners must produce. A separate **Runtime Specification** describes how submissions are loaded, sandboxed, executed, and rendered by the validator. Both documents are required reading.
+> The [miner guide](README.md) covers submission, Python, budget and replay.
+> This reference contains the detailed JavaScript API, counting rules and failure codes.
 
 ## TL;DR
 
@@ -10,7 +11,7 @@
 - **File budget:** source ≤ **1 MB**; total bytes of string/numeric literals ≤ **50 KB** (prevents shipping baked assets as code).
 - **Runtime budget:** module evaluation + `generate()` ≤ **5 s** combined wall-clock, **256 MB** heap.
 - **Scene caps:** ≤ **250,000 vertices**, ≤ **200 draw calls**, scene-graph depth ≤ **32**, ≤ **50,000 `InstancedMesh` instances**, ≤ **4 MB** `DataTexture` data.
-- **APIs:** `THREE.*` allowlist only — loaders, shader materials, animations, non-PBR materials, and DOM / network / timing globals are rejected.
+- **APIs:** `THREE.*` allowlist only — loaders, shader materials, animations, unlisted materials, and DOM / network / timing globals are rejected.
 - **Failures** map to rule codes (`VERTEX_LIMIT_EXCEEDED`, `ASYNC_NOT_ALLOWED`, etc.) — see § Failure Semantics.
 
 ## Concept
@@ -33,7 +34,7 @@ export default function generate(THREE) {
 }
 ```
 
-The function receives a `THREE` instance as its only argument (see Runtime Spec for the exact bundle).
+The function receives the allowlisted `THREE` namespace as its only argument, pinned to `three@0.183.2`.
 
 Your module must not import or require any external package. The `THREE` object passed to `generate` is the only API surface available. Any `import` or `require` statement causes rejection at parse time. The module must have exactly one top-level export: the default `generate` function.
 
@@ -78,18 +79,13 @@ Custom vertex attributes beyond `position`, `normal`, `uv`, and `color` are allo
 
 ## Rendering Context
 
-Your asset is rendered under a fixed camera, lighting, and environment setup defined in the Runtime Spec. Your material and geometry choices should account for this. Key facts:
-
-- Forward axis: +Z (defined above).
-- Camera, FOV, distance, and view configuration: see Runtime Spec.
-- Lighting: PBR-friendly fixed environment. See Runtime Spec for exact values.
-- Background and environment map: see Runtime Spec.
-
-Refer to the Runtime Spec for exact values, integrity hashes, and the canonical render setup before tuning materials or geometry against assumptions.
+The runtime specifies the renderer build and camera, lighting, background and view options.
+Use those settings when assessing your asset; the local viewer is an inspection tool.
+See [Rendering](README.md#rendering) for the preview and judging views.
 
 ## Three.js Version
 
-Pinned to **Three.js r183** (npm: `three@0.183.2`). Exact bundle source and integrity hash specified in the Runtime Spec.
+Pinned to **Three.js r183** (npm: `three@0.183.2`). The runtime identifies the exact bundle and its hash.
 
 ## Determinism
 
@@ -179,7 +175,7 @@ Mis-paired combinations (e.g., `Points` with `MeshBasicMaterial`, `Mesh` with `P
 | File size exceeds 1 MB | Rejected at parse time, failed | `FILE_SIZE_EXCEEDED` |
 | Module has no `export default` function | Rejected at parse time, failed | `MISSING_DEFAULT_EXPORT` |
 | Module has more than one top-level export | Rejected at parse time, failed | `MULTIPLE_TOP_LEVEL_EXPORTS` |
-| `generate` is async or returns a `Promise` | Rejected at parse time, failed | `ASYNC_NOT_ALLOWED` |
+| `generate` is async or returns a `Promise` | Rejected before execution or when its return value is checked, failed | `ASYNC_NOT_ALLOWED` |
 | Identifier outside the allowlist | Rejected before execution, failed | `IDENTIFIER_NOT_ALLOWED` |
 | Forbidden identifier referenced (e.g. `fetch`, `Date`) | Rejected before execution, failed | `FORBIDDEN_IDENTIFIER` |
 | Forbidden Three.js API used (e.g. `THREE.AnimationMixer`, including via destructuring) | Rejected before execution, failed | `FORBIDDEN_THREE_API` |
@@ -204,9 +200,16 @@ Mis-paired combinations (e.g., `Points` with `MeshBasicMaterial`, `Mesh` with `P
 | Bounding box exceeds `[-0.5, 0.5]` on any axis | Failed | `BOUNDING_BOX_OUT_OF_RANGE` |
 | Render run failed after passing validation | Failed | `RENDER_RUN_FAILED` |
 
-Each rule code is paired with a failure stage and detail in the structured error returned to miners. See **Runtime Specification § Error Reporting** for the JSON shape and the stage that emits each code.
+Failures have the shape `{ stage, rule, detail }`, for example:
 
-Failed prompts within a batch do not block the rest of the batch. Other prompts in the same batch are scored normally.
+```json
+{"stage": "post_validation", "rule": "EMPTY_SCENE", "detail": "returned scene has an empty bounding box"}
+```
+
+The [validator guide](validator/README.md) lists the stages used by the local tool.
+
+JavaScript validation reports failure for the affected prompt. Partial-submission
+acceptance and scoring depend on the round's published policy.
 
 ## Validation
 
@@ -219,10 +222,10 @@ All submissions undergo automated static analysis before execution:
 
 After successful execution, the validator computes `new THREE.Box3().setFromObject(root)` and rejects assets where any axis falls outside `[-0.5, 0.5]` or where the box is empty. Vertex count, draw call count, scene-graph depth, instance count, and texture data limits are all checked at this stage on the returned root.
 
-Code that passes both static and post-execution validation is then handed to the rendering and judging pipeline described in the Runtime Spec.
+Code that passes both static and post-execution validation proceeds to rendering and judging.
+Passing the local validator does not verify Python replay, model evidence, budgets or rendering.
 
 ## See Also
 
-- **Runtime Specification** — sandbox model, execution environment, exact Three.js bundle, AST allowlist details, camera/lighting/render setup.
-- **API Specification** — `/generate`, `/status`, `/results` endpoints for batch processing.
-- **Competition Rules** — scoring, prompt sets, time budgets, pod management.
+- [Miner guide](README.md) — submission, Python environment, budget and replay.
+- [Local validator](validator/README.md) — checks and usage.

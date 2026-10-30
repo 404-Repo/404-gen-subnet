@@ -1,14 +1,44 @@
 # Submission Collector
 
-Collects miner submissions from a chain, downloads generated 3D files, and prepares them for judging.
+Collects Python miner submissions from chain and records generated and submitted results.
+
+Miners submit a repository and an exact commit containing root `main.py` with
+`generate(image: bytes, seed: int, witness: WitnessClient, renderer: Renderer) -> str | None`,
+plus supporting committed source. The operator supplies a fixed runtime and library set.
+See the current [miner guide](../miner-reference/README.md) for the contract.
+
+The collector freezes the on-chain `repo` (`owner/repo`) and full 40-character
+`commit` in `submissions.json`. Source-copy CI consumes those immutable entries
+separately; the collector does not execute miner code or install dependencies.
+
+The Pod saves JavaScript, 12 judging views, a grid and embeddings in the existing
+public R2 bucket (`404-gen`). It publishes one result index at
+`<witness_storage_prefix>rounds/<full-round-name>/<hotkey>/submitted.json`, mapping prompt IDs to records
+with four fields: `js`, `views`, `failure_reason` and `size`. The prompt ID is the
+stem of its published prompt URL.
+
+`witness_storage_prefix` comes from the round's `schedule.json`; its empty default
+preserves official storage paths. An isolated branch can supply a prefix ending
+in `/`. `generation_deadline_block` is required: an integer closes generation at
+that block, while an explicit null keeps `miner_generation` open indefinitely.
+`state.json`'s approximate `next_stage_eta` does not change that deadline.
+
+The collector reads one complete index per miner over HTTP through `CDN_URL`,
+expands the storage keys with that URL, and replaces `generated.json` for each miner
+in Git. It needs no R2 credentials. A missing index (HTTP 404) or prompt entry becomes
+`not_submitted`; an explicit `None` becomes `generation_failed`, and a renderer
+rejection remains `render_rejected`. HTTP status errors, timeouts and connection
+errors use five total attempts, waiting at least three seconds or longer when
+`Retry-After` supplies a numeric delay in seconds. The concurrency slot is released
+between attempts. Exhausted retries leave collection retryable.
 
 ## Algorithm
 
-1. **OPEN stage**: Wait for `latest_reveal_block`, then collect all valid submissions from a chain. For each submission, read `hardware.json` from the root of the miner's repo (at the submitted commit) to record the verification hardware the miner targets, defaulting to `["4xH200"]` when the file is absent. Generate seed and select prompts for the round. Save to git and transition to MINER_GENERATION.
+1. **OPEN stage**: Wait for `latest_reveal_block`, then collect valid submissions within the inclusive reveal window. Keep registered subnet hotkeys whose coldkey covers the conviction lock (default 100 alpha per submitting hotkey, aggregated by coldkey; multiple hotkeys are allowed). Preserve reveal-block ordering, generate the seed and select the configured number of prompts. Publish the admitted list, seed, prompts and MINER_GENERATION state in one Git commit. If none are admitted, transition to FINALIZING.
 
-2. **MINER_GENERATION stage**: Wait for `generation_deadline_block`. Miners use the published seed and prompts to generate 3D files and upload to their CDNs.
+2. **MINER_GENERATION stage**: Wait for `generation_deadline_block`. Miners use the published seed and prompts to generate JavaScript and the runtime saves each final result through the witness Pod.
 
-3. **DOWNLOADING stage**: For each submission, download PLY files from miner CDNs, render PNG previews, upload both to R2. Save progress after each file for crash recovery. Transition to DUELS when complete.
+3. **COLLECTING stage**: Collect generated and submitted results and record their public URLs and status. Save each miner's collected index. Transition to DUELS when complete.
 
 ## State Files
 
@@ -22,10 +52,8 @@ Reads and writes to the competition Git repository:
 | `rounds/{n}/schedule.json` | R | Round timing (reveal blocks, deadline) |
 | `rounds/{n}/seed.json` | W | Random seed for prompt selection       |
 | `rounds/{n}/prompts.txt` | W | Selected prompts for the round         |
-| `rounds/{n}/submissions.json` | W | Miner submissions from chain, plus each miner's target verification hardware |
-| `rounds/{n}/{hotkey}/submitted.json` | W | Downloaded GLB/PNG locations           |
-
-The target hardware is sourced from a `hardware.json` file at the root of each miner's own repository (not the competition repo), read at the submitted commit and defaulting to `["4xH200"]` when absent. See [`miner-reference/api_specification.md`](../miner-reference/api_specification.md#hardware) for the format.
+| `rounds/{n}/submissions.json` | W | Admitted repo, exact commit, reveal block and round |
+| `rounds/{n}/{hotkey}/generated.json` | W | JS URL, preview prefix, size and failure status |
 
 ## Development
 ```bash

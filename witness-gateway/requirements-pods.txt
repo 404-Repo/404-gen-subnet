@@ -1,0 +1,8 @@
+-r requirements-gateway.txt
+
+--extra-index-url https://download.pytorch.org/whl/cpu
+numpy==2.4.4
+tenacity==9.1.2
+torch==2.10.0+cpu
+torchvision==0.25.0+cpu
+transformers==5.6.2

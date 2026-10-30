@@ -5,7 +5,6 @@ from pydantic import SecretStr
 from subnet_common.competition.config import CompetitionConfig
 from subnet_common.competition.schedule import RoundSchedule
 from subnet_common.competition.state import CompetitionState, RoundStage
-from subnet_common.competition.submissions import DEFAULT_HARDWARE
 from subnet_common.git_batcher import GitBatcher
 from subnet_common.testing import MockGitHubClient
 
@@ -17,12 +16,7 @@ def settings() -> Settings:
     return Settings(
         GITHUB_TOKEN=SecretStr("test-token"),
         GITHUB_REPO="test/repo",
-        R2_ACCESS_KEY_ID=SecretStr("test-r2-key"),
-        R2_SECRET_ACCESS_KEY=SecretStr("test-r2-secret"),
-        R2_ENDPOINT=SecretStr("https://test-r2-endpoint"),
         DOWNLOAD_JITTER_SECONDS=0,
-        STORAGE_KEY_TEMPLATE="rounds/{round}/{hotkey}/submitted/{filename}",
-        DINOV3_REVISION="test-revision",
     )
 
 
@@ -43,7 +37,7 @@ def add_schedule(
     round_num: int = 1,
     earliest_reveal_block: int = 100,
     latest_reveal_block: int = 200,
-    generation_deadline_block: int = 500,
+    generation_deadline_block: int | None = 500,
 ) -> RoundSchedule:
     """Create a RoundSchedule and store it in the mock git."""
     schedule = RoundSchedule(
@@ -82,11 +76,10 @@ def add_prompts(git: MockGitHubClient, prompts: list[str], round_num: int | None
 def make_commitment(
     repo: str = "test/model",
     commit: str = "a" * 40,
-    cdn_url: str = "https://cdn.example.com/files",
     block: int = 150,
 ) -> tuple[tuple[int, str], ...]:
     """Create a single commitment tuple as returned by subtensor."""
-    data = json.dumps({"repo": repo, "commit": commit, "cdn_url": cdn_url})
+    data = json.dumps({"repo": repo, "commit": commit})
     return ((block, data),)
 
 
@@ -131,23 +124,8 @@ def make_get_locked_alpha(locked: dict[str, float] | None = None, default: float
     return get_locked_alpha
 
 
-def make_get_hardware(by_repo: dict[str, list[str]] | None = None):
-    """Factory for a controllable get_hardware function (repo -> declared hardware).
-
-    Without an explicit mapping, every repo resolves to the default, matching an absent
-    hardware.json.
-    """
-
-    async def get_hardware(repo: str, commit: str) -> list[str]:
-        if by_repo is None:
-            return [DEFAULT_HARDWARE]
-        return by_repo.get(repo, [DEFAULT_HARDWARE])
-
-    return get_hardware
-
-
-class SpyDownloadFn:
-    """A download_fn that tracks whether it was called."""
+class SpyCollectFn:
+    """A collect_fn that tracks whether it was called."""
 
     def __init__(self) -> None:
         self.called: bool = False

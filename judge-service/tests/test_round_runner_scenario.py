@@ -2,33 +2,36 @@
 faking only GitHub, the judge (run_match), Discord, and the clock.
 
 A scenario supplies a margin table (the judge's verdict per (left, right) duel, consumed
-in call order) and a list of deliveries (external inputs the orchestrator and source
+in call order) and a list of deliveries (external inputs the validator and source
 auditor produce, one batch per idle tick). Everything else runs for real; assertions are
-on the committed artifacts and the published transcript."""
+on committed artifacts, requested work and the timeline announcements."""
 
 import json
 from collections.abc import Callable
 from datetime import date
 from unittest.mock import AsyncMock, patch
 
-from pydantic import TypeAdapter
-from subnet_common.competition.audit_matrix import get_audit_matrix
-from subnet_common.competition.build_info import BuildInfo, BuildsInfoAdapter, BuildStatus
+import pytest
+from pydantic import TypeAdapter, ValidationError
 from subnet_common.competition.config import CompetitionConfig
-from subnet_common.competition.generation_audit import get_generation_audits
-from subnet_common.competition.generation_report import (
-    GenerationReport,
-    GenerationReportOutcome,
-    GenerationReportsAdapter,
-    RepeatStats,
-)
 from subnet_common.competition.generations import GenerationResult, GenerationsAdapter
 from subnet_common.competition.leader import LeaderEntry, LeaderListAdapter
 from subnet_common.competition.match_matrix import get_match_matrix
 from subnet_common.competition.match_report import MatchReport
-from subnet_common.competition.source_audit import AuditListAdapter, AuditResult, AuditVerdict
+from subnet_common.competition.source_audit import (
+    AuditListAdapter,
+    AuditResult,
+    AuditVerdict,
+)
 from subnet_common.competition.state import CompetitionState, RoundStage
 from subnet_common.competition.submissions import MinerSubmission
+from subnet_common.competition.validation import (
+    ValidationResult,
+    ValidationResultsAdapter,
+    ValidationVerdict,
+    get_validation_results,
+)
+from subnet_common.competition.validation_requests import get_validation_requests
 from subnet_common.git_batcher import GitBatcher
 from subnet_common.graceful_shutdown import GracefulShutdown
 from subnet_common.testing import MockGitHubClient
@@ -36,7 +39,6 @@ from subnet_common.testing import MockGitHubClient
 from judge_service.discord import NullDiscordNotifier
 from judge_service.round_runner import RoundRunner
 from judge_service.settings import Settings
-from judge_service.timeline import defender_audit_key, submitted_audit_key
 
 
 LEADER = "leader"
@@ -51,44 +53,41 @@ _SUBMISSIONS_ADAPTER = TypeAdapter(dict[str, MinerSubmission])
 
 # A generations file body with every prompt stem delivered (has a usable js URL).
 _GENERATIONS_JSON = GenerationsAdapter.dump_json(
-    {p.removesuffix(".png"): GenerationResult(js="https://cdn/x.js") for p in PROMPTS}, indent=2
+    {p.removesuffix(".png"): GenerationResult(js="https://cdn/x.js", views="https://cdn/x") for p in PROMPTS},
+    indent=2,
 ).decode()
 
 # A generations file body where no prompt stem has a usable output (a failed delivery).
 _EMPTY_GENERATIONS_JSON = GenerationsAdapter.dump_json(
-    {p.removesuffix(".png"): GenerationResult(failure_reason="js_fetch_failed") for p in PROMPTS}, indent=2
+    {p.removesuffix(".png"): GenerationResult(failure_reason="js_fetch_failed") for p in PROMPTS},
+    indent=2,
 ).decode()
 
 
 class _RecordingDiscord(NullDiscordNotifier):
     def __init__(self) -> None:
         self.timeline_changes: list[dict] = []
-        self.audit_requested: list[dict] = []
-        self.audit_completed: list[dict] = []
+        self.validation_requested: list[dict] = []
         self.round_finalized: list[dict] = []
 
     async def notify_timeline_change(self, *, round_num: int, body: str) -> None:
         self.timeline_changes.append({"round_num": round_num, "body": body})
 
-    async def notify_audit_requested(self, *, round_num: int, hotkey: str, defeated: str, margin: float) -> None:
-        self.audit_requested.append({"round_num": round_num, "hotkey": hotkey, "defeated": defeated, "margin": margin})
-
-    async def notify_audit_completed(
-        self,
-        *,
-        round_num: int,
-        hotkey: str,
-        defender: str,
-        repeats: list[tuple[float, float]],
-        verified: bool,
-    ) -> None:
-        self.audit_completed.append({"hotkey": hotkey, "defender": defender, "verified": verified})
+    async def notify_validation_requested(self, *, round_num: int, hotkey: str, defeated: str, margin: float) -> None:
+        self.validation_requested.append(
+            {
+                "round_num": round_num,
+                "hotkey": hotkey,
+                "defeated": defeated,
+                "margin": margin,
+            }
+        )
 
     async def notify_round_finalized(self, *, round_num: int, winner: str, reason: str) -> None:
         self.round_finalized.append({"round_num": round_num, "winner": winner, "reason": reason})
 
 
-def _config_json(audit_repeats: int = 1) -> str:
+def _config_json() -> str:
     return CompetitionConfig(
         name="test-comp",
         description="scenario",
@@ -98,103 +97,65 @@ def _config_json(audit_repeats: int = 1) -> str:
         win_margin=WIN_MARGIN,
         prompts_per_round=len(PROMPTS),
         carryover_prompts=0,
-        audit_repeats=audit_repeats,
     ).model_dump_json(indent=2)
 
 
-def _world(miners: list[str], audit_repeats: int = 1) -> MockGitHubClient:
-    """Round 1 at the start of judging: config, the leader's reference renders, and each
-    miner's submitted outputs. Regenerations, reports and source audits arrive later via
-    deliveries. Miners are revealed in list order."""
+def _world(miners: list[str]) -> MockGitHubClient:
+    """Canonical result bundles are ready; validation and source verdicts arrive later.
+    Miners are revealed in list order.
+    """
     submissions = {
         hk: MinerSubmission(
             repo=f"org/{hk}",
             commit=f"sha_{hk}",
-            cdn_url=f"https://cdn/{hk}",
             revealed_at_block=100 + i,
+            tie_breaker="0" * 128,
             round="test-comp-1",
         )
         for i, hk in enumerate(miners)
     }
-    builds = {
-        hk: BuildInfo(
-            repo=f"org/{hk}",
-            commit=f"sha_{hk}",
-            revealed_at_block=100 + i,
-            tag=f"tag_{hk}",
-            status=BuildStatus.SUCCESS,
-            docker_image=f"docker.io/{hk}:latest",
-        )
-        for i, hk in enumerate(miners)
-    }
     files = {
-        "config.json": _config_json(audit_repeats),
+        "config.json": _config_json(),
         "rounds/1/seed.json": json.dumps({"seed": SEED}),
         "rounds/1/prompts.txt": "\n".join(PROMPTS),
         "rounds/1/submissions.json": _SUBMISSIONS_ADAPTER.dump_json(submissions, indent=2).decode(),
-        "rounds/1/builds.json": BuildsInfoAdapter.dump_json(builds, indent=2).decode(),
         "leader.json": LeaderListAdapter.dump_json(
             [
                 LeaderEntry(
                     hotkey=LEADER,
                     repo="org/leader",
                     commit="sha_leader",
-                    docker=f"docker.io/{LEADER}:latest",
                     weight=1.0,
                     effective_block=0,
                 )
             ],
             indent=2,
         ).decode(),
-        f"rounds/1/{LEADER}/generated_1.json": _GENERATIONS_JSON,
+        f"rounds/1/{LEADER}/generated.json": _GENERATIONS_JSON,
     }
     for hk in miners:
-        files[f"rounds/1/{hk}/submitted.json"] = _GENERATIONS_JSON
+        files[f"rounds/1/{hk}/generated.json"] = _GENERATIONS_JSON
     return MockGitHubClient(files=files)
 
 
-def _deliver_regeneration(git: MockGitHubClient, *hotkeys: str) -> None:
-    """Audit pod: regenerate each hotkey's outputs and mark its report COMPLETED, keeping
-    any reports already delivered."""
-    content = git.files.get("rounds/1/generation_reports.json")
-    reports = dict(GenerationReportsAdapter.validate_json(content)) if content else {}
-    for hk in hotkeys:
-        git.files[f"rounds/1/{hk}/generated_1.json"] = _GENERATIONS_JSON
-        reports[hk] = GenerationReport(
-            hotkey=hk,
-            outcome=GenerationReportOutcome.COMPLETED,
-            repeats=[RepeatStats(repeat_index=1, generated_prompts=len(PROMPTS))],
+def _deliver_validation(git: MockGitHubClient, verdicts: dict[str, str]) -> None:
+    """Validator: publish one terminal result per hotkey, retaining previous results."""
+    content = git.files.get("rounds/1/validation_results.json")
+    results = ValidationResultsAdapter.validate_json(content) if content is not None else {}
+    for hk, verdict in verdicts.items():
+        results[hk] = ValidationResult(
+            verdict=ValidationVerdict(verdict),
+            reason="recorded output mismatch" if verdict == "failed" else "",
         )
-    git.files["rounds/1/generation_reports.json"] = GenerationReportsAdapter.dump_json(reports, indent=2).decode()
+    git.files["rounds/1/validation_results.json"] = ValidationResultsAdapter.dump_json(results, indent=2).decode()
 
 
-def _deliver_repeats(
-    git: MockGitHubClient,
-    hotkey: str,
-    repeats: list[int],
-    outcome: GenerationReportOutcome = GenerationReportOutcome.COMPLETED,
-) -> None:
-    """Audit pod: deliver `hotkey`'s regenerated outputs for `repeats` and a report listing
-    them. A PENDING outcome with a subset of repeats models a partial report — the judge
-    audits each delivered repeat without waiting for the rest."""
-    content = git.files.get("rounds/1/generation_reports.json")
-    reports = dict(GenerationReportsAdapter.validate_json(content)) if content else {}
-    for repeat in repeats:
-        git.files[f"rounds/1/{hotkey}/generated_{repeat}.json"] = _GENERATIONS_JSON
-    reports[hotkey] = GenerationReport(
-        hotkey=hotkey,
-        outcome=outcome,
-        repeats=[RepeatStats(repeat_index=repeat, generated_prompts=len(PROMPTS)) for repeat in repeats],
-    )
-    git.files["rounds/1/generation_reports.json"] = GenerationReportsAdapter.dump_json(reports, indent=2).decode()
-
-
-def _deliver_source_audits(git: MockGitHubClient, verdicts: dict[str, AuditVerdict]) -> None:
+def _deliver_source_audits(git: MockGitHubClient, verdicts: dict[str, str]) -> None:
     """Source auditor: record each hotkey's source verdict, keeping any already delivered."""
     content = git.files.get("rounds/1/source_audit.json")
     audits = {a.hotkey: a for a in AuditListAdapter.validate_json(content)} if content else {}
     for hk, verdict in verdicts.items():
-        audits[hk] = AuditResult(hotkey=hk, verdict=verdict)
+        audits[hk] = AuditResult(hotkey=hk, verdict=AuditVerdict(verdict))
     git.files["rounds/1/source_audit.json"] = AuditListAdapter.dump_json(list(audits.values()), indent=2).decode()
 
 
@@ -235,7 +196,13 @@ async def _run_round(
         if stop_on == (left, right):
             # A shutdown signal arrives while the judge is scoring this match.
             shutdown.request_shutdown()
-        return MatchReport(left=left, right=right, score=0, margin=margins[(left, right)].pop(0), duels=[])
+        return MatchReport(
+            left=left,
+            right=right,
+            score=0,
+            margin=margins[(left, right)].pop(0),
+            duels=[],
+        )
 
     with (
         patch("judge_service.round_runner.run_match", side_effect=fake_run_match),
@@ -246,358 +213,245 @@ async def _run_round(
     return discord, calls, waits
 
 
-def _verdicts(discord: _RecordingDiscord) -> list[tuple[str, str, bool]]:
-    return [(c["hotkey"], c["defender"], c["verified"]) for c in discord.audit_completed]
-
-
 def _requested(discord: _RecordingDiscord) -> list[tuple[str, str]]:
-    return [(c["hotkey"], c["defeated"]) for c in discord.audit_requested]
+    return [(c["hotkey"], c["defeated"]) for c in discord.validation_requested]
 
 
-async def _assert_leader_defends_without_judging(git: MockGitHubClient, settings: Settings) -> None:
-    """The round finalizes for the leader with no qualifier and no judge call — every match
-    short-circuited (walkover or scoreless draw)."""
-    discord, calls, waits = await _run_round(git, {}, [], settings)
-    assert calls == []
-    assert waits == 0
-    winner = json.loads(git.committed["rounds/1/winner.json"])
-    assert winner["winner_hotkey"] == LEADER
-    assert discord.round_finalized[0]["winner"] == LEADER
-    assert discord.audit_requested == []
+def _winner(git: MockGitHubClient) -> str:
+    return json.loads(git.committed["rounds/1/winner.json"])["winner_hotkey"]
 
 
-async def test_single_challenger_dethrones_leader_and_is_verified(settings: Settings) -> None:
+def _deliver_passes(git: MockGitHubClient, *hotkeys: str) -> None:
+    verdicts = dict.fromkeys(hotkeys, "passed")
+    _deliver_validation(git, verdicts)
+    _deliver_source_audits(git, verdicts)
+
+
+def _assert_verdicts_are_read_only(git: MockGitHubClient) -> None:
+    assert "rounds/1/validation_results.json" not in git.committed
+    assert "rounds/1/source_audit.json" not in git.committed
+
+
+async def test_single_challenger_waits_for_both_verdicts(settings: Settings) -> None:
     git = _world([HK_A])
-    margins = {
-        (LEADER, HK_A): [1.0, 1.0],  # qualification; A's defender audit vs leader
-        ("submitted", HK_A): [0.0],  # A's submission matches its regeneration
+    passes = {HK_A: "passed"}
+    _deliver_validation(git, passes)
+
+    discord, calls, waits = await _run_round(
+        git,
+        {(LEADER, HK_A): [1.0]},
+        [lambda g: _deliver_source_audits(g, passes)],
+        settings,
+    )
+
+    assert waits == 1
+    assert calls == [(LEADER, HK_A)]
+    assert json.loads(git.committed["rounds/1/winner.json"]) == {
+        "winner_hotkey": HK_A,
+        "repo": f"org/{HK_A}",
+        "commit": f"sha_{HK_A}",
     }
-    deliveries = [
-        lambda g: _deliver_regeneration(g, HK_A),
-        lambda g: _deliver_source_audits(g, {HK_A: AuditVerdict.PASSED}),
-    ]
-    discord, _calls, waits = await _run_round(git, margins, deliveries, settings)
-
-    assert waits == 2
-
-    winner = json.loads(git.committed["rounds/1/winner.json"])
-    assert winner["winner_hotkey"] == HK_A
-    assert winner["docker_image"] == f"docker.io/{HK_A}:latest"
-
-    final_state = CompetitionState.model_validate_json(git.committed["state.json"])
-    assert final_state.stage == RoundStage.FINALIZING
-
-    match_matrix = await get_match_matrix(git=git, round_num=1, ref=git.ref_sha)
-    audit_matrix = await get_audit_matrix(git=git, round_num=1, ref=git.ref_sha)
-    assert match_matrix.get(LEADER, HK_A) == 1.0
-    assert audit_matrix.get(submitted_audit_key(1), HK_A) == 0.0
-    assert audit_matrix.get(defender_audit_key(LEADER, 1), HK_A) == 1.0
-
+    assert CompetitionState.model_validate_json(git.committed["state.json"]).stage == RoundStage.FINALIZING
     assert _requested(discord) == [(HK_A, LEADER)]
-    assert _verdicts(discord) == [(HK_A, LEADER, True)]
+    assert len(discord.timeline_changes) == 2
+    assert "[verified]" in discord.timeline_changes[-1]["body"]
     assert discord.round_finalized[0]["winner"] == HK_A
-    assert len(discord.timeline_changes) == 2  # initial publish, then the flip to verified
-
-    audits = await get_generation_audits(git=git, round_num=1, ref=git.ref_sha)
-    assert audits[HK_A].verdict == AuditVerdict.PASSED
+    assert set(await get_validation_results(git, 1, git.ref_sha)) == {HK_A}
+    _assert_verdicts_are_read_only(git)
 
 
-async def test_no_submissions_finalizes_with_leader_defending(settings: Settings) -> None:
+async def test_no_submissions_finalizes_with_leader_defending(
+    settings: Settings,
+) -> None:
     git = _world([])
     discord, calls, waits = await _run_round(git, {}, [], settings)
-
     assert calls == []
     assert waits == 0
-
-    winner = json.loads(git.committed["rounds/1/winner.json"])
-    assert winner["winner_hotkey"] == LEADER
-    assert winner["docker_image"] == f"docker.io/{LEADER}:latest"
-
-    final_state = CompetitionState.model_validate_json(git.committed["state.json"])
-    assert final_state.stage == RoundStage.FINALIZING
-
-    assert len(discord.round_finalized) == 1
-    assert discord.round_finalized[0]["winner"] == LEADER
+    assert _winner(git) == LEADER
     assert discord.round_finalized[0]["reason"] == "No submissions found"
-    assert discord.audit_requested == []
+    assert discord.validation_requested == []
     assert discord.timeline_changes == []
 
 
-async def test_two_qualify_second_loses_to_first_first_wins(settings: Settings) -> None:
-    """A dethrones the leader; B qualifies but loses to defender A. A is the new leader."""
-    git = _world([HK_A, HK_B])
-    margins = {
-        (LEADER, HK_A): [1.0, 1.0],  # qualification; A's defender audit vs leader
-        (LEADER, HK_B): [1.0],  # qualification
-        (HK_A, HK_B): [-1.0],  # timeline: B loses to defender A
-        ("submitted", HK_A): [0.0],
-    }
-    deliveries = [
-        lambda g: _deliver_regeneration(g, HK_A),
-        lambda g: _deliver_source_audits(g, {HK_A: AuditVerdict.PASSED}),
-    ]
-    discord, _calls, waits = await _run_round(git, margins, deliveries, settings)
-
-    assert waits == 2
-    winner = json.loads(git.committed["rounds/1/winner.json"])
-    assert winner["winner_hotkey"] == HK_A
-    assert _requested(discord) == [(HK_A, LEADER)]  # B lost, never audited
-    assert _verdicts(discord) == [(HK_A, LEADER, True)]
-    assert discord.round_finalized[0]["winner"] == HK_A
-
-
 async def test_two_qualify_second_beats_first_second_wins(settings: Settings) -> None:
-    """A dethrones the leader, B dethrones A; both pass audit. B is the new leader."""
     git = _world([HK_A, HK_B])
-    margins = {
-        (LEADER, HK_A): [1.0, 1.0],  # qualification; A's defender audit vs leader
-        (LEADER, HK_B): [1.0],  # qualification
-        (HK_A, HK_B): [1.0, 1.0],  # timeline: B beats A; B's defender audit vs A
-        ("submitted", HK_A): [0.0],
-        ("submitted", HK_B): [0.0],
-    }
-    deliveries = [
-        lambda g: _deliver_regeneration(g, HK_A, HK_B),
-        lambda g: _deliver_source_audits(g, {HK_A: AuditVerdict.PASSED, HK_B: AuditVerdict.PASSED}),
-    ]
-    discord, _calls, waits = await _run_round(git, margins, deliveries, settings)
-
-    assert waits == 2
-    winner = json.loads(git.committed["rounds/1/winner.json"])
-    assert winner["winner_hotkey"] == HK_B
+    discord, calls, waits = await _run_round(
+        git,
+        {(LEADER, HK_A): [1.0], (LEADER, HK_B): [1.0], (HK_A, HK_B): [1.0]},
+        [lambda g: _deliver_passes(g, HK_A, HK_B)],
+        settings,
+    )
+    assert _winner(git) == HK_B
+    assert calls == [(LEADER, HK_A), (LEADER, HK_B), (HK_A, HK_B)]
+    assert waits == 1
     assert _requested(discord) == [(HK_A, LEADER), (HK_B, HK_A)]
-    assert _verdicts(discord) == [(HK_A, LEADER, True), (HK_B, HK_A, True)]
-    assert discord.round_finalized[0]["winner"] == HK_B
 
 
-async def test_two_qualify_second_loses_but_first_rejected_second_wins(settings: Settings) -> None:
-    """A dethrones the leader and B loses to A, but A's source audit fails; A is rejected,
-    so B is re-evaluated against the leader, beats it, and is the new leader."""
+async def test_collector_submission_order_determines_winner(settings: Settings) -> None:
     git = _world([HK_A, HK_B])
-    margins = {
-        (LEADER, HK_A): [1.0],  # qualification (A rejected via source audit, never audited)
-        (LEADER, HK_B): [1.0, 1.0],  # qualification; B's defender audit vs the restored leader
-        (HK_A, HK_B): [-1.0],  # timeline: B loses to defender A
-        ("submitted", HK_B): [0.0],
-    }
-    deliveries = [
-        lambda g: _deliver_source_audits(g, {HK_A: AuditVerdict.FAILED, HK_B: AuditVerdict.PASSED}),
-        lambda g: _deliver_regeneration(g, HK_B),
-    ]
-    discord, _calls, waits = await _run_round(git, margins, deliveries, settings)
+    submissions = json.loads(git.files["rounds/1/submissions.json"])
+    git.files["rounds/1/submissions.json"] = json.dumps({HK_B: submissions[HK_B], HK_A: submissions[HK_A]})
 
+    await _run_round(
+        git,
+        {(LEADER, HK_A): [1.0], (LEADER, HK_B): [1.0], (HK_A, HK_B): [0.0], (HK_B, HK_A): [0.0]},
+        [lambda g: _deliver_passes(g, HK_A, HK_B)],
+        settings,
+    )
+
+    assert _winner(git) == HK_B
+
+
+async def test_loser_becomes_candidate_when_defender_fails(settings: Settings) -> None:
+    git = _world([HK_A, HK_B])
+    discord, calls, waits = await _run_round(
+        git,
+        {(LEADER, HK_A): [1.0], (LEADER, HK_B): [1.0], (HK_A, HK_B): [-1.0]},
+        [
+            lambda g: _deliver_source_audits(g, {HK_A: "failed", HK_B: "passed"}),
+            lambda g: _deliver_validation(g, {HK_B: "passed"}),
+        ],
+        settings,
+    )
+    assert _winner(git) == HK_B
+    assert calls == [(LEADER, HK_A), (LEADER, HK_B), (HK_A, HK_B)]
     assert waits == 2
-    winner = json.loads(git.committed["rounds/1/winner.json"])
-    assert winner["winner_hotkey"] == HK_B
     assert _requested(discord) == [(HK_A, LEADER), (HK_B, LEADER)]
-    assert _verdicts(discord) == [(HK_B, LEADER, True)]  # A rejected before its audit ran
-    assert discord.round_finalized[0]["winner"] == HK_B
+    assert "rejected: source audit" in discord.timeline_changes[-1]["body"]
+    _assert_verdicts_are_read_only(git)
 
 
-async def test_second_beats_first_then_first_rejected_second_reaudited_against_leader(settings: Settings) -> None:
-    """A challenger's audit against a defender that is later rejected must not disqualify it.
-    A dethrones the leader, B dethrones A; B is audited against A first and its defender duel
-    lands below win_margin, but the rejection is deferred while A is unverified. A then fails
-    its own audit — its submission beats what it reproduces — and is rejected; B's defender
-    reverts to the leader, B is re-audited against it and passes. B is the new leader; the
-    stale vs-A margin stays in the matrix as forensic data."""
+async def test_defender_change_reuses_candidate_validation(settings: Settings) -> None:
     git = _world([HK_A, HK_B])
-    margins = {
-        (LEADER, HK_A): [1.0, 1.0],  # qualification; A's defender audit vs leader
-        (LEADER, HK_B): [1.0, 1.0],  # qualification; B re-audited vs the restored leader
-        (HK_A, HK_B): [1.0, 0.01],  # timeline: B beats A; B's forensic audit vs A (below win_margin)
-        ("submitted", HK_A): [-1.0],  # A's submission beats its regeneration -> A rejected
-        ("submitted", HK_B): [0.0],  # B's submission matches its regeneration
-    }
 
-    def deliver_b_audit_inputs(g: MockGitHubClient) -> None:
-        _deliver_regeneration(g, HK_B)
-        _deliver_source_audits(g, {HK_B: AuditVerdict.PASSED})
+    def reject_a(g: MockGitHubClient) -> None:
+        # B's own checks passed, but A is unverified: the chain cannot finalize.
+        assert "rounds/1/winner.json" not in g.committed
+        _deliver_validation(g, {HK_A: "failed"})
 
-    deliveries = [deliver_b_audit_inputs, lambda g: _deliver_regeneration(g, HK_A)]
-    discord, calls, waits = await _run_round(git, margins, deliveries, settings)
-
+    discord, calls, waits = await _run_round(
+        git,
+        {(LEADER, HK_A): [1.0], (LEADER, HK_B): [1.0], (HK_A, HK_B): [1.0]},
+        [lambda g: _deliver_passes(g, HK_B), reject_a],
+        settings,
+    )
+    assert _winner(git) == HK_B
+    assert calls == [(LEADER, HK_A), (LEADER, HK_B), (HK_A, HK_B)]
     assert waits == 2
-    assert calls == [
-        (LEADER, HK_A),  # qualification
-        (LEADER, HK_B),
-        (HK_A, HK_B),  # timeline: B dethrones A
-        ("submitted", HK_B),  # B audited against A
-        (HK_A, HK_B),
-        ("submitted", HK_A),  # A audited, submission beats its regeneration
-        (LEADER, HK_A),
-        (LEADER, HK_B),  # B re-audited against the restored leader
-    ]
-    assert _requested(discord) == [(HK_A, LEADER), (HK_B, HK_A), (HK_B, LEADER)]
-    assert _verdicts(discord) == [(HK_B, HK_A, False), (HK_A, LEADER, False), (HK_B, LEADER, True)]
-
-    audit_matrix = await get_audit_matrix(git=git, round_num=1, ref=git.ref_sha)
-    assert audit_matrix.get(defender_audit_key(HK_A, 1), HK_B) == 0.01  # stale, forensic only
-    assert audit_matrix.get(defender_audit_key(LEADER, 1), HK_B) == 1.0
-
-    audits = await get_generation_audits(git=git, round_num=1, ref=git.ref_sha)
-    assert audits[HK_A].verdict == AuditVerdict.FAILED  # A's submission beat its regeneration
-    assert audits[HK_B].verdict == AuditVerdict.PASSED
-
-    winner = json.loads(git.committed["rounds/1/winner.json"])
-    assert winner["winner_hotkey"] == HK_B
+    # The defender changes from A to leader. B is neither re-requested nor re-judged.
+    assert _requested(discord) == [(HK_A, LEADER), (HK_B, HK_A)]
+    requests = await get_validation_requests(git, 1, git.ref_sha)
+    assert len(requests) == 2
+    assert f"vs {LEADER}  [verified]" in discord.timeline_changes[-1]["body"]
+    _assert_verdicts_are_read_only(git)
 
 
-async def test_verification_verdict_defers_against_unverified_defender_then_resolves(settings: Settings) -> None:
-    """A dethrones the leader, B dethrones both. With audit_repeats=3:
-
-    1. B is audited first (all repeats). Its submitted-vs-generated duels pass, but its
-       defender duels against A all fall below win_margin. Because A is still unverified,
-       that failure is deferred — B is neither rejected nor verified, so NO verification
-       verdict is published for B.
-    2. A then delivers a partial (1-repeat, PENDING) report and its submitted-vs-generated
-       duel busts below -win_margin. A is rejected on that single repeat, and its FAILED
-       verdict is published immediately — without A's other repeats existing.
-    3. With A gone, B's defender reverts to the verified leader; B's three defender-vs-leader
-       duels pass, B verifies, and its PASSED verdict is published.
-    """
-    git = _world([HK_A, HK_B], audit_repeats=3)
-    margins = {
-        (LEADER, HK_A): [1.0, 0.0],  # A beats leader; A's wasted defender duel after it is rejected
-        (LEADER, HK_B): [1.0, 1.0, 1.0, 1.0],  # B beats leader; B's 3 defender-vs-leader audits pass
-        (HK_A, HK_B): [1.0, 0.0, 0.0, 0.0],  # B beats A (timeline); B's 3 defender-vs-A audits all fail
-        ("submitted", HK_B): [-0.4, -0.4, -0.4],  # B's submission ~matches regeneration, all pass (> -win_margin)
-        ("submitted", HK_A): [-1.0],  # A's submission beats its regeneration -> A rejected on repeat 1
-    }
-
-    captured: dict[str, str | None] = {}
-
-    def deliver_b_full(g: MockGitHubClient) -> None:
-        _deliver_repeats(g, HK_B, [1, 2, 3])
-        _deliver_source_audits(g, {HK_B: AuditVerdict.PASSED})
-
-    def capture_mid_round(g: MockGitHubClient) -> None:
-        captured["audits"] = g.committed.get("rounds/1/generation_audits.json")
-
-    def deliver_a_partial(g: MockGitHubClient) -> None:
-        _deliver_repeats(g, HK_A, [1], outcome=GenerationReportOutcome.PENDING)
-
-    deliveries = [deliver_b_full, capture_mid_round, deliver_a_partial]
-    await _run_round(git, margins, deliveries, settings)
-
-    # B's defender-audit failure against the unverified A published no verdict.
-    assert captured["audits"] is None
-
-    audits = await get_generation_audits(git=git, round_num=1, ref=git.ref_sha)
-    assert audits[HK_A].verdict == AuditVerdict.FAILED
-    assert audits[HK_B].verdict == AuditVerdict.PASSED
-
-    winner = json.loads(git.committed["rounds/1/winner.json"])
-    assert winner["winner_hotkey"] == HK_B
-
-
-async def test_two_losers_are_matched_by_an_exploratory_duel(settings: Settings) -> None:
-    """A dethrones the leader; B and C both qualify but lose to defender A. With no chain
-    work left and A's audit not yet startable, the unmatched loser pair B-C is filled by an
-    exploratory duel. A is the new leader."""
+async def test_exploratory_duels_fill_cache_while_validation_is_pending(
+    settings: Settings,
+) -> None:
     git = _world([HK_A, HK_B, HK_C])
-    margins = {
-        (LEADER, HK_A): [1.0, 1.0],  # qualification; A's defender audit vs leader
-        (LEADER, HK_B): [1.0],  # qualification
-        (LEADER, HK_C): [1.0],  # qualification
-        (HK_A, HK_B): [-1.0],  # timeline: B loses to defender A
-        (HK_A, HK_C): [-1.0],  # timeline: C loses to defender A
-        (HK_B, HK_C): [0.0],  # exploratory duel between the two losers (no effect on the chain)
-        ("submitted", HK_A): [0.0],  # A's submission matches its regeneration
-    }
-    deliveries = [
-        lambda g: _deliver_regeneration(g, HK_A),
-        lambda g: _deliver_source_audits(g, {HK_A: AuditVerdict.PASSED}),
-    ]
-    discord, calls, waits = await _run_round(git, margins, deliveries, settings)
-
-    assert waits == 2
+    discord, calls, waits = await _run_round(
+        git,
+        {
+            (LEADER, HK_A): [1.0],
+            (LEADER, HK_B): [1.0],
+            (LEADER, HK_C): [1.0],
+            (HK_A, HK_B): [-1.0],
+            (HK_A, HK_C): [-1.0],
+            (HK_B, HK_C): [0.0],
+        },
+        [lambda g: _deliver_passes(g, HK_A)],
+        settings,
+    )
+    assert _winner(git) == HK_A
+    assert waits == 1
     assert calls == [
-        (LEADER, HK_A),  # qualification
+        (LEADER, HK_A),
         (LEADER, HK_B),
         (LEADER, HK_C),
-        (HK_A, HK_B),  # timeline: B loses to A
-        (HK_A, HK_C),  # timeline: C loses to A
-        (HK_B, HK_C),  # exploratory: the two losers, previously unmatched
-        ("submitted", HK_A),  # A's audit
-        (LEADER, HK_A),
+        (HK_A, HK_B),
+        (HK_A, HK_C),
+        (HK_B, HK_C),
     ]
-
-    match_matrix = await get_match_matrix(git=git, round_num=1, ref=git.ref_sha)
-    assert match_matrix.has(HK_B, HK_C)  # the exploratory result was persisted
-
-    assert _requested(discord) == [(HK_A, LEADER)]  # B and C lost, never audited
-    assert _verdicts(discord) == [(HK_A, LEADER, True)]
-    winner = json.loads(git.committed["rounds/1/winner.json"])
-    assert winner["winner_hotkey"] == HK_A
+    matrix = await get_match_matrix(git, 1, git.ref_sha)
+    assert matrix.get(HK_B, HK_C) == 0.0
+    assert _requested(discord) == [(HK_A, LEADER)]
 
 
-async def test_challenger_with_no_usable_output_loses_by_walkover(settings: Settings) -> None:
-    """A challenger whose submission has no usable output is beaten without a judge call:
-    the qualification match is a walkover for the leader, the challenger fails to qualify,
-    and the leader defends the round."""
+@pytest.mark.parametrize("leader_empty", [False, True])
+async def test_unusable_challenger_never_beats_leader(settings: Settings, leader_empty: bool) -> None:
     git = _world([HK_A])
-    git.files[f"rounds/1/{HK_A}/submitted.json"] = _EMPTY_GENERATIONS_JSON
-    await _assert_leader_defends_without_judging(git, settings)
-
-
-async def test_qualification_with_both_sides_empty_is_a_draw_leader_defends(settings: Settings) -> None:
-    """When neither the leader's renders nor the challenger's submission have usable output,
-    the qualification match is a scoreless draw with no judge call, so the challenger fails
-    to qualify and the leader defends."""
-    git = _world([HK_A])
-    git.files[f"rounds/1/{LEADER}/generated_1.json"] = _EMPTY_GENERATIONS_JSON
-    git.files[f"rounds/1/{HK_A}/submitted.json"] = _EMPTY_GENERATIONS_JSON
-    await _assert_leader_defends_without_judging(git, settings)
-
-
-async def test_restart_reuses_cached_matches_and_audits(settings: Settings) -> None:
-    """A restarted judge rebuilds the round from persisted git state alone. After a full run
-    has populated the match matrix, audit matrix, audit requests, report and source audit, a
-    fresh runner over the same git re-derives the verified winner without calling the judge
-    again or re-publishing audit notifications."""
-    git = _world([HK_A])
-    margins = {
-        (LEADER, HK_A): [1.0, 1.0],  # qualification; A's defender audit vs leader
-        ("submitted", HK_A): [0.0],  # A's submission matches its regeneration
-    }
-    deliveries = [
-        lambda g: _deliver_regeneration(g, HK_A),
-        lambda g: _deliver_source_audits(g, {HK_A: AuditVerdict.PASSED}),
-    ]
-    await _run_round(git, margins, deliveries, settings)  # first boot, persists everything
-
-    # Restart: a fresh runner over the same git, with no judge verdicts and no deliveries.
+    git.files[f"rounds/1/{HK_A}/generated.json"] = _EMPTY_GENERATIONS_JSON
+    if leader_empty:
+        git.files[f"rounds/1/{LEADER}/generated.json"] = _EMPTY_GENERATIONS_JSON
     discord, calls, waits = await _run_round(git, {}, [], settings)
-
-    assert calls == []  # every match and audit margin was reused from cache
+    assert _winner(git) == LEADER
+    assert calls == []
     assert waits == 0
-
-    match_matrix = await get_match_matrix(git=git, round_num=1, ref=git.ref_sha)
-    audit_matrix = await get_audit_matrix(git=git, round_num=1, ref=git.ref_sha)
-    assert match_matrix.get(LEADER, HK_A) == 1.0
-    assert audit_matrix.get(defender_audit_key(LEADER, 1), HK_A) == 1.0
-
-    winner = json.loads(git.committed["rounds/1/winner.json"])
-    assert winner["winner_hotkey"] == HK_A
-    assert discord.audit_requested == []  # request already persisted before the restart
-    assert discord.audit_completed == []  # no new margins, so no re-published verdict
-    assert discord.round_finalized[0]["winner"] == HK_A
+    assert discord.validation_requested == []
 
 
-async def test_shutdown_while_scoring_a_match_discards_partial_and_does_not_finalize(settings: Settings) -> None:
-    """A shutdown signal arriving while the judge is scoring a match stops the round cleanly:
-    the in-flight result is discarded (never persisted), the remaining work is skipped, and
-    the round does not finalize."""
+async def test_restart_reuses_cached_matches_requests_and_terminal_results(
+    settings: Settings,
+) -> None:
+    git = _world([HK_A])
+    await _run_round(git, {(LEADER, HK_A): [1.0]}, [lambda g: _deliver_passes(g, HK_A)], settings)
+    discord, calls, waits = await _run_round(git, {}, [], settings)
+    assert calls == []
+    assert waits == 0
+    assert _winner(git) == HK_A
+    assert discord.validation_requested == []
+    _assert_verdicts_are_read_only(git)
+
+
+async def test_invalid_validation_result_is_a_service_error(settings: Settings) -> None:
+    git = _world([HK_A])
+    git.files["rounds/1/validation_results.json"] = '{"miner": {"verdict": "failed", "reason": ""}}'
+    with pytest.raises(ValidationError):
+        await _run_round(git, {}, [], settings)
+    assert "rounds/1/winner.json" not in git.committed
+    _assert_verdicts_are_read_only(git)
+
+
+async def test_shutdown_while_scoring_discards_partial_result(
+    settings: Settings,
+) -> None:
     git = _world([HK_A, HK_B])
-    margins = {(LEADER, HK_A): [1.0]}  # interrupted mid-score; B's qualification never starts
-    discord, calls, waits = await _run_round(git, margins, [], settings, stop_on=(LEADER, HK_A))
-
-    assert calls == [(LEADER, HK_A)]  # shutdown hit during A; B was never scored
+    discord, calls, waits = await _run_round(git, {(LEADER, HK_A): [1.0]}, [], settings, stop_on=(LEADER, HK_A))
+    assert calls == [(LEADER, HK_A)]
     assert waits == 0
-
-    assert "rounds/1/winner.json" not in git.committed  # the round did not finalize
+    assert "rounds/1/winner.json" not in git.committed
     assert discord.round_finalized == []
+    matrix = await get_match_matrix(git, 1, git.ref_sha)
+    assert matrix.get(LEADER, HK_A) is None
 
-    match_matrix = await get_match_matrix(git=git, round_num=1, ref=git.ref_sha)
-    assert match_matrix.get(LEADER, HK_A) is None  # the interrupted result was discarded
+
+@pytest.mark.parametrize(
+    "baseline", [None, "{}", '{"p0": {"js": "https://cdn/x.js", "views": "https://cdn/x"}}', '{"p0": {}, "p1": {}}']
+)
+async def test_missing_or_incomplete_baseline_waits_without_judging(settings: Settings, baseline: str | None) -> None:
+    git = _world([HK_A])
+    path = f"rounds/1/{LEADER}/generated.json"
+    if baseline is None:
+        del git.files[path]
+    else:
+        git.files[path] = baseline
+    discord, calls, waits = await _run_round(git, {}, [], settings)
+    assert calls == []
+    assert waits == 0
+    assert "rounds/1/winner.json" not in git.committed
+    assert "state.json" not in git.committed
+    assert discord.round_finalized == []
+    git.files[path] = _GENERATIONS_JSON
+    await _run_round(git, {(LEADER, HK_A): [-1.0]}, [], settings)
+    assert _winner(git) == LEADER
+
+
+async def test_empty_official_prompt_set_does_not_complete_a_baseline(settings: Settings) -> None:
+    git = _world([HK_A])
+    git.files["rounds/1/prompts.txt"] = ""
+    git.files[f"rounds/1/{LEADER}/generated.json"] = "{}"
+    discord, calls, _ = await _run_round(git, {}, [], settings)
+    assert calls == []
+    assert "rounds/1/winner.json" not in git.committed
+    assert discord.round_finalized == []

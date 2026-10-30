@@ -58,49 +58,11 @@ class Settings(BaseSettings):
     download_jitter_seconds: int = Field(
         default=300,
         alias="DOWNLOAD_JITTER_SECONDS",
-        description="Max random delay before each download to spread load across CDNs",
-    )
-    max_js_size_bytes: int = Field(
-        default=1 * 1024 * 1024,
-        alias="MAX_JS_SIZE_BYTES",
-        description=(
-            "Maximum .js module size in bytes (default 1 MB; matches orchestrator "
-            "MAX_JS_BYTES and the miner output spec)"
-        ),
+        description="Max random delay before collecting each output",
     )
 
-    r2_access_key_id: SecretStr = Field(..., alias="R2_ACCESS_KEY_ID", description="R2 access key ID")
-    r2_secret_access_key: SecretStr = Field(..., alias="R2_SECRET_ACCESS_KEY", description="R2 secret access key")
-    r2_endpoint: SecretStr = Field(..., alias="R2_ENDPOINT", description="R2 endpoint")
-
-    render_service_url: str = Field(
-        default="http://localhost:8000", alias="RENDER_URL", description="Render service base URL"
-    )
-    render_api_key: SecretStr | None = Field(
-        default=None,
-        alias="RENDER_API_KEY",
-        description="Bearer token sent to the render service (e.g. Runpod serverless key). None = no auth.",
-    )
-    hf_token: SecretStr | None = Field(
-        default=None,
-        alias="HF_TOKEN",
-        description="Hugging Face token for gated models (DINOv3 embeddings).",
-    )
-    dinov3_revision: str = Field(
-        ...,
-        alias="DINOV3_REVISION",
-        description="Hugging Face revision (branch/tag/commit) for the DINOv3 embedding model. "
-        "Pin to a commit hash in production — drift across revisions changes embedding "
-        "outputs and corrupts judge comparisons.",
-    )
-
-    storage_key_template: str = Field(
-        default="rounds/{round}/{hotkey}/submitted/{filename}",
-        alias="STORAGE_KEY_TEMPLATE",
-        description="Storage key template for uploaded files",
-    )
     cdn_url: str = Field(
-        default="https://subnet404.xyz", alias="CDN_URL", description="CDN base URL for uploaded files"
+        default="https://subnet404.xyz", alias="CDN_URL", description="CDN base URL for saved Pod artifacts"
     )
 
     pause_on_stage_end: bool = Field(
@@ -129,7 +91,7 @@ class Settings(BaseSettings):
 
     log_level: str = Field(default="DEBUG", alias="LOG_LEVEL", description="Logging level")
 
-    @field_validator("render_service_url", "cdn_url")
+    @field_validator("cdn_url")
     @classmethod
     def normalize_url(cls, v: str) -> str:
         return v.rstrip("/")

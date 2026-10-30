@@ -10,7 +10,7 @@ from subnet_common.github import GitHubClient
 class RoundStage(str, Enum):
     OPEN = "open"  # Submission window opens, miners register their submissions
     MINER_GENERATION = "miner_generation"  # Seed published, miners have 3h to generate and upload
-    DOWNLOADING = "downloading"  # Fetching 3D from miner CDNs
+    COLLECTING = "collecting"  # Collecting generated and submitted results
     DUELS = "duels"  # Duels, verification, and approval
     FINALIZING = "finalizing"  # Updating the leader and creating the next round schedule
     FINISHED = "finished"  # Competition completes, no further rounds

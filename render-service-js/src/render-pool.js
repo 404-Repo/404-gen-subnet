@@ -2,14 +2,15 @@
  * Render slot pool.
  *
  * Manages bounded concurrency for browser-based rendering. Each render
- * gets a fresh BrowserContext. On failure only that context is closed;
- * the browser is restarted only if the process itself died.
+ * gets a fresh BrowserContext. The browser is replaced if it dies or
+ * context cleanup cannot finish within the rendering deadline.
  *
- * Pool size: RENDER_POOL_SIZE env var (default 2).
+ * Pool size: RENDER_POOL_SIZE env var (default 1).
  */
 
-import { ensureBrowser, isBrowserHealthy, restartBrowser } from './browser.js';
+import { ensureBrowser, isBrowserHealthy, terminateBrowser } from './browser.js';
 import { STATIC_PORT } from './static-server.js';
+import { getCachedPmrem } from './pmrem-cache.js';
 import { SAFE_THREE_BROWSER_BUNDLE } from './safeThree.js';
 import {
   THREE_ALLOWED,
@@ -78,43 +79,49 @@ class RenderPool {
   }
 
   async _executeInContext(source, params, mode) {
-    if (!isBrowserHealthy()) {
-      console.log('[render-pool] browser not healthy, restarting...');
-      await restartBrowser();
-    }
+    const deadline = performance.now() + RENDER_TIMEOUT_MS;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      let browser;
+      let context;
+      let contextClosed = false;
+      let finished = false;
+      try {
+        const result = await withTimeout((async () => {
+          browser = await ensureBrowser();
+          if (finished) return;
+          try {
+            context = await browser.createBrowserContext();
+            if (finished) return;
+            const page = await context.newPage();
+            page.on('pageerror', (err) => console.error(`[browser error] ${err.message}`));
+            await page.goto(PAGE_URL, { waitUntil: 'domcontentloaded' });
+            await page.waitForFunction('window.__ready === true', { timeout: 10_000 });
+            await page.setOfflineMode(true);
 
-    const browser = await ensureBrowser();
-    const context = await browser.createBrowserContext();
-    let page;
-    try {
-      page = await context.newPage();
-      page.on('pageerror', (err) => console.error(`[browser error] ${err.message}`));
-      await page.goto(PAGE_URL, { waitUntil: 'domcontentloaded' });
-      await page.waitForFunction('window.__ready === true', { timeout: 10_000 });
-      await page.setOfflineMode(true);
+            const environment = await getCachedPmrem(browser, params.lighting);
+            return await page.evaluate(
+              renderInPage,
+              source,
+              params,
+              mode,
+              SAFE_THREE_CONFIG,
+              SAFE_THREE_BROWSER_BUNDLE,
+              environment,
+            );
+          } finally {
+            try { await context?.close(); contextClosed = true; } catch {}
+          }
+        })(), Math.max(0, deadline - performance.now()));
 
-      const result = await withTimeout(
-        page.evaluate(
-          renderInPage,
-          source,
-          params,
-          mode,
-          SAFE_THREE_CONFIG,
-          SAFE_THREE_BROWSER_BUNDLE,
-        ),
-        RENDER_TIMEOUT_MS,
-      );
-
-      if (result.error) throw new Error(result.error);
-      return result.data;
-    } catch (err) {
-      try { await context.close(); } catch {}
-      if (!isBrowserHealthy()) {
-        console.log('[render-pool] browser died during render, will restart on next request');
+        if (result.error) throw new Error(result.error);
+        return result.data;
+      } catch (err) {
+        if (attempt > 0 || isBrowserHealthy() || performance.now() >= deadline) throw err;
+        console.log('[render-pool] browser died, retrying within the rendering deadline');
+      } finally {
+        finished = true;
+        if (browser && !contextClosed) terminateBrowser(browser);
       }
-      throw err;
-    } finally {
-      try { await context.close(); } catch {}
     }
   }
 }
@@ -136,7 +143,7 @@ class RenderPool {
  * are trapped below — once those are trapped, `new Proxy(...)` itself
  * would throw.
  */
-async function renderInPage(source, params, mode, safeThreeConfig, safeThreeBundle) {
+async function renderInPage(source, params, mode, safeThreeConfig, safeThreeBundle, cachedEnvironment) {
   try {
     const THREE = window.THREE;
 
@@ -170,6 +177,21 @@ async function renderInPage(source, params, mode, safeThreeConfig, safeThreeBund
     scene.background = new THREE.Color(params.bgColor ? `#${params.bgColor}` : 0x808080);
 
     let followLight = null;
+    let environment = null;
+    if (cachedEnvironment) {
+      const binary = atob(cachedEnvironment.data);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+      environment = new THREE.DataTexture(
+        new Uint16Array(bytes.buffer), cachedEnvironment.width, cachedEnvironment.height,
+        THREE.RGBAFormat, THREE.HalfFloatType,
+      );
+      environment.mapping = THREE.CubeUVReflectionMapping;
+      environment.minFilter = THREE.LinearFilter;
+      environment.magFilter = THREE.LinearFilter;
+      environment.colorSpace = THREE.LinearSRGBColorSpace;
+      environment.needsUpdate = true;
+    }
 
     if (params.lighting === 'follow') {
       scene.add(new THREE.AmbientLight(0xffffff, 0.4));
@@ -194,29 +216,8 @@ async function renderInPage(source, params, mode, safeThreeConfig, safeThreeBund
       followLight = new THREE.DirectionalLight(0xffffff, 1.1);
       scene.add(followLight);
 
-      const pmrem = new THREE.PMREMGenerator(renderer);
-      const envScene = new THREE.Scene();
-
-      const shellMat = new THREE.MeshBasicMaterial({ side: THREE.BackSide });
-      shellMat.color.setRGB(0.32, 0.32, 0.32);
-      envScene.add(new THREE.Mesh(new THREE.BoxGeometry(10, 10, 10), shellMat));
-
-      const addPanel = (w, h, intensity, x, y, z, rx, ry) => {
-        const mat = new THREE.MeshBasicMaterial();
-        mat.color.setRGB(intensity, intensity, intensity);
-        const panel = new THREE.Mesh(new THREE.PlaneGeometry(w, h), mat);
-        panel.position.set(x, y, z);
-        panel.rotation.set(rx, ry, 0);
-        envScene.add(panel);
-      };
-      addPanel(4, 4, 2.6, 0, 4.9, 0, Math.PI / 2, 0);     // ceiling key panel
-      addPanel(3, 2, 1.4, -4.9, 1.5, 0, 0, Math.PI / 2);  // left fill panel
-      addPanel(3, 2, 1.1, 4.9, 1.0, -1, 0, -Math.PI / 2); // right fill panel
-      addPanel(4, 1.5, 0.9, 0, 1.0, -4.9, 0, 0);          // back rim panel
-
-      scene.environment = pmrem.fromScene(envScene, 0.04).texture;
+      scene.environment = environment;
       scene.environmentIntensity = 0.9;
-      pmrem.dispose();
     } else {
       scene.add(new THREE.AmbientLight(0xffffff, 0.12));
 
@@ -232,12 +233,8 @@ async function renderInPage(source, params, mode, safeThreeConfig, safeThreeBund
       rimLight.position.set(0, 2, -3);
       scene.add(rimLight);
 
-      const pmrem = new THREE.PMREMGenerator(renderer);
-      const envScene = new THREE.Scene();
-      envScene.add(new THREE.HemisphereLight(0xffffff, 0x444444, 1.0));
-      scene.environment = pmrem.fromScene(envScene, 0.04).texture;
+      scene.environment = environment;
       scene.environmentIntensity = 0.8;
-      pmrem.dispose();
     }
 
     const camera = new THREE.PerspectiveCamera(params.camFovDeg, 1.0, 0.01, 100);
@@ -418,6 +415,7 @@ async function renderInPage(source, params, mode, safeThreeConfig, safeThreeBund
         ctx.drawImage(renderer.domElement, col * (params.imgSize + gap), row * (params.imgSize + gap));
       }
 
+      environment?.dispose();
       renderer.dispose();
       return { data: gridCanvas.toDataURL('image/png') };
     }
@@ -436,6 +434,7 @@ async function renderInPage(source, params, mode, safeThreeConfig, safeThreeBund
       images.push(renderer.domElement.toDataURL('image/png'));
     }
 
+    environment?.dispose();
     renderer.dispose();
     return { data: images };
   } catch (err) {
@@ -446,7 +445,7 @@ async function renderInPage(source, params, mode, safeThreeConfig, safeThreeBund
 function withTimeout(promise, ms) {
   let timer;
   const timeout = new Promise((_, reject) => {
-    timer = setTimeout(() => reject(new Error(`render timed out after ${ms}ms`)), ms);
+    timer = setTimeout(() => reject(new Error(`render timed out after ${RENDER_TIMEOUT_MS}ms`)), ms);
   });
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }

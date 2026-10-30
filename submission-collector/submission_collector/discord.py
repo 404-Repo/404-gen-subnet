@@ -29,11 +29,11 @@ class DiscordNotifier:
         round_num: int,
         committed_count: int,
         accepted_count: int,
-        generation_deadline: datetime,
+        generation_deadline: datetime | None,
         prompts_url: str,
         seed_url: str,
     ) -> None:
-        unix_ts = int(generation_deadline.timestamp())
+        deadline = "No deadline" if generation_deadline is None else f"<t:{int(generation_deadline.timestamp())}:f>"
         await self._webhook.send_embed(
             title=f"Round {round_num} Submissions Collected",
             color=COLOR_GREEN,
@@ -41,7 +41,7 @@ class DiscordNotifier:
                 {"name": "Committed", "value": str(committed_count), "inline": True},
                 {"name": "No lock", "value": str(committed_count - accepted_count), "inline": True},
                 {"name": "Accepted", "value": str(accepted_count), "inline": True},
-                {"name": "Generation Deadline", "value": f"<t:{unix_ts}:f>", "inline": True},
+                {"name": "Generation Deadline", "value": deadline, "inline": True},
                 {"name": "Prompts", "value": f"[prompts.txt]({prompts_url})", "inline": True},
                 {"name": "Seed", "value": f"[seed.json]({seed_url})", "inline": True},
             ],
@@ -75,11 +75,11 @@ class DiscordNotifier:
             f"Render service may be down.",
         )
 
-    async def notify_downloads_complete(self, round_num: int, results: dict[str, GenerationsMap]) -> None:
+    async def notify_collection_complete(self, round_num: int, results: dict[str, GenerationsMap]) -> None:
         total_miners = len(results)
         if total_miners == 0:
             await self._webhook.send_embed(
-                title=f"Round {round_num} Downloads Complete",
+                title=f"Round {round_num} Collection Complete",
                 color=COLOR_GREEN,
                 fields=[{"name": "Miners", "value": "0", "inline": True}],
             )
@@ -112,7 +112,7 @@ class DiscordNotifier:
         color = COLOR_RED if render_failures > 0 else COLOR_GREEN
 
         await self._webhook.send_embed(
-            title=f"Round {round_num} Downloads Complete",
+            title=f"Round {round_num} Collection Complete",
             color=color,
             fields=[
                 {"name": "Miners", "value": str(total_miners), "inline": True},
@@ -151,7 +151,7 @@ class NullDiscordNotifier(DiscordNotifier):
         round_num: int,
         committed_count: int,
         accepted_count: int,
-        generation_deadline: datetime,
+        generation_deadline: datetime | None,
         prompts_url: str,
         seed_url: str,
     ) -> None:
@@ -163,7 +163,7 @@ class NullDiscordNotifier(DiscordNotifier):
     async def notify_render_failure(self, hotkey: str) -> None:
         pass
 
-    async def notify_downloads_complete(self, round_num: int, results: dict[str, GenerationsMap]) -> None:
+    async def notify_collection_complete(self, round_num: int, results: dict[str, GenerationsMap]) -> None:
         pass
 
     async def notify_cycle_error(self, error: Exception) -> None:

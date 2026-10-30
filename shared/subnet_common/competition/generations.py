@@ -1,14 +1,16 @@
-from enum import StrEnum
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, Field, TypeAdapter
 
-from subnet_common.git_batcher import GitBatcher
-from subnet_common.github import GitHubClient
+
+if TYPE_CHECKING:
+    from subnet_common.git_batcher import GitBatcher
+    from subnet_common.github import GitHubClient
 
 
-class GenerationSource(StrEnum):
-    SUBMITTED = "submitted"
-    GENERATED = "generated"
+MAX_GENERATIONS_BYTES = 16 * 1024 * 1024
 
 
 class GenerationResult(BaseModel):
@@ -34,18 +36,12 @@ class GenerationResult(BaseModel):
     views: str | None = Field(default=None, description="CDN folder prefix containing white/ and gray/ rendered views")
     failure_reason: str | None = Field(
         default=None,
-        description=(
-            "Why this stem has no js. On the GENERATED source: a reason reported by the "
-            "miner via _failed.json. On the SUBMITTED source: a categorical string set "
-            "by the collector when its own pipeline failed (e.g. 'js_fetch_failed: HTTP 404', "
-            "'render_failed', 'embeddings_failed'). None means a clean delivery (or, on "
-            "SUBMITTED, the miner did not submit anything for this stem)."
-        ),
+        description="Why this prompt has no usable result; None means a successful result or no-data sentinel",
     )
     size: int = Field(default=0, description="Size of the JS module in bytes")
 
     def is_failed(self) -> bool:
-        """True when the miner declared permanent failure for this stem."""
+        """True when this stem has a recorded permanent delivery failure."""
         return self.failure_reason is not None
 
 
@@ -54,24 +50,21 @@ GenerationsMap = dict[str, GenerationResult]
 GenerationsAdapter = TypeAdapter(GenerationsMap)
 
 
-def _path(round_num: int, hotkey: str, source: GenerationSource, repeat_index: int = 1) -> str:
-    suffix = f"_{repeat_index}" if source == GenerationSource.GENERATED else ""
-    return f"rounds/{round_num}/{hotkey}/{source}{suffix}.json"
+def _path(round_num: int, hotkey: str) -> str:
+    return f"rounds/{round_num}/{hotkey}/generated.json"
 
 
 async def get_generations(
     git: GitHubClient,
     round_num: int,
     hotkey: str,
-    source: GenerationSource,
     ref: str,
-    repeat_index: int = 1,
 ) -> GenerationsMap:
     content = await git.get_file(
-        path=_path(round_num=round_num, hotkey=hotkey, source=source, repeat_index=repeat_index),
+        path=_path(round_num=round_num, hotkey=hotkey),
         ref=ref,
     )
-    if not content:
+    if content is None:
         return {}
     return GenerationsAdapter.validate_json(content)
 
@@ -80,11 +73,9 @@ async def save_generations(
     git_batcher: GitBatcher,
     round_num: int,
     hotkey: str,
-    source: GenerationSource,
     generations: GenerationsMap,
-    repeat_index: int = 1,
 ) -> None:
-    path = _path(round_num=round_num, hotkey=hotkey, source=source, repeat_index=repeat_index)
+    path = _path(round_num=round_num, hotkey=hotkey)
     await git_batcher.write(
         path=path,
         content=GenerationsAdapter.dump_json(generations, indent=2).decode(),

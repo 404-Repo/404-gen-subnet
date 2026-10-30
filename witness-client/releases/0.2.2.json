@@ -1,0 +1,50 @@
+{
+  "version": "0.2.2",
+  "status": "built and locally verified",
+  "platform": "Linux x86_64, Debian 12 (glibc 2.36+), Python 3.11+",
+  "proof_key_sha256": "6478059e4ad0d39e8c157c76cea9c6dd777c2ab5143cf8694876094facf39b16",
+  "proof_parameters_url": "https://subnet404.xyz/witness-client/releases/0.2.0/witness-proof-parameters-v1.tar.gz",
+  "files": {
+    "witness-proof-parameters-v1.tar.gz": {
+      "sha256": "c5e2264bdf3fefd50ec20d3384c388e8dc709a0e7968ee840f32fbf1386fc244",
+      "bytes": 37902483
+    },
+    "witness_client-0.2.2-py3-none-linux_x86_64.whl": {
+      "sha256": "288953c98e6a39aabeacc47a48e9e8d94b5914708aabb02f9cc53f266f5957a4",
+      "bytes": 7362431
+    }
+  },
+  "validation": {
+    "macos_python": {
+      "passed": 69
+    },
+    "queued_worker_local": {
+      "passed": 18
+    },
+    "strict_type_checks": "passed",
+    "linux_installed_wheel": {
+      "passed": 69,
+      "seconds": 292.17,
+      "network": "disabled; local provider fixtures only"
+    },
+    "wheel_python_sources": "byte-for-byte match with source_commit",
+    "regressions": [
+      "early admission failure reports an explicit non-recoverable state",
+      "zero queue delivery timeout is rejected before allocating resources",
+      "accepted claims are polled without repeated proof uploads",
+      "authorization status and uploads share one retry window"
+    ],
+    "request_preparation_comparison": {
+      "baseline_commit": "b66e1bb9d321b688d673a3e77b83443d22974a04",
+      "cases": 800,
+      "byte_identical_requests": 192,
+      "identical_rejections": 608
+    }
+  },
+  "previous_live_cloud_test": "releases/0.2.0.json",
+  "live_cloud_end_to_end": "Not rerun for 0.2.2; the recorded real cloud test used 0.2.0.",
+  "source_commit": "12b77e1290b17f495b72f492831324ec8d8ef74c",
+  "native_library_sha256": "a6a83d7ac21c0a7508cb220aa0cd5dbf49c6e8051946ff6b5f4bf3f0bc22a89e",
+  "native_library_matches_0_2_0": true,
+  "previous_release": "releases/0.2.1.json"
+}
