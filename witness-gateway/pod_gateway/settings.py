@@ -59,7 +59,7 @@ class Settings(BaseSettings):
     worker_vcpu_count: int = Field(default=2, alias="WITNESS_VCPU")
     worker_disk_gb: int = Field(default=10, alias="WITNESS_DISK_GB")
     data_centers: Annotated[tuple[str, ...], NoDecode] = Field(default=(), alias="WITNESS_DATA_CENTERS")
-    gateway_image: str | None = Field(default=None, alias="WITNESS_GATEWAY_IMAGE")
+    gateway_image: str = Field(..., alias="WITNESS_GATEWAY_IMAGE", min_length=1)
     gateway_cpu_id: str = Field(default="cpu3c", alias="GATEWAY_CPU_ID")
     gateway_vcpu_count: int = Field(default=2, alias="GATEWAY_VCPU")
 

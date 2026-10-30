@@ -44,8 +44,12 @@ Build from the repository root:
 docker build --platform linux/amd64 -f witness-server/worker/Dockerfile.pods -t 404-witness-pods:local .
 ```
 
-The image includes the Python gateway and worker, Node, the native verifier and
-`verifying.bin`. The `worker` role is started with `python -m pod_gateway worker`.
+The image includes the worker, Node, the native verifier, `verifying.bin`,
+Chromium, the renderer and the Python dependencies for embeddings and result
+saving. The `worker` role is started with `python -m pod_gateway worker` and is
+the default. Set `WITNESS_IMAGE` to this image's immutable digest. Build target
+`gateway` from the same Dockerfile for gateways and the independent revivor;
+set `WITNESS_GATEWAY_IMAGE` to that image's digest.
 Use the [Pod guide](../../witness-gateway/PODS.md) for operator settings,
 capabilities, TLS, evidence storage and resource limits. Reproduce a tested
 runtime using its full manifest, including any required bootstrap.

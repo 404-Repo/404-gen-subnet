@@ -38,6 +38,7 @@ witness-server/worker/**
 !witness-gateway/
 witness-gateway/**
 !witness-gateway/requirements.txt
+!witness-gateway/requirements-gateway.txt
 !witness-gateway/requirements-pods.txt
 !witness-gateway/constraints-pods.txt
 !witness-gateway/pod_gateway/
@@ -57,9 +58,15 @@ render-service-js/**
 !render-service-js/package.json
 !render-service-js/package-lock.json
 !render-service-js/src/
-!render-service-js/src/**
+render-service-js/src/**
+!render-service-js/src/*.js
+!render-service-js/src/*.html
+!render-service-js/src/validator/
+render-service-js/src/validator/**
+!render-service-js/src/validator/*.js
 !render-service-js/test/
-!render-service-js/test/**
+render-service-js/test/**
+!render-service-js/test/*.mjs
 !miner-reference/examples/
 miner-reference/examples/**
 !miner-reference/examples/generated/

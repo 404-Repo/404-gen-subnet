@@ -121,6 +121,7 @@ def values(tmp_path: Path) -> dict[str, object]:
         "WITNESS_MASTER_KEY": "ab" * 32,
         "GATEWAY_RUNPOD_API_KEY": "fixture-runpod",
         "WITNESS_IMAGE": "registry/witness@sha256:" + "a" * 64,
+        "WITNESS_GATEWAY_IMAGE": "registry/gateway@sha256:" + "b" * 64,
         "R2_ENDPOINT": "https://r2.test",
         "R2_ACCESS_KEY_ID": "fixture-id",
         "R2_SECRET_ACCESS_KEY": "fixture-secret",
@@ -130,6 +131,31 @@ def values(tmp_path: Path) -> dict[str, object]:
         "GATEWAY_TLS_KEY_B64": "fixture-key",
         "WITNESS_PRICING_FILE": str(pricing),
     }
+
+
+def test_split_images_select_the_same_roles_after_gateway_revival(values: dict[str, object]) -> None:
+    settings = Settings.model_validate(values)
+    worker, gateway = worker_spec(settings), gateway_spec(settings)
+    assert worker.image == values["WITNESS_IMAGE"]
+    assert gateway.image == values["WITNESS_GATEWAY_IMAGE"]
+    assert worker.env["WITNESS_ROLE"] == "worker"
+    assert gateway.env["WITNESS_ROLE"] == "gateway"
+    revived = Settings.model_validate({
+        **gateway.env,
+        "WITNESS_DEPLOYMENT": settings.deployment,
+        "WITNESS_PRICING_FILE": values["WITNESS_PRICING_FILE"],
+    })
+    assert worker_spec(revived).image == worker.image
+    assert gateway_spec(revived).image == gateway.image
+
+
+def test_gateway_image_is_explicit_for_split_and_legacy_deployments(values: dict[str, object]) -> None:
+    values["WITNESS_GATEWAY_IMAGE"] = values["WITNESS_IMAGE"]
+    settings = Settings.model_validate(values)
+    assert gateway_spec(settings).image == worker_spec(settings).image
+    for missing in ("WITNESS_IMAGE", "WITNESS_GATEWAY_IMAGE"):
+        with pytest.raises(ValueError, match=missing):
+            Settings.model_validate({key: value for key, value in values.items() if key != missing})
 
 
 def test_typed_settings_build_equivalent_pod_specs(values: dict[str, object]) -> None:

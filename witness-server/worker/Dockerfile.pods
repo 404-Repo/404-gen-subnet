@@ -12,9 +12,36 @@ WORKDIR /witness
 COPY witness-server/verifier/package.json witness-server/verifier/package-lock.json ./
 RUN npm ci --ignore-scripts --omit=dev --no-audit --no-fund
 
-FROM python:3.14.9-slim-bookworm@sha256:945c2676dc2b18e0c1f16879244122c57c0ffede60006bf3df159c507a31bcae AS witness-base
+FROM python:3.14.9-slim-bookworm@sha256:945c2676dc2b18e0c1f16879244122c57c0ffede60006bf3df159c507a31bcae AS python
+
+FROM python AS gateway
 WORKDIR /app/witness-gateway
-COPY witness-gateway/requirements.txt witness-gateway/requirements-pods.txt witness-gateway/constraints-pods.txt ./
+COPY witness-gateway/requirements.txt witness-gateway/requirements-gateway.txt witness-gateway/constraints-pods.txt ./
+RUN pip install --no-cache-dir -c constraints-pods.txt -r requirements-gateway.txt
+COPY --from=node /usr/local/bin/node /usr/local/bin/node
+COPY --from=node /witness/node_modules /app/witness-server/verifier/node_modules
+COPY --from=proof /privateauth /app/witness-client/native/privateauth
+COPY witness-client/LICENSE witness-client/THIRD_PARTY_NOTICES.md /app/licenses/
+COPY witness-server/verifier/THIRD_PARTY_NOTICES.md /app/licenses/VERIFIER_THIRD_PARTY_NOTICES.md
+COPY witness-server/verifier/*.mjs /app/witness-server/verifier/
+COPY witness-server/verifier/params/verifying.bin /app/witness-server/verifier/params/verifying.bin
+COPY witness-server/worker/verify.mjs /app/witness-server/worker/
+COPY witness-client/src/witness_client/ /app/witness-client/src/witness_client/
+COPY miner-runtime/src/miner_runtime/ /app/miner-runtime/src/miner_runtime/
+COPY renderer-client/src/renderer_client/ /app/renderer-client/src/renderer_client/
+COPY witness-gateway/pod_gateway/ /app/witness-gateway/pod_gateway/
+COPY miner-reference/budgets/pricing.json /app/config/pricing.json
+COPY shared/subnet_common/__init__.py shared/subnet_common/github.py shared/subnet_common/git_batcher.py /app/shared/subnet_common/
+COPY shared/subnet_common/competition/__init__.py shared/subnet_common/competition/generations.py shared/subnet_common/competition/config.py shared/subnet_common/competition/state.py shared/subnet_common/competition/schedule.py shared/subnet_common/competition/seed.py shared/subnet_common/competition/prompts.py /app/shared/subnet_common/competition/
+COPY NOTICE.md /app/licenses/NOTICE.md
+ENV PYTHONPATH=/app/shared:/app/witness-client/src:/app/miner-runtime/src:/app/renderer-client/src:/app/witness-gateway \
+    PYTHONUNBUFFERED=1 WITNESS_TIMINGS=1 WITNESS_PRICING_FILE=/app/config/pricing.json WITNESS_ROLE=gateway
+EXPOSE 8443
+ENTRYPOINT ["python", "-m", "pod_gateway"]
+
+FROM python AS witness-base
+WORKDIR /app/witness-gateway
+COPY witness-gateway/requirements.txt witness-gateway/requirements-gateway.txt witness-gateway/requirements-pods.txt witness-gateway/constraints-pods.txt ./
 RUN pip install --no-cache-dir -c constraints-pods.txt -r requirements-pods.txt
 COPY --from=node /usr/local/bin/node /usr/local/bin/node
 COPY --from=node /witness/node_modules /app/witness-server/verifier/node_modules

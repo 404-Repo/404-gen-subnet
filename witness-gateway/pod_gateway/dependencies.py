@@ -70,6 +70,7 @@ def gateway_spec(settings: Settings) -> PodSpec:
             "WITNESS_GATEWAY_URL",
             "WITNESS_MASTER_KEY",
             "WITNESS_IMAGE",
+            "WITNESS_GATEWAY_IMAGE",
             "GATEWAY_RUNPOD_API_KEY",
             "R2_ENDPOINT",
             "R2_ACCESS_KEY_ID",
@@ -115,7 +116,7 @@ def gateway_spec(settings: Settings) -> PodSpec:
         {"WITNESS_ROLE": "gateway", "WITNESS_PRICING_FILE": "/app/config/pricing.json", "GATEWAY_PORT": "8443"}
     )
     return PodSpec(
-        settings.gateway_image if settings.gateway_image is not None else settings.image,
+        settings.gateway_image,
         cpu_id=settings.gateway_cpu_id,
         vcpu_count=settings.gateway_vcpu_count,
         disk_gb=10,

@@ -7,9 +7,12 @@ Workers capture and verify OpenAI exchanges, then save evidence and usage in pri
 revivor restores the gateway and drains resources owned by the deployment.
 
 See [PODS.md](PODS.md) for configuration, lifecycle, recovery, budgets, replay and
-the immutable runtime manifests. The image is built from
-[Dockerfile.pods](../witness-server/worker/Dockerfile.pods). Its entrypoint supports
-`gateway`, `worker` and `revivor` roles through `python -m pod_gateway`.
+the immutable runtime manifests. Both images are built from
+[Dockerfile.pods](../witness-server/worker/Dockerfile.pods): target `gateway`
+serves gateways and the independent `revivor`; target `production` serves miner
+witness Pods. Both use `python -m pod_gateway`, defaulting to `gateway` and
+`worker` respectively. Set `WITNESS_GATEWAY_IMAGE` to the gateway digest and
+`WITNESS_IMAGE` to the witness Pod digest. Both pins are required.
 
 The [client](../witness-client/README.md) makes allocation-scoped model calls; the execution host observes each generate() call for replay.
 [The worker](../witness-server/worker/README.md) saves authorization before
