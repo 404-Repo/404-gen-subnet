@@ -20,7 +20,7 @@
     "sdk_state_directory_required": false
   },
   "version": "0.2.17",
-  "status": "Built and locally verified release candidate; isolated RunPod validation pending",
+  "status": "Built and verified release candidate; registry publication pending",
   "source_commit": "8435c886d161c8b2f3e9893b90cc8958c1727c1f",
   "release_tag": "witness-client-v0.2.17",
   "release_tag_object": "0bbc3e978ae9dd4fa4c9fe456aef7669e33255f4",
@@ -325,8 +325,277 @@
       "python3.13_report": "results/release-0.2.17-audit313.json"
     },
     "live_gateway_and_pod": {
-      "status": "pending",
-      "reason": "Isolated live deployment has not run"
+      "status": "passed",
+      "date": "2026-10-30",
+      "rc_base_commit": "456f0e6b62926538b5fbd439e60860dca0241f43",
+      "source_commit": "8435c886d161c8b2f3e9893b90cc8958c1727c1f",
+      "image": "europe-west3-docker.pkg.dev/gen-456515/witness-runtime/pods@sha256:b153cc5672897418dd591e1117208e4fd87af22b020460a1ed386df2e6368743",
+      "sdk": {
+        "version": "0.2.17",
+        "client_python": "3.13",
+        "pod_python": "3.14",
+        "client_import": "/venv/lib/python3.13/site-packages/witness_client/__init__.py",
+        "pod_import": "/usr/local/lib/python3.14/site-packages/witness_client/__init__.py"
+      },
+      "provider": "OpenAI Codex subscription; small synthetic requests; login retained on local client",
+      "round": "test-sdk017-20261030-f48b1eb3",
+      "bucket": "404-gen",
+      "storage_prefix": "rounds/test-sdk017-20261030-f48b1eb3/",
+      "allocation": {
+        "status": "passed",
+        "start_id": "eec440bf-596d-42f7-9256-2ba39172752b",
+        "http_route_counts": {
+          "/v1/pods/current": 11,
+          "/v1/pods/start": 2,
+          "/v1/pods/eec440bf-596d-42f7-9256-2ba39172752b": 9,
+          "/v1/control/5FYhJFxSQ3CgysJ2jwftUKUUdv99MzXboUK2FzsUH7thko4t/eec440bf-596d-42f7-9256-2ba39172752b": 7,
+          "/v1/pods/6a3cd4bf-4f3b-4575-a667-d595de09ee73": 7,
+          "/v1/control/5FYhJFxSQ3CgysJ2jwftUKUUdv99MzXboUK2FzsUH7thko4t/6a3cd4bf-4f3b-4575-a667-d595de09ee73": 8
+        },
+        "test_pods": [
+          {
+            "id": "yqi6gceift1zrx",
+            "name": "sdk017-isolated-gateway-f48b1eb3",
+            "image": "europe-west3-docker.pkg.dev/gen-456515/witness-runtime/pods@sha256:b153cc5672897418dd591e1117208e4fd87af22b020460a1ed386df2e6368743",
+            "cost": 0.06,
+            "createdAt": "2026-10-30T14:45:18.601Z",
+            "startedAt": "2026-10-30T14:45:18.596Z",
+            "cpu": {
+              "id": "cpu3c",
+              "memory": 4,
+              "vcpuCount": 2
+            },
+            "observed_status": "RUNNING",
+            "final_status": "deleted"
+          },
+          {
+            "id": "heh3s691ncwb3i",
+            "name": "w404-sdk017-f48b1-test-sdk017--5FYhJFxS-active",
+            "image": "europe-west3-docker.pkg.dev/gen-456515/witness-runtime/pods@sha256:b153cc5672897418dd591e1117208e4fd87af22b020460a1ed386df2e6368743",
+            "cost": 0.12,
+            "createdAt": "2026-10-30T14:47:24.448Z",
+            "startedAt": "2026-10-30T14:47:24.442Z",
+            "cpu": {
+              "id": "cpu3c",
+              "memory": 8,
+              "vcpuCount": 4
+            },
+            "observed_status": "RUNNING",
+            "final_status": "deleted"
+          },
+          {
+            "id": "r8hinht54hio46",
+            "name": "w404-sdk017-f48b1-test-sdk017--5FYhJFxS-active",
+            "image": "europe-west3-docker.pkg.dev/gen-456515/witness-runtime/pods@sha256:b153cc5672897418dd591e1117208e4fd87af22b020460a1ed386df2e6368743",
+            "cost": 0.12,
+            "createdAt": "2026-10-30T15:06:02.394Z",
+            "startedAt": "2026-10-30T15:06:02.389Z",
+            "cpu": {
+              "id": "cpu3c",
+              "memory": 8,
+              "vcpuCount": 4
+            },
+            "observed_status": "RUNNING",
+            "final_status": "deleted"
+          }
+        ]
+      },
+      "cases": [
+        {
+          "case": "sync-capture",
+          "request_id": 100,
+          "queue_wait_seconds": 135,
+          "capture_seconds": 1800,
+          "delivery_seconds": 120,
+          "deadline_before_queue": null,
+          "deadline_after_queue": null,
+          "deadline_after_dispatch": 1793373701,
+          "release_time": 1793371864.8414905,
+          "exchange_id": "49ab19cf-4746-502b-8cb5-87c744b712ba",
+          "dispatches_after_saved_reuse": 1,
+          "output_sha256": "565339bc4d33d72817b583024112eb7f5cdf3e5eef0252d6ec1b9c9a94e12bb3",
+          "passed": true
+        },
+        {
+          "case": "async-capture",
+          "request_id": 101,
+          "queue_wait_seconds": 135,
+          "capture_seconds": 1800,
+          "delivery_seconds": 120,
+          "deadline_before_queue": null,
+          "deadline_after_queue": null,
+          "deadline_after_dispatch": 1793373735,
+          "release_time": 1793371874.517316,
+          "exchange_id": "711dbc0f-4f57-5ea3-a99b-ae0e7a334801",
+          "dispatches_after_saved_reuse": 1,
+          "output_sha256": "565339bc4d33d72817b583024112eb7f5cdf3e5eef0252d6ec1b9c9a94e12bb3",
+          "passed": true
+        },
+        {
+          "case": "async-preparation",
+          "request_id": 103,
+          "queue_wait_seconds": 135,
+          "capture_seconds": 1800,
+          "delivery_seconds": 120,
+          "deadline_before_queue": null,
+          "deadline_after_queue": null,
+          "deadline_after_dispatch": 1793373932,
+          "release_time": 1793372096.0237436,
+          "exchange_id": "04cc1f99-752f-55f9-aa7f-649244a6e2d9",
+          "dispatches_after_saved_reuse": 1,
+          "output_sha256": "565339bc4d33d72817b583024112eb7f5cdf3e5eef0252d6ec1b9c9a94e12bb3",
+          "passed": true
+        },
+        {
+          "case": "sync-preparation",
+          "request_id": 102,
+          "queue_wait_seconds": 135,
+          "capture_seconds": 1800,
+          "delivery_seconds": 120,
+          "deadline_before_queue": null,
+          "deadline_after_queue": null,
+          "deadline_after_dispatch": 1793373960,
+          "release_time": 1793372106.748819,
+          "exchange_id": "1849cee0-33cc-535d-9981-25213974e9ec",
+          "dispatches_after_saved_reuse": 1,
+          "output_sha256": "565339bc4d33d72817b583024112eb7f5cdf3e5eef0252d6ec1b9c9a94e12bb3",
+          "passed": true
+        },
+        {
+          "case": "silent-setup-and-same-id-retry",
+          "setup_elapsed_seconds": 65.59,
+          "failed_deadline": null,
+          "dispatches_before_retry": 0,
+          "dispatches_after_retry": 1,
+          "exchange_replaced": true,
+          "passed": true
+        }
+      ],
+      "worker_restart": {
+        "before": {
+          "id": "heh3s691ncwb3i",
+          "name": "w404-sdk017-f48b1-test-sdk017--5FYhJFxS-active",
+          "status": "RUNNING",
+          "startedAt": "2026-10-30T14:47:24.442Z"
+        },
+        "after": {
+          "id": "heh3s691ncwb3i",
+          "name": "w404-sdk017-f48b1-test-sdk017--5FYhJFxS-active",
+          "status": "RUNNING",
+          "startedAt": "2026-10-30T14:59:51.464Z"
+        }
+      },
+      "worker_restart_saved_response_reuse": [
+        {
+          "request_id": 100,
+          "exchange_id": "49ab19cf-4746-502b-8cb5-87c744b712ba",
+          "persisted_deadline_unchanged": true,
+          "possible_dispatches": 1,
+          "passed": true
+        },
+        {
+          "request_id": 101,
+          "exchange_id": "711dbc0f-4f57-5ea3-a99b-ae0e7a334801",
+          "persisted_deadline_unchanged": true,
+          "possible_dispatches": 1,
+          "passed": true
+        },
+        {
+          "request_id": 102,
+          "exchange_id": "1849cee0-33cc-535d-9981-25213974e9ec",
+          "persisted_deadline_unchanged": true,
+          "possible_dispatches": 1,
+          "passed": true
+        },
+        {
+          "request_id": 103,
+          "exchange_id": "04cc1f99-752f-55f9-aa7f-649244a6e2d9",
+          "persisted_deadline_unchanged": true,
+          "possible_dispatches": 1,
+          "passed": true
+        },
+        {
+          "request_id": 900,
+          "exchange_id": "7dd84474-5708-4e52-b483-aa3766ea02e6",
+          "persisted_deadline_unchanged": true,
+          "possible_dispatches": 1,
+          "passed": true
+        }
+      ],
+      "restart_recovery": {
+        "observed_behavior": "Gateway retired the restarted worker; normal SDK allocation obtained a replacement before saved-response reuse.",
+        "replacement_allocation": {
+          "start_id": "6a3cd4bf-4f3b-4575-a667-d595de09ee73",
+          "round": "test-sdk017-20261030-f48b1eb3",
+          "status": "passed"
+        },
+        "initial_reuse_attempt": "Timed out at 120 seconds while manual MCP provisioning acknowledgements were pending. This is not an automated production recovery-time result.",
+        "rerun_after_replacement_ready": "All five saved responses reused with identical exchange IDs and deadlines; no additional provider dispatches."
+      },
+      "independent_r2_verification": {
+        "status": "passed",
+        "round": "test-sdk017-20261030-f48b1eb3",
+        "prefix": "rounds/test-sdk017-20261030-f48b1eb3/",
+        "objects": 126,
+        "calls": {
+          "103": {
+            "exchange_id": "04cc1f99-752f-55f9-aa7f-649244a6e2d9",
+            "deadline": 1793373932,
+            "possible_dispatches": 1,
+            "pending_usage": 0
+          },
+          "900": {
+            "exchange_id": "7dd84474-5708-4e52-b483-aa3766ea02e6",
+            "deadline": 1793374087,
+            "possible_dispatches": 1,
+            "pending_usage": 0
+          },
+          "101": {
+            "exchange_id": "711dbc0f-4f57-5ea3-a99b-ae0e7a334801",
+            "deadline": 1793373735,
+            "possible_dispatches": 1,
+            "pending_usage": 0
+          },
+          "102": {
+            "exchange_id": "1849cee0-33cc-535d-9981-25213974e9ec",
+            "deadline": 1793373960,
+            "possible_dispatches": 1,
+            "pending_usage": 0
+          },
+          "100": {
+            "exchange_id": "49ab19cf-4746-502b-8cb5-87c744b712ba",
+            "deadline": 1793373701,
+            "possible_dispatches": 1,
+            "pending_usage": 0
+          }
+        },
+        "public_bucket_read": {
+          "key": "rounds/test-sdk017-20261030-f48b1eb3/pod-calls/v2/sdk017-f48b1eb3/test-sdk017-20261030-f48b1eb3/5FYhJFxSQ3CgysJ2jwftUKUUdv99MzXboUK2FzsUH7thko4t/cf4160fe14bfe44ed1c08f3f04f9a7559573ca3788aeab9d7d6df8e41bfbbc98.json",
+          "public_url": "https://pub-748b04105aea43f4955516354e5efffd.r2.dev/rounds/test-sdk017-20261030-f48b1eb3/pod-calls/v2/sdk017-f48b1eb3/test-sdk017-20261030-f48b1eb3/5FYhJFxSQ3CgysJ2jwftUKUUdv99MzXboUK2FzsUH7thko4t/cf4160fe14bfe44ed1c08f3f04f9a7559573ca3788aeab9d7d6df8e41bfbbc98.json",
+          "sha256": "4f072708cf0fa1904460268b9014cada66f4eb95c78459aae52782d32f2de171",
+          "matches_authenticated_read": true
+        }
+      },
+      "possible_provider_dispatches": 5,
+      "pending_usage": 0,
+      "active_captures_at_finish": 0,
+      "cleanup": {
+        "deleted_test_pod_ids": [
+          "yqi6gceift1zrx",
+          "heh3s691ncwb3i",
+          "r8hinht54hio46"
+        ],
+        "all_test_pods_absent": true,
+        "verification": "GET returned 404 after each deletion and final account inventory contains none of the created test pod IDs",
+        "retained_r2_test_prefix": "rounds/test-sdk017-20261030-f48b1eb3/"
+      },
+      "production_pod_metadata_unchanged": true,
+      "witness_dns_mutations": 0,
+      "test_scope": {
+        "allocation": "Installed SDK uses normal HTTP allocation, Gateway, allocator, control activation and direct worker TLS. RunPod provisioning I/O is dispatched through the connected MCP adapter.",
+        "round_and_membership": "Isolated test fixtures supply a synthetic miner and refreshed round policy. Official Finney membership and GitHub competition-round discovery are outside this run.",
+        "renderer": "Real worker renderer reached ready state; full rendering/submission was not exercised by these model-call checks."
+      }
     }
   },
   "dependency_findings": [
@@ -339,7 +608,8 @@
   ],
   "publication": {
     "package_registry": "not published; upload requires separate authorization",
-    "prepared_artifacts": "Use the files and SHA-256 values in this manifest; do not rebuild under this version or overwrite existing artifacts."
+    "prepared_artifacts": "Use the files and SHA-256 values in this manifest; do not rebuild under this version or overwrite existing artifacts.",
+    "source_tag": "Prepared local annotated tag; not pushed."
   },
   "previous_release": "releases/0.2.15.json"
 }
