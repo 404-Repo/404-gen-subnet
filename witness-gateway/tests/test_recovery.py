@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from aiohttp import web
+from bittensor_wallet import Keypair
 from botocore.exceptions import EndpointConnectionError
 from channel import WorkerChannel
 from pod import PodRuntime
@@ -22,6 +23,7 @@ from witness_client.calls import RequestKey, canonical
 
 from pod_gateway.budget import Budget
 from pod_gateway.direct import Witness
+from pod_gateway.models import Scope
 from pod_gateway.records import Call, CallRecord, CallRecords, RecordingConflict
 from pod_gateway.recovery import recover_issued
 from pod_gateway.rounds import PromptImage, RoundInputs
@@ -89,6 +91,38 @@ def runtime(state: MemoryState, records: CallRecords, budget: Budget, spool: Pat
         token="fixture", origin="https://witness.test", proof_hash=PROOF,
         round_end=int(time.time()) + 600, spool=spool,
     )
+
+
+def test_prefixed_capture_reaches_provider_and_records_its_connection_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = MemoryState()
+    scope = Scope(
+        SCOPE.deployment, SCOPE.round, Keypair.create_from_mnemonic(Keypair.generate_mnemonic()).ss58_address,
+    )
+    records, budget, item = CallRecords(state), Budget(state, PRICING), invocation()
+    call = records.assign(scope, item, START, "pod-one")
+    assert records.claim(scope, item, "pod-one", call.capture_id or "")
+    worker = PodRuntime(
+        evidence=state, records=records, budget=budget, scope=scope, start_id=START, pod_id="pod-one",
+        token="fixture", origin="https://witness.test", proof_hash=PROOF, round_end=int(time.time()) + 600,
+        spool=tmp_path / "spool",
+    )
+    worker.storage_prefix = "isolated/"
+
+    def unavailable(*args: object, **kwargs: object) -> None:
+        raise ConnectionRefusedError("Fixture provider is unavailable")
+
+    monkeypatch.setattr("worker.socket.create_connection", unavailable)
+    monkeypatch.setattr("pod.connect", lambda *args, **kwargs: MagicMock())
+    try:
+        worker._capture(item, call, MagicMock())
+        saved = records.load(scope, item.id)
+        assert saved is not None and saved.call.failure == "ConnectionRefusedError"
+        failure = state.get(f"isolated/rounds/{scope.round}/{scope.hotkey}/{call.exchange_id}/failure.json")
+        assert failure is not None and json.loads(failure)["error_type"] == "ConnectionRefusedError"
+    finally:
+        worker.executor.shutdown(wait=True)
 
 
 @pytest.mark.parametrize("provider_status", [404, 200])

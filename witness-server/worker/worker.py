@@ -89,6 +89,7 @@ def relay(
     round_number: str,
     hotkey: str,
     host: str,
+    storage_prefix: str = "",
     port: int = 443,
     before_release: Callable[[bytes], float | None] | None = None,
     extra_metadata: dict[str, object] | None = None,
@@ -100,7 +101,7 @@ def relay(
     After release, provider capture is independent of the miner. The complete
     response and its usage become durable before its ciphertext is delivered.
     """
-    if prefix.rsplit("/", 1)[0] != miner_prefix(round_number, hotkey):
+    if prefix.rsplit("/", 1)[0] != storage_prefix + miner_prefix(round_number, hotkey):
         raise ValueError("Transcript path differs from authenticated identity")
     identify_exchange(prefix.rsplit("/", 1)[1])
     started = time.monotonic()

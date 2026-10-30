@@ -432,6 +432,7 @@ class PodRuntime:
                 round_number=self.scope.round,
                 hotkey=self.scope.hotkey,
                 host=host,
+                storage_prefix=self.storage_prefix,
                 before_release=authorize,
                 extra_metadata=self._binding(invocation, call),
                 seal=partial(self.publish, call.exchange_id),

@@ -18,6 +18,31 @@ from identity import miner_prefix
 from storage import json_bytes
 
 
+@pytest.mark.parametrize("different", ["namespace", "round", "hotkey"])
+def test_prefixed_transcript_must_match_its_namespace_and_authenticated_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    identity: tuple[Keypair, str],
+    different: str,
+) -> None:
+    hotkey, other = identity
+    namespace = "other/" if different == "namespace" else "isolated/"
+    round_number = "2" if different == "round" else "1"
+    miner = other if different == "hotkey" else hotkey.ss58_address
+    prefix = f"{namespace}{miner_prefix(round_number, miner)}/{uuid.uuid4()}"
+
+    def connect(*args: object, **kwargs: object) -> None:
+        raise AssertionError("Mismatched transcript reached the provider")
+
+    monkeypatch.setattr(worker, "socket", SimpleNamespace(create_connection=connect))
+    with pytest.raises(ValueError, match="Transcript path differs from authenticated identity"):
+        worker.relay(
+            MemoryStore(), prefix, None, tmp_path, MagicMock(), MagicMock(),
+            round_number="1", hotkey=hotkey.ss58_address, host="provider.test",
+            storage_prefix="isolated/",
+        )
+
+
 class Clock:
     def __init__(self) -> None:
         self.now = 1000.0
