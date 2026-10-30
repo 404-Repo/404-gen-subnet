@@ -88,9 +88,12 @@ class ReplayWitness(ObservedWitness):
             if entry.outcome != "return":
                 raise ReplayMismatch("A saved response was unavailable during replay")
             call, item = self.captures[entry.request.id]
+            model = item["model"]
+            if not isinstance(model, str):
+                raise ReplayMismatch("Invalid verified model")
             self.budget.consume(
                 entry.request.id,
-                item["model"],
+                model,
                 item["usage"],
                 not_dispatched=call.not_dispatched and not call.authorized,
             )
