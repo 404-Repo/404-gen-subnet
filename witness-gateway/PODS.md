@@ -161,8 +161,10 @@ returns `200` with its completion metadata, including evidence of provider error
 Complete provider HTTP errors use the completed-capture envelope so existing
 clients can raise the corresponding status exception. They remain failed outcomes
 in call storage and are retryable.
-Unstarted calls have a null `deadline`. Authorization saves the capture deadline
-immediately before provider release; its default window is thirty minutes.
+Unstarted calls have no saved capture deadline. API replies use
+`9007199254740991` as an effectively infinite integer deadline until authorization
+saves the capture deadline immediately before provider release; its default window
+is thirty minutes.
 Joining or recovering an authorized capture retains that saved deadline.
 `GET /v1/calls/<exchange_id>` returns the current snapshot. The supplied client's
 `responses.create()` handles polling and retrieval and returns a Response or

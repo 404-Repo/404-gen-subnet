@@ -502,6 +502,7 @@ def test_http_start_and_duplicate_clients_share_one_paid_capture(
                 accepted = Snapshot.model_validate(initial.json())
                 identifier = accepted.call.exchange_id
                 assert accepted.call.phase == "assigned" and accepted.session is not None
+                assert accepted.call.deadline is not None and accepted.call.deadline > time.time()
                 assert initial.headers["Location"] == f"/v1/calls/{identifier}"
 
                 def duplicates() -> list[httpx.Response]:
@@ -533,6 +534,7 @@ def test_http_start_and_duplicate_clients_share_one_paid_capture(
                     assert pending.status_code == 202
                     capturing = Snapshot.model_validate(pending.json())
                     assert capturing.call.exchange_id == identifier and capturing.call.authorized
+                    assert capturing.call.deadline is not None and capturing.call.deadline < accepted.call.deadline
                     duplicate = asyncio.create_task(asyncio.to_thread(repeated_stream))
                     assert await asyncio.to_thread(polled.wait, 3)
                     assert not running.done() and not duplicate.done() and fixture.paid == 1

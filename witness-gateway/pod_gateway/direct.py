@@ -165,6 +165,8 @@ class Witness:
             await asyncio.to_thread(self.completion, scope, invocation, call) if call.manifest_sha256 is not None else None
         )
         view = call.model_dump(exclude={"capture_id"})
+        # Unstarted captures expose a JSON-safe integer infinity until dispatch.
+        view["deadline"] = call.deadline if call.deadline is not None else 2**53 - 1
         if call.phase == "failed" and call.failure == "ProviderHTTPError" and completion is not None:
             # A complete HTTP error uses the existing capture protocol; it is not a reusable logical result.
             view["phase"] = "issued"
