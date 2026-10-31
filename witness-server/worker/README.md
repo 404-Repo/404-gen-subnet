@@ -20,6 +20,20 @@ Evidence lives under `rounds/<round>/<hotkey>/<exchange-id>/`. Generation
 recordings retain invocation and delivery order. Durable claims and usage live in
 R2; Pod identity, ownership and lifecycle come from RunPod.
 
+Capture and verifier diagnostics are saved atomically in the exchange's local spool as
+`failure.json`, then uploaded to that exchange's R2 directory before spool cleanup.
+The configured storage prefix applies to this path. Upload retries and Pod restarts
+preserve the first diagnostic. An error recovered from retained evidence also keeps
+its diagnostic in R2; call state and the manifest determine the final outcome.
+
+The record includes the failure stage and reason, exception and cause types,
+bounded Python stack locations, verifier mode/exit status and safe Node stack
+locations when available. Call, exchange and Pod identities correlate the evidence;
+Python version, the Pod specification fingerprint and source hashes identify the
+runtime. Reservation reasons distinguish unsupported models/tiers from unavailable
+or busy ledgers. These records do not require `WITNESS_TIMINGS=1` and contain no
+exception messages, locals, source lines, raw subprocess output or credentials.
+
 Content-addressed completed evidence lives under `evidence/v1/`. The Pod returns
 expected hashes and object-specific signed R2 URLs through authenticated TLS;
 the miner downloads saved bytes directly from R2. Private journals, pending

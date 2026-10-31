@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import platform
+import re
 import select
 import socket
 import subprocess
@@ -11,6 +14,7 @@ import time
 from collections.abc import Callable
 from contextlib import suppress
 from pathlib import Path
+from time import time_ns
 from typing import cast
 
 from channel import Channel
@@ -21,6 +25,7 @@ from timing import exchange_id as _exchange_id
 from timing import forward as _verifier_timings
 from timing import started as timing_started
 from websockets.exceptions import WebSocketException
+from witness_client.state import save
 
 HERE = Path(__file__).resolve().parent
 WITNESS = HERE.parent / "verifier"
@@ -34,6 +39,54 @@ PROVIDERS: dict[Provider, tuple[str, str]] = {
 Verifier = Callable[[str, Path], dict[str, object]]
 
 
+def record_failure(
+    directory: Path,
+    error: Exception | None,
+    stage: str,
+    *,
+    reason: str | None = None,
+    context: dict[str, object] | None = None,
+    verifier: dict[str, object] | None = None,
+) -> None:
+    """Spool the first failure without exception messages, locals or source lines."""
+    path = directory / "failure.json"
+    data: dict[str, object] = json.loads(path.read_bytes()) if path.is_file() else {}
+    if "diagnostic" not in data:
+        data["schema"] = 1
+        frames: list[dict[str, object]] = []
+        trace = None if error is None else error.__traceback__
+        while trace is not None:
+            frames.append({
+                "file": "/".join(trace.tb_frame.f_code.co_filename.replace("\\", "/").split("/")[-2:]),
+                "function": trace.tb_frame.f_code.co_name,
+                "line": trace.tb_lineno,
+            })
+            trace = trace.tb_next
+        error_reason = getattr(error, "witness_reason", None)
+        data["diagnostic"] = {
+            "timestamp_ns": time_ns(),
+            "stage": stage,
+            "reason": reason or (error_reason if isinstance(error_reason, str) else f"{stage}_failed"),
+            "error_type": None if error is None else type(error).__name__,
+            "cause_type": type(error.__cause__).__name__ if error is not None and error.__cause__ is not None else None,
+            "stack": frames[-32:],
+            "verifier": verifier,
+        }
+        sources = {
+            "pod.py": HERE / "pod.py", "worker.py": HERE / "worker.py", "verify.mjs": HERE / "verify.mjs",
+            "verifier/verify.mjs": WITNESS / "verify.mjs",
+            "pod_gateway/budget.py": HERE.parent.parent / "witness-gateway" / "pod_gateway" / "budget.py",
+        }
+        data["runtime"] = {
+            "python_version": platform.python_version(),
+            "pod_spec_sha256": os.environ.get("WITNESS_POD_SPEC"),
+            "source_sha256": {name: hashlib.sha256(source.read_bytes()).hexdigest() for name, source in sources.items()},
+        }
+    if context is not None:
+        data.update(context)
+    save(path, json_bytes(data))
+
+
 def complete_records(data: bytes | bytearray) -> bool:
     offset = 0
     while offset < len(data):
@@ -43,38 +96,82 @@ def complete_records(data: bytes | bytearray) -> bool:
     return offset == len(data)
 
 
+def verifier_failure(stderr: bytes, mode: str, returncode: int | None) -> dict[str, object]:
+    """Read the verifier's content-free failure event, ignoring other stderr."""
+    details: dict[str, object] = {"mode": mode, "returncode": returncode}
+    for line in stderr.splitlines():
+        try:
+            value = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(value, dict) or value.get("event") != "witness_verifier_failure" or value.get("mode") != mode:
+            continue
+        error_type, frames = value.get("error_type"), value.get("stack")
+        if not isinstance(error_type, str) or not error_type.isidentifier() or not isinstance(frames, list):
+            continue
+        stack = []
+        for frame in frames[:32]:
+            if not isinstance(frame, dict):
+                continue
+            file, function, number, column = (frame.get(key) for key in ("file", "function", "line", "column"))
+            if (not isinstance(file, str) or not re.fullmatch(r"(?:worker|verifier)/[A-Za-z0-9_.-]+\.mjs", file)
+                    or (function is not None and (not isinstance(function, str)
+                        or not re.fullmatch(r"[A-Za-z_$][A-Za-z0-9_.$]*", function)))
+                    or type(number) is not int or number <= 0 or type(column) is not int or column <= 0):
+                continue
+            stack.append({"file": file, "function": function, "line": number, "column": column})
+        details.update(error_type=error_type, stack=stack)
+    return details
+
+
 def verify(
     mode: str, directory: Path, *, provider: Provider | None = None
 ) -> dict[str, object]:
-    with measure("verifier_subprocess"):
-        result = subprocess.run(
-            [
-                "node",
-                str(HERE / "verify.mjs"),
-                mode,
-                str(directory),
-                str(PARAMETERS),
-                *([provider] if provider is not None else []),
-            ],
-            capture_output=True,
-            timeout=180,
-            check=False,
-            env={
-                **os.environ,
-                "NODE_OPTIONS": "--max-old-space-size=384",
-                "WITNESS_EXCHANGE_ID": _exchange_id(),
-                "WITNESS_VERIFIER_MODE": mode,
-            },
-        )
-    _verifier_timings(result.stderr)
-    if result.returncode:
-        if mode == "finish" and result.returncode != 2:
-            raise RuntimeError("Witness verifier did not complete")
-        raise ValueError("Witness verification rejected the exchange")
+    returncode = None
+    stderr = b""
+    reason = "verifier_process_failed"
     try:
-        return cast(dict[str, object], json.loads(result.stdout))
-    except ValueError as error:
-        raise RuntimeError("Witness verifier returned an invalid result") from error
+        with measure("verifier_subprocess"):
+            result = subprocess.run(
+                [
+                    "node",
+                    str(HERE / "verify.mjs"),
+                    mode,
+                    str(directory),
+                    str(PARAMETERS),
+                    *([provider] if provider is not None else []),
+                ],
+                capture_output=True,
+                timeout=180,
+                check=False,
+                env={
+                    **os.environ,
+                    "NODE_OPTIONS": "--max-old-space-size=384",
+                    "WITNESS_EXCHANGE_ID": _exchange_id(),
+                    "WITNESS_VERIFIER_MODE": mode,
+                },
+            )
+        returncode = result.returncode
+        stderr = result.stderr
+        _verifier_timings(result.stderr)
+        if result.returncode:
+            if mode == "finish" and result.returncode != 2:
+                raise RuntimeError("Witness verifier did not complete")
+            reason = "verification_rejected" if mode == "finish" else "verifier_process_failed"
+            raise ValueError("Witness verification rejected the exchange")
+        try:
+            return cast(dict[str, object], json.loads(result.stdout))
+        except ValueError as error:
+            reason = "verifier_invalid_result"
+            raise RuntimeError("Witness verifier returned an invalid result") from error
+    except Exception as error:
+        if isinstance(error, subprocess.TimeoutExpired):
+            reason = "verifier_timeout"
+        elif isinstance(error, OSError):
+            reason = "verifier_unavailable"
+        record_failure(directory, error, "verifier_" + mode, reason=reason,
+                       verifier=verifier_failure(stderr, mode, returncode))
+        raise
 
 
 @timed("relay")
@@ -116,6 +213,7 @@ def relay(
     handshake = False
     handshake_bytes = 0
     stage = "provider_connect"
+    reason: str | None = None
     try:
         with measure("provider_tcp_connect"):
             connection = socket.create_connection((host, port), timeout=10)
@@ -127,6 +225,7 @@ def relay(
                     client[3:5], "big"
                 ):
                     if time.monotonic() >= hello_deadline:
+                        reason = "client_hello_timeout"
                         raise TimeoutError("ClientHello deadline reached")
                     chunk = channel.recv(hello_deadline)
                     if not chunk:
@@ -137,11 +236,13 @@ def relay(
                         and 5 + int.from_bytes(client[3:5], "big") > 16645
                     ):
                         raise ValueError("Oversized ClientHello")
+            stage = "client_hello_persist"
             (directory / "client.bin").write_bytes(client)
             with measure("verify_hello"):
                 stage = "hello_verify"
                 gate = verifier("hello", directory)
             released = int(str(gate["released"]))
+            stage = "provider_hello_release"
             provider.sendall(client[:released])
 
             handshake_started = timing_started()
@@ -154,12 +255,14 @@ def relay(
                     chunk = provider.recv(65536)
                     if not chunk:
                         transport("capture_failed", _exchange_id(), reason="provider_closed_before_authorization")
+                        reason = "provider_closed_before_authorization"
                         raise ValueError("Provider closed before authorization")
                     server.extend(chunk)
                     if len(server) > 128 * 1024:
                         raise ValueError("Server handshake exceeds limit")
                     # Before request authorization the shared verifier permits
                     # only TLS setup and its fixed, unauthenticated HEAD probe.
+                    stage = "miner_handshake_delivery"
                     channel.send(chunk)
                 try:
                     stage = "miner_message_wait"
@@ -167,6 +270,7 @@ def relay(
                         min(authorization_deadline, time.monotonic() + 0.05)
                     )
                     if not chunk:
+                        reason = "miner_left_before_authorization"
                         raise ValueError("Miner left before authorization")
                     client.extend(chunk)
                     if len(client) > MAX_BYTES:
@@ -177,8 +281,8 @@ def relay(
                 raw_claim = channel.claim("authorize" if handshake else "handshake")
                 if raw_claim is None:
                     continue
-                claim = json.loads(raw_claim)
                 stage = "handshake_claim" if not handshake else "authorization_claim"
+                claim = json.loads(raw_claim)
                 size = claim.get("client_bytes")
                 if (
                     not isinstance(size, int)
@@ -197,6 +301,7 @@ def relay(
                     continue  # Wait for a ticket to confirm the committed key.
                 transport("claim_ready", _exchange_id(), kind=claim_name, size=len(client), expected_bytes=size)
                 with measure("claim_spool_persistence"):
+                    stage = "claim_persist"
                     (directory / "client.bin").write_bytes(client)
                     (directory / "server.bin").write_bytes(server)
                     (directory / claim_name).write_bytes(raw_claim)
@@ -213,6 +318,7 @@ def relay(
                         )
                     handshake_bytes = len(server)
                     handshake = True
+                    stage = "handshake_notification"
                     channel.notify(
                         {"status": "running", "handshook": True, "authorized": False}
                     )
@@ -243,6 +349,7 @@ def relay(
                         ),
                     )
                 if time.monotonic() >= authorization_deadline:
+                    reason = "authorization_timeout"
                     raise TimeoutError("Request authorization deadline reached")
                 if before_release is not None:
                     stage = "dispatch_reservation"
@@ -252,6 +359,7 @@ def relay(
                     if capture_deadline is not None:
                         deadline = capture_deadline
                     if time.monotonic() >= authorization_deadline:
+                        reason = "authorization_timeout"
                         raise TimeoutError("Request authorization deadline reached")
                 if deadline is None:
                     raise ValueError("Capture deadline is missing")
@@ -266,6 +374,7 @@ def relay(
                     provider.sendall(client[released:])
                     break
             else:
+                reason = "authorization_timeout"
                 raise TimeoutError("Request authorization deadline reached")
 
             response_started = timing_started()
@@ -287,7 +396,9 @@ def relay(
                     if len(server) > MAX_BYTES:
                         raise ValueError("Provider traffic exceeds 16 MiB")
                 else:
+                    reason = "provider_exchange_timeout"
                     raise TimeoutError("Provider exchange deadline reached")
+        stage = "final_transcript_persist"
         (directory / "server.bin").write_bytes(server)
         with measure("final_transcript_persistence"):
             store.put(prefix + "/server.bin", bytes(server))
@@ -310,8 +421,10 @@ def relay(
             if seal is not None:
                 seal(metadata)
             with measure("manifest_persistence"):
+                stage = "manifest_persist"
                 store.put(prefix + "/manifest.json", json_bytes(metadata))
             with measure("final_status_persistence"):
+                stage = "final_status_persist"
                 store.put(
                     prefix + "/status.json",
                     json_bytes(
@@ -327,6 +440,7 @@ def relay(
                 )
         issued = True
         if before_delivery is not None:
+            stage = "call_finalize"
             before_delivery(metadata)
         # Capture is durable before delivery. A disconnected miner can recover it.
         with measure("delivery"), suppress(OSError, WebSocketException):
@@ -335,6 +449,12 @@ def relay(
         return metadata
     except Exception as error:
         transport("capture_failed", _exchange_id(), reason=stage, error_type=type(error).__name__)
+        if stage == "provider_connect":
+            reason = "provider_connection_failed"
+        record_failure(directory, error, stage, reason=reason, context={
+            **(extra_metadata or {}), "round": round_number, "hotkey": hotkey,
+            "exchange_id": prefix.rsplit("/", 1)[1],
+        })
         raise
     finally:
         # Ordinary Pods retain the spool for upload/finalization recovery. This

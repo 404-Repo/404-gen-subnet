@@ -34,7 +34,7 @@ from websockets.sync.connection import Connection
 from witness_client.calls import RequestKey
 from witness_client.gateway import _GatewayConnection
 from witness_client.state import save
-from worker import PARAMETERS, PROVIDERS, relay, verify
+from worker import PARAMETERS, PROVIDERS, record_failure, relay, verify
 
 
 class PodRuntime:
@@ -154,14 +154,22 @@ class PodRuntime:
         return self.evidence.get(self.storage_prefix + key)
 
     def save_failure(self, call: Call) -> None:
-        data = json_bytes({"status": "failed", "error_type": call.failure})
         directory = self.spool / identifier(call.exchange_id)
+        path = directory / "failure.json"
+        key = f"{self.storage_prefix}rounds/{self.scope.round}/{self.scope.hotkey}/{call.exchange_id}/failure.json"
+        previous = path.read_bytes() if path.is_file() else self.evidence.get(key)
+        details: dict[str, object] = json.loads(previous) if previous is not None else {}
+        details.update({
+            "status": "failed", "error_type": call.failure, "schema": 1,
+            "deployment": self.scope.deployment, "round": self.scope.round, "hotkey": self.scope.hotkey,
+            "call_id": call.request.id, "exchange_id": call.exchange_id,
+            "pod_id": call.pod_id, "pod_start_id": call.start_id,
+            "authorized": call.authorized, "not_dispatched": call.not_dispatched,
+        })
+        data = json_bytes(details)
         if directory.is_dir():
-            save(directory / "failure.json", data)
-        self.evidence.put(
-            f"{self.storage_prefix}rounds/{self.scope.round}/{self.scope.hotkey}/{call.exchange_id}/failure.json",
-            data,
-        )
+            save(path, data)
+        self.evidence.put(key, data)
 
     def start_capture(self, invocation: RequestKey, call: Call, channel: Channel) -> bool:
         with self.lock:
@@ -303,6 +311,14 @@ class PodRuntime:
                     )
                 except Exception as error:  # noqa: BLE001 - retain evidence until verification completes
                     metadata, failure = None, type(error).__name__
+                    record_failure(directory, error, "recovery_verify", context={
+                        **self._binding(invocation, call), "round": self.scope.round,
+                        "hotkey": self.scope.hotkey, "exchange_id": exchange_id,
+                    })
+                    self.evidence.put(
+                        f"{self.storage_prefix}rounds/{self.scope.round}/{self.scope.hotkey}/{exchange_id}/failure.json",
+                        (directory / "failure.json").read_bytes(),
+                    )
                     # Transient verification outages retain the spool for another check.
                     self.evidence.put(
                         f"{self.storage_prefix}rounds/{self.scope.round}/{self.scope.hotkey}/{exchange_id}/status.json",
@@ -322,10 +338,14 @@ class PodRuntime:
             directory = self.spool / identifier(exchange_id)
             if save_evidence and directory.is_dir():
                 prefix = f"{self.storage_prefix}rounds/{self.scope.round}/{self.scope.hotkey}/{exchange_id}/"
-                for name in self.PUBLIC_EVIDENCE | {"failure.json"}:
+                for name in self.PUBLIC_EVIDENCE:
                     file = directory / name
                     if file.is_file():
                         self.evidence.put(prefix + name, file.read_bytes())
+            failure = directory / "failure.json"
+            if failure.is_file():
+                key = f"{self.storage_prefix}rounds/{self.scope.round}/{self.scope.hotkey}/{exchange_id}/failure.json"
+                self.evidence.put(key, failure.read_bytes())
             with suppress(FileNotFoundError):
                 shutil.rmtree(directory)
 
@@ -440,6 +460,10 @@ class PodRuntime:
             )
         except Exception as error:  # noqa: BLE001 - seal a captured outcome before cleanup
             failure = type(error).__name__
+            record_failure(directory, error, "capture", context={
+                **self._binding(invocation, call), "round": self.scope.round,
+                "hotkey": self.scope.hotkey, "exchange_id": call.exchange_id,
+            })
             # R2 can fail after the full provider response was captured. Finish
             # from that local spool, never by opening a new provider connection.
             if (directory / "authorization.json").is_file() and (
@@ -498,6 +522,9 @@ class PodRuntime:
                         self.scope, invocation, self.pod_id, rejected, exchange_id=call.exchange_id,
                     )
                     current = current.model_copy(update={"phase": "failed", "failure": rejected})
+                    record_failure(directory, None, "provider_response", reason=rejected, context={
+                        **self._binding(invocation, current), "provider_status": final.get("provider_status"),
+                    })
                     self.save_failure(current)
                 for name in (
                     "client.bin",
