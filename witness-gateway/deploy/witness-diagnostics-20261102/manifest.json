@@ -1,0 +1,130 @@
+{
+  "version": 1,
+  "id": "witness-diagnostics-20261102",
+  "source_commit": "641064151a8f3783fcce7c13216e477daf8a5397",
+  "release_branch": "feat/witness-public-release",
+  "platform": "linux/amd64",
+  "images": {
+    "gateway": "europe-west3-docker.pkg.dev/gen-456515/witness-runtime/gateway@sha256:8420c3c024870296849658906a4aecc0355f6982cc6f879b3d3d06ec93ed6201",
+    "worker": "europe-west3-docker.pkg.dev/gen-456515/witness-runtime/pods@sha256:b35199d08b6b735ccc88c29594863d350cf82764505af9fc9abb17fc84cbd028",
+    "controller_local_image_id": "sha256:6540b23421f95d04afb3fb642c4ac48fe4c0ab30238af66e554eebc6cc260370"
+  },
+  "runtime": {
+    "python": "3.14.9",
+    "node": "v22.23.3",
+    "proof_key_sha256": "6478059e4ad0d39e8c157c76cea9c6dd777c2ab5143cf8694876094facf39b16"
+  },
+  "production": {
+    "deployment": "witness-public-v3",
+    "origin": "https://witness.subnet404.xyz",
+    "gateway_pod_id": "xgig63objnx60p",
+    "previous_gateway_pod_id": "q2lgsywr1cc31u",
+    "previous_gateway_absence_confirmed": true,
+    "gateway_shape": {
+      "id": "cpu3c",
+      "memory": 8,
+      "vcpuCount": 4
+    },
+    "gateway_compute_usd_per_hour": 0.12,
+    "worker_vcpus": 8,
+    "worker_rollout": "No active worker Pods at cutover; future allocations use the new worker digest.",
+    "renderer_profile": {
+      "bootstrap_sha256": null,
+      "image_digest": "sha256:b35199d08b6b735ccc88c29594863d350cf82764505af9fc9abb17fc84cbd028",
+      "validation_sha256": "d25897d322ef8937714a97cc70b252f5a4b1d80d76887b52d60666c82b53bbb8"
+    },
+    "pricing": {
+      "sha256": "7a39f67c1381fd45f82e9f719776f83041174544124560cb5138e2fb4fcc77d6",
+      "model_count": 7,
+      "source": "Exact previously deployed pricing bytes",
+      "existing_rates_preserved": true
+    },
+    "health": {
+      "url": "https://witness.subnet404.xyz/health",
+      "checked_at_unix": 1793632515.8267908,
+      "http_status": 200,
+      "body": {
+        "status": "ready",
+        "transport": "pods-v1",
+        "receiver": "404-witness",
+        "round": "gpt-1",
+        "admission_ready": false
+      },
+      "headers": {
+        "Date": "Mon, 02 Nov 2026 15:15:15 GMT",
+        "Server": "cloudflare",
+        "cf-cache-status": "DYNAMIC"
+      }
+    },
+    "competition_state": {
+      "repository": "404-Repo/404-active-competition",
+      "revision": "fa631acfd6c620320502c00caa9efb4720e185d3",
+      "state": {
+        "current_round": 1,
+        "stage": "duels",
+        "next_stage_eta": null
+      }
+    }
+  },
+  "validation": {
+    "focused_worker_tests_passed": 41,
+    "gateway_recovery_recording_pricing_tests_passed": 119,
+    "existing_container_checks_passed": 5,
+    "gateway_image": {
+      "status": "passed",
+      "runtime_files": 65,
+      "role_help_checks": 7,
+      "verifier_health": "ready",
+      "python": "3.14.9",
+      "aiohttp": "3.14.4",
+      "openai": "3.35.1"
+    },
+    "native_gateway_preflight": {
+      "status": "passed",
+      "python": "3.14.9",
+      "pricing_sha256": "7a39f67c1381fd45f82e9f719776f83041174544124560cb5138e2fb4fcc77d6",
+      "model_count": 7,
+      "verifier_health": "ready"
+    },
+    "final_worker_image_r2_smoke": {
+      "status": "passed",
+      "source_commit": "641064151a8f3783fcce7c13216e477daf8a5397",
+      "runtime_files": 91,
+      "execution": "local linux/amd64 production image under emulation",
+      "cases": [
+        {
+          "case": "provider-401-poll-before-finalization",
+          "sha256": "be2de6dccf570c01bc0591b81d24b688758412f815cae7cda9e43c8387689d09",
+          "r2_verified": true,
+          "provider_status": 401
+        },
+        {
+          "case": "upload-outage-sigkill-recovery",
+          "sha256": "2197de3085789de492bc16178c8889aa620c1f547f45ac4550a6abbda0b9540b",
+          "r2_verified": true,
+          "provider_status": 401
+        }
+      ],
+      "spool_empty": true,
+      "independent_r2_hash_verification": true,
+      "diagnostic_secret_scan_passed": true,
+      "server_source_overlay": false,
+      "client_source_overlay": false,
+      "new_runpod_resources": false
+    },
+    "ruff": "passed",
+    "strict_mypy": "Limited to three existing missing torch/transformers dependency and associated unused-ignore diagnostics in shared/subnet_common/embeddings.py."
+  },
+  "limitations": [
+    "The final worker image R2 smoke ran locally under amd64 emulation; a new native Runpod worker canary was not run.",
+    "Process recovery used the retained spool after restarting the worker process; physical Pod replacement was not tested."
+  ],
+  "rollback": {
+    "production_host": "witness-public-frontend",
+    "configuration_backup_directory": "/var/lib/witness/releases/diagnostics-6410641",
+    "previous_gateway_image": "europe-west3-docker.pkg.dev/gen-456515/witness-runtime/gateway@sha256:892396fbdd45354d7734590c787527d7eaa47ebc606f3db3f4d5b65533768aa8",
+    "previous_worker_image": "europe-west3-docker.pkg.dev/gen-456515/witness-runtime/pods@sha256:4bfdaf5c7dcee7c623c9b83a62f3dd25736ad52f11e71aaf31406f65b980939e"
+  },
+  "client_source_changes": false,
+  "client_artifacts_published": false
+}
