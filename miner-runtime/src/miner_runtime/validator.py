@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
-from typing import TypedDict, TypeVar
+from typing import TypeVar
 
 from witness_client.calls import RequestKey
 from witness_client.client import CapturedResponse
@@ -24,11 +24,6 @@ from .observations import (
 )
 
 R = TypeVar("R")
-
-
-class CaptureMetadata(TypedDict):
-    model: str
-    usage: object
 
 
 class ReplayWitness(ObservedWitness):
@@ -51,7 +46,7 @@ class ReplayWitness(ObservedWitness):
         super().__init__(Schedule(
             Execution(inputs=execution.inputs, provider=execution.provider), timeout=timeout, record=True,
         ))
-        self.captures: dict[str, tuple[CallView, CaptureMetadata]] = {}
+        self.captures: dict[str, tuple[CallView, dict[str, object]]] = {}
         for item in self.bundle["captures"].values():
             call = CallView.model_validate(item["call"])
             if call.phase != "issued":
@@ -93,9 +88,12 @@ class ReplayWitness(ObservedWitness):
             if entry.outcome != "return":
                 raise ReplayMismatch("A saved response was unavailable during replay")
             call, item = self.captures[entry.request.id]
+            model = item["model"]
+            if not isinstance(model, str):
+                raise ReplayMismatch("Invalid verified model")
             self.budget.consume(
                 entry.request.id,
-                item["model"],
+                model,
                 item["usage"],
                 not_dispatched=call.not_dispatched and not call.authorized,
             )
