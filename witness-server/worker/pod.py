@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import json
 import os
+import platform
 import shutil
 import signal
 import threading
@@ -18,8 +19,17 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from channel import Channel
-from pod_gateway.budget import Budget, BudgetNotReserved
+from diagnostics import (
+    DiagnosticRecord,
+    ExchangeIdentity,
+    FailureFact,
+    FailureObservation,
+    Operation,
+    RuntimeIdentity,
+    failure_fact,
+)
 from pod_gateway.auth import AuthRejected
+from pod_gateway.budget import Budget, BudgetNotReserved
 from pod_gateway.models import Scope, identifier, json_bytes, object_dict
 from pod_gateway.records import Call, CallRecords
 from pod_gateway.recovery import recover_issued, response_failure
@@ -28,7 +38,7 @@ from pod_gateway.rounds import RoundInputs, RoundPolicy
 from pod_gateway.selection import Selection
 from pod_gateway.state import WriteUncertain
 from storage import Store
-from timing import identify_exchange, measure, timed
+from timing import diagnostic_error, identify_exchange, measure, timed
 from websockets.sync.client import connect
 from websockets.sync.connection import Connection
 from witness_client.calls import RequestKey
@@ -74,6 +84,9 @@ class PodRuntime:
         self.scope, self.start_id, self.pod_id = scope, identifier(start_id), pod_id
         self.token, self.origin = token, f"wss://{url.netloc}"
         self.proof_hash, self.round_end = proof_hash, round_end
+        self.runtime_identity = RuntimeIdentity(
+            python_version=platform.python_version(), pod_spec_sha256=os.environ.get("WITNESS_POD_SPEC"),
+        )
         if round_inputs is not None and round_inputs.round != scope.round:
             raise ValueError("Frozen inputs belong to another round")
         self.round_inputs = round_inputs
@@ -159,9 +172,40 @@ class PodRuntime:
         if directory.is_dir():
             save(directory / "failure.json", data)
         self.evidence.put(
-            f"{self.storage_prefix}rounds/{self.scope.round}/{self.scope.hotkey}/{call.exchange_id}/failure.json",
-            data,
+            f"{self.storage_prefix}rounds/{self.scope.round}/{self.scope.hotkey}/{call.exchange_id}/failure.json", data,
         )
+
+    def _save_diagnostic(self, call: Call, failure: FailureFact, operation: Operation) -> None:
+        """Only the exchange's capture/recovery task writes its immutable records."""
+        try:
+            record = DiagnosticRecord(
+                observed_at_ns=time.time_ns(), operation=operation, failure=failure,
+                identity=ExchangeIdentity(
+                    deployment=self.scope.deployment, round=self.scope.round, hotkey=self.scope.hotkey,
+                    call_id=call.request.id, exchange_id=call.exchange_id,
+                    pod_id=self.pod_id, pod_start_id=self.start_id, proof_key_sha256=self.proof_hash,
+                    pricing_sha256=self.budget.pricing_hash, runtime=self.runtime_identity,
+                ),
+            )
+            directory = self.spool / identifier(call.exchange_id) / "diagnostics"
+            directory.mkdir(mode=0o700, exist_ok=True)
+            path = directory / (record.record_id() + ".json")
+            if not path.exists():
+                save(path, record.model_dump_json().encode())
+        except (OSError, ValueError) as error:
+            diagnostic_error(call.exchange_id, "save", error)
+
+    def _upload_diagnostics(self, exchange_id: str) -> None:
+        directory = self.spool / identifier(exchange_id) / "diagnostics"
+        prefix = f"{self.storage_prefix}rounds/{self.scope.round}/{self.scope.hotkey}/{exchange_id}/diagnostics/"
+        for path in sorted(directory.glob("*.json")):
+            self.evidence.put(prefix + path.name, path.read_bytes())
+
+    def _try_upload_diagnostics(self, exchange_id: str) -> None:
+        try:
+            self._upload_diagnostics(exchange_id)
+        except Exception as error:  # noqa: BLE001 - retain diagnostic uploads without changing the call outcome
+            diagnostic_error(exchange_id, "upload", error)
 
     def start_capture(self, invocation: RequestKey, call: Call, channel: Channel) -> bool:
         with self.lock:
@@ -291,8 +335,10 @@ class PodRuntime:
             failure = "CaptureInterrupted"
             # Finishing retained TLS bytes cannot open a provider connection.
             if call.authorized:
+                observation = FailureObservation()
                 try:
-                    metadata = verify("finish", directory, provider=invocation.provider)
+                    metadata = verify("finish", directory, provider=invocation.provider,
+                                      observe_failure=observation.observe)
                     metadata.update(
                         {
                             **self._binding(invocation, call),
@@ -301,8 +347,10 @@ class PodRuntime:
                             "exchange_id": exchange_id,
                         }
                     )
-                except Exception as error:  # noqa: BLE001 - retain evidence until verification completes
+                except Exception as error:
                     metadata, failure = None, type(error).__name__
+                    self._save_diagnostic(call, observation.failure or failure_fact(error, "recovery_verify"), "recovery")
+                    self._try_upload_diagnostics(exchange_id)
                     # Transient verification outages retain the spool for another check.
                     self.evidence.put(
                         f"{self.storage_prefix}rounds/{self.scope.round}/{self.scope.hotkey}/{exchange_id}/status.json",
@@ -326,6 +374,7 @@ class PodRuntime:
                     file = directory / name
                     if file.is_file():
                         self.evidence.put(prefix + name, file.read_bytes())
+            self._upload_diagnostics(exchange_id)
             with suppress(FileNotFoundError):
                 shutil.rmtree(directory)
 
@@ -377,6 +426,8 @@ class PodRuntime:
         failure = "CaptureFailed"
         not_dispatched = True
         finalized = False
+        observation = FailureObservation()
+        cleanup: bool | None = None
         try:
             # No provider connection may open while a pending claim can be recovered as unstarted.
             (directory / "pending-claim").unlink(missing_ok=True)
@@ -408,8 +459,9 @@ class PodRuntime:
                     not_dispatched = False
                     try:
                         self.budget.reserve(self.scope, invocation, call.exchange_id, body)
-                    except BudgetNotReserved:
+                    except BudgetNotReserved as error:
                         not_dispatched = True
+                        observation.observe(failure_fact(error, "dispatch_reservation", reason=error.reason))
                         raise
                     deadline = self.records.authorize(self.scope, invocation, self.pod_id, exchange_id=call.exchange_id)
                     self.require_generation()
@@ -418,8 +470,8 @@ class PodRuntime:
                     return time.monotonic() + deadline - time.time()
 
             def complete(final: dict[str, object]) -> None:
-                nonlocal finalized
-                self._finalize(invocation, call, final, failure)
+                nonlocal finalized, cleanup
+                cleanup = self._finalize(invocation, call, final, failure, defer_cleanup=True)
                 finalized = True
 
             metadata = relay(
@@ -427,7 +479,7 @@ class PodRuntime:
                 prefix,
                 None,
                 directory,
-                partial(verify, provider=invocation.provider),
+                partial(verify, provider=invocation.provider, observe_failure=observation.observe),
                 channel,
                 round_number=self.scope.round,
                 hotkey=self.scope.hotkey,
@@ -437,17 +489,20 @@ class PodRuntime:
                 extra_metadata=self._binding(invocation, call),
                 seal=partial(self.publish, call.exchange_id),
                 before_delivery=complete,
+                observe_failure=observation.observe,
             )
         except Exception as error:  # noqa: BLE001 - seal a captured outcome before cleanup
             failure = type(error).__name__
+            self._save_diagnostic(call, observation.failure or failure_fact(error, "capture"), "capture")
             # R2 can fail after the full provider response was captured. Finish
             # from that local spool, never by opening a new provider connection.
             if (directory / "authorization.json").is_file() and (
                 directory / "server.bin"
             ).is_file():
+                recovery = FailureObservation()
                 try:
                     metadata = verify(
-                        "finish", directory, provider=invocation.provider
+                        "finish", directory, provider=invocation.provider, observe_failure=recovery.observe,
                     )
                     metadata.update(
                         {
@@ -457,31 +512,41 @@ class PodRuntime:
                             "exchange_id": call.exchange_id,
                         }
                     )
-                except ValueError:
-                    pass
-                except Exception:  # noqa: BLE001 - retry verification without another provider request
-                    if not not_dispatched:
+                except Exception as error:  # noqa: BLE001 - finish or retain the capture without another provider request
+                    self._save_diagnostic(call, recovery.failure or failure_fact(error, "recovery_verify"), "recovery")
+                    if not isinstance(error, ValueError) and not not_dispatched:
                         self._recover(call.exchange_id)
                         finalized = True
         if not finalized:
             self._finalize(invocation, call, metadata, failure, not_dispatched=not_dispatched)
         with suppress(OSError):
             channel.finish()
+        if cleanup is not None:
+            self._cleanup(call.exchange_id, save_evidence=cleanup)
 
     def _finalize(
         self, invocation: RequestKey, call: Call, metadata: dict[str, object] | None, failure: str, *,
-        not_dispatched: bool = False,
-    ) -> None:
+        not_dispatched: bool = False, defer_cleanup: bool = False,
+    ) -> bool:
         directory = self.spool / identifier(call.exchange_id)
         prefix = f"{self.storage_prefix}rounds/{self.scope.round}/{self.scope.hotkey}/{call.exchange_id}"
+        save_evidence = False
         if metadata is not None:
             final = metadata
 
             def issued() -> None:
+                nonlocal save_evidence
+                rejected = response_failure(final, (directory / "response.sse").read_bytes())
+                if rejected is not None:
+                    status = final.get("provider_status")
+                    self._save_diagnostic(call, FailureFact(
+                        stage="provider_response", reason=rejected,
+                        provider_status=status if isinstance(status, int) else None,
+                    ), "outcome")
                 located = self.records.locate(self.scope, call.exchange_id)
                 if located is None:
                     if self.records.replaced(self.scope, call.exchange_id):
-                        self._cleanup(call.exchange_id, save_evidence=True)
+                        save_evidence = True
                         return
                     raise RuntimeError("Capture record is missing")
                 current = located[1]
@@ -489,9 +554,8 @@ class PodRuntime:
                     return
                 if current.phase == "failed":
                     self.save_failure(current)
-                    self._cleanup(call.exchange_id, save_evidence=True)
+                    save_evidence = True
                     return
-                rejected = response_failure(final, (directory / "response.sse").read_bytes())
                 if rejected is not None:
                     self.budget.discard(self.scope, invocation, call.exchange_id)
                     self.records.failed(
@@ -545,10 +609,11 @@ class PodRuntime:
         else:
 
             def failed() -> None:
+                nonlocal save_evidence
                 located = self.records.locate(self.scope, call.exchange_id)
                 if located is None:
                     if self.records.replaced(self.scope, call.exchange_id):
-                        self._cleanup(call.exchange_id, save_evidence=True)
+                        save_evidence = True
                         return
                     raise RuntimeError("Capture record is missing")
                 recovered = recover_issued(
@@ -558,7 +623,7 @@ class PodRuntime:
                 if recovered.manifest_sha256 is not None:
                     if recovered.phase == "failed":
                         self.save_failure(recovered)
-                        self._cleanup(call.exchange_id, save_evidence=True)
+                        save_evidence = True
                     return
                 failure_reason = recovered.failure or failure
                 if not_dispatched is False or recovered.authorized:
@@ -587,7 +652,9 @@ class PodRuntime:
                             prefix + "/" + file.name, file.read_bytes()
                         )
             self._retry_upload(failed)
-        self._cleanup(call.exchange_id)
+        if not defer_cleanup:
+            self._cleanup(call.exchange_id, save_evidence=save_evidence)
+        return save_evidence
 
     def _send(self, socket: Connection, data: dict[str, object]) -> None:
         socket.send(json_bytes(data).decode())

@@ -84,8 +84,8 @@ export async function run(mode, directory, params, provider, overrides = {}) {
     result = finishAuthorizedResponse([server], {
       ...saved, requestBody: Buffer.from(saved.requestBody, 'base64'),
     });
-  } catch {
-    throw new RejectedEvidence('Witness verification rejected the exchange');
+  } catch (error) {
+    throw new RejectedEvidence('Witness verification rejected the exchange', {cause: error});
   }
   writeFileSync(join(directory, 'response.sse'), result.responseBody);
   return { request_sha256: result.request_sha256, response_sha256: result.response_sha256,
@@ -99,6 +99,18 @@ if (import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   try {
     console.log(JSON.stringify(await run(...process.argv.slice(2))));
   } catch (error) {
+    const cause = error.cause instanceof Error ? error.cause : error;
+    const stack = [];
+    for (const frame of (cause.stack ?? '').split('\n').slice(1)) {
+      const location = frame.match(/\/(worker|verifier)\/([A-Za-z0-9_.-]+\.mjs):(\d+):(\d+)\)?$/);
+      if (!location) continue;
+      const name = frame.match(/^\s+at (?:async )?([A-Za-z_$][A-Za-z0-9_.$]*) \(/);
+      stack.push({file: `${location[1]}/${location[2]}`, function: name?.[1] ?? null,
+        line: Number(location[3]), column: Number(location[4])});
+      if (stack.length === 32) break;
+    }
+    console.error(JSON.stringify({event: 'witness_verifier_failure', mode: process.argv[2],
+      error_type: cause.name, stack}));
     if (!(error instanceof RejectedEvidence) && !(process.argv[2] === 'finish' && error.code === 'ENOENT')) throw error;
     console.error('Witness verification rejected the exchange');
     process.exitCode = 2;

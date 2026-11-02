@@ -25,6 +25,10 @@ class BudgetRejected(RuntimeError):
 class BudgetNotReserved(BudgetRejected):
     """This reservation made no accepted or uncertain dispatch write."""
 
+    def __init__(self, message: str, *, reason: str = "budget_not_reserved") -> None:
+        self.reason = reason
+        super().__init__(message)
+
 
 class Charge(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
@@ -90,21 +94,24 @@ class Budget:
         self, scope: Scope, invocation: RequestKey, exchange_id: str, body: bytes,
     ) -> None:
         if request_digest(body) != invocation.request_sha256:
-            raise BudgetNotReserved("Verified request differs from reserved request hash")
+            raise BudgetNotReserved("Verified request differs from reserved request hash", reason="request_hash_mismatch")
         request = json.loads(body)
         model = request.get("model")
         if request.get("service_tier") == "flex":
-            raise BudgetNotReserved("Unknown model or unsupported service tier")
+            raise BudgetNotReserved("Unknown model or unsupported service tier", reason="unsupported_service_tier")
         try:
             self._require_model(model)
         except Exception as error:
-            raise BudgetNotReserved("Unknown model or unavailable pricing") from error
+            raise BudgetNotReserved(
+                "Unknown model or unavailable pricing",
+                reason="unsupported_model" if isinstance(error, BudgetRejected) else "pricing_unavailable",
+            ) from error
         base = self.charge_key(invocation)
         for _ in range(16):
             try:
                 ledger, etag = self._load(scope, invocation)
             except Exception as error:
-                raise BudgetNotReserved("Call ledger could not be read") from error
+                raise BudgetNotReserved("Call ledger could not be read", reason="ledger_read_failed") from error
             if base in ledger.charges:
                 raise BudgetRejected("This call already has a possible dispatch")
             ledger.charges[base] = Charge(exchange_id=exchange_id, model=model)
@@ -115,8 +122,8 @@ class Budget:
             except StateConflict:
                 continue
             except WriteRejected as error:
-                raise BudgetNotReserved("Call ledger write was rejected") from error
-        raise BudgetNotReserved("Call ledger is busy")
+                raise BudgetNotReserved("Call ledger write was rejected", reason="ledger_write_rejected") from error
+        raise BudgetNotReserved("Call ledger is busy", reason="ledger_busy")
 
     def discard(self, scope: Scope, invocation: RequestKey, exchange_id: str) -> None:
         for _ in range(16):
