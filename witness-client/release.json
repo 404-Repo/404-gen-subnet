@@ -1,6 +1,6 @@
 {
   "release": "witness-0.2.17-runtime-0.1.5",
-  "status": "Integrated, pushed and installed; GitHub draft awaiting the inherited CRAP-score exception",
+  "status": "Published on GitHub Releases; source pushed and exact release packages installed in both launchers",
   "release_tag": "miner-runtime-v0.1.5",
   "source_commit": "eb45a121c9e02175aeca11b348e050a0aee063ac",
   "source_archive_sha256": "88efe283c84e3807666bc707a4c93e1bc4c4c273937b1ecbb71c00c35cb1b72a",
@@ -162,7 +162,13 @@
         "function": "miner_runtime.batch.run",
         "coverage_percent": 94.6,
         "threshold": "< 10",
-        "status": "inherited-score exception pending; other affected functions below 10"
+        "status": "Inherited threshold failure accepted for this integration; all other affected functions below 10",
+        "exception": {
+          "status": "accepted",
+          "date": "2026-11-02",
+          "scope": "Existing common batch run() only",
+          "decision": "Retain the common implementation unchanged for this integration; refactoring remains a separate follow-up"
+        }
       },
       "dryer": {
         "threshold": 0.8,
@@ -182,9 +188,15 @@
     },
     "local_installation": {
       "base_miner": "Exact three wheel members verified in the existing Python 3.13.0 environment; original --help reproduction now passes",
-      "leader": "Exact three wheel members verified in the existing Python 3.13.0 environment",
+      "leader": "Exact three release wheels installed from the public SDK requirements URL; every package member verified",
       "non_sdk_package_versions": "Unchanged in both environments",
       "completed_leader_index": "Unchanged"
+    },
+    "public_installation": {
+      "linux_python3.13": "Fresh pip install of both committed launcher dependency files from public URLs; pip check and miner main.py --help passed; installed members match the tested artifacts",
+      "macos_python3.13": "Fresh Poetry environment with an empty cache; locked installation from public URLs, pip check, main.py --help and installed-member comparison passed",
+      "downloads": "All seven release assets retrieved without authentication with HTTP 200 and matching SHA-256",
+      "local_origins": "Both existing launcher environments identify the public release URLs for all three SDK distributions"
     }
   },
   "dependency_findings": [
@@ -201,11 +213,13 @@
     }
   ],
   "publication": {
-    "github_release": "Draft uploaded; all seven asset digests verified against the tested local files",
+    "github_release": "Published; all seven public downloads match the exact tested artifact hashes",
     "github_url": "https://github.com/404-Repo/404-gen-subnet/releases/tag/miner-runtime-v0.1.5",
     "pypi": "Not published; the three names return HTTP 404 and no PyPI token or configured trusted publisher is available",
-    "draft_url": "https://github.com/404-Repo/404-gen-subnet/releases/tag/untagged-38e7f50dbbdbea713f2d",
-    "source_tags": "Pushed without replacement"
+    "source_tags": "Pushed without replacement",
+    "published_at": "2026-11-02T07:01:59Z",
+    "install_url": "https://github.com/404-Repo/404-gen-subnet/releases/download/miner-runtime-v0.1.5/sdk-requirements.txt",
+    "anonymous_download_status": 200
   },
   "preserved_prepared_bundle": {
     "filename": "404-witness-sdk-0.2.17-linux-x86_64.zip",
