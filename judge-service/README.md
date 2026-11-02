@@ -11,43 +11,91 @@ This document focuses on the logic and reasoning behind each layer. For exact th
 
 ## Round flow (tournament layer)
 
-Each round produces one winner from a pool of miners.
+Each competitor provides one result bundle: miners use
+`rounds/{n}/{hotkey}/generated.json`, and the previous leader uses
+`rounds/{n}/leader/generated.json`. Both use the same result schema. The same
+Three.js modules, rendered views and embeddings are compared throughout the round.
+How those outputs were produced is outside the judge's boundary.
 
-1. **Qualification.** Every miner first plays the previous round's winner ("base leader"). They have to win by a margin of at least 5% across all prompts to qualify. This stops weak submissions from polluting the timeline and gives the previous champion a meaningful defence.
+1. **Qualification.** Miners play the base leader. A margin of at least
+   `config.win_margin` qualifies them. Qualification follows the collector's order
+   in `submissions.json`.
+2. **Timeline.** Qualified miners play the current chain defender in that order.
+   A margin of at least `win_margin` advances the challenger. Every local winner
+   gets one validation request, including provisional leaders whose own checks
+   are still pending.
+3. **Exploratory duels.** While external verdicts are pending, remaining pairwise
+   matches between non-rejected qualifiers fill the existing match cache.
+4. **Eligibility.** A failed validation **or** a failed source audit rejects a
+   candidate. Its successor is evaluated against the remaining chain using cached
+   matches; changing defenders never requires another validation pass.
+5. **Finalization.** Every local winner in the surviving chain must have both a
+   passed validation and a passed source audit. Verification also requires a
+   verified defender. Missing verdicts keep the round open. The base leader is the
+   existing verified baseline; with no qualifiers it retains the round.
 
-2. **Main timeline.** Qualified miners are ordered by submission time and play sequentially. Whoever beats the current leader becomes the new leader. Every miner who held the lead is sent for verification — we only crown a winner whose source-and-build has been independently confirmed to actually produce their submission.
+A single candidate-validation pass does not limit the number of timeline rebuilds,
+miner matches, or stages inside a VLM duel.
 
-3. **Exploratory duels.** Verification is slow, so while we wait we precompute the remaining pairwise matches. If verification fails we already have results in hand to assemble a different timeline without re-judging from scratch.
+## Judging and validation boundary
 
-4. **Verification check.** All leaders pass verification → the round is over. Any leader fails → that timeline is discarded; we restart with the remaining miners.
+The judge owns tournament comparisons, match reports, ordering, caching and winner
+selection. The validator owns replay execution, recorded request/response matching,
+output verification and budget checks. The judge neither regenerates candidate
+outputs nor compares a submission with a regenerated copy.
 
-5. **Repeat** until a verified timeline emerges.
+Validation uses its own Git request and result channels. For round 7:
 
-### Verification: how a miner is "audited"
+`rounds/7/validation_requests.json` (judge writes, validator reads):
 
-Verification answers a single question: *if we re-run the miner's own Docker image on the same prompts, does it actually produce something at least as good as what they submitted?* If yes, the submission is real. If the regeneration is clearly worse than the submission, the submission was likely not produced by the source the miner published — and the leader is rejected.
+```json
+[
+  {"hotkey": "miner-a"},
+  {"hotkey": "miner-b"}
+]
+```
 
-The flow is split between two services:
+Requests are append-only and deduplicated by hotkey within the round, including
+across judge restarts. There is no defender or repeat index in a request.
 
-1. **Judge service requests an audit** by adding the miner's hotkey to `require_audit.json`. This happens automatically the moment a miner becomes a (qualifying or local) leader.
-2. **Generation orchestrator picks up the request, regenerates, and renders.** It runs the miner's Docker image on the round's prompts, then renders the resulting models into the same view bundles the judge consumes. Its job ends there — *it does not grade the result.*
-3. **Judge service runs a verification duel** between the miner's submitted bundle and the freshly regenerated bundle, prompt-by-prompt, using the same multi-stage judge described below.
-4. **Pass condition: 0% margin in favor of `generated`.** The audit passes if the duel comes back as a draw *or* with `generated` winning. Equivalently, the miner only fails if their submission strictly beats their own regeneration on a net of prompts — a strong sign the submission was not produced by the published code.
+`rounds/7/validation_results.json` (validator writes, judge reads):
 
-This 0% margin is intentionally tighter than the 5% used in the tournament. The tournament margin exists to avoid coin-flip wins between two independent miners; the audit is a self-check, so any net loss for `generated` is suspicious.
+```json
+{
+  "miner-a": {"verdict": "passed", "reason": ""},
+  "miner-b": {"verdict": "failed", "reason": "Replay output differs for prompt chair"}
+}
+```
 
-#### Why the orchestrator no longer grades
+The round path and map key identify one validation result. The validator publishes
+one terminal verdict per requested hotkey, retains previously published results
+when adding candidates, and supplies a nonempty reason for a failure. A missing
+file or missing hotkey means queued/in-progress validation: the judge waits. The
+validator must leave infrastructure failures unresolved and retry them, rather
+than publish a miner failure. Storage/read errors and malformed result files
+propagate as service errors; the judge does not convert them into a rejection.
 
-A previous design had the generation orchestrator decide pass/reject directly — by computing DINOv3 distances between submitted and regenerated outputs, plus a match-rate threshold. We moved away from this because individual generations are not deterministic: the same source code re-run on the same prompt will not produce a pixel- or geometry-identical model, and a per-prompt distance metric is too fragile a basis for accept/reject decisions. Putting the verdict in the same VLM-based duel pipeline as the tournament turns out to be both more forgiving of harmless variance and more reliable at catching real source/submission mismatches, because the same multi-stage gates that make tournament duels robust also apply here.
+Source audit remains independent: its producer still uses `save_source_audits`
+and writes `source_audit.json` as a list of `{hotkey, verdict, reason}` objects.
+The judge reads it through `get_source_audits`. A source failure rejects immediately,
+even if validation passed or is absent; a missing source audit blocks verification,
+even when validation passed. A validation failure similarly rejects without waiting
+for a source verdict. Neither service infers or overwrites the other's verdict.
+The judge announces eligibility through timeline changes.
+
+Final winner metadata comes from the submitted repository and commit, or the
+existing leader record on a defense. `winner.json` needs no Docker image or GPU
+declaration. The integrated round-manager uses this source identity and writes
+`docker=""` for new leaders; the shared leader model retains that empty-default
+string for legacy weight setters. The required producers are listed in
+[shared/README.md](../shared/README.md#required-producers).
 
 ## Duel judge (the multi-stage judge)
 
-A duel is "given a reference image and two 3D models, which one is a more faithful reproduction?" The output is `LEFT`, `RIGHT`, or `DRAW`. The exact same pipeline runs both kinds of duels:
-
-- **Tournament duel:** miner A's submission vs miner B's submission. The aggregator demands a 5% margin to commit a winner.
-- **Verification duel:** one miner's submission vs that same miner's freshly regenerated outputs. The aggregator passes the audit on any non-loss for `generated` (0% margin — see [Verification](#verification-how-a-miner-is-audited)).
-
-Inside a single duel, both cases use identical logic; only the surrounding match-level threshold differs.
+A duel is "given a reference image and two 3D models, which one is a more faithful
+reproduction?" The output is `LEFT`, `RIGHT`, or `DRAW`. This pipeline is used for
+miner-vs-miner tournament matches. Validation verdicts come from the separate replay
+validator and do not run through the VLM pipeline.
 
 The judge uses a vision-language model (VLM), but a single VLM call is too noisy and too biased to trust on its own. So instead of one big question, the judge runs a pipeline of cheaper, narrower questions, each targeting a specific failure mode of 3D generation. Earlier stages can short-circuit the rest; later stages only run when the picture is still ambiguous.
 
@@ -132,24 +180,26 @@ The service reads from and writes to the competition Git repository:
 
 | File | R/W | Description |
 |------|-----|-------------|
-| `state.json` | R | Current round and stage |
+| `state.json` | R/W | Current round and stage |
 | `rounds/{n}/matches_matrix.csv` | R/W | All match results |
-| `rounds/{n}/require_audit.json` | W | Miners the judge wants regenerated for an audit (consumed by generation orchestrator) |
-| `rounds/{n}/{hotkey}/generated.json` | R | Freshly regenerated GLB/PNG locations produced by the orchestrator |
-| `rounds/{n}/generation_audits.json` | R/W | Pass/reject verdict from the judge's `submitted` vs `generated` duel |
+| `rounds/{n}/validation_requests.json` | W | One validation request per local winner (validator consumes) |
+| `rounds/{n}/{hotkey}/generated.json` | R | Miner's Three.js results, views and failure details |
+| `rounds/{n}/leader/generated.json` | R | Previous leader's single result bundle for this round's prompts |
+| `rounds/{n}/validation_results.json` | R | Validator's terminal passed/failed result per hotkey; absent while pending |
 | `rounds/{n}/source_audit.json` | R | Source-level audit results (independent check on the published code) |
 | `rounds/{n}/{hotkey}/duels_*.json` | W | Detailed match reports |
-| `rounds/{n}/winner.json` | W | Final winner |
+| `rounds/{n}/winner.json` | W | Winner hotkey and submitted source repository/commit |
 
 ## Development
 
 ```bash
 poetry install
 poetry poe lint
+poetry poe test
 ```
 
 ## Running
 
 ```bash
-poetry run python -m judge_service.main
+poetry run python main.py
 ```

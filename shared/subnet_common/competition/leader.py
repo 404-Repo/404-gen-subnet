@@ -1,6 +1,5 @@
 from pydantic import BaseModel, Field, TypeAdapter
 
-from subnet_common.competition.submissions import DEFAULT_HARDWARE
 from subnet_common.github import GitHubClient
 
 
@@ -8,11 +7,7 @@ class LeaderEntry(BaseModel):
     hotkey: str = Field(description="Miner hotkey")
     repo: str = Field(description="GitHub repo")
     commit: str = Field(description="Git commit SHA")
-    docker: str = Field(description="Docker image")
-    hardware: list[str] = Field(
-        default_factory=lambda: [DEFAULT_HARDWARE],
-        description="Verification GPU configurations the leader's pipeline targets",
-    )
+    docker: str = Field(default="", description="Legacy weight-setter compatibility; unused for Python generation")
     weight: float = Field(description="Weight set by validators")
     effective_block: int = Field(description="Block when this leader becomes active")
 

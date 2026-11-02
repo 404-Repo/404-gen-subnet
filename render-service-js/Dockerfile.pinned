@@ -1,0 +1,17 @@
+# The immutable upstream image includes Chrome for Testing and its system libraries.
+# Release this profile for linux/amd64 and use the resulting image digest in both
+# generation and validation. It leaves the existing deployment Dockerfile untouched.
+FROM ghcr.io/puppeteer/puppeteer:24.40.0@sha256:de1c985f0af848b07599cdb20ec0509b1a69927cf466b65cf56eb706cc4245fb
+
+USER root
+WORKDIR /app
+ENV PUPPETEER_SKIP_DOWNLOAD=true
+ENV PORT=8000
+
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev
+COPY src/ src/
+
+USER pptruser
+EXPOSE 8000
+CMD ["node", "src/server.js"]

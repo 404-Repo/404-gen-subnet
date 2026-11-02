@@ -1,0 +1,364 @@
+{
+  "date": "2026-10-02",
+  "source_commit": "b437cd269cca21ac7981769aa41b8cd910e48636",
+  "tool": "pip-audit 2.10.1",
+  "service": "PyPI",
+  "strict": true,
+  "suppressed_advisories": [],
+  "scope": "All third-party packages installed in each test environment, including build/test tools. The local unpublished witness distribution is excluded from the Linux dependency audit.",
+  "before": {
+    "cryptography": {
+      "version": "46.0.5",
+      "pypi_advisory_records": 11,
+      "distinct_advisories": [
+        "GHSA-m959-cc7f-wv43",
+        "GHSA-p423-j2cm-9vmq",
+        "GHSA-537c-gmf6-5ccf",
+        "GHSA-m2h6-j472-rp4c",
+        "GHSA-g6cj-pr64-35w5",
+        "GHSA-jwv3-5hgf-82ww"
+      ],
+      "source": "https://pypi.org/pypi/cryptography/46.0.5/json"
+    },
+    "setuptools": {
+      "version": "80.9.0",
+      "advisory": "GHSA-h35f-9h28-mq5c"
+    },
+    "wheel": {
+      "version": "0.45.1",
+      "advisory": "GHSA-8rrh-rw8j-w5fx"
+    },
+    "pytest": {
+      "version": "8.4.2",
+      "advisory": "GHSA-6w46-j5rx-g56g"
+    }
+  },
+  "provider_certificate_regression": {
+    "test": "tests/test_certificates.py::test_provider_certificate_policy[excluded]",
+    "old_version": "46.0.5 accepted a wildcard for an explicitly excluded hostname",
+    "new_version": "50.0.2 rejects the certificate",
+    "additional_checks": [
+      "valid wildcard accepted",
+      "permitted subtree enforced",
+      "wrong hostname rejected",
+      "expired certificate rejected"
+    ]
+  },
+  "macos": {
+    "packages": 30,
+    "distinct_advisories": 1,
+    "exit_code": 1,
+    "dependencies": [
+      {
+        "name": "anyio",
+        "version": "4.15.1",
+        "advisories": []
+      },
+      {
+        "name": "ast-serialize",
+        "version": "0.11.2",
+        "advisories": []
+      },
+      {
+        "name": "bittensor-wallet",
+        "version": "4.1.1",
+        "advisories": []
+      },
+      {
+        "name": "build",
+        "version": "1.6.1",
+        "advisories": []
+      },
+      {
+        "name": "certifi",
+        "version": "2026.7.22",
+        "advisories": []
+      },
+      {
+        "name": "cffi",
+        "version": "2.1.1",
+        "advisories": []
+      },
+      {
+        "name": "cryptography",
+        "version": "50.0.2",
+        "advisories": []
+      },
+      {
+        "name": "ecdsa",
+        "version": "0.19.2",
+        "advisories": [
+          {
+            "id": "PYSEC-2026-1325",
+            "aliases": [
+              "GHSA-wj6h-64fc-37mp",
+              "CVE-2024-23342"
+            ],
+            "fix_versions": []
+          }
+        ]
+      },
+      {
+        "name": "h11",
+        "version": "0.16.0",
+        "advisories": []
+      },
+      {
+        "name": "httpcore",
+        "version": "1.0.9",
+        "advisories": []
+      },
+      {
+        "name": "httpx",
+        "version": "0.28.1",
+        "advisories": []
+      },
+      {
+        "name": "idna",
+        "version": "3.20",
+        "advisories": []
+      },
+      {
+        "name": "iniconfig",
+        "version": "2.3.0",
+        "advisories": []
+      },
+      {
+        "name": "librt",
+        "version": "0.16.0",
+        "advisories": []
+      },
+      {
+        "name": "mypy",
+        "version": "2.3.1",
+        "advisories": []
+      },
+      {
+        "name": "mypy-extensions",
+        "version": "1.1.0",
+        "advisories": []
+      },
+      {
+        "name": "packaging",
+        "version": "26.3",
+        "advisories": []
+      },
+      {
+        "name": "pathspec",
+        "version": "1.1.1",
+        "advisories": []
+      },
+      {
+        "name": "pluggy",
+        "version": "1.6.0",
+        "advisories": []
+      },
+      {
+        "name": "pycparser",
+        "version": "3.0",
+        "advisories": []
+      },
+      {
+        "name": "pygments",
+        "version": "2.21.0",
+        "advisories": []
+      },
+      {
+        "name": "pyproject-hooks",
+        "version": "1.3.3",
+        "advisories": []
+      },
+      {
+        "name": "pytest",
+        "version": "9.1.1",
+        "advisories": []
+      },
+      {
+        "name": "setuptools",
+        "version": "84.0.0",
+        "advisories": []
+      },
+      {
+        "name": "six",
+        "version": "1.17.0",
+        "advisories": []
+      },
+      {
+        "name": "tlslite-ng",
+        "version": "0.8.2",
+        "advisories": []
+      },
+      {
+        "name": "types-setuptools",
+        "version": "84.0.0.20260812",
+        "advisories": []
+      },
+      {
+        "name": "typing-extensions",
+        "version": "4.16.0",
+        "advisories": []
+      },
+      {
+        "name": "websockets",
+        "version": "15.0.1",
+        "advisories": []
+      },
+      {
+        "name": "wheel",
+        "version": "0.48.0",
+        "advisories": []
+      }
+    ]
+  },
+  "linux": {
+    "packages": 25,
+    "distinct_advisories": 1,
+    "exit_code": 1,
+    "dependencies": [
+      {
+        "name": "pygments",
+        "version": "2.21.0",
+        "advisories": []
+      },
+      {
+        "name": "anyio",
+        "version": "4.15.1",
+        "advisories": []
+      },
+      {
+        "name": "bittensor-wallet",
+        "version": "4.1.1",
+        "advisories": []
+      },
+      {
+        "name": "build",
+        "version": "1.6.1",
+        "advisories": []
+      },
+      {
+        "name": "certifi",
+        "version": "2026.7.22",
+        "advisories": []
+      },
+      {
+        "name": "cffi",
+        "version": "2.1.1",
+        "advisories": []
+      },
+      {
+        "name": "cryptography",
+        "version": "50.0.2",
+        "advisories": []
+      },
+      {
+        "name": "ecdsa",
+        "version": "0.19.2",
+        "advisories": [
+          {
+            "id": "PYSEC-2026-1325",
+            "aliases": [
+              "CVE-2024-23342",
+              "GHSA-wj6h-64fc-37mp"
+            ],
+            "fix_versions": []
+          }
+        ]
+      },
+      {
+        "name": "h11",
+        "version": "0.16.0",
+        "advisories": []
+      },
+      {
+        "name": "httpcore",
+        "version": "1.0.9",
+        "advisories": []
+      },
+      {
+        "name": "httpx",
+        "version": "0.28.1",
+        "advisories": []
+      },
+      {
+        "name": "idna",
+        "version": "3.20",
+        "advisories": []
+      },
+      {
+        "name": "iniconfig",
+        "version": "2.3.0",
+        "advisories": []
+      },
+      {
+        "name": "packaging",
+        "version": "26.3",
+        "advisories": []
+      },
+      {
+        "name": "pip",
+        "version": "26.2.1",
+        "advisories": []
+      },
+      {
+        "name": "pluggy",
+        "version": "1.6.0",
+        "advisories": []
+      },
+      {
+        "name": "pycparser",
+        "version": "3.0",
+        "advisories": []
+      },
+      {
+        "name": "pyproject-hooks",
+        "version": "1.3.3",
+        "advisories": []
+      },
+      {
+        "name": "pytest",
+        "version": "9.1.1",
+        "advisories": []
+      },
+      {
+        "name": "setuptools",
+        "version": "84.0.0",
+        "advisories": []
+      },
+      {
+        "name": "six",
+        "version": "1.17.0",
+        "advisories": []
+      },
+      {
+        "name": "tlslite-ng",
+        "version": "0.8.2",
+        "advisories": []
+      },
+      {
+        "name": "typing-extensions",
+        "version": "4.16.0",
+        "advisories": []
+      },
+      {
+        "name": "websockets",
+        "version": "15.0.1",
+        "advisories": []
+      },
+      {
+        "name": "wheel",
+        "version": "0.48.0",
+        "advisories": []
+      }
+    ]
+  },
+  "remaining_release_blocker": {
+    "package": "ecdsa",
+    "version": "0.19.2",
+    "id": "CVE-2024-23342",
+    "url": "https://github.com/tlsfuzzer/python-ecdsa/security/advisories/GHSA-wj6h-64fc-37mp",
+    "patched_version": null,
+    "client_relevance": "Configured secp256r1 key shares use tlslite ECDHKeyExchange and python-ecdsa for private-key generation and ECDH.",
+    "decision": "Keep public release blocked pending a separate TLS implementation fix. No suppression or automatic waiver.",
+    "demonstrated_client_attack": false
+  }
+}

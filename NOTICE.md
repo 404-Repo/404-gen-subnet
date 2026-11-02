@@ -70,4 +70,4 @@ When deploying this codebase you are responsible for:
 2. **Honoring attribution requirements** of any model whose output is published or
    redistributed downstream.
 3. **Configuring `HF_TOKEN`** in the embedding-using services
-   (`generation-orchestrator`, `submission-collector`, judge-side if local-loading).
+   (`submission-collector`, judge-side if local-loading).

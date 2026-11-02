@@ -14,15 +14,21 @@
  */
 
 import http from 'node:http';
-import { URL } from 'node:url';
+import { URL, pathToFileURL } from 'node:url';
 
 import { startStaticServer } from './static-server.js';
 import { ensureBrowser } from './browser.js';
 import { renderViews, renderGrid } from './renderer.js';
 import { staticValidate } from './validator/index.js';
-import { validationPool } from './validation-pool.js';
+import { validationPool, ValidationUnavailableError } from './validation-pool.js';
+import { boundValidationError } from './validation-report.js';
+import { JobQueue, QueueRejected } from './job-queue.js';
 
 const PORT = parseInt(process.env.PORT || '80', 10);
+const jobs = new JobQueue({
+  capacity: Number(process.env.RENDER_QUEUE_CAPACITY || 8),
+  waitMs: Number(process.env.RENDER_QUEUE_WAIT_MS || 120000),
+});
 
 // Every lighting mode the renderer implements. Anything else is a client bug.
 const LIGHTING_MODES = new Set(['follow', 'studio', 'neutral']);
@@ -122,6 +128,10 @@ function sendError(res, status, message) {
   sendJson(res, status, { error: message });
 }
 
+function sendValidationError(res, error, result) {
+  sendJson(res, 422, boundValidationError(error, result));
+}
+
 async function handleRender(req, res) {
   const t0 = performance.now();
   const body = await readBody(req);
@@ -132,7 +142,7 @@ async function handleRender(req, res) {
   const staticMs = (performance.now() - tStatic).toFixed(1);
   if (!staticResult.passed) {
     console.log(`[render] static analysis failed (${staticMs}ms)`);
-    sendJson(res, 422, { error: 'validation_failed', failures: staticResult.failures });
+    sendValidationError(res, 'validation_failed', staticResult);
     return;
   }
 
@@ -141,11 +151,7 @@ async function handleRender(req, res) {
   const execMs = (performance.now() - tExec).toFixed(1);
   if (!execResult.passed) {
     console.log(`[render] post-validation failed (${execMs}ms)`);
-    sendJson(res, 422, {
-      error: 'post_validation_failed',
-      failures: execResult.failures,
-      metrics: execResult.metrics,
-    });
+    sendValidationError(res, 'post_validation_failed', execResult);
     return;
   }
 
@@ -179,7 +185,7 @@ async function handleRenderGrid(req, res) {
   const staticMs = (performance.now() - tStatic).toFixed(1);
   if (!staticResult.passed) {
     console.log(`[render/grid] static analysis failed (${staticMs}ms)`);
-    sendJson(res, 422, { error: 'validation_failed', failures: staticResult.failures });
+    sendValidationError(res, 'validation_failed', staticResult);
     return;
   }
 
@@ -188,11 +194,7 @@ async function handleRenderGrid(req, res) {
   const execMs = (performance.now() - tExec).toFixed(1);
   if (!execResult.passed) {
     console.log(`[render/grid] post-validation failed (${execMs}ms)`);
-    sendJson(res, 422, {
-      error: 'post_validation_failed',
-      failures: execResult.failures,
-      metrics: execResult.metrics,
-    });
+    sendValidationError(res, 'post_validation_failed', execResult);
     return;
   }
 
@@ -206,7 +208,7 @@ async function handleRenderGrid(req, res) {
   sendPng(res, gridBuf);
 }
 
-const server = http.createServer(async (req, res) => {
+export const server = http.createServer(async (req, res) => {
   try {
     const pathname = new URL(req.url, 'http://localhost').pathname;
 
@@ -222,17 +224,32 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === 'POST' && pathname === '/render') {
-      await handleRender(req, res);
+      await jobs.run(async (waitMs) => {
+        res.setHeader('X-Render-Queue-Wait-Ms', waitMs.toFixed(3));
+        await handleRender(req, res);
+      });
       return;
     }
 
     if (req.method === 'POST' && pathname === '/render/grid') {
-      await handleRenderGrid(req, res);
+      await jobs.run(async (waitMs) => {
+        res.setHeader('X-Render-Queue-Wait-Ms', waitMs.toFixed(3));
+        await handleRenderGrid(req, res);
+      });
       return;
     }
 
     sendError(res, 404, 'not found');
   } catch (err) {
+    if (err instanceof QueueRejected) {
+      res.setHeader('Retry-After', '1');
+      sendJson(res, 503, { error: err.reason });
+      return;
+    }
+    if (err instanceof ValidationUnavailableError) {
+      sendError(res, 503, 'validation_unavailable');
+      return;
+    }
     if (err instanceof InvalidRequestError) {
       console.log(`[request] invalid request: ${err.message}`);
       sendError(res, 422, err.message);
@@ -243,7 +260,7 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-async function main() {
+export async function main() {
   console.log('Starting static file server...');
   await startStaticServer();
 
@@ -261,7 +278,9 @@ async function main() {
   console.log('Browser ready, service is fully operational');
 }
 
-main().catch((err) => {
-  console.error('Fatal startup error:', err);
-  process.exit(1);
-});
+if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
+  main().catch((err) => {
+    console.error('Fatal startup error:', err);
+    process.exit(1);
+  });
+}

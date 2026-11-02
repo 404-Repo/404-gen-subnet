@@ -8,9 +8,8 @@
  *   3. worker          — module load + generate() + post-validation
  *                        (Node worker thread with real preemption + heap cap)
  *
- * The worker stage covers what the runtime spec calls `module_load`,
- * `execution`, and `post_validation` — the boundaries between them are
- * reported via the `failures[].stage` field.
+ * The worker reports `module_load`, `execution`, and `post_validation`
+ * failures through the `failures[].stage` field.
  */
 
 import { parseSource } from './parse.js';

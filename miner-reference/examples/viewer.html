@@ -174,8 +174,7 @@
     const scene = new THREE.Scene();
     scene.background = new THREE.Color(0xffffff);
 
-    // FOV matches the runtime spec (17.5°). Position kept at the same direction
-    // and distance as the canonical render camera (3.5 from origin).
+    // Interactive inspection camera. Judging uses the round's published views.
     const camera = new THREE.PerspectiveCamera(17.5, window.innerWidth / window.innerHeight, 0.01, 100);
     camera.position.set(2.4, 1.6, 2.8);
     camera.lookAt(0, 0, 0);

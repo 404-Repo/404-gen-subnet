@@ -1,3 +1,4 @@
+import json
 from datetime import UTC, date, datetime, time
 
 import time_machine
@@ -73,7 +74,6 @@ def add_round_result(git: MockGitHubClient, round_num: int = 0, **overrides) -> 
         "winner_hotkey": "leader_hotkey",
         "repo": "leader/repo",
         "commit": "abc123",
-        "docker_image": "leader:latest",
     }
     result = RoundResult(**{**defaults, **overrides})
     git.files[f"rounds/{round_num}/winner.json"] = result.model_dump_json()
@@ -91,7 +91,7 @@ async def test_new_leader_takes_over(git: MockGitHubClient, settings: Settings) 
     add_config(git)
     schedule = add_schedule(git, round_num=1)
     add_leader(git, weight=1.0)
-    add_round_result(git, round_num=1, winner_hotkey="miner_hotkey", repo="miner/repo", hardware=["4xRTX6000Pro"])
+    add_round_result(git, round_num=1, winner_hotkey="miner_hotkey", repo="miner/repo")
 
     await finalize_round(git=git, get_block=make_get_block(block=7200), settings=settings)
 
@@ -118,7 +118,7 @@ async def test_new_leader_takes_over(git: MockGitHubClient, settings: Settings) 
     leaders = LeaderListAdapter.validate_json(committed["leader.json"])
     assert leaders[-1].hotkey == "miner_hotkey"
     assert leaders[-1].weight == 1.0
-    assert leaders[-1].hardware == ["4xRTX6000Pro"]
+    assert json.loads(committed["leader.json"])[-1]["docker"] == ""
 
 
 async def test_early_exit_when_not_finalizing(git: MockGitHubClient, settings: Settings) -> None:

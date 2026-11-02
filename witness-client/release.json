@@ -1,0 +1,323 @@
+{
+  "release": "witness-0.2.17-runtime-0.1.5",
+  "status": "Published on GitHub Releases; exact packages verified locally and on native CPU Runpod with both launchers",
+  "release_tag": "miner-runtime-v0.1.5",
+  "source_commit": "eb45a121c9e02175aeca11b348e050a0aee063ac",
+  "source_archive_sha256": "88efe283c84e3807666bc707a4c93e1bc4c4c273937b1ecbb71c00c35cb1b72a",
+  "platforms": [
+    "Linux x86_64, glibc 2.34+, Python 3.11+",
+    "macOS 13+ arm64, Python 3.11+"
+  ],
+  "native_proof_abi": 2,
+  "proof_key_sha256": "6478059e4ad0d39e8c157c76cea9c6dd777c2ab5143cf8694876094facf39b16",
+  "packages": {
+    "404-miner-runtime": {
+      "version": "0.1.5",
+      "source_commit": "eb45a121c9e02175aeca11b348e050a0aee063ac",
+      "source_tag": "miner-runtime-v0.1.5",
+      "requires_dist": [
+        "404-witness-client<0.3,>=0.2.17",
+        "aiofiles==25.1.0",
+        "loguru==0.7.3"
+      ],
+      "license_expression": "MIT",
+      "artifacts": [
+        "404_miner_runtime-0.1.5-py3-none-any.whl"
+      ]
+    },
+    "404-renderer-client": {
+      "version": "0.1.4",
+      "source_commit": "6010e3c7d1268cb9f36c1ba0ed2af723617e61cf",
+      "source_tag": "renderer-client-v0.1.4",
+      "requires_dist": [
+        "httpx==0.28.1",
+        "pytest==8.3.5; extra == \"dev\"",
+        "ruff==0.14.14; extra == \"dev\"",
+        "mypy==1.18.2; extra == \"dev\"",
+        "build==1.3.0; extra == \"dev\""
+      ],
+      "license_expression": "MIT",
+      "artifacts": [
+        "404_renderer_client-0.1.4-py3-none-any.whl"
+      ]
+    },
+    "404-witness-client": {
+      "version": "0.2.17",
+      "source_commit": "8435c886d161c8b2f3e9893b90cc8958c1727c1f",
+      "source_tag": "witness-client-v0.2.17",
+      "requires_dist": [
+        "404-renderer-client<0.2,>=0.1.4",
+        "tlslite-ng<0.9,>=0.8.2",
+        "cryptography<51,>=50.0.2",
+        "httpx<0.29,>=0.28.1",
+        "websockets<18,>=17.1",
+        "bittensor-wallet<5,>=4.1.0",
+        "openai<4,>=3.24.0",
+        "pydantic<3,>=2",
+        "mypy<3,>=2.3.1; extra == \"dev\"",
+        "types-setuptools<85,>=84.0.0.20260812; extra == \"dev\"",
+        "pytest<10,>=9.0.3; extra == \"dev\""
+      ],
+      "license_expression": "MIT AND Apache-2.0 AND BSD-3-Clause AND BSD-1-Clause AND SunPro AND LicenseRef-Go-Cephes",
+      "artifacts": [
+        "404_witness_client-0.2.17-py3-none-macosx_13_0_arm64.whl",
+        "404_witness_client-0.2.17-py3-none-manylinux_2_34_x86_64.whl"
+      ]
+    }
+  },
+  "files": {
+    "404_miner_runtime-0.1.5-py3-none-any.whl": {
+      "sha256": "db3f70f71b25f57bd06030bb637ee2e643b3a60849d541074d9da7e15ddc6f0c",
+      "bytes": 12331,
+      "url": "https://github.com/404-Repo/404-gen-subnet/releases/download/miner-runtime-v0.1.5/404_miner_runtime-0.1.5-py3-none-any.whl#sha256=db3f70f71b25f57bd06030bb637ee2e643b3a60849d541074d9da7e15ddc6f0c"
+    },
+    "404_renderer_client-0.1.4-py3-none-any.whl": {
+      "sha256": "35b1b77efe479a18713a0d817bd60749089cc7d0725c1738edbbcd8caccaa4fa",
+      "bytes": 13575,
+      "url": "https://github.com/404-Repo/404-gen-subnet/releases/download/miner-runtime-v0.1.5/404_renderer_client-0.1.4-py3-none-any.whl#sha256=35b1b77efe479a18713a0d817bd60749089cc7d0725c1738edbbcd8caccaa4fa"
+    },
+    "404_witness_client-0.2.17-py3-none-macosx_13_0_arm64.whl": {
+      "sha256": "29c6a541d64aa5152153cef173873f8a44340a26ceb5d6beb530ba11b74a009d",
+      "bytes": 3997155,
+      "url": "https://github.com/404-Repo/404-gen-subnet/releases/download/miner-runtime-v0.1.5/404_witness_client-0.2.17-py3-none-macosx_13_0_arm64.whl#sha256=29c6a541d64aa5152153cef173873f8a44340a26ceb5d6beb530ba11b74a009d"
+    },
+    "404_witness_client-0.2.17-py3-none-manylinux_2_34_x86_64.whl": {
+      "sha256": "70a7fda820edaa90d109817ac671487a3ac6a053ae0bb9b17991fe858671adfd",
+      "bytes": 8081568,
+      "url": "https://github.com/404-Repo/404-gen-subnet/releases/download/miner-runtime-v0.1.5/404_witness_client-0.2.17-py3-none-manylinux_2_34_x86_64.whl#sha256=70a7fda820edaa90d109817ac671487a3ac6a053ae0bb9b17991fe858671adfd"
+    },
+    "sdk-requirements.txt": {
+      "sha256": "7f49bf9a82c4a5d63129398b6a0922398bcf78f818ed34a0fc90f7d7e100132b",
+      "bytes": 1081,
+      "url": "https://github.com/404-Repo/404-gen-subnet/releases/download/miner-runtime-v0.1.5/sdk-requirements.txt"
+    }
+  },
+  "installation": {
+    "requirements_url": "https://github.com/404-Repo/404-gen-subnet/releases/download/miner-runtime-v0.1.5/sdk-requirements.txt",
+    "base_miner_python": ">=3.13,<3.14",
+    "leader_python": "3.13.0",
+    "source_checkout": "miner-runtime-v0.1.5",
+    "proof_parameters_path": "witness-server/verifier/params",
+    "leader_index_schema_path": "shared/subnet_common/competition/generations.py",
+    "leader_index_schema_import": "PYTHONPATH=<release-checkout>/shared"
+  },
+  "launchers": {
+    "base_miner": {
+      "repository": "https://github.com/404-Repo/404-base-miner-gpt",
+      "commit": "f9876fb76c07f01831aece93070b8580da50da09",
+      "entry_point": "main.py",
+      "runner": "miner_runtime.batch.run"
+    },
+    "leader": {
+      "repository": "https://github.com/404-Repo/lumen-kit",
+      "commit": "181620933924a72c779d69eb879f382a3dc129a8",
+      "entry_point": "run.py",
+      "runner": "miner_runtime.batch.run"
+    }
+  },
+  "validation": {
+    "date": "2026-11-02",
+    "runtime_source_snapshot": "eb45a121c9e02175aeca11b348e050a0aee063ac",
+    "python3.11_linux": {
+      "passed": 514,
+      "skipped": 2,
+      "deselected": 2,
+      "scope": "Existing witness, renderer and reference/replay tests plus shared batch probes; launcher probes require Python 3.13"
+    },
+    "python3.13_linux": {
+      "passed": 516,
+      "skipped": 2,
+      "scope": "Existing witness, renderer and reference/replay tests plus both launcher and shared batch probes"
+    },
+    "python3.13_macos": {
+      "passed": 19,
+      "scope": "Native proof tests and shared batch/both launcher probes"
+    },
+    "skips": "Two renderer integration tests require a rendering service",
+    "network": "Earlier isolated Linux suites ran with external networking disabled; the Runpod live validation below used real subscription, witness, renderer and R2 requests",
+    "artifact_integrity": "All wheel RECORD hashes, packaged Python/type members, licence bytes and metadata verified; installed members equal their wheels",
+    "mypy": {
+      "runtime": "passed: 6 source files",
+      "witness": "passed: 41 source files",
+      "base_miner": "passed: 3 source files"
+    },
+    "base_miner_checks": {
+      "ruff": "passed",
+      "black_check": "passed",
+      "bandit": "passed",
+      "poetry_check_lock": "passed"
+    },
+    "runtime_ruff": "passed",
+    "witness_ruff": {
+      "status": "37 inherited findings in unchanged witness Python sources; no lint fixes in this integration"
+    },
+    "pip_check": "Passed for both Linux artifact environments, the clean macOS environment and both launcher environments",
+    "base_miner_failure_reproduction": "main.py --help failed before installation with missing miner_runtime and passes after the locked install",
+    "generation_source": "Common batch module byte-identical to 3fa81ee095a53f23837c3dc0169508b4ff9cb3bf; validator byte-identical to witness-client-v0.2.17; launcher generate implementations unchanged",
+    "review": {
+      "method": "Serial multi-lens source review plus isolated execution and mandatory analysis tools",
+      "crapper": {
+        "max_crap": 11.0,
+        "function": "miner_runtime.batch.run",
+        "coverage_percent": 94.6,
+        "threshold": "< 10",
+        "status": "Inherited threshold failure accepted for this integration; all other affected functions below 10",
+        "exception": {
+          "status": "accepted",
+          "date": "2026-11-02",
+          "scope": "Existing common batch run() only",
+          "decision": "Retain the common implementation unchanged for this integration; refactoring remains a separate follow-up"
+        }
+      },
+      "dryer": {
+        "threshold": 0.8,
+        "duplicate_candidates": 0
+      },
+      "mutator": {
+        "killed": 33,
+        "survived": 19,
+        "uncovered": 2,
+        "sites": 54,
+        "status": "Inherited coverage gaps retained under the unchanged-behavior test scope; mutations executed only in disposable source copies"
+      },
+      "refactor_candidates": [
+        "Reduce the shared batch runner complexity in a separate refactor pass",
+        "Make the operator leader launcher configuration and startup explicit in a separate refactor pass"
+      ]
+    },
+    "local_installation": {
+      "base_miner": "Exact three wheel members verified in the existing Python 3.13.0 environment; original --help reproduction now passes",
+      "leader": "Exact three release wheels installed from the public SDK requirements URL; every package member verified",
+      "non_sdk_package_versions": "Unchanged in both environments",
+      "completed_leader_index": "Unchanged"
+    },
+    "public_installation": {
+      "linux_python3.13": "Fresh pip install of both committed launcher dependency files from public URLs; pip check and miner main.py --help passed; installed members match the tested artifacts",
+      "macos_python3.13": "Fresh Poetry environment with an empty cache; locked installation from public URLs, pip check, main.py --help and installed-member comparison passed",
+      "downloads": "All seven release assets retrieved without authentication with HTTP 200 and matching SHA-256",
+      "local_origins": "Both existing launcher environments identify the public release URLs for all three SDK distributions"
+    },
+    "provider_calls": {
+      "codex_subscription": 14,
+      "openai_api_key": 0
+    },
+    "runpod": {
+      "date": "2026-11-02",
+      "status": "passed",
+      "source_snapshot": "a8337db099581ac03da5e44852b61f1da38e4e88",
+      "round": "test-sdk-public-be46703f",
+      "verification_url": "https://subnet404.xyz/rounds/test-sdk-public-be46703f/verification.json",
+      "round_manifest_url": "https://subnet404.xyz/rounds/test-sdk-public-be46703f/test-round.json",
+      "native_tests": {
+        "python": "3.13.0",
+        "platform": "Linux x86_64",
+        "passed": 516,
+        "skipped": 2,
+        "skips": "Standalone renderer-service integration tests require RENDERER_TEST_URL/ID"
+      },
+      "environment": {
+        "client_python": "3.13.0",
+        "worker_python": "3.14.9",
+        "cpu": "cpu3g, 4 vCPU, 16 GB RAM, EU-RO-1",
+        "client_ca_bundle": "/etc/ssl/certs/ca-certificates.crt",
+        "temporary_storage": "RAM /tmp for renderer and disposable witness spool",
+        "embedding_cache": "Pinned DINOv3 revision loaded offline from the approved private copy; no Hugging Face token exported",
+        "worker_image": "sha256:4bfdaf5c7dcee7c623c9b83a62f3dd25736ad52f11e71aaf31406f65b980939e"
+      },
+      "installed_members": "All packaged Python, typing and native module members match the public release wheels; pip check passed",
+      "artifact_sha256": {
+        "404-witness-client": "70a7fda820edaa90d109817ac671487a3ac6a053ae0bb9b17991fe858671adfd",
+        "404-renderer-client": "35b1b77efe479a18713a0d817bd60749089cc7d0725c1738edbbcd8caccaa4fa",
+        "404-miner-runtime": "db3f70f71b25f57bd06030bb637ee2e643b3a60849d541074d9da7e15ddc6f0c"
+      },
+      "launchers": {
+        "miner": {
+          "source_commit": "f9876fb76c07f01831aece93070b8580da50da09",
+          "hotkey": "5HRDKXmi4443u3AcPxFcnZFqecNgz76Hj3yfqyyaBT6pyfpR",
+          "index_url": "https://subnet404.xyz/rounds/test-sdk-public-be46703f/rounds/test-sdk-public-be46703f/5HRDKXmi4443u3AcPxFcnZFqecNgz76Hj3yfqyyaBT6pyfpR/submitted.json",
+          "js_url": "https://subnet404.xyz/rounds/test-sdk-public-be46703f/rounds/test-sdk-public-be46703f/5HRDKXmi4443u3AcPxFcnZFqecNgz76Hj3yfqyyaBT6pyfpR/submitted/miner.js",
+          "grid_url": "https://subnet404.xyz/rounds/test-sdk-public-be46703f/rounds/test-sdk-public-be46703f/5HRDKXmi4443u3AcPxFcnZFqecNgz76Hj3yfqyyaBT6pyfpR/submitted/miner/grid.png",
+          "js_sha256": "f3c1ec2b39176923ee081e36a0fda080ba5f8102d3cfde0a40ca9ac67e576f0e",
+          "js_bytes": 12534,
+          "white_views": 8,
+          "gray_views": 4,
+          "captured_calls": 7
+        },
+        "leader": {
+          "source_commit": "181620933924a72c779d69eb879f382a3dc129a8",
+          "hotkey": "5E2V2Ru2bf5ZfQnKJbYPqfP7JeCggSS8rAU8fKNPj7DKi2Su",
+          "index_url": "https://subnet404.xyz/rounds/test-sdk-public-be46703f/rounds/test-sdk-public-be46703f/5E2V2Ru2bf5ZfQnKJbYPqfP7JeCggSS8rAU8fKNPj7DKi2Su/submitted.json",
+          "js_url": "https://subnet404.xyz/rounds/test-sdk-public-be46703f/rounds/test-sdk-public-be46703f/5E2V2Ru2bf5ZfQnKJbYPqfP7JeCggSS8rAU8fKNPj7DKi2Su/submitted/leader.js",
+          "grid_url": "https://subnet404.xyz/rounds/test-sdk-public-be46703f/rounds/test-sdk-public-be46703f/5E2V2Ru2bf5ZfQnKJbYPqfP7JeCggSS8rAU8fKNPj7DKi2Su/submitted/leader/grid.png",
+          "js_sha256": "6803d68bcb419ef16a7067779b3bf3176e69d5eaab7a65d5c605add453650a98",
+          "js_bytes": 21014,
+          "white_views": 8,
+          "gray_views": 4,
+          "captured_calls": 7
+        }
+      },
+      "resume_checks": {
+        "miner": {
+          "status": "passed",
+          "additional_model_captures": 0
+        },
+        "leader": {
+          "status": "passed",
+          "additional_model_captures": 0
+        }
+      },
+      "saved_outputs": "Each launcher saved JavaScript, 8 white views, 4 gray views, a grid and 9 finite normalized DINO embeddings; public files and hashes verified",
+      "provider_status": "Every final captured provider response returned HTTP 200; usage settled with no pending entries",
+      "scope": "Exact released SDK packages and committed generator/launcher bodies; isolated input/output bindings and assigned test identities",
+      "finney_admission_tested": false,
+      "cloud_worker_replacement_tested": false,
+      "cleanup": {
+        "pod_id": "gsqabuarg2xvc3",
+        "verified_absent": true,
+        "temporary_control_records": "Owned test allocation records removed; test-round results retained"
+      }
+    }
+  },
+  "dependency_findings": [
+    {
+      "package": "ecdsa",
+      "version": "0.19.2",
+      "id": "PYSEC-2026-1325",
+      "aliases": [
+        "CVE-2024-23342",
+        "GHSA-wj6h-64fc-37mp"
+      ],
+      "fixed_versions": [],
+      "status": "Existing accepted release finding; two identical advisory entries deduplicated; external dependency pins unchanged"
+    }
+  ],
+  "publication": {
+    "github_release": "Published; all seven public downloads match the exact tested artifact hashes",
+    "github_url": "https://github.com/404-Repo/404-gen-subnet/releases/tag/miner-runtime-v0.1.5",
+    "pypi": "Not published; the three names return HTTP 404 and no PyPI token or configured trusted publisher is available",
+    "source_tags": "Pushed without replacement",
+    "published_at": "2026-11-02T07:01:59Z",
+    "install_url": "https://github.com/404-Repo/404-gen-subnet/releases/download/miner-runtime-v0.1.5/sdk-requirements.txt",
+    "anonymous_download_status": 200
+  },
+  "preserved_prepared_bundle": {
+    "filename": "404-witness-sdk-0.2.17-linux-x86_64.zip",
+    "sha256": "d85ba08d01145b74910f0a6dc2ad9f701afcce0fb914d1658125482dc71c33c9",
+    "status": "Unchanged; witness and renderer wheels retained byte-for-byte"
+  },
+  "previous_release": "releases/0.2.15.json",
+  "source_tags": {
+    "witness-client-v0.2.17": {
+      "commit": "8435c886d161c8b2f3e9893b90cc8958c1727c1f",
+      "tag_object": "0bbc3e978ae9dd4fa4c9fe456aef7669e33255f4"
+    },
+    "renderer-client-v0.1.4": {
+      "commit": "6010e3c7d1268cb9f36c1ba0ed2af723617e61cf",
+      "tag_object": "a4db5a40b9263a2d873b8eb2e1fec636019f8fef"
+    },
+    "miner-runtime-v0.1.5": {
+      "commit": "eb45a121c9e02175aeca11b348e050a0aee063ac",
+      "tag_object": "28dd263c37a4e63089a7d86ab36026e4ccc4a4e9"
+    }
+  }
+}

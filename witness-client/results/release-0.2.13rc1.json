@@ -1,0 +1,268 @@
+{
+  "date": "2026-10-12",
+  "artifact": {
+    "source_tag": "witness-client-v0.2.13rc1",
+    "source_commit": "9d35ff2c0efa5b0d2e1ce0397a55c53bb3cb298a",
+    "version": "0.2.13rc1",
+    "wheel": "404_witness_client-0.2.13rc1-py3-none-manylinux_2_34_x86_64.whl",
+    "sha256": "f4c936c9d15c6b082161202d7ec638ce3ce392ee916b41086a2309fd6f8acff9",
+    "bytes": 8038897,
+    "client_image": "witness-client:0.2.13rc1-9d35ff2",
+    "record_hashes": "passed",
+    "matching_package_files": 16,
+    "license_sha256": {
+      "LICENSE": "73a13e26f9c17ded4c6efc40ae68e8c774b1a7feef5a2a1c14ab98297353b4db",
+      "THIRD_PARTY_NOTICES.md": "34d77048b73bb346b00fb9f179887a6bfb3d86fbf571b591cabc2dceff6158dc"
+    },
+    "native_sha256": "ba1d29d8c786d6558068c17687dc3280bdba9afee05e1ab3895698b5f7608b27",
+    "requires_dist": [
+      "tlslite-ng<0.9,>=0.8.2",
+      "cryptography<51,>=50.0.2",
+      "httpx<0.29,>=0.28.1",
+      "websockets<18,>=17.1",
+      "bittensor-wallet<5,>=4.1.0",
+      "openai<4,>=3.24.0",
+      "pydantic<3,>=2",
+      "mypy<3,>=2.3.1; extra == \"dev\"",
+      "types-setuptools<85,>=84.0.0.20260812; extra == \"dev\"",
+      "pytest<10,>=9.0.3; extra == \"dev\""
+    ]
+  },
+  "resolved_python_packages": {
+    "404-witness-client": "0.2.13rc1",
+    "annotated-types": "0.8.0",
+    "anyio": "4.15.1",
+    "auditwheel": "6.8.2",
+    "bittensor-wallet": "4.1.1",
+    "build": "1.6.1",
+    "certifi": "2026.7.22",
+    "cffi": "2.1.1",
+    "cryptography": "50.0.2",
+    "ecdsa": "0.19.2",
+    "h11": "0.16.0",
+    "httpcore": "1.0.9",
+    "httpcore2": "2.13.1",
+    "httpx": "0.28.1",
+    "httpx2": "2.13.1",
+    "idna": "3.20",
+    "iniconfig": "2.3.1",
+    "jiter": "0.17.0",
+    "openai": "3.29.0",
+    "packaging": "26.3",
+    "patchelf": "0.19.1.0",
+    "pip": "26.2.1",
+    "pluggy": "1.6.0",
+    "pycparser": "3.11",
+    "pydantic": "2.14.1",
+    "pydantic_core": "2.50.1",
+    "pyelftools": "0.33",
+    "Pygments": "2.21.0",
+    "pyproject_hooks": "1.3.3",
+    "pytest": "9.1.1",
+    "setuptools": "84.0.0",
+    "six": "1.17.0",
+    "sniffio": "1.3.1",
+    "tlslite-ng": "0.8.2",
+    "truststore": "0.10.4",
+    "typing_extensions": "4.16.0",
+    "typing-inspection": "0.4.4",
+    "websockets": "17.2",
+    "wheel": "0.48.0"
+  },
+  "validation": {
+    "linux_installed_wheel_tests": {
+      "passed": 229,
+      "warnings": 1,
+      "external_network": "disabled"
+    },
+    "gateway_tests": {
+      "passed": 55
+    },
+    "worker_container_tests": {
+      "passed": 2
+    },
+    "mypy": {
+      "client_source_files": 30,
+      "gateway_source_files": 12,
+      "passed": true
+    },
+    "black": "passed",
+    "ruff": "passed",
+    "pip_check": "passed",
+    "wheel_record_hashes": "passed",
+    "source_package_files_matching_tag": 16,
+    "license_files_match_source": true,
+    "native_go_version": "go1.27.1",
+    "dependency_audit": {
+      "auditor": "pip-audit 2.10.1",
+      "scope": "all resolved Python packages in the Linux client build and test image",
+      "unique_advisories": 1,
+      "raw_findings": 2,
+      "findings": [
+        {
+          "package": "ecdsa",
+          "version": "0.19.2",
+          "id": "PYSEC-2026-1325",
+          "aliases": [
+            "CVE-2024-23342",
+            "GHSA-wj6h-64fc-37mp"
+          ],
+          "fix_versions": [],
+          "decision": "Accepted as nonblocking for this release."
+        }
+      ]
+    }
+  },
+  "cloud": {
+    "date": "2026-10-12",
+    "timezone": "Europe/Minsk",
+    "round": "test-0",
+    "gateway_url": "https://404-witness-retest-20261005.subnet404.workers.dev",
+    "gateway_version": "9d70ca8e-06e0-40b1-9845-047d1b8b3a79",
+    "gateway_bundle_sha256": {
+      "worker.py": "5bf4cb212d2275ad03347c6fccf7a2e8b44d60ba5ab52a230bdd160087eb51ed",
+      "auth.py": "99c46893f25ec77ba06f654aa01fe27f4b5880cd5901f435e542e3d343f159f6",
+      "models.py": "e38f9bce9d06f4b52ebd5c318d74589d5a824d638a4a518f43f0525b1e04397b",
+      "runtime.py": "58e752fe781d06bb133d4110446cc8a42f91d0ff20c380e2a487eebb34138638",
+      "crypto.mjs": "80a50f64fb81cff5e03f57c669e0ba58b953f0adbefddfad824d3064ce8f715e",
+      "bindings.py": "5692f66de1f57b81be4b9a638bbefa8f10b30ab06190d48217bfd69489f60e4e",
+      "membership.py": "f8b0018d5bfa6ca9a0fbf9d6b19e113333de26cb20a61617f88f17dd90e6038a",
+      "crypto.wasm": "7edb3158a3ec97e5bd72f35476128a1c09273a109887fd445b366ad1ebc21b06"
+    },
+    "runpod_endpoint": "6y1jev9r0zvmw0",
+    "runpod_version": 4,
+    "worker_image": "europe-docker.pkg.dev/gen-456515/docker-test/queued-witness@sha256:db593d30fe4cbd3dac91389f3b3fa75d8cdfb72b786525c7ebf85a98e2859e29",
+    "worker_file_sha256": {
+      "/app/witness-client/native/privateauth": "bba874b26096cef3c98405513b3f56940e5e065dd6d34d0aafc975b06189b736",
+      "/app/witness-server/verifier/params/verifying.bin": "6478059e4ad0d39e8c157c76cea9c6dd777c2ab5143cf8694876094facf39b16",
+      "/app/licenses/LICENSE": "73a13e26f9c17ded4c6efc40ae68e8c774b1a7feef5a2a1c14ab98297353b4db",
+      "/app/licenses/THIRD_PARTY_NOTICES.md": "34d77048b73bb346b00fb9f179887a6bfb3d86fbf571b591cabc2dceff6158dc"
+    },
+    "workers_max": 16,
+    "workers_min": 0,
+    "execution_timeout_ms": 2400000,
+    "test_hotkey": "5D4dcSEVURC69EEWsNLMGwK8EvvYe5djFuR4KZeuHb8q4ztq",
+    "test_hotkey_scope": "registration exception for test-0 only; signatures, replay protection, ownership and allocation limits apply",
+    "membership": {
+      "hotkeys": 256,
+      "network": "finney",
+      "netuid": 17,
+      "age_seconds": 39.5,
+      "block": 9266806,
+      "block_age_seconds": 74.4
+    },
+    "authentication_checks": {
+      "unsigned": "invalid_hotkey",
+      "forged_signature": "invalid_signature",
+      "unregistered": "hotkey_not_registered",
+      "test_hotkey_status": "finished",
+      "replay": "hotkey_auth_replayed"
+    },
+    "exchanges": [
+      {
+        "mode": "normal",
+        "exchange_id": "ab2f69ab-92ca-45c6-a715-d2133e6fd3de",
+        "manifest_url": "https://subnet404.xyz/rounds/test-0/5D4dcSEVURC69EEWsNLMGwK8EvvYe5djFuR4KZeuHb8q4ztq/ab2f69ab-92ca-45c6-a715-d2133e6fd3de/manifest.json",
+        "stream": true,
+        "usage": {
+          "input_tokens": 42,
+          "output_tokens": 20,
+          "total_tokens": 62
+        },
+        "request_sha256": "71dac6ac712793e1f84de125fd9d287df81ea67d28023e26771e2047a105aff8",
+        "response_sha256": "819fa607c45a4669d88c15b9af0675547c16e483abd3125960de52107071d101",
+        "request_response_match": true,
+        "credential_tokens_absent": true,
+        "public_evidence_matches": true
+      },
+      {
+        "mode": "disconnect",
+        "exchange_id": "1b242c92-739c-44f1-a16e-c0a4ad312ab7",
+        "manifest_url": "https://subnet404.xyz/rounds/test-0/5D4dcSEVURC69EEWsNLMGwK8EvvYe5djFuR4KZeuHb8q4ztq/1b242c92-739c-44f1-a16e-c0a4ad312ab7/manifest.json",
+        "stream": true,
+        "usage": {
+          "input_tokens": 42,
+          "output_tokens": 20,
+          "total_tokens": 62
+        },
+        "request_sha256": "71dac6ac712793e1f84de125fd9d287df81ea67d28023e26771e2047a105aff8",
+        "response_sha256": "2a824ab212495e1cebe738dfb126dcc769983d6c24420659792f0df244f8f1f0",
+        "request_response_match": true,
+        "credential_tokens_absent": true,
+        "public_evidence_matches": true
+      }
+    ],
+    "recovery": {
+      "failed_final_status": "same response downloaded from R2",
+      "capture_after_client_disconnect": "evidence saved before reconnect",
+      "separate_process_resume": "passed",
+      "additional_runpod_jobs": 0
+    },
+    "generations_created": 2,
+    "total_input_tokens": 84,
+    "total_output_tokens": 40,
+    "final_jobs": {
+      "completed": 13,
+      "failed": 0,
+      "inProgress": 0,
+      "inQueue": 0,
+      "retried": 0
+    }
+  },
+  "api_key_validation": {
+    "date": "2026-10-12",
+    "status": "provider rejection and recovery verified; successful generation blocked by API credit balance",
+    "package_version": "0.2.13rc1",
+    "wheel_sha256": "f4c936c9d15c6b082161202d7ec638ce3ce392ee916b41086a2309fd6f8acff9",
+    "gateway_version": "9d70ca8e-06e0-40b1-9845-047d1b8b3a79",
+    "worker_image": "europe-docker.pkg.dev/gen-456515/docker-test/queued-witness@sha256:db593d30fe4cbd3dac91389f3b3fa75d8cdfb72b786525c7ebf85a98e2859e29",
+    "runpod_endpoint": "6y1jev9r0zvmw0",
+    "workers_max": 16,
+    "model": "gpt-4.1-mini",
+    "api_key_authentication": "authenticated model read succeeded",
+    "round": "test-0",
+    "tested_at": "2026-10-12T12:07:17.009097+00:00",
+    "exchange_id": "abeb418d-9023-494b-be02-f751da8763fd",
+    "provider": "https://api.openai.com/v1/responses",
+    "manifest_url": "https://subnet404.xyz/rounds/test-0/5D4dcSEVURC69EEWsNLMGwK8EvvYe5djFuR4KZeuHb8q4ztq/abeb418d-9023-494b-be02-f751da8763fd/manifest.json",
+    "request_response_match": true,
+    "stream": true,
+    "provider_http_status": 200,
+    "provider_response_status": "failed",
+    "provider_error_code": "credit_balance_exhausted",
+    "usage": null,
+    "credential_literal_and_encodings_absent": true,
+    "public_evidence_matches": true,
+    "evidence_objects": {
+      "authorization.json": 591,
+      "claim.json": 2047,
+      "client.bin": 1456,
+      "handshake.json": 149,
+      "manifest.json": 545,
+      "request.json": 309,
+      "response.sse": 4035,
+      "server.bin": 9604,
+      "session.json": 269,
+      "status.json": 129
+    },
+    "request_sha256": "d392207f99aea1b4d8244cc97cb61eac55dd57e5662594f664dc646a9cfb8208",
+    "response_sha256": "20faad274c64fec73f834f01720c26386251005d2e82d2ba195ae4adf026f5b3",
+    "witness_status": "issued",
+    "usage_state": "unknown",
+    "recovery": {
+      "separate_process_resume": "same recorded provider rejection",
+      "response_sha256": "20faad274c64fec73f834f01720c26386251005d2e82d2ba195ae4adf026f5b3",
+      "same_error_code": true,
+      "additional_runpod_jobs": 0
+    },
+    "runpod_jobs_created": 1,
+    "successful_generations": 0,
+    "final_jobs": {
+      "completed": 14,
+      "failed": 0,
+      "inProgress": 0,
+      "inQueue": 0,
+      "retried": 0
+    }
+  }
+}

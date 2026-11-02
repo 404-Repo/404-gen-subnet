@@ -1,0 +1,346 @@
+{
+  "distribution": "404-witness-client",
+  "import_package": "witness_client",
+  "version": "0.2.13rc9",
+  "status": "built and verified release candidate; registry publication pending",
+  "source_commit": "3924635e996e0785083d3143b05b32ec80f0e06a",
+  "source_snapshot": "clean git archive",
+  "release_tag": "witness-client-v0.2.13rc9",
+  "release_tag_scope": "The release tag adds only release manifests to source_commit; package and build inputs are identical.",
+  "supported_protocols": [
+    2
+  ],
+  "native_proof_abi": 2,
+  "proof_key_sha256": "6478059e4ad0d39e8c157c76cea9c6dd777c2ab5143cf8694876094facf39b16",
+  "proof_parameters_source": {
+    "source_commit": "3924635e996e0785083d3143b05b32ec80f0e06a",
+    "path": "witness-server/verifier/params",
+    "included_in_wheel": false
+  },
+  "proof_parameter_members": {
+    "circuit.bin": {
+      "sha256": "451b8ebe434e1b9cee5982a46f4630d3d3647fe49c11f2ec6d88b8731617f9c7",
+      "bytes": 10378176
+    },
+    "proving.bin": {
+      "sha256": "31bd198d1325f526f5f1add2272bf73ffaff23c9e2d0ac7463c0f5e88c8701e7",
+      "bytes": 35392269
+    },
+    "verifying.bin": {
+      "sha256": "6478059e4ad0d39e8c157c76cea9c6dd777c2ab5143cf8694876094facf39b16",
+      "bytes": 12400
+    }
+  },
+  "native_builder_image": "golang:1.27.3-bookworm@sha256:972b4110ba0f47539a975c31e52c64765e1ff19f2d74469ae4a595c6676e80a5",
+  "python_builder_image": "python:3.11-slim-bookworm@sha256:a36c24f9cbdf4fd0f52d67f0823eeac19c2028c637cecc392d97f980d4fec56b",
+  "platform": "Linux x86_64, glibc 2.34+, Python 3.11+; base miner requires Python 3.13",
+  "native_library_sha256": "17d5473f4f2e1581c088124672bd26bbd4dc02ca48bbf89af687164b80b1e9cb",
+  "native_go_version": "go1.27.3",
+  "license_expression": "MIT AND Apache-2.0 AND BSD-3-Clause AND BSD-1-Clause AND SunPro AND LicenseRef-Go-Cephes",
+  "license_files": {
+    "LICENSE": {
+      "sha256": "73a13e26f9c17ded4c6efc40ae68e8c774b1a7feef5a2a1c14ab98297353b4db",
+      "bytes": 1067
+    },
+    "THIRD_PARTY_NOTICES.md": {
+      "sha256": "a3e7ed7f5b95ebbe7321ac73a6a20677c486aa650ec83383029f49f79da399ca",
+      "bytes": 83265
+    }
+  },
+  "requires_dist": [
+    "404-renderer-client<0.2,>=0.1.3rc1",
+    "tlslite-ng<0.9,>=0.8.2",
+    "cryptography<51,>=50.0.2",
+    "httpx<0.29,>=0.28.1",
+    "websockets<18,>=17.1",
+    "bittensor-wallet<5,>=4.1.0",
+    "openai<4,>=3.24.0",
+    "pydantic<3,>=2",
+    "mypy<3,>=2.3.1; extra == \"dev\"",
+    "types-setuptools<85,>=84.0.0.20260812; extra == \"dev\"",
+    "pytest<10,>=9.0.3; extra == \"dev\""
+  ],
+  "packages": {
+    "404-witness-client": {
+      "version": "0.2.13rc9",
+      "filename": "404_witness_client-0.2.13rc9-py3-none-manylinux_2_34_x86_64.whl",
+      "requires_dist": [
+        "404-renderer-client<0.2,>=0.1.3rc1",
+        "tlslite-ng<0.9,>=0.8.2",
+        "cryptography<51,>=50.0.2",
+        "httpx<0.29,>=0.28.1",
+        "websockets<18,>=17.1",
+        "bittensor-wallet<5,>=4.1.0",
+        "openai<4,>=3.24.0",
+        "pydantic<3,>=2",
+        "mypy<3,>=2.3.1; extra == \"dev\"",
+        "types-setuptools<85,>=84.0.0.20260812; extra == \"dev\"",
+        "pytest<10,>=9.0.3; extra == \"dev\""
+      ],
+      "license_expression": "MIT AND Apache-2.0 AND BSD-3-Clause AND BSD-1-Clause AND SunPro AND LicenseRef-Go-Cephes"
+    },
+    "404-renderer-client": {
+      "version": "0.1.3rc1",
+      "filename": "404_renderer_client-0.1.3rc1-py3-none-any.whl",
+      "requires_dist": [
+        "httpx==0.28.1",
+        "pytest==8.3.5; extra == \"dev\"",
+        "ruff==0.14.14; extra == \"dev\"",
+        "mypy==1.18.2; extra == \"dev\"",
+        "build==1.3.0; extra == \"dev\""
+      ],
+      "license_expression": "MIT"
+    },
+    "404-miner-runtime": {
+      "version": "0.1.1rc1",
+      "filename": "404_miner_runtime-0.1.1rc1-py3-none-any.whl",
+      "requires_dist": [
+        "404-witness-client<0.3,>=0.2.13rc9"
+      ],
+      "license_expression": "MIT"
+    }
+  },
+  "files": {
+    "404_witness_client-0.2.13rc9-py3-none-manylinux_2_34_x86_64.whl": {
+      "sha256": "80f40c236c95984b938e66c412b618c6ed2f5d2c686c15b629e8edc4cd015dd0",
+      "bytes": 8079648
+    },
+    "404_renderer_client-0.1.3rc1-py3-none-any.whl": {
+      "sha256": "6d91fa41daeb0cff582c671589fc7ee8160d9b4a46d9a9bc392ceb73c8bd59db",
+      "bytes": 13614
+    },
+    "404_miner_runtime-0.1.1rc1-py3-none-any.whl": {
+      "sha256": "d05bbd97ba11fadafc015bd640d32f216f4eefcc388558abaf8fbbb49a8341b4",
+      "bytes": 10727
+    }
+  },
+  "tested_linux_environments": {
+    "python3.11": {
+      "python": "3.11.16 (main, Sep 19 2026, 01:05:51) [GCC 12.2.0]",
+      "platform": "Linux-6.12.54-linuxkit-x86_64-with-glibc2.36",
+      "libc": [
+        "glibc",
+        "2.36"
+      ],
+      "native_abi": 2,
+      "proof_key_sha256": "6478059e4ad0d39e8c157c76cea9c6dd777c2ab5143cf8694876094facf39b16",
+      "environment": {
+        "pyelftools": "0.33",
+        "setuptools": "84.0.0",
+        "pip": "26.2.2",
+        "packaging": "26.3",
+        "wheel": "0.48.0",
+        "build": "1.6.1",
+        "auditwheel": "6.8.2",
+        "patchelf": "0.19.1.0",
+        "pyproject_hooks": "1.3.3",
+        "cryptography": "50.0.2",
+        "pluggy": "1.7.0",
+        "openai": "3.40.0",
+        "ecdsa": "0.19.2",
+        "pytest": "9.1.1",
+        "tlslite-ng": "0.8.2",
+        "pycparser": "3.12",
+        "pydantic": "2.14.1",
+        "typing-inspection": "0.4.4",
+        "Pygments": "2.21.0",
+        "httpx": "0.28.1",
+        "jiter": "0.18.0",
+        "six": "1.17.0",
+        "404-renderer-client": "0.1.3rc1",
+        "httpx2": "2.16.0",
+        "typing_extensions": "4.16.0",
+        "annotated-types": "0.8.0",
+        "cffi": "2.1.1",
+        "bittensor-wallet": "4.1.1",
+        "certifi": "2026.10.23",
+        "anyio": "4.15.1",
+        "404-witness-client": "0.2.13rc9",
+        "idna": "3.20",
+        "iniconfig": "2.3.1",
+        "httpcore2": "2.16.0",
+        "404-miner-runtime": "0.1.1rc1",
+        "websockets": "17.3",
+        "httpcore": "1.0.9",
+        "truststore": "0.10.5",
+        "h11": "0.16.0",
+        "pydantic_core": "2.50.1",
+        "sniffio": "1.3.1"
+      }
+    },
+    "python3.13": {
+      "python": "3.13.16 (main, Oct  6 2026, 02:04:05) [GCC 12.2.0]",
+      "platform": "Linux-6.12.54-linuxkit-x86_64-with-glibc2.36",
+      "libc": [
+        "glibc",
+        "2.36"
+      ],
+      "environment": {
+        "cryptography": "50.0.2",
+        "pluggy": "1.7.0",
+        "packaging": "26.3",
+        "ecdsa": "0.19.2",
+        "pytest": "9.1.1",
+        "tlslite-ng": "0.8.2",
+        "openai": "3.29.0",
+        "pycparser": "3.12",
+        "pydantic": "2.14.1",
+        "typing-inspection": "0.4.4",
+        "Pygments": "2.21.0",
+        "httpx": "0.28.1",
+        "jiter": "0.18.0",
+        "six": "1.17.0",
+        "404-renderer-client": "0.1.3rc1",
+        "httpx2": "2.16.0",
+        "typing_extensions": "4.16.0",
+        "annotated-types": "0.8.0",
+        "cffi": "2.1.1",
+        "bittensor-wallet": "4.1.0",
+        "certifi": "2026.10.23",
+        "anyio": "4.15.1",
+        "404-witness-client": "0.2.13rc9",
+        "websockets": "17.2",
+        "pip": "26.2.1",
+        "idna": "3.20",
+        "numpy": "2.5.4",
+        "iniconfig": "2.3.1",
+        "httpcore2": "2.16.0",
+        "404-miner-runtime": "0.1.1rc1",
+        "httpcore": "1.0.9",
+        "truststore": "0.10.5",
+        "h11": "0.16.0",
+        "loguru": "0.7.3",
+        "pydantic_core": "2.50.1",
+        "sniffio": "1.3.1",
+        "aiofiles": "25.1.0"
+      }
+    }
+  },
+  "validation": {
+    "date": "2026-10-28",
+    "artifact_build": "witness-client/Dockerfile builds all three wheels; auditwheel repair/show validates the witness manylinux_2_34_x86_64 wheel",
+    "artifact_integrity": "Wheel RECORD hashes, packaged Python source, py.typed, dependency metadata and license files checked against source_commit",
+    "native_library": "Installed wheel loads ABI 2, authenticates the pinned proof parameters and generates a synthetic credential proof; go version -m reports go1.27.3",
+    "native_go_tests": {
+      "command": "GOTOOLCHAIN=local GOMAXPROCS=2 GOMEMLIMIT=768MiB go test ./...",
+      "status": "passed"
+    },
+    "installed_wheel_tests": {
+      "network": "disabled during execution",
+      "pythonpath": "No source-package paths; miner-reference tests add only their own unbundled reference code",
+      "python3.11": {
+        "witness": {
+          "passed": 391,
+          "warnings": 1
+        },
+        "renderer": {
+          "passed": 61,
+          "skipped": 2
+        },
+        "miner_reference_and_runtime": {
+          "passed": 21,
+          "warnings": 2
+        }
+      },
+      "python3.13": {
+        "witness": {
+          "passed": 391
+        },
+        "renderer": {
+          "passed": 61,
+          "skipped": 2
+        },
+        "miner_reference_and_runtime": {
+          "passed": 21
+        }
+      },
+      "skips": "Standalone renderer integration tests require a running renderer; no real rendering service was exercised.",
+      "warnings": "Python 3.11: tlslite asyncore deprecation; read-only pytest cache for reference tests."
+    },
+    "pip_check": "passed in the Python 3.11 wheel environment, Python 3.13 source-install environment and separate Python 3.13 wheel environment",
+    "base_miner_install": {
+      "repository": "https://github.com/404-Repo/404-base-miner-gpt",
+      "commit": "26c3ad32f9c4f202c9cd896c955695ab1964b75c",
+      "python": "3.13.16",
+      "source_install": "python -m pip install ./404-base-miner with sibling 404-sdk source; native library supplied by the current clean source build",
+      "cli": "python main.py --help passed",
+      "public_apis": "AsyncWitnessClient, responses.create, render, submit(image, source), get_submitted, RenderOptions and the async three-argument base-miner entry point load from installed packages; API-key and subscription constructors initialized without credentials or service access",
+      "synchronous_reference": "generate(image, seed, witness, renderer) imports with the same installed packages; existing execution/replay tests passed"
+    },
+    "live_gateway_and_pod": "not exercised; registration, live model calls, Pod rendering and final network submission remain live-operation checks",
+    "paid_provider_calls": 0,
+    "dependency_audit": {
+      "tool": "pip-audit 2.10.1 --strict --disable-pip --no-deps against exact pinned external distributions from each installed environment",
+      "own_packages": "Not on PyPI; verified as local artifacts by hashes and package metadata.",
+      "python3.11": {
+        "exit_code": 1,
+        "unique_findings": [
+          {
+            "package": "ecdsa",
+            "version": "0.19.2",
+            "id": "PYSEC-2026-1325",
+            "aliases": [
+              "CVE-2024-23342",
+              "GHSA-wj6h-64fc-37mp"
+            ],
+            "fix_versions": []
+          },
+          {
+            "package": "setuptools",
+            "version": "84.0.0",
+            "id": "GHSA-xmj3-9gf7-h52w",
+            "aliases": [],
+            "fix_versions": [
+              "84.1.0"
+            ]
+          }
+        ]
+      },
+      "python3.13": {
+        "exit_code": 1,
+        "unique_findings": [
+          {
+            "package": "ecdsa",
+            "version": "0.19.2",
+            "id": "PYSEC-2026-1325",
+            "aliases": [
+              "CVE-2024-23342",
+              "GHSA-wj6h-64fc-37mp"
+            ],
+            "fix_versions": []
+          }
+        ]
+      },
+      "note": "The advisory feed repeated the same ecdsa advisory twice; findings here are deduplicated by package and ID."
+    }
+  },
+  "dependency_findings": [
+    {
+      "package": "ecdsa",
+      "version": "0.19.2",
+      "id": "PYSEC-2026-1325",
+      "decision": "Existing accepted release finding retained; upstream lists no fixed version. Dependency unchanged."
+    },
+    {
+      "package": "setuptools",
+      "version": "84.0.0",
+      "id": "GHSA-xmj3-9gf7-h52w",
+      "decision": "Build-tool finding recorded. The advisory concerns Windows legacy install_as_egg namespace handling; this release builds on Linux and installs wheels through pip. Not present in the clean Python 3.13 runtime environment; no build-tool upgrade in this scoped release."
+    }
+  ],
+  "installation": {
+    "method": "pinned source checkout",
+    "guide": "miner-reference/README.md#launch-quickstart",
+    "witness_url": "https://witness.subnet404.xyz",
+    "chain": "Finney",
+    "netuid": 17,
+    "recommended_entry_point": "404-base-miner-gpt: async generate(image, seed, witness)",
+    "submission": "await witness.submit(image, source) outside generate()",
+    "sdk_state_directory_required": false
+  },
+  "publication": {
+    "package_registry": "not published; upload requires separate authorization",
+    "prepared_artifacts": "Use the files and SHA-256 values in this manifest; do not rebuild under the same published version or overwrite existing artifacts."
+  },
+  "previous_release": "releases/0.2.13rc1.json"
+}

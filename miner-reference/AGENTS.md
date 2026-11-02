@@ -93,16 +93,13 @@ Plus any identifiers declared locally (`const`, `let`, `var`, function parameter
 
 ## Rendering context
 
-The asset is rendered under a fixed setup you cannot change. Tune materials accordingly.
+The runtime specifies the renderer build and camera, lighting, background and view
+options. Your module constructs the asset; the renderer controls that setup.
+Use the supplied renderer client to inspect candidates under recorded preview
+settings. The local browser viewer does not reproduce judging conditions.
 
-- **Camera:** `PerspectiveCamera`, FOV 17.5°, position `(0, 0.3, 3.5)`, target `(0, 0, 0)`, Y-up
-- **Key light:** `DirectionalLight(0xffffff, 1.2)` at `(2, 3, 2)`
-- **Fill light:** `DirectionalLight(0xffffff, 0.4)` at `(-2, 1, 1)`
-- **Ambient:** `AmbientLight(0xffffff, 0.15)`
-- **Environment:** Neutral studio HDRI, intensity 1.0
-- **Background:** Solid gray `0x808080`
-- **Renderer:** 1024×1024, ACES filmic tone mapping, sRGB output, pixel ratio 1
-- **Three.js version:** `three@0.183.2` (r183)
+See [Rendering](README.md#rendering) for the preview and judging views.
+Three.js remains pinned to `three@0.183.2` (r183).
 
 ## Essential patterns
 

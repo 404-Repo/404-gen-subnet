@@ -1,0 +1,5 @@
+node_modules/
+params/*
+!params/circuit.bin
+!params/proving.bin
+!params/verifying.bin

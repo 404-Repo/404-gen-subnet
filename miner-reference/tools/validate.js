@@ -15,8 +15,8 @@
  *   { stage, rule, detail }
  *
  * See ../validator/README.md for the rules this tool enforces and the ones
- * it can't (heap cap, render run, container isolation — those live in the
- * production validator only).
+ * its limitations: worker heap control excludes external array buffers,
+ * and the tool does not render assets or run the Python sandbox/replay.
  */
 
 import fs from 'node:fs/promises';

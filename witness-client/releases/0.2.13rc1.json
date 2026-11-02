@@ -1,0 +1,141 @@
+{
+  "distribution": "404-witness-client",
+  "import_package": "witness_client",
+  "supported_protocols": [
+    2
+  ],
+  "native_proof_abi": 2,
+  "proof_key_sha256": "6478059e4ad0d39e8c157c76cea9c6dd777c2ab5143cf8694876094facf39b16",
+  "proof_parameters_url": "https://subnet404.xyz/witness-client/releases/0.2.0/witness-proof-parameters-v1.tar.gz",
+  "proof_parameter_members": {
+    "circuit.bin": {
+      "sha256": "451b8ebe434e1b9cee5982a46f4630d3d3647fe49c11f2ec6d88b8731617f9c7",
+      "bytes": 10378176
+    },
+    "proving.bin": {
+      "sha256": "31bd198d1325f526f5f1add2272bf73ffaff23c9e2d0ac7463c0f5e88c8701e7",
+      "bytes": 35392269
+    },
+    "verifying.bin": {
+      "sha256": "6478059e4ad0d39e8c157c76cea9c6dd777c2ab5143cf8694876094facf39b16",
+      "bytes": 12400
+    }
+  },
+  "native_builder_image": "golang:1.27.1-bookworm@sha256:69a7b9788769bec032d238959b61854e9ae87f57be9029ec04e9885fabf99195",
+  "platform": "Linux x86_64, glibc 2.34+, Python 3.11+",
+  "license_expression": "MIT AND Apache-2.0 AND BSD-3-Clause AND BSD-1-Clause AND SunPro AND LicenseRef-Go-Cephes",
+  "license_files": {
+    "LICENSE": {
+      "sha256": "73a13e26f9c17ded4c6efc40ae68e8c774b1a7feef5a2a1c14ab98297353b4db",
+      "bytes": 1067
+    },
+    "THIRD_PARTY_NOTICES.md": {
+      "sha256": "34d77048b73bb346b00fb9f179887a6bfb3d86fbf571b591cabc2dceff6158dc",
+      "bytes": 83265
+    }
+  },
+  "accepted_dependency_findings": [
+    {
+      "package": "ecdsa",
+      "version": "0.19.2",
+      "id": "PYSEC-2026-1325",
+      "aliases": [
+        "CVE-2024-23342",
+        "GHSA-wj6h-64fc-37mp"
+      ],
+      "fix_versions": [],
+      "decision": "Accepted as nonblocking for this release."
+    }
+  ],
+  "version": "0.2.13rc1",
+  "status": "verified release candidate; not published",
+  "source_tag": "witness-client-v0.2.13rc1",
+  "source_commit": "9d35ff2c0efa5b0d2e1ce0397a55c53bb3cb298a",
+  "files": {
+    "404_witness_client-0.2.13rc1-py3-none-manylinux_2_34_x86_64.whl": {
+      "sha256": "f4c936c9d15c6b082161202d7ec638ce3ce392ee916b41086a2309fd6f8acff9",
+      "bytes": 8038897
+    },
+    "witness-proof-parameters-v1.tar.gz": {
+      "sha256": "c5e2264bdf3fefd50ec20d3384c388e8dc709a0e7968ee840f32fbf1386fc244",
+      "bytes": 37902483
+    }
+  },
+  "native_library_sha256": "ba1d29d8c786d6558068c17687dc3280bdba9afee05e1ab3895698b5f7608b27",
+  "native_go_version": "go1.27.1",
+  "requires_dist": [
+    "tlslite-ng<0.9,>=0.8.2",
+    "cryptography<51,>=50.0.2",
+    "httpx<0.29,>=0.28.1",
+    "websockets<18,>=17.1",
+    "bittensor-wallet<5,>=4.1.0",
+    "openai<4,>=3.24.0",
+    "pydantic<3,>=2",
+    "mypy<3,>=2.3.1; extra == \"dev\"",
+    "types-setuptools<85,>=84.0.0.20260812; extra == \"dev\"",
+    "pytest<10,>=9.0.3; extra == \"dev\""
+  ],
+  "tested_linux_environment": {
+    "404-witness-client": "0.2.13rc1",
+    "annotated-types": "0.8.0",
+    "anyio": "4.15.1",
+    "auditwheel": "6.8.2",
+    "bittensor-wallet": "4.1.1",
+    "build": "1.6.1",
+    "certifi": "2026.7.22",
+    "cffi": "2.1.1",
+    "cryptography": "50.0.2",
+    "ecdsa": "0.19.2",
+    "h11": "0.16.0",
+    "httpcore": "1.0.9",
+    "httpcore2": "2.13.1",
+    "httpx": "0.28.1",
+    "httpx2": "2.13.1",
+    "idna": "3.20",
+    "iniconfig": "2.3.1",
+    "jiter": "0.17.0",
+    "openai": "3.29.0",
+    "packaging": "26.3",
+    "patchelf": "0.19.1.0",
+    "pip": "26.2.1",
+    "pluggy": "1.6.0",
+    "pycparser": "3.11",
+    "pydantic": "2.14.1",
+    "pydantic_core": "2.50.1",
+    "pyelftools": "0.33",
+    "Pygments": "2.21.0",
+    "pyproject_hooks": "1.3.3",
+    "pytest": "9.1.1",
+    "setuptools": "84.0.0",
+    "six": "1.17.0",
+    "sniffio": "1.3.1",
+    "tlslite-ng": "0.8.2",
+    "truststore": "0.10.4",
+    "typing_extensions": "4.16.0",
+    "typing-inspection": "0.4.4",
+    "websockets": "17.2",
+    "wheel": "0.48.0"
+  },
+  "validation": {
+    "report": "results/release-0.2.13rc1.json",
+    "tagged_source_build": "Built once from a clean git archive; the same installed wheel passed local and live cloud checks",
+    "linux_installed_wheel_tests": {
+      "passed": 229,
+      "warnings": 1,
+      "external_network": "disabled"
+    },
+    "live_cloud_end_to_end": {
+      "status": "passed",
+      "date": "2026-10-12",
+      "wheel_sha256": "f4c936c9d15c6b082161202d7ec638ce3ce392ee916b41086a2309fd6f8acff9",
+      "report": "results/release-0.2.13rc1.json",
+      "authentication_mode": "subscription",
+      "api_key_validation": {
+        "status": "provider rejection and recovery verified; successful generation blocked by API credit balance",
+        "date": "2026-10-12",
+        "report": "results/release-0.2.13rc1.json"
+      }
+    }
+  },
+  "previous_release": "releases/0.2.12.json"
+}

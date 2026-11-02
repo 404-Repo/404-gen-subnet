@@ -1,0 +1,1 @@
+"""Example miner package."""

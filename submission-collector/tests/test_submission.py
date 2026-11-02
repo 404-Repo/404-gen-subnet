@@ -1,7 +1,6 @@
 import json
 
 import pytest
-from pydantic import HttpUrl
 
 from submission_collector.submission import Submission, parse_commitment
 
@@ -21,7 +20,6 @@ def _valid_data(**overrides: str) -> dict:
     defaults = {
         "repo": "test/model",
         "commit": "a" * 40,
-        "cdn_url": "https://cdn.example.com/files",
     }
     defaults.update(overrides)
     return defaults
@@ -39,15 +37,14 @@ def test_valid_commitment_returns_submission() -> None:
         hotkey=HOTKEY,
         repo="test/model",
         commit="a" * 40,
-        cdn_url=HttpUrl("https://cdn.example.com/files"),
         reveal_block=150,
     )
 
 
 def test_multiple_commits_uses_latest_value() -> None:
     commitment = (
-        (110, json.dumps({"repo": "old/repo", "commit": "b" * 40, "cdn_url": "https://old.example.com"})),
-        (190, json.dumps({"repo": "new/repo", "commit": "c" * 40, "cdn_url": "https://new.example.com"})),
+        (110, json.dumps({"repo": "old/repo", "commit": "b" * 40})),
+        (190, json.dumps({"repo": "new/repo", "commit": "c" * 40})),
     )
 
     result = parse_commitment(hotkey=HOTKEY, commitment=commitment, earliest_block=EARLIEST, latest_block=LATEST)
@@ -55,15 +52,13 @@ def test_multiple_commits_uses_latest_value() -> None:
     assert result is not None
     assert result.repo == "new/repo"
     assert result.commit == "c" * 40
-    assert str(result.cdn_url).rstrip("/") == "https://new.example.com"
 
 
 def test_fields_across_separate_commits() -> None:
-    """Miners can submit repo, commit, cdn_url in different commits."""
+    """Miners can submit repo and commit in different commits."""
     commitment = (
         (110, json.dumps({"repo": "test/model"})),
         (120, json.dumps({"commit": "d" * 40})),
-        (130, json.dumps({"cdn_url": "https://cdn.example.com"})),
     )
 
     result = parse_commitment(hotkey=HOTKEY, commitment=commitment, earliest_block=EARLIEST, latest_block=LATEST)
@@ -75,7 +70,7 @@ def test_fields_across_separate_commits() -> None:
 
 def test_single_quotes_in_json_handled() -> None:
     """The parser replaces single quotes with double quotes."""
-    raw = "{'repo': 'test/model', 'commit': '" + "a" * 40 + "', 'cdn_url': 'https://cdn.example.com'}"
+    raw = "{'repo': 'test/model', 'commit': '" + "a" * 40 + "'}"
     result = parse_commitment(
         hotkey=HOTKEY,
         commitment=((150, raw),),
@@ -109,7 +104,7 @@ def test_block_window_filter(block: int, expected_valid: bool) -> None:
     assert (result is not None) == expected_valid
 
 
-@pytest.mark.parametrize("missing_field", ["repo", "commit", "cdn_url"])
+@pytest.mark.parametrize("missing_field", ["repo", "commit"])
 def test_missing_required_field_returns_none(missing_field: str) -> None:
     data = _valid_data()
     del data[missing_field]
@@ -119,7 +114,7 @@ def test_missing_required_field_returns_none(missing_field: str) -> None:
     assert result is None
 
 
-@pytest.mark.parametrize("empty_field", ["repo", "commit", "cdn_url"])
+@pytest.mark.parametrize("empty_field", ["repo", "commit"])
 def test_empty_field_returns_none(empty_field: str) -> None:
     data = _valid_data(**{empty_field: ""})
 

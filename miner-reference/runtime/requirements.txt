@@ -1,0 +1,13 @@
+# Pinned direct dependencies for Python 3.13 / Linux x86_64.
+# The runtime also bundles the witness/renderer clients.
+tlslite-ng==0.8.2
+cryptography==50.0.2
+httpx==0.28.1
+websockets==17.2
+bittensor-wallet==4.1.0
+openai==3.29.0
+pydantic==2.14.1
+
+# Local image processing and numerical tools for miner code.
+numpy==2.5.4
+pillow==13.0.0

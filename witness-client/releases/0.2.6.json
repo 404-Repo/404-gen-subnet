@@ -1,0 +1,124 @@
+{
+  "distribution": "404-witness-client",
+  "import_package": "witness_client",
+  "version": "0.2.6",
+  "status": "built and tested; not published; blocked on ecdsa timing advisory",
+  "platform": "Linux x86_64, Debian 12 (glibc 2.36+), Python 3.11+",
+  "source_tag": "witness-client-v0.2.6",
+  "source_commit": "b437cd269cca21ac7981769aa41b8cd910e48636",
+  "supported_protocols": [
+    2
+  ],
+  "native_proof_abi": 2,
+  "proof_key_sha256": "6478059e4ad0d39e8c157c76cea9c6dd777c2ab5143cf8694876094facf39b16",
+  "proof_parameters_url": "https://subnet404.xyz/witness-client/releases/0.2.0/witness-proof-parameters-v1.tar.gz",
+  "proof_parameter_members": {
+    "circuit.bin": {
+      "sha256": "451b8ebe434e1b9cee5982a46f4630d3d3647fe49c11f2ec6d88b8731617f9c7",
+      "bytes": 10378176
+    },
+    "proving.bin": {
+      "sha256": "31bd198d1325f526f5f1add2272bf73ffaff23c9e2d0ac7463c0f5e88c8701e7",
+      "bytes": 35392269
+    },
+    "verifying.bin": {
+      "sha256": "6478059e4ad0d39e8c157c76cea9c6dd777c2ab5143cf8694876094facf39b16",
+      "bytes": 12400
+    }
+  },
+  "files": {
+    "witness-proof-parameters-v1.tar.gz": {
+      "sha256": "c5e2264bdf3fefd50ec20d3384c388e8dc709a0e7968ee840f32fbf1386fc244",
+      "bytes": 37902483
+    },
+    "404_witness_client-0.2.6-py3-none-linux_x86_64.whl": {
+      "sha256": "b7060d979c89c3d28ac2cb4b2588d43c948c03473db0e2dfa961bac1e22bbaa9",
+      "bytes": 7368923
+    }
+  },
+  "native_library_sha256": "183a14fcab13899f5e0f9b3eb55aaab0646e9f3e4b7f52b40a46cad23aec5919",
+  "native_library_unchanged_from": "releases/0.2.5.json",
+  "requires_dist": [
+    "tlslite-ng<0.9,>=0.8.2",
+    "cryptography<51,>=50.0.2",
+    "httpx<0.29,>=0.28.1",
+    "websockets<16,>=15.0.1",
+    "bittensor-wallet<5,>=4.1.0",
+    "mypy<3,>=2.3.1; extra == \"dev\"",
+    "types-setuptools<85,>=84.0.0.20260812; extra == \"dev\"",
+    "pytest<10,>=9.0.3; extra == \"dev\""
+  ],
+  "tested_linux_environment": {
+    "setuptools": "84.0.0",
+    "packaging": "26.3",
+    "wheel": "0.48.0",
+    "build": "1.6.1",
+    "pip": "26.2.1",
+    "pyproject_hooks": "1.3.3",
+    "cryptography": "50.0.2",
+    "iniconfig": "2.3.0",
+    "ecdsa": "0.19.2",
+    "pytest": "9.1.1",
+    "pycparser": "3.0",
+    "tlslite-ng": "0.8.2",
+    "Pygments": "2.21.0",
+    "httpx": "0.28.1",
+    "six": "1.17.0",
+    "typing_extensions": "4.16.0",
+    "cffi": "2.1.1",
+    "bittensor-wallet": "4.1.1",
+    "websockets": "15.0.1",
+    "anyio": "4.15.1",
+    "certifi": "2026.7.22",
+    "idna": "3.20",
+    "httpcore": "1.0.9",
+    "h11": "0.16.0",
+    "pluggy": "1.6.0",
+    "404-witness-client": "0.2.6"
+  },
+  "validation": {
+    "clean_linux_install": {
+      "distribution": "404-witness-client",
+      "version": "0.2.6",
+      "package_path": "/venv/lib/python3.11/site-packages/witness_client/__init__.py",
+      "old_distribution_absent": true,
+      "proof_abi": 2,
+      "verified_parameter_initialization": "passed",
+      "cryptography": "50.0.2",
+      "pytest": "9.1.1"
+    },
+    "linux_installed_wheel_tests": {
+      "passed": 101,
+      "warnings": 2,
+      "seconds": 279.31,
+      "network": "disabled; local TLS witnesses and HTTP mocks only"
+    },
+    "macos_source_tests": {
+      "passed": 101,
+      "warnings": 2,
+      "seconds": 144.84,
+      "cryptography": "50.0.2",
+      "pytest": "9.1.1"
+    },
+    "strict_type_checks": "passed; 29 source files",
+    "wheel_python_sources": "17 package files match source_tag byte for byte",
+    "tagged_source_build": "Built once from a clean git archive of source_tag; retained wheel used for installation and tests",
+    "dependency_audit": "results/dependencies-0.2.6.json"
+  },
+  "release_blockers": [
+    {
+      "package": "ecdsa",
+      "version": "0.19.2",
+      "id": "CVE-2024-23342",
+      "url": "https://github.com/tlsfuzzer/python-ecdsa/security/advisories/GHSA-wj6h-64fc-37mp",
+      "patched_version": null,
+      "client_relevance": "Configured secp256r1 key shares use tlslite ECDHKeyExchange and python-ecdsa for private-key generation and ECDH.",
+      "decision": "Keep public release blocked pending a separate TLS implementation fix. No suppression or automatic waiver.",
+      "demonstrated_client_attack": false
+    }
+  ],
+  "previous_live_cloud_test": "results/cloud-2026-10-02.json",
+  "live_cloud_end_to_end": "Last passed on source commit 8e0cf9d. Not repeated for 0.2.6; local TLS/proof integration tests passed with the upgraded dependencies.",
+  "previous_release": "releases/0.2.5.json",
+  "upgrade_note": "0.2.5 and earlier pin cryptography to a version with known advisories. 0.2.6 fixes that dependency requirement but is not approved for public release while the ecdsa finding remains open."
+}

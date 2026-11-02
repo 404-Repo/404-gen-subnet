@@ -1,0 +1,91 @@
+{
+  "version": "0.2.0",
+  "source_commit": "a68404b14b8fd905d8d191472306c682c6dcd4db",
+  "platform": "Linux x86_64, Debian 12 (glibc 2.36+), Python 3.11+",
+  "proof_key_sha256": "6478059e4ad0d39e8c157c76cea9c6dd777c2ab5143cf8694876094facf39b16",
+  "files": {
+    "witness-proof-parameters-v1.tar.gz": {
+      "sha256": "c5e2264bdf3fefd50ec20d3384c388e8dc709a0e7968ee840f32fbf1386fc244",
+      "bytes": 37902483
+    },
+    "witness_client-0.2.0-py3-none-linux_x86_64.whl": {
+      "sha256": "d259a03d60f354b4c47605faa9be3c66130443d6ff728afbb391d63911608397",
+      "bytes": 7358496
+    }
+  },
+  "proof_parameters_url": "https://subnet404.xyz/witness-client/releases/0.2.0/witness-proof-parameters-v1.tar.gz",
+  "validation": {
+    "linux_installed_wheel": {
+      "passed": 50,
+      "seconds": 292.69
+    },
+    "macos_python": {
+      "passed": 50
+    },
+    "gateway_workerd": {
+      "passed": 13,
+      "concurrent_test_miners": 250,
+      "runpod": "mocked"
+    },
+    "javascript_witness": {
+      "passed": 28
+    },
+    "native_go": "passed",
+    "strict_type_checks": "passed",
+    "proof_parameters_public_download": "sha256 verified",
+    "live_cloud_end_to_end": {
+      "status": "passed",
+      "date": "2026-10-01",
+      "platform": "Installed Linux x86_64 release wheel in a fresh Docker container",
+      "path": "WitnessClient -> deployed Cloudflare gateway -> RunPod queue -> OpenAI subscription -> R2",
+      "model": "gpt-6-astra",
+      "membership": "Disposable sr25519 hotkeys in a synthetic private membership snapshot; not a live chain registration test",
+      "worker_image": "europe-docker.pkg.dev/gen-456515/docker-test/queued-witness@sha256:a202e47c0ade6404ed8e5f1b2aa48ac4ad45d5ce1b56c8600367eff5d7fa400c",
+      "worker_source_commit": "d7276a492ff723cd11ba794967dc2d120947e6e3",
+      "runpod_endpoint": "lxghqv4arn6j6f",
+      "runpod_job": "95140142-a3cb-420f-b7b3-8cc53e828110-e2",
+      "runpod_worker": "b2dk8zyu4fh029",
+      "queue_delay_ms": 26297,
+      "worker_execution_ms": 54253,
+      "jobs_completed": 1,
+      "jobs_failed": 0,
+      "jobs_retried": 0,
+      "exchange_id": "04bfb1d6-f9ce-42f0-bbd4-8781f4ff0e47",
+      "round": "1",
+      "hotkey": "5FUShQPX8FhNNZkUgQLRPUvoHiH8hwCQJUJCVku1ZJmuXJT7",
+      "usage": {
+        "input_tokens": 42,
+        "output_tokens": 20,
+        "total_tokens": 62
+      },
+      "output_text": "const geometry = new THREE.BoxGeometry(1, 1, 1);",
+      "request_sha256": "950d1e7d90f30062ea2a91da16995aee102b4b7115f1c531cac83d60ea0618fe",
+      "response_sha256": "87826df74bf8ad04ac2bd38409f4fcac4edbe3711709468b65210cb10ea91326",
+      "first_recovery_seconds": 0.714,
+      "recovery_after_gateway_redeploy_seconds": 0.748,
+      "checks": {
+        "exact_request_retained": true,
+        "exact_response_retained": true,
+        "usage_matches": true,
+        "single_indexed_exchange": true,
+        "no_local_response_before_recovery": true,
+        "fresh_client_process_recovery": true,
+        "identical_response_after_gateway_redeploy": true,
+        "same_admission_after_redeploy": true,
+        "anonymous_rejected_http": 401,
+        "other_registered_miner_rejected_http": 404,
+        "unregistered_rejected_http": 403,
+        "public_transcript_hashes_match": true
+      },
+      "transcript_url": "https://subnet404.xyz/rounds/1/5FUShQPX8FhNNZkUgQLRPUvoHiH8hwCQJUJCVku1ZJmuXJT7/04bfb1d6-f9ce-42f0-bbd4-8781f4ff0e47/manifest.json",
+      "cleanup": {
+        "runpod_endpoint_deleted": true,
+        "cloudflare_worker_and_secret_deleted": true,
+        "membership_namespace_deleted": true,
+        "durable_namespace_deleted": true,
+        "local_subscription_copy_deleted": true,
+        "transcripts_retained": true
+      }
+    }
+  }
+}

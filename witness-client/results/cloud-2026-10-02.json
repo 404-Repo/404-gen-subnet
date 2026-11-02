@@ -1,0 +1,134 @@
+{
+  "date": "2026-10-02",
+  "status": "passed",
+  "path": "Installed Python WitnessClient -> deployed Cloudflare Worker -> RunPod serverless queue -> OpenAI subscription -> R2",
+  "client": {
+    "source_commit": "8e0cf9dc0cebcc045321679794e35636db28501e",
+    "package_version": "0.2.3",
+    "platform": "Linux x86_64, Python 3.11, fresh Docker containers",
+    "artifact": {
+      "source_commit": "8e0cf9dc0cebcc045321679794e35636db28501e",
+      "file": "witness_client-0.2.3-py3-none-linux_x86_64.whl",
+      "sha256": "782eb25c97b901868112fcc9eab76c900fea568d84db5779e67b8a1b28204409",
+      "bytes": 7362103,
+      "matching_python_files": 17,
+      "purpose": "Isolated test build including P2 fix; not a published release"
+    },
+    "installed_wheel_focused_tests": 48,
+    "infrastructure_credentials_provided_to_miner": false
+  },
+  "membership": "Disposable sr25519 hotkeys in a synthetic private membership snapshot; not live Bittensor chain registration",
+  "gateway": {
+    "name": "404-witness-cloud-20261002",
+    "url": "https://404-witness-cloud-20261002.subnet404.workers.dev",
+    "redeployment_version": "c513e56e-721f-4685-9110-f3d17b1ae04a",
+    "membership_namespace": "7d49cf992c6f4467916745072699be7c",
+    "membership_refresh": "Synthetic snapshot refreshed during the test because admission rejects snapshots older than five minutes"
+  },
+  "runpod": {
+    "endpoint": "znir981xpfa36m",
+    "type": "QUEUE",
+    "worker_image": "europe-docker.pkg.dev/gen-456515/docker-test/queued-witness@sha256:a202e47c0ade6404ed8e5f1b2aa48ac4ad45d5ce1b56c8600367eff5d7fa400c",
+    "worker_source_commit": "d7276a492ff723cd11ba794967dc2d120947e6e3",
+    "worker_source_unchanged_at_client_commit": true,
+    "worker_vcpus": 2,
+    "worker_ram_gb": 4,
+    "min_workers": 0,
+    "max_workers": 1,
+    "health_job": "3b7b0ca2-22f3-4e57-a18f-c111dbbc7246-e1",
+    "generation_job": {
+      "id": "1713a3e5-a349-403a-8145-2776a4b5a050-e2",
+      "status": "COMPLETED",
+      "delayTime": 2607,
+      "executionTime": 54223,
+      "workerId": "n6dt5rx3yqgumc"
+    },
+    "final_job_counts": {
+      "completed": 2,
+      "failed": 0,
+      "inProgress": 0,
+      "inQueue": 0,
+      "retried": 0
+    },
+    "generation_count": 1,
+    "health_job_count": 1
+  },
+  "exchange": {
+    "id": "4a47d857-23f6-49d9-8eb5-b5b11c169cd6",
+    "round": "1",
+    "hotkey": "5F3saXzcSYorkNLpFjY3T2ZXSNBWnXkXfc5RT6bTKnnPAJoU",
+    "model": "gpt-6-astra",
+    "output_text": "const geometry = new THREE.BoxGeometry(1, 1, 1);",
+    "usage": {
+      "input_tokens": 42,
+      "output_tokens": 20,
+      "total_tokens": 62
+    },
+    "request_sha256": "950d1e7d90f30062ea2a91da16995aee102b4b7115f1c531cac83d60ea0618fe",
+    "response_sha256": "b1c8cafa341e12b6fbb1d9d109bd67049b8008e8b8ca2603c97f758247fcc29b",
+    "provider_tls_client_bytes": 3129,
+    "provider_tls_server_bytes": 18868,
+    "transcript_url": "https://subnet404.xyz/rounds/1/5F3saXzcSYorkNLpFjY3T2ZXSNBWnXkXfc5RT6bTKnnPAJoU/4a47d857-23f6-49d9-8eb5-b5b11c169cd6/manifest.json"
+  },
+  "recovery": {
+    "miner_interrupted_after_authorization": true,
+    "no_local_response_before_recovery": true,
+    "witness_recorded_response_and_usage_after_disconnect": true,
+    "first_recovery_fresh_container": true,
+    "first_recovery_seconds": 0.619,
+    "gateway_redeployed": true,
+    "post_redeployment_fresh_container_without_cached_response": true,
+    "recovery_after_redeployment_seconds": 0.578,
+    "identical_response_after_redeployment": true,
+    "same_admission_after_redeployment": true
+  },
+  "download_failure_checks": {
+    "method": "Fault injection in the client after successful retrieval from the real gateway; no additional generation",
+    "cases": [
+      {
+        "failure": "unavailable",
+        "error": "WitnessError",
+        "exchange_id": "4a47d857-23f6-49d9-8eb5-b5b11c169cd6",
+        "status_code": 503
+      },
+      {
+        "failure": "disconnect",
+        "error": "WitnessError",
+        "exchange_id": "4a47d857-23f6-49d9-8eb5-b5b11c169cd6",
+        "status_code": null
+      }
+    ],
+    "partial_response_file_absent": true,
+    "successful_recovery_after_failures": true
+  },
+  "evidence_checks": {
+    "exact_request_retained": true,
+    "exact_response_retained": true,
+    "usage_matches": true,
+    "single_indexed_exchange": true,
+    "public_transcript_hashes_match": true
+  },
+  "admission_checks": {
+    "anonymous_rejected_http": 401,
+    "signature_replay_rejected_http": 401,
+    "forged_signature_rejected_http": 401,
+    "other_registered_miner_rejected_http": 404,
+    "unregistered_rejected_http": 403
+  },
+  "cleanup": {
+    "worker_read_after_delete_http": 404,
+    "membership_read_after_delete_http": 404,
+    "durable_namespace_absent": true,
+    "runpod_endpoint_deleted": true,
+    "local_subscription_copy_deleted": true,
+    "disposable_private_hotkeys_deleted": true,
+    "transcripts_retained": true
+  },
+  "limits": [
+    "One small subscription generation; not a concurrency or throughput test.",
+    "Miner disconnection and gateway redeployment tested; RunPod worker death during generation was not tested.",
+    "P2 download failures were injected locally against a real recorded response; Cloudflare was not made to fail.",
+    "The isolated test wheel includes the P2 fix and differs from the earlier 0.2.3 artifact recorded in releases/0.2.3.json. No package was published."
+  ],
+  "artifact_role": "Historical development test build containing the P2 fix; not a release artifact"
+}

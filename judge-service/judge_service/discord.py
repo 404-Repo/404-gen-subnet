@@ -9,17 +9,8 @@ class DiscordNotifier(ABC):
     async def notify_timeline_change(self, *, round_num: int, body: str) -> None: ...
 
     @abstractmethod
-    async def notify_audit_requested(self, *, round_num: int, hotkey: str, defeated: str, margin: float) -> None: ...
-
-    @abstractmethod
-    async def notify_audit_completed(
-        self,
-        *,
-        round_num: int,
-        hotkey: str,
-        defender: str,
-        repeats: list[tuple[float, float]],
-        verified: bool,
+    async def notify_validation_requested(
+        self, *, round_num: int, hotkey: str, defeated: str, margin: float
     ) -> None: ...
 
     @abstractmethod
@@ -37,38 +28,21 @@ class WebhookDiscordNotifier(DiscordNotifier):
         self._webhook = DiscordWebhook(webhook_url)
 
     async def notify_timeline_change(self, *, round_num: int, body: str) -> None:
+        max_body_length = 4096 - len("```\n\n```")
+        if len(body) > max_body_length:
+            marker = "\n... (truncated)"
+            body = body[: max_body_length - len(marker)] + marker
         await self._webhook.send_embed(
             title=f"Round {round_num} timeline",
             color=0x3498DB,
             description=f"```\n{body}\n```",
         )
 
-    async def notify_audit_requested(self, *, round_num: int, hotkey: str, defeated: str, margin: float) -> None:
+    async def notify_validation_requested(self, *, round_num: int, hotkey: str, defeated: str, margin: float) -> None:
         await self._webhook.send_embed(
-            title=f"Round {round_num} Audit Requested",
+            title=f"Round {round_num} Validation Requested",
             color=0x9B59B6,
             description=f"`{hotkey[:10]}` defeated `{defeated[:10]}` by {margin:+.2%}",
-        )
-
-    async def notify_audit_completed(
-        self,
-        *,
-        round_num: int,
-        hotkey: str,
-        defender: str,
-        repeats: list[tuple[float, float]],
-        verified: bool,
-    ) -> None:
-        verdict = "VERIFIED" if verified else "REJECTED"
-        lines = [
-            f"r{i}: submitted {submitted_margin:+.2%} / defender {defender_margin:+.2%}"
-            for i, (submitted_margin, defender_margin) in enumerate(repeats, start=1)
-        ]
-        body = f"`{hotkey[:10]}` vs `{defender[:10]}` — **{verdict}**\n```\n" + "\n".join(lines) + "\n```"
-        await self._webhook.send_embed(
-            title=f"Round {round_num} Audit Completed",
-            color=0x2ECC71 if verified else 0xE67E22,
-            description=body,
         )
 
     async def notify_round_finalized(self, *, round_num: int, winner: str, reason: str) -> None:
@@ -103,18 +77,7 @@ class NullDiscordNotifier(DiscordNotifier):
     async def notify_timeline_change(self, *, round_num: int, body: str) -> None:
         pass
 
-    async def notify_audit_requested(self, *, round_num: int, hotkey: str, defeated: str, margin: float) -> None:
-        pass
-
-    async def notify_audit_completed(
-        self,
-        *,
-        round_num: int,
-        hotkey: str,
-        defender: str,
-        repeats: list[tuple[float, float]],
-        verified: bool,
-    ) -> None:
+    async def notify_validation_requested(self, *, round_num: int, hotkey: str, defeated: str, margin: float) -> None:
         pass
 
     async def notify_round_finalized(self, *, round_num: int, winner: str, reason: str) -> None:

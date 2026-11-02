@@ -6,7 +6,7 @@
  *   MULTIPLE_TOP_LEVEL_EXPORTS → § Code Constraints
  *   ASYNC_NOT_ALLOWED          → § Function Signature
  *   FORBIDDEN_IDENTIFIER       → § Prohibited APIs
- *   IDENTIFIER_NOT_ALLOWED     → § Allowed Root Identifiers (Runtime Spec)
+ *   IDENTIFIER_NOT_ALLOWED     → identifiers.js / AGENTS.md § Allowed globals
  *   FORBIDDEN_THREE_API        → § Prohibited Three.js APIs (known real class, disallowed)
  *   UNKNOWN_THREE_API          → § Prohibited Three.js APIs (name not a real THREE member)
  *   THREE_AT_TOP_LEVEL         → § Function Signature

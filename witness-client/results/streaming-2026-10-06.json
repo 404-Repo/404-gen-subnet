@@ -1,0 +1,114 @@
+{
+  "date": "2026-10-06",
+  "recorded_at": "2026-10-06T10:19:46.868071+00:00",
+  "status": "streaming_passed_with_finding",
+  "path": "Current Python client source -> Cloudflare Worker -> RunPod serverless queue -> OpenAI subscription -> R2 transcript",
+  "source_commit": "092becabae3856f6828007a4ab0b23f3656d9908",
+  "client": {
+    "execution": "Current checkout",
+    "python": "3.14.0",
+    "platform": "macOS-26.6.2-arm64-arm-64bit-Mach-O",
+    "native_library_sha256": "664ee242e6f8f6e70b6c8bc6b524595d10c0b263f11202933f1611de7588f840"
+  },
+  "gateway": {
+    "name": "404-witness-retest-20261005",
+    "url": "https://404-witness-retest-20261005.subnet404.workers.dev",
+    "reused_existing_test_deployment": true
+  },
+  "runpod": {
+    "endpoint": "6y1jev9r0zvmw0",
+    "type": "QUEUE",
+    "job": {
+      "id": "08df2ea5-c4d8-4ec2-9168-9737a61a2f79-e2",
+      "status": "COMPLETED",
+      "delayTime": 1228,
+      "executionTime": 53634,
+      "workerId": "6zaaf0kngn3rpn"
+    },
+    "image": "europe-docker.pkg.dev/gen-456515/docker-test/queued-witness@sha256:31741717f45c63d5ce0325d0116badcbed75b167a8768cc5afe86276e19db5ab",
+    "jobs_completed_before": 4,
+    "jobs_completed_after": 5,
+    "final_job_counts": {
+      "completed": 5,
+      "failed": 0,
+      "inProgress": 0,
+      "inQueue": 0,
+      "retried": 0
+    }
+  },
+  "membership": {
+    "kind": "Isolated synthetic fixture with a disposable sr25519 hotkey",
+    "hotkey": "5D1zT5ayMSX2HSwutBhrTDajk4bRi1kZC6vzxDTU6onS8XhN"
+  },
+  "exchange": {
+    "id": "fcf50db4-2e60-4b65-b42d-88e7d704622e",
+    "round": "2026100501",
+    "provider": "https://chatgpt.com/backend-api/codex/responses",
+    "model": "gpt-6-astra",
+    "generation_calls": 1,
+    "stream_selected_by": "WitnessClient",
+    "request_stream_true_in_r2": true,
+    "http_status": 200,
+    "transfer_encoding": "chunked",
+    "content_type_header": null,
+    "http_data_chunks": 463,
+    "http_response_bytes": 186691,
+    "sse_bytes": 180318,
+    "event_counts": {
+      "response.created": 1,
+      "response.in_progress": 1,
+      "response.output_item.added": 1,
+      "response.content_part.added": 1,
+      "response.output_text.delta": 650,
+      "response.output_text.done": 1,
+      "response.content_part.done": 1,
+      "response.output_item.done": 1,
+      "response.completed": 1
+    },
+    "sequence_numbers_contiguous": true,
+    "output_characters": 1532,
+    "deltas_match_text_done_part_done_item_done_and_client": true,
+    "usage": {
+      "input_tokens": 76,
+      "output_tokens": 654,
+      "total_tokens": 730
+    },
+    "request_sha256": "89ba5e91341931d91fc9242a24000c5cc7cea1ea5fb83652749ef1e44de4c8b5",
+    "response_sha256": "0902d7db61510f9b16117773a2c127a7be49fbb3950f0b34a02d8e930d22394f"
+  },
+  "evidence": {
+    "r2_response_equals_client_bytes": true,
+    "cdn_response_equals_client_bytes": true,
+    "request_stream_true_in_r2": true,
+    "response_hash_matches_manifest": true,
+    "usage_matches_client_r2_manifest_and_status": true,
+    "public_manifest_url": "https://subnet404.xyz/rounds/2026100501/5D1zT5ayMSX2HSwutBhrTDajk4bRi1kZC6vzxDTU6onS8XhN/fcf50db4-2e60-4b65-b42d-88e7d704622e/manifest.json"
+  },
+  "recovery": {
+    "fresh_client": true,
+    "uncached_response_download": true,
+    "identical_response_bytes_and_usage": true,
+    "seconds": 0.758,
+    "same_original_exchange": true,
+    "generation_calls_after_recovery": 1
+  },
+  "finding": {
+    "priority": "P2",
+    "file": "witness-client/src/witness_client/response.py",
+    "line": 137,
+    "code": "subscription_sdk_response_output_missing",
+    "description": "The provider completion event contains output: []. WitnessResult.output_text correctly uses earlier text events, but WitnessResult.response is built only from the terminal event, losing completed output items present in the stream.",
+    "provider_terminal_output_items": 0,
+    "completed_message_events": 1,
+    "returned_sdk_response_output_items": 0,
+    "returned_sdk_response_output_text_characters": 0
+  },
+  "delivery_behavior": "The worker captures the OpenAI stream and saves evidence before releasing the response to the miner. create() returns the completed result.",
+  "final_state": {
+    "gateway_round_end": 0,
+    "membership_refresher_stopped": true,
+    "disposable_private_hotkey_deleted": true,
+    "local_subscription_copy_deleted": true,
+    "public_transcript_retained": true
+  }
+}

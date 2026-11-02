@@ -1,0 +1,62 @@
+{
+  "checked_on": "2026-10-19",
+  "usd_per_credit": 0.000001,
+  "credits_per_prompt": 5000000,
+  "calls_per_prompt": 60,
+  "long_context_above_input_tokens": 272000,
+  "providers": {
+    "api": "https://api.openai.com/v1/responses",
+    "codex": "https://chatgpt.com/backend-api/codex/responses"
+  },
+  "models": {
+    "gpt-6-astra": {
+      "input_credits_per_token": 10,
+      "output_credits_per_token": 50,
+      "long_input_credits_per_token": 20,
+      "long_output_credits_per_token": 75,
+      "source": "https://developers.openai.com/api/docs/models/gpt-6-astra"
+    },
+    "gpt-6.1-sol": {
+      "input_credits_per_token": 2,
+      "output_credits_per_token": 10,
+      "long_input_credits_per_token": 4,
+      "long_output_credits_per_token": 15,
+      "source": "https://developers.openai.com/api/docs/models/gpt-6.1-sol"
+    },
+    "gpt-6-sol": {
+      "input_credits_per_token": 2,
+      "output_credits_per_token": 10,
+      "long_input_credits_per_token": 4,
+      "long_output_credits_per_token": 15,
+      "source": "https://developers.openai.com/api/docs/models/gpt-6-sol"
+    },
+    "gpt-6-luna": {
+      "input_credits_per_token": 0.10,
+      "output_credits_per_token": 0.50,
+      "long_input_credits_per_token": 0.20,
+      "long_output_credits_per_token": 0.75,
+      "source": "https://developers.openai.com/api/docs/models/gpt-6-luna"
+    },
+    "gpt-5.6-sol": {
+      "input_credits_per_token": 4,
+      "output_credits_per_token": 20,
+      "long_input_credits_per_token": 8,
+      "long_output_credits_per_token": 30,
+      "source": "https://developers.openai.com/api/docs/models/gpt-5.6-sol"
+    },
+    "gpt-5.6-terra": {
+      "input_credits_per_token": 2,
+      "output_credits_per_token": 12,
+      "long_input_credits_per_token": 4,
+      "long_output_credits_per_token": 18,
+      "source": "https://developers.openai.com/api/docs/models/gpt-5.6-terra"
+    },
+    "gpt-5.6-luna": {
+      "input_credits_per_token": 0.20,
+      "output_credits_per_token": 1.20,
+      "long_input_credits_per_token": 0.40,
+      "long_output_credits_per_token": 1.80,
+      "source": "https://developers.openai.com/api/docs/models/gpt-5.6-luna"
+    }
+  }
+}

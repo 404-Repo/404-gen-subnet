@@ -1,0 +1,135 @@
+{
+  "schema_version": 1,
+  "baseline_id": "witness-renderer-20261023",
+  "git_tag": "witness-renderer-20261023",
+  "status": "validated_benchmark_baseline_with_known_timeout_limits",
+  "platform": "linux/amd64",
+  "image": "europe-docker.pkg.dev/gen-456515/docker-test/witness-render-bench@sha256:75f8a00c722a9e27ee72f590ad77ac0e107f540126822146ba8b9c2868245d43",
+  "requires_bootstrap": true,
+  "bootstrap": {
+    "file": "bootstrap.py",
+    "sha256": "792870e11c763d725955ffbc7bb769152bc53274e910e7f31e32b42e7b7b2128",
+    "entrypoint": [
+      "python",
+      "-u",
+      "/opt/witness-baseline/bootstrap.py"
+    ],
+    "container_path": "/opt/witness-baseline/bootstrap.py",
+    "optional_https_proxy_enabled_in_128_run": false
+  },
+  "source_references": {
+    "compatible_client_sdk_commit": "5b5b68ba11246a20303bbc08f094fa90f4308398",
+    "worker_opening_fix_commit": "5b5b68ba11246a20303bbc08f094fa90f4308398",
+    "renderer_pmrem_commit": "da7d2e61bee08af053b9e971a1be7afc6698379d",
+    "renderer_hardening_commit": "341742618441146ece41c7c73eee7b9c86b18146",
+    "renderer_client_commit": "48d5a9e857fb7aeff43758f9ca94582c1f0393ed",
+    "authority": "The image digest, bootstrap bytes and runtime file hashes identify the deployed code. The current branch renderer sources differ from the image."
+  },
+  "runtime_files_sha256": {
+    "/app/witness-client/native/privateauth": "354795719c330679d19f63685eb5a245ebf53ab75683049cd6861aa067ee2259",
+    "/app/witness-client/src/witness_client/gateway.py": "209b1010687889e5b8f1b70e3bf5d2dedc312746648e353cd9e1db687f904b03",
+    "/app/witness-gateway/pod_gateway/auth.py": "b6e5d2b73b2950ff21207c5413509223559549eabba4aec96d870918df70db99",
+    "/app/witness-server/verifier/params/verifying.bin": "6478059e4ad0d39e8c157c76cea9c6dd777c2ab5143cf8694876094facf39b16",
+    "/app/witness-server/worker/pod.py": "caddbf958e6f10e36c332bda54e4b31fdc49b109ddaf24daff5ca593cf0ca0a4",
+    "/opt/benchmark/harness.py": "f19da34bd3f31104c6fea70086bc16cbe6882d2595d76fa1669311d207a7ea49",
+    "/opt/renderer/package-lock.json": "649bb6f511925bb4cbd38f4a74e6e26f29c11042aad7b8df7a2ec11730d7dae8",
+    "/opt/renderer/package.json": "eb329323857e5c418ffa59f6bfadf6223bd16850b43738e662d6395864cf1c10",
+    "/opt/renderer/src/browser.js": "7b4608e962c4bc8494136b409d1d798cb48789bcd4216d9ed7e390a19cf32bb3",
+    "/opt/renderer/src/job-queue.js": "37b05341a885c82abab0eb8adef3caa0ba725685f52f28b3d2fb8ff957332ba0",
+    "/opt/renderer/src/pmrem-cache.js": "3428f3984cc6b753b9659a75b9bd0d8a8392e22eb0606291e377859545d31ae6",
+    "/opt/renderer/src/post-validate.js": "df2b2ab201f4e9b32d14622db24140b320d1c97f8df6190576fff03c0b82a05e",
+    "/opt/renderer/src/render-page.html": "b7ccde08e4fc53e17ffd37c2299b49f4d6dbb8472313f7d0531bd68c4d17d880",
+    "/opt/renderer/src/render-pool.js": "e0c5bd4d6b3dc70a9498a8de89d912a8d8e607ace38b156122c7a76140d4c424",
+    "/opt/renderer/src/renderer.js": "d2115e99e790e1f536c854e14a00392c8b43cfd756166cc6a4f0a33923ea9b0b",
+    "/opt/renderer/src/safeThree.js": "d4647fd635ef32c3f6826a7a6a622fff92729dbd4b2310ac428f0b0b8ff97a50",
+    "/opt/renderer/src/server.js": "f28d18f51af081b8810c113ef100fd0b993e6a941acd2cad772015685da8e5f6",
+    "/opt/renderer/src/static-server.js": "397d7c960349a28bee53786d2e5d3f778b16c49dd83338d910fb554047ebccc6",
+    "/opt/renderer/src/validation-pool.js": "90a4b5a6b0dfa497a2c5e5883111a02abc23e24ba0b64f9a90c21e35818f0e46",
+    "/opt/renderer/src/validation-worker.js": "c6d6c067212fe29976973638971d94937ba1f2eca3ec306967650ecedc769fec",
+    "/opt/renderer/src/validator/identifiers.js": "157bcb97cb6e2625e486afd4c3cacd326d92e251a02370bb595db7634dc0bead",
+    "/opt/renderer/src/validator/index.js": "4f87c90adba225918e8b82c42ae308e33d82d6c932064c4c75b235dd7256330a",
+    "/opt/renderer/src/validator/parse.js": "f12713f592c1b1972eec522bbe84cb600994b64950a90ed4c6cb3acc715016b8",
+    "/opt/renderer/src/validator/staticAnalysis.js": "702451e9c9ec080e01445d97dd8ad085cd35728de801dd51e570b4e0db3ccdac",
+    "/opt/renderer/src/validator/threeAllowlist.js": "493c9917d1c674b4d52c129f004c2ce40d6417268ce68652d75d80cb155e8c31"
+  },
+  "renderer_environment": {
+    "PORT": "8002",
+    "STATIC_PORT": "3000",
+    "RENDER_POOL_SIZE": "1",
+    "VALIDATION_POOL_SIZE": "1",
+    "RENDER_TIMEOUT_MS": "30000",
+    "VALIDATION_TIMEOUT_MS": "5000",
+    "RENDER_QUEUE_CAPACITY": "8",
+    "RENDER_QUEUE_WAIT_MS": "120000"
+  },
+  "render_options": {
+    "thetas": [
+      24.0,
+      120.0,
+      216.0,
+      312.0
+    ],
+    "phis": [
+      -15.0,
+      -15.0,
+      -15.0,
+      -15.0
+    ],
+    "img_size": 518,
+    "cam_radius": 2.0,
+    "cam_fov_deg": 49.1,
+    "gap": 5,
+    "bg_color": "808080",
+    "lighting": "studio"
+  },
+  "fixture_png_sha256": {
+    "balloon.js": "d60a2b2f803ecd980060e2a178a75d836d4f15f9ae28e676cc558af4095e1fc5",
+    "clock.js": "b0d3af3b9a0007daeae5098285c8a1ca7557860f70b6efbbf5e0eae41914763e",
+    "pumpkin.js": "082729a8f8e7c3b2eb9648fc2d5c3fd7cd87d4d9af7df5b4f65926c8a90628b4",
+    "suv.js": "6e6712348b5408861a971217884ca80620352e6741ac35b0891435a33704f98a"
+  },
+  "benchmark_configuration": {
+    "parallel_preparations": 3,
+    "parallel_model_calls": 12,
+    "parallel_prompts": 8,
+    "parallel_rendering_jobs": 1,
+    "reference_round": "test-3",
+    "reuse_reference_recording_namespace_for_new_inference": false,
+    "dispatch_limit": 2048,
+    "model_equivalent_usd_limit": 100,
+    "render_limit": 8192
+  },
+  "client_prover": {
+    "validated_host": "macOS arm64",
+    "library_sha256": "a54102bd2240d387c7503db4a605cc3a5c17706cc50196fcdce6a8db4f6e2985",
+    "GOMAXPROCS": "4",
+    "GOMEMLIMIT": "768MiB"
+  },
+  "validation": {
+    "run": "witness-pod-test-3-20261022",
+    "selected_prompts": 128,
+    "native_verified_recordings": 128,
+    "native_verified_issued_exchanges": 965,
+    "offline_replays": 256,
+    "offline_outputs_and_delivery_order_identical": true,
+    "fresh_original_png_comparisons": 1278,
+    "fresh_original_pngs_identical": true,
+    "original_validator_passes": 128,
+    "browser_replacement_fixture_pngs_identical": true,
+    "cross_hardware_fixture_pngs_identical": true,
+    "worker_host": "local amd64 container emulated on Mac",
+    "container_cpus": 6,
+    "container_memory_gib": 12,
+    "full_128_on_native_RunPod": false,
+    "verification_result_sha256": "e0b8882d4b3f39478e08911e4f106907c2dc51dc083cd8f07052d6a28304e87e",
+    "miner_source_archive_sha256": "a71ee2f919829096e0b067c0ec63bae032d36b5bdcb2f11eeef7c355634941ff"
+  },
+  "known_limits": [
+    "Timeout outcomes are load-sensitive; 11 outcomes across two fresh rendering passes used the original recorded timeout receipt.",
+    "One unpaid stalled connection required a same-generation resume.",
+    "One authorized failed capture retains unknown usage.",
+    "The benchmark harness uses a fixed worker adapter; dynamic allocation and revivor are outside this validation.",
+    "The bootstrap fixes the reference round to test-3. A new capture run needs a fresh namespace and a new run configuration without changing renderer, verifier or worker pins."
+  ],
+  "change_policy": "Keep this baseline immutable. Use a new baseline ID and Git tag for runtime, image, bootstrap, renderer, verifier or limit changes. Do not substitute current branch files or a mutable image tag."
+}

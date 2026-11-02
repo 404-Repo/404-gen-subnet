@@ -1,7 +1,7 @@
 /**
  * Post-execution validation: walk the returned root, check every metric.
  *
- * Mirrors Runtime Spec § Post-Execution Validation. Single-pass bounded walk
+ * Checks output_specifications.md scene limits. Single-pass bounded walk
  * with explicit cycle detection (Three.js's `Object3D.traverse` does not
  * detect cycles).
  */

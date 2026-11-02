@@ -18,6 +18,8 @@ const WORKER_PATH = path.join(__dirname, 'validation-worker.js');
 const POOL_SIZE = parseInt(process.env.VALIDATION_POOL_SIZE || '2', 10);
 const TIMEOUT_MS = parseInt(process.env.VALIDATION_TIMEOUT_MS || '5000', 10);
 
+export class ValidationUnavailableError extends Error {}
+
 class ValidationPool {
   constructor() {
     this.workers = [];
@@ -25,9 +27,11 @@ class ValidationPool {
     this.waiting = [];
     this._nextRequestId = 0;
     this._shuttingDown = false;
+    this._replacing = 0;
   }
 
   async init() {
+    this._shuttingDown = false;
     const promises = [];
     for (let i = 0; i < POOL_SIZE; i++) {
       promises.push(this._createWorker());
@@ -59,12 +63,7 @@ class ValidationPool {
           return;
         }
         if (msg.type === 'result') {
-          const entry = worker._pending.get(msg.requestId);
-          if (entry) {
-            worker._pending.delete(msg.requestId);
-            clearTimeout(entry.timer);
-            entry.resolve(msg.result);
-          }
+          this._settle(worker, msg.requestId, { result: msg.result });
         }
       });
 
@@ -74,20 +73,13 @@ class ValidationPool {
           reject(err);
           return;
         }
-        const isOOM = err.code === 'ERR_WORKER_OUT_OF_MEMORY';
-        const rule = isOOM ? 'HEAP_EXCEEDED' : 'EXECUTION_THREW';
-        const detail = isOOM
-          ? 'worker killed (exceeded 256 MB heap)'
-          : err.message;
-        for (const [, entry] of worker._pending) {
-          clearTimeout(entry.timer);
-          entry.resolve({
+        this._retireWorker(worker, err.code === 'ERR_WORKER_OUT_OF_MEMORY'
+          ? { result: {
             passed: false,
-            failures: [{ stage: 'execution', rule, detail }],
+            failures: [{ stage: 'execution', rule: 'HEAP_EXCEEDED', detail: 'worker killed (exceeded 256 MB heap)' }],
             metrics: null,
-          });
-        }
-        worker._pending.clear();
+          } }
+          : { error: new ValidationUnavailableError('validation worker failed') });
       });
 
       worker.on('exit', (code) => {
@@ -96,19 +88,9 @@ class ValidationPool {
           reject(new Error(`worker exited during init with code ${code}`));
           return;
         }
-        const rule = code === null ? 'HEAP_EXCEEDED' : 'EXECUTION_THREW';
-        const detail = code === null
-          ? 'worker killed (likely exceeded 256 MB heap)'
-          : `worker exited with code ${code}`;
-        for (const [, entry] of worker._pending) {
-          clearTimeout(entry.timer);
-          entry.resolve({
-            passed: false,
-            failures: [{ stage: 'execution', rule, detail }],
-            metrics: null,
-          });
-        }
-        worker._pending.clear();
+        this._retireWorker(worker, {
+          error: new ValidationUnavailableError('validation worker exited unexpectedly'),
+        });
         if (!this._shuttingDown) {
           this._replaceWorker(worker);
         }
@@ -116,26 +98,56 @@ class ValidationPool {
     });
   }
 
+  _settle(worker, requestId, { result, error, release = true }) {
+    const entry = worker._pending.get(requestId);
+    if (!entry) return;
+    worker._pending.delete(requestId);
+    clearTimeout(entry.timer);
+    if (error) {
+      entry.reject(error);
+    } else {
+      if (release) this._release(worker);
+      entry.resolve(result);
+    }
+  }
+
+  _retireWorker(worker, outcome) {
+    worker._failed = true;
+    this.available = this.available.filter((w) => w !== worker);
+    for (const requestId of worker._pending.keys()) {
+      this._settle(worker, requestId, outcome);
+    }
+  }
+
   async _replaceWorker(dead) {
     const idx = this.workers.indexOf(dead);
     if (idx === -1) return;
     this.workers.splice(idx, 1);
-
-    const wasAvailable = this.available.indexOf(dead);
-    if (wasAvailable !== -1) this.available.splice(wasAvailable, 1);
+    this._replacing++;
 
     try {
       const fresh = await this._createWorker();
+      if (this._shuttingDown) {
+        await fresh.terminate();
+        return;
+      }
       this.workers.push(fresh);
 
       if (this.waiting.length > 0) {
         const next = this.waiting.shift();
-        next(fresh);
+        next.resolve(fresh);
       } else {
         this.available.push(fresh);
       }
     } catch (err) {
       console.error('[validation-pool] failed to create replacement worker:', err.message);
+    } finally {
+      this._replacing--;
+      if (this._replacing === 0 && !this.workers.some((w) => !w._failed)) {
+        for (const next of this.waiting.splice(0)) {
+          next.reject(new ValidationUnavailableError('no validation workers available'));
+        }
+      }
     }
   }
 
@@ -143,39 +155,45 @@ class ValidationPool {
     const worker = await this._acquire();
     const requestId = this._nextRequestId++;
 
-    return new Promise((resolve) => {
+    return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
-        worker._pending.delete(requestId);
-        worker.terminate().catch(() => {});
-        resolve({
+        this._settle(worker, requestId, { result: {
           passed: false,
           failures: [{ stage: 'execution', rule: 'TIMEOUT_EXCEEDED', detail: `exceeded ${TIMEOUT_MS}ms` }],
           metrics: null,
-        });
+        }, release: false });
+        worker.terminate().catch(() => {});
       }, TIMEOUT_MS);
 
-      worker._pending.set(requestId, { resolve: (result) => {
-        this._release(worker);
-        resolve(result);
-      }, timer });
+      worker._pending.set(requestId, { resolve, reject, timer });
 
-      worker.postMessage({ type: 'validate', source, requestId });
+      try {
+        worker.postMessage({ type: 'validate', source, requestId });
+      } catch {
+        this._retireWorker(worker, {
+          error: new ValidationUnavailableError('could not dispatch validation'),
+        });
+        worker.terminate().catch(() => {});
+      }
     });
   }
 
   _acquire() {
+    if (this._shuttingDown || (!this.workers.some((w) => !w._failed) && this._replacing === 0)) {
+      return Promise.reject(new ValidationUnavailableError('no validation workers available'));
+    }
     if (this.available.length > 0) {
       return Promise.resolve(this.available.shift());
     }
-    return new Promise((resolve) => {
-      this.waiting.push(resolve);
+    return new Promise((resolve, reject) => {
+      this.waiting.push({ resolve, reject });
     });
   }
 
   _release(worker) {
-    if (!this.workers.includes(worker)) return;
+    if (worker._failed || !this.workers.includes(worker)) return;
     if (this.waiting.length > 0) {
-      this.waiting.shift()(worker);
+      this.waiting.shift().resolve(worker);
     } else {
       this.available.push(worker);
     }
@@ -183,13 +201,15 @@ class ValidationPool {
 
   async shutdown() {
     this._shuttingDown = true;
+    for (const next of this.waiting.splice(0)) {
+      next.reject(new ValidationUnavailableError('validation pool is shutting down'));
+    }
     for (const w of this.workers) {
       await w.terminate().catch(() => {});
     }
     this.workers = [];
     this.available = [];
     this.waiting = [];
-    this._shuttingDown = false;
   }
 }
 

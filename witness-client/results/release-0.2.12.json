@@ -1,0 +1,214 @@
+{
+  "date": "2026-10-02",
+  "artifact": {
+    "version": "0.2.12",
+    "source_tag": "witness-client-v0.2.12",
+    "source_commit": "44d90a0061bd28d1cc2caa195665b1398dd32944",
+    "wheel": "404_witness_client-0.2.12-py3-none-manylinux_2_34_x86_64.whl",
+    "sha256": "4688f5e06bac1bce0c27f1c751ac1b093f81a0f1161e9776899923c37b05aa74",
+    "bytes": 8033540,
+    "matching_package_source_files": 17,
+    "wheel_record_hashes": "passed",
+    "layout": "platlib",
+    "tag": "py3-none-manylinux_2_34_x86_64",
+    "native_library_sha256": "ba1d29d8c786d6558068c17687dc3280bdba9afee05e1ab3895698b5f7608b27",
+    "native_go_version": "go1.27.1",
+    "license_files": {
+      "LICENSE": {
+        "sha256": "73a13e26f9c17ded4c6efc40ae68e8c774b1a7feef5a2a1c14ab98297353b4db",
+        "bytes": 1067
+      },
+      "THIRD_PARTY_NOTICES.md": {
+        "sha256": "34d77048b73bb346b00fb9f179887a6bfb3d86fbf571b591cabc2dceff6158dc",
+        "bytes": 83265
+      }
+    },
+    "license_expression": "MIT AND Apache-2.0 AND BSD-3-Clause AND BSD-1-Clause AND SunPro AND LicenseRef-Go-Cephes",
+    "requires_dist": [
+      "tlslite-ng<0.9,>=0.8.2",
+      "cryptography<51,>=50.0.2",
+      "httpx<0.29,>=0.28.1",
+      "websockets<16,>=15.0.1",
+      "bittensor-wallet<5,>=4.1.0",
+      "mypy<3,>=2.3.1; extra == \"dev\"",
+      "types-setuptools<85,>=84.0.0.20260812; extra == \"dev\"",
+      "pytest<10,>=9.0.3; extra == \"dev\""
+    ]
+  },
+  "validation": {
+    "linux_installed_wheel_tests": {
+      "passed": 124,
+      "warnings": 2,
+      "seconds": 577.19,
+      "external_network": "disabled"
+    },
+    "clean_install": {
+      "pip_check": "passed",
+      "twine_check_strict": "passed",
+      "platforms": [
+        "Debian 12 / glibc 2.36 / Python 3.11",
+        "UBI 9 / glibc 2.34 / Python 3.11.13"
+      ],
+      "glibc_234_native_abi": 2,
+      "pinned_parameter_initialization": "passed"
+    },
+    "strict_typing": {
+      "passed": true,
+      "source_files": 31
+    },
+    "artifact_checks": {
+      "source_files_matching_tag": 17,
+      "wheel_record_hashes": "passed",
+      "licences_match_tag": true,
+      "native_go_version": "go1.27.1",
+      "native_bytes_preserved_by_auditwheel": true,
+      "platform_tag": "py3-none-manylinux_2_34_x86_64",
+      "auditwheel": "6.8.2",
+      "patchelf": "0.19.1.0"
+    },
+    "dependency_audit": {
+      "auditor": "pip-audit 2.10.1",
+      "mode": "strict; exact third-party runtime versions from a clean wheel install",
+      "runtime_versions": {
+        "anyio": "4.15.1",
+        "bittensor-wallet": "4.1.1",
+        "certifi": "2026.7.22",
+        "cffi": "2.1.1",
+        "cryptography": "50.0.2",
+        "ecdsa": "0.19.2",
+        "h11": "0.16.0",
+        "httpcore": "1.0.9",
+        "httpx": "0.28.1",
+        "idna": "3.20",
+        "pycparser": "3.0",
+        "six": "1.17.0",
+        "tlslite-ng": "0.8.2",
+        "typing-extensions": "4.16.0",
+        "websockets": "15.0.1"
+      },
+      "findings": [
+        {
+          "package": "ecdsa",
+          "version": "0.19.2",
+          "id": "PYSEC-2026-1325",
+          "aliases": [
+            "CVE-2024-23342",
+            "GHSA-wj6h-64fc-37mp"
+          ],
+          "fix_versions": [],
+          "decision": "Accepted as nonblocking for this release."
+        }
+      ],
+      "unique_advisories": 1,
+      "raw_findings": 2
+    }
+  },
+  "cloud": {
+    "date": "2026-10-03",
+    "timezone": "Europe/Minsk",
+    "completed_at": "2026-10-02T21:06:04.747870+00:00",
+    "status": "passed",
+    "path": "Installed Python WitnessClient -> deployed Cloudflare Worker -> RunPod serverless queue -> OpenAI subscription -> R2",
+    "client": {
+      "source_tag": "witness-client-v0.2.12",
+      "source_commit": "44d90a0061bd28d1cc2caa195665b1398dd32944",
+      "version": "0.2.12",
+      "wheel": "404_witness_client-0.2.12-py3-none-manylinux_2_34_x86_64.whl",
+      "sha256": "4688f5e06bac1bce0c27f1c751ac1b093f81a0f1161e9776899923c37b05aa74",
+      "bytes": 8033540,
+      "installed_package_files_verified": 18,
+      "environment": "Fresh Linux x86_64 containers, Python 3.11",
+      "infrastructure_credentials_provided_to_miner": false
+    },
+    "membership": "Disposable sr25519 hotkeys in an isolated synthetic membership snapshot; live Bittensor chain registration was not exercised.",
+    "gateway": {
+      "name": "404-witness-release-0212",
+      "url": "https://404-witness-release-0212.subnet404.workers.dev",
+      "source_commit": "44d90a0061bd28d1cc2caa195665b1398dd32944",
+      "redeployment_version": "c1d75078-8ae3-4cc8-a4d7-4fcce760cbbd"
+    },
+    "runpod": {
+      "endpoint": "fji5j6mdrwb70i",
+      "type": "QUEUE",
+      "worker_image": "europe-docker.pkg.dev/gen-456515/docker-test/queued-witness@sha256:45040756b3117b1f5ad6243785dc88c382e9c290d0f26750fbebc31d3c205cee",
+      "worker_source_commit": "d896013e4e00fdb26951197ba46ad724d1c6cd81",
+      "worker_and_native_sources_match_client_tag": true,
+      "worker_vcpus": 2,
+      "worker_ram_gb": 4,
+      "min_workers": 0,
+      "max_workers": 1,
+      "health_job": "fa8b6ee7-2dc5-4b9f-9d61-441afb461d58-e2",
+      "generation_job": {
+        "id": "48fee160-9935-4d6a-b823-396b2611e39f-e1",
+        "status": "COMPLETED",
+        "delayTime": 1480,
+        "executionTime": 50919,
+        "workerId": "qr3iua5nx5r3xh"
+      },
+      "final_job_counts": {
+        "completed": 2,
+        "failed": 0,
+        "inProgress": 0,
+        "inQueue": 0,
+        "retried": 0
+      },
+      "generation_count": 1,
+      "health_job_count": 1
+    },
+    "exchange": {
+      "id": "d4f7447a-5290-4c59-93c1-5185e6f4e501",
+      "round": "1",
+      "hotkey": "5GKPJ9wFfQDBV2E3aF8GqXbZ4e3NT9GkfodSvxcpjoixwZ3C",
+      "model": "gpt-6-astra",
+      "output_text": "const geometry = new THREE.BoxGeometry(1, 1, 1);",
+      "usage": {
+        "input_tokens": 42,
+        "output_tokens": 20,
+        "total_tokens": 62
+      },
+      "request_sha256": "950d1e7d90f30062ea2a91da16995aee102b4b7115f1c531cac83d60ea0618fe",
+      "response_sha256": "44d4d911bfa4a27a881fc8f295aecee29f035e0a5c2d9097526e44331f583b9e",
+      "provider_tls_client_bytes": 3129,
+      "provider_tls_server_bytes": 18807,
+      "transcript_url": "https://subnet404.xyz/rounds/1/5GKPJ9wFfQDBV2E3aF8GqXbZ4e3NT9GkfodSvxcpjoixwZ3C/d4f7447a-5290-4c59-93c1-5185e6f4e501/manifest.json"
+    },
+    "recovery": {
+      "miner_interrupted_after_authorization": true,
+      "no_local_response_before_recovery": true,
+      "witness_recorded_response_and_usage_after_disconnect": true,
+      "first_recovery_fresh_container": true,
+      "first_recovery_seconds": 14.842,
+      "gateway_redeployed": true,
+      "post_redeployment_fresh_container_without_cached_response": true,
+      "recovery_after_redeployment_seconds": 14.719,
+      "identical_response_after_redeployment": true,
+      "same_admission_after_redeployment": true
+    },
+    "evidence_checks": {
+      "exact_request_retained": true,
+      "exact_response_retained": true,
+      "usage_matches": true,
+      "single_indexed_exchange": true,
+      "public_transcript_hashes_match": true
+    },
+    "admission_checks": {
+      "anonymous_rejected_http": 401,
+      "signature_replay_rejected_http": 401,
+      "forged_signature_rejected_http": 401,
+      "other_registered_miner_rejected_http": 404,
+      "unregistered_rejected_http": 403
+    },
+    "cleanup": {
+      "worker_read_after_delete_http": 404,
+      "membership_read_after_delete_http": 404,
+      "runpod_endpoint_read_after_delete_http": 404,
+      "durable_namespace_absent": true,
+      "local_subscription_copy_deleted": true,
+      "disposable_private_hotkeys_deleted": true,
+      "transcripts_retained": true
+    },
+    "scope": "One small subscription generation, miner disconnection and gateway redeployment. This is not a concurrency test or a RunPod worker-death test."
+  },
+  "published": false,
+  "updated_at": "2026-10-02T21:06:04.747870+00:00"
+}

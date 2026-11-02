@@ -1,0 +1,124 @@
+{
+  "date": "2026-10-02",
+  "source_tag": "witness-client-v0.2.9",
+  "source_commit": "691b5acb9e7638d118b9f95dea2812fcd7db3431",
+  "scope": "Provider rejection accounting and subscription-token expiry during admission",
+  "package": {
+    "wheel": "404_witness_client-0.2.9-py3-none-linux_x86_64.whl",
+    "sha256": "33cb9e62362f453638763820c6bb8776a21134def79533a55e2240ff58a9d7da",
+    "bytes": 8031197,
+    "license_expression": "MIT AND Apache-2.0 AND BSD-3-Clause AND BSD-1-Clause AND SunPro AND LicenseRef-Go-Cephes",
+    "license_files": {
+      "LICENSE": {
+        "sha256": "73a13e26f9c17ded4c6efc40ae68e8c774b1a7feef5a2a1c14ab98297353b4db",
+        "bytes": 1067
+      },
+      "THIRD_PARTY_NOTICES.md": {
+        "sha256": "34d77048b73bb346b00fb9f179887a6bfb3d86fbf571b591cabc2dceff6158dc",
+        "bytes": 83265
+      }
+    },
+    "linked_modules_covered": {
+      "github.com/bits-and-blooms/bitset": "v1.24.4",
+      "github.com/blang/semver/v4": "v4.0.0",
+      "github.com/consensys/gnark": "v0.15.0",
+      "github.com/consensys/gnark-crypto": "v0.20.1",
+      "github.com/fxamacker/cbor/v2": "v2.9.0",
+      "github.com/google/pprof": "v0.0.0-20260202012954-cb029daf43ef",
+      "github.com/mattn/go-colorable": "v0.1.14",
+      "github.com/mattn/go-isatty": "v0.0.20",
+      "github.com/ronanh/intcomp": "v1.1.1",
+      "github.com/rs/zerolog": "v1.34.0",
+      "github.com/x448/float16": "v0.8.4",
+      "golang.org/x/crypto": "v0.48.0",
+      "golang.org/x/sync": "v0.19.0",
+      "golang.org/x/sys": "v0.41.0"
+    },
+    "original_upstream_license_and_patent_files": 24,
+    "embedded_go_notices": 6,
+    "native_library_sha256": "15add051c57a1e27e50499bffc0ac127b24420d76423d5240e77fea1704f994d",
+    "native_go_version": "go1.27.1",
+    "native_library_unchanged_from": "0.2.8",
+    "changed_package_files": [
+      "witness_client/auth.py",
+      "witness_client/client.py",
+      "witness_client/response.py",
+      "witness_client/types.py"
+    ],
+    "matching_package_source_files": 17,
+    "requires_dist_unchanged_from": "0.2.8"
+  },
+  "clean_linux_install": {
+    "version": "0.2.9",
+    "installed_package": "/venv/lib/python3.11/site-packages/witness_client/__init__.py",
+    "license_expression": "MIT AND Apache-2.0 AND BSD-3-Clause AND BSD-1-Clause AND SunPro AND LicenseRef-Go-Cephes",
+    "installed_license_files": [
+      "LICENSE",
+      "THIRD_PARTY_NOTICES.md"
+    ],
+    "files_match_tagged_source": true,
+    "native_abi": 2,
+    "pinned_parameter_initialization": "passed"
+  },
+  "macos_client_tests": {
+    "passed": 116,
+    "warnings": 2,
+    "seconds": 262.76
+  },
+  "linux_installed_wheel_tests": {
+    "passed": 116,
+    "warnings": 2,
+    "seconds": 529.24,
+    "network": "disabled; loopback TLS fixtures and HTTP mocks only"
+  },
+  "queued_worker_tests": {
+    "passed": 30,
+    "full_suite": {
+      "passed": 29,
+      "seconds": 68.36
+    },
+    "additional_unused_worker_regression": {
+      "passed": 1,
+      "seconds": 0.14
+    },
+    "storage": "in-memory; real TLS/proofs"
+  },
+  "shared_witness_node_tests": {
+    "passed": 31,
+    "failed": 0
+  },
+  "strict_type_checks": {
+    "client_source_files": 30,
+    "queued_worker_source_files": 13,
+    "result": "passed"
+  },
+  "verified_behavior": [
+    "Complete TLS-authenticated HTTP 401/403/429 replies are retained with their status and release the miner hold after durable evidence writes. Usage remains null, not fabricated zero.",
+    "HTTP 500 and missing/incomplete usage keep the admission hold, including after witness restart.",
+    "One matching completed/failed/incomplete terminal SSE event with valid nonnegative, consistent token counts records usage and permits another call.",
+    "Incomplete or ambiguous HTTP framing and missing, conflicting or invalid terminal usage do not resolve spending.",
+    "A subscription token expiring during simulated admission is refreshed before provider TLS, without another allocation or inference retry.",
+    "Failed credential refresh preserves the exchange ID and attempts to release the unused worker before sending any TLS/provider request.",
+    "The queued worker removes the active lock when an unused client closes before its ClientHello.",
+    "Rejected response recovery returns the original HTTP status and performs no inference."
+  ],
+  "deployment": "Client and matching witness source changes must be deployed together; no deployment performed in this check",
+  "existing_holds": "Previously unresolved exchanges are not automatically cleared; operator reconciliation still required",
+  "provider_error_reference": "https://developers.openai.com/api/docs/guides/error-codes",
+  "native_library": "Byte-identical to 0.2.8; proof parameters and ABI unchanged",
+  "dependency_audit": "results/dependencies-0.2.6.json; exact third-party Linux Python versions unchanged",
+  "live_cloud_test": "Not repeated; local fixtures only, no OpenAI calls",
+  "published": false,
+  "release_blockers": [
+    {
+      "package": "ecdsa",
+      "version": "0.19.2",
+      "id": "CVE-2024-23342",
+      "url": "https://github.com/tlsfuzzer/python-ecdsa/security/advisories/GHSA-wj6h-64fc-37mp",
+      "patched_version": null,
+      "client_relevance": "Configured secp256r1 key shares use tlslite ECDHKeyExchange and python-ecdsa for private-key generation and ECDH.",
+      "decision": "Keep public release blocked pending a separate TLS implementation fix. No suppression or automatic waiver.",
+      "demonstrated_client_attack": false
+    }
+  ]
+}

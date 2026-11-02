@@ -1,0 +1,75 @@
+{
+  "date": "2026-10-02",
+  "source_tag": "witness-client-v0.2.8",
+  "source_commit": "67b3e4da1b6556157eac105ba7d91e195edde87f",
+  "scope": "Licence declaration and notice packaging only; runtime code and dependencies unchanged",
+  "package": {
+    "wheel": "404_witness_client-0.2.8-py3-none-linux_x86_64.whl",
+    "sha256": "ccc86e86da95c672f87eef5fc07b1ca208d76adac727a432d3017199cc61fbaf",
+    "bytes": 8030780,
+    "license_expression": "MIT AND Apache-2.0 AND BSD-3-Clause AND BSD-1-Clause AND SunPro AND LicenseRef-Go-Cephes",
+    "license_files": {
+      "LICENSE": {
+        "sha256": "73a13e26f9c17ded4c6efc40ae68e8c774b1a7feef5a2a1c14ab98297353b4db",
+        "bytes": 1067
+      },
+      "THIRD_PARTY_NOTICES.md": {
+        "sha256": "34d77048b73bb346b00fb9f179887a6bfb3d86fbf571b591cabc2dceff6158dc",
+        "bytes": 83265
+      }
+    },
+    "linked_modules_covered": {
+      "github.com/bits-and-blooms/bitset": "v1.24.4",
+      "github.com/blang/semver/v4": "v4.0.0",
+      "github.com/consensys/gnark": "v0.15.0",
+      "github.com/consensys/gnark-crypto": "v0.20.1",
+      "github.com/fxamacker/cbor/v2": "v2.9.0",
+      "github.com/google/pprof": "v0.0.0-20260202012954-cb029daf43ef",
+      "github.com/mattn/go-colorable": "v0.1.14",
+      "github.com/mattn/go-isatty": "v0.0.20",
+      "github.com/ronanh/intcomp": "v1.1.1",
+      "github.com/rs/zerolog": "v1.34.0",
+      "github.com/x448/float16": "v0.8.4",
+      "golang.org/x/crypto": "v0.48.0",
+      "golang.org/x/sync": "v0.19.0",
+      "golang.org/x/sys": "v0.41.0"
+    },
+    "original_upstream_license_and_patent_files": 24,
+    "embedded_go_notices": 6,
+    "native_library_sha256": "15add051c57a1e27e50499bffc0ac127b24420d76423d5240e77fea1704f994d",
+    "native_go_version": "go1.27.1",
+    "runtime_payload_unchanged_from": "0.2.7",
+    "matching_package_source_files": 17,
+    "requires_dist_unchanged_from": "0.2.7"
+  },
+  "installed_wheel_check": {
+    "version": "0.2.8",
+    "installed_package": "/venv/lib/python3.11/site-packages/witness_client/__init__.py",
+    "license_expression": "MIT AND Apache-2.0 AND BSD-3-Clause AND BSD-1-Clause AND SunPro AND LicenseRef-Go-Cephes",
+    "installed_license_files": [
+      "LICENSE",
+      "THIRD_PARTY_NOTICES.md"
+    ],
+    "files_match_tagged_source": true,
+    "native_abi": 2,
+    "pinned_parameter_initialization": "passed"
+  },
+  "repository_license": "MIT; witness-client/LICENSE is byte-identical to the repository LICENSE",
+  "notice_sources": "Original files from the Go 1.27.1 SDK and exact module versions, with additional inline Go notices and gnark reflectwalk attribution",
+  "packaging_standard": "https://packaging.python.org/en/latest/guides/licensing-examples-and-user-scenarios/",
+  "runtime_validation": "0.2.7: 101 Python tests on macOS and Linux, native Go suite and strict typing passed. Not rerun for this metadata-only change; wheel runtime files compared byte for byte and native initialization passed.",
+  "dependency_audit": "results/dependencies-0.2.6.json; exact third-party Python versions unchanged",
+  "published": false,
+  "release_blockers": [
+    {
+      "package": "ecdsa",
+      "version": "0.19.2",
+      "id": "CVE-2024-23342",
+      "url": "https://github.com/tlsfuzzer/python-ecdsa/security/advisories/GHSA-wj6h-64fc-37mp",
+      "patched_version": null,
+      "client_relevance": "Configured secp256r1 key shares use tlslite ECDHKeyExchange and python-ecdsa for private-key generation and ECDH.",
+      "decision": "Keep public release blocked pending a separate TLS implementation fix. No suppression or automatic waiver.",
+      "demonstrated_client_attack": false
+    }
+  ]
+}

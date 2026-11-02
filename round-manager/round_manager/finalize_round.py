@@ -19,7 +19,7 @@ BLOCK_TIME_SECONDS = 12
 
 async def run_finalize_round(settings: Settings, discord: DiscordNotifier = NULL_DISCORD_NOTIFIER) -> None:
     async def get_block() -> int:
-        async with bt.async_subtensor(network=settings.network) as subtensor:
+        async with bt.AsyncSubtensor(network=settings.network) as subtensor:
             block: int = await subtensor.get_current_block()
         return block
 
@@ -231,8 +231,7 @@ def _find_new_leader(
         hotkey=round_result.winner_hotkey,
         repo=round_result.repo,
         commit=round_result.commit,
-        docker=round_result.docker_image,
-        hardware=round_result.hardware,
+        docker="",
         weight=1.0,
         effective_block=effective_block,
     )

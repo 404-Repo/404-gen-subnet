@@ -1,0 +1,85 @@
+{
+  "distribution": "404-witness-client",
+  "import_package": "witness_client",
+  "version": "0.2.5",
+  "status": "built and locally verified; not published",
+  "platform": "Linux x86_64, Debian 12 (glibc 2.36+), Python 3.11+",
+  "source_tag": "witness-client-v0.2.5",
+  "source_commit": "8cbf3023df0586e6f32a2621fee9e71b965cf9b5",
+  "supported_protocols": [
+    2
+  ],
+  "native_proof_abi": 2,
+  "proof_key_sha256": "6478059e4ad0d39e8c157c76cea9c6dd777c2ab5143cf8694876094facf39b16",
+  "proof_parameters_url": "https://subnet404.xyz/witness-client/releases/0.2.0/witness-proof-parameters-v1.tar.gz",
+  "proof_parameter_members": {
+    "circuit.bin": {
+      "sha256": "451b8ebe434e1b9cee5982a46f4630d3d3647fe49c11f2ec6d88b8731617f9c7",
+      "bytes": 10378176
+    },
+    "proving.bin": {
+      "sha256": "31bd198d1325f526f5f1add2272bf73ffaff23c9e2d0ac7463c0f5e88c8701e7",
+      "bytes": 35392269
+    },
+    "verifying.bin": {
+      "sha256": "6478059e4ad0d39e8c157c76cea9c6dd777c2ab5143cf8694876094facf39b16",
+      "bytes": 12400
+    }
+  },
+  "files": {
+    "witness-proof-parameters-v1.tar.gz": {
+      "sha256": "c5e2264bdf3fefd50ec20d3384c388e8dc709a0e7968ee840f32fbf1386fc244",
+      "bytes": 37902483
+    },
+    "404_witness_client-0.2.5-py3-none-linux_x86_64.whl": {
+      "sha256": "3c3d89c34d25f3963ea33453d850359bc7e4be6ea3a7404684f4b568e54d2850",
+      "bytes": 7368897
+    }
+  },
+  "native_library_sha256": "183a14fcab13899f5e0f9b3eb55aaab0646e9f3e4b7f52b40a46cad23aec5919",
+  "validation": {
+    "clean_linux_install": {
+      "distribution": "404-witness-client",
+      "version": "0.2.5",
+      "package_path": "/venv/lib/python3.11/site-packages/witness_client/__init__.py",
+      "old_distribution_absent": true,
+      "proof_abi": 2,
+      "verified_parameter_initialization": "passed"
+    },
+    "linux_installed_wheel_tests": {
+      "passed": 96,
+      "warnings": 2,
+      "seconds": 280.39,
+      "network": "disabled; local TLS witnesses and HTTP mocks only"
+    },
+    "macos_source_tests": {
+      "unit_and_parameter_rejection": {
+        "passed": 60,
+        "seconds": 11.82
+      },
+      "local_tls_integration": {
+        "passed": 36,
+        "seconds": 138.93
+      }
+    },
+    "native_go_suite": {
+      "result": "passed",
+      "seconds": 82.866,
+      "platform": "macOS arm64, Go 1.25.7, CGO enabled"
+    },
+    "parameter_rejection": [
+      "modified, truncated, extended, and missing files",
+      "parseable proving key with zeroed delta points",
+      "parseable proving key for an unrelated circuit",
+      "native proof entry point without Python initialization"
+    ],
+    "parameter_snapshot": "Proof verifies after all three source files are removed following initialization",
+    "strict_type_checks": "passed; 28 source files",
+    "wheel_python_sources": "17 package files match source_tag byte for byte",
+    "tagged_source_build": "Built once from a clean git archive of source_tag; retained wheel used for installation and tests"
+  },
+  "previous_live_cloud_test": "results/cloud-2026-10-02.json",
+  "live_cloud_end_to_end": "Last passed on source commit 8e0cf9d. Not repeated for 0.2.5; this version changes native parameter loading and has passed local TLS/proof integration tests.",
+  "previous_release": "releases/0.2.4.json",
+  "upgrade_note": "0.2.4 and earlier wheels lack parameter integrity checks. Use 0.2.5 or later for public release."
+}
