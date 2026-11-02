@@ -1,7 +1,6 @@
 """Pod specifications and TLS construction for the process entry points."""
 
 import base64
-import hashlib
 import ssl
 import tempfile
 from pathlib import Path
@@ -30,8 +29,6 @@ def worker_spec(settings: Settings, inputs: RoundInputs | None = None) -> PodSpe
     environment.update(
         {
             "WITNESS_ROLE": "worker",
-            "WITNESS_PRICING_FILE": "/app/config/pricing.json",
-            "WITNESS_PRICING_SHA256": hashlib.sha256(settings.pricing_path.read_bytes()).hexdigest(),
             "WITNESS_IDLE_SECONDS": settings.pod_environment.get("WITNESS_IDLE_SECONDS", "1800"),
             "WITNESS_MAX_CAPTURES": settings.pod_environment.get("WITNESS_MAX_CAPTURES", "2"),
         }
@@ -113,7 +110,7 @@ def gateway_spec(settings: Settings) -> PodSpec:
             key = "GATEWAY_MIN_REQUEST_INTERVAL" if name == "RUNPOD_MIN_REQUEST_INTERVAL" else name
             environment[key] = settings.pod_environment[name]
     environment.update(
-        {"WITNESS_ROLE": "gateway", "WITNESS_PRICING_FILE": "/app/config/pricing.json", "GATEWAY_PORT": "8443"}
+        {"WITNESS_ROLE": "gateway", "GATEWAY_PORT": "8443"}
     )
     return PodSpec(
         settings.gateway_image,

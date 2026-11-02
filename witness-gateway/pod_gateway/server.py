@@ -43,7 +43,7 @@ class Start(BaseModel):
 class Gateway:
     def __init__(self, *, allocator: Allocator, auth: Authenticator, registry: Registry,
                  deployment: str, round_number: str, round_end: int | None, secret: bytes,
-                 proof_hash: str, fence: Callable[[], bool], pricing_hash: str,
+                 proof_hash: str, fence: Callable[[], bool],
                  create_interval: float = 10,
                  request_interval: float = 10, poll_seconds: float = 30,
                  max_requests: int = 64, max_queue: int = 1024,
@@ -53,7 +53,6 @@ class Gateway:
         self.allocator, self.auth, self.registry = allocator, auth, registry
         self.deployment, self.round, self.round_end = deployment, round_number, round_end
         self.secret, self.proof_hash, self.fence = secret, proof_hash, fence
-        self.pricing_hash = pricing_hash
         self.rounds, self.spec_for_round = rounds, spec_for_round
         if allocator.selection is None:
             raise ValueError("Gateway admission requires durable selection storage")
@@ -766,7 +765,6 @@ class Gateway:
                         selected
                         and data.get("ready") is True
                         and data.get("proof_key_sha256") == self.proof_hash
-                        and data.get("pricing_sha256") == self.pricing_hash
                     )
                     self._wake.set()
                     if not selected and self._fence_at > 0:

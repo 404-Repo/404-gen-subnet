@@ -35,12 +35,12 @@ recordings with the intended compatible replay path before cutover.
 
 | Area | Required evidence |
 | --- | --- |
-| Artifacts | Record a clean source commit/tag, immutable image digest, client wheel hash, runtime versions, dependency constraints, native verifier, proof-key hash, frozen pricing and renderer settings. Include licences and dependency audit results. |
+| Artifacts | Record a clean source commit/tag, immutable image digest, client wheel hash, runtime versions, dependency constraints, native verifier, proof-key hash, shared model table and renderer settings. Include licences and dependency audit results. |
 | Image | Build from the Pod Dockerfile and its context allowlist. Verify all runtime roles, renderer readiness, proof-key identity and exclusion of credentials, local state and proving parameters. Record native versus emulated execution. |
 | Client and runner | Run existing client, gateway, worker, verifier, renderer and miner-runner tests and strict type checks against the integrated snapshot. Check the packaged wheel, not only editable sources. |
 | Recovery | Interrupt client/gateway connections before and after authorization, restart services and retry storage delivery. Recovery must use retained responses for started inference; unresolved usage remains unknown. Verify ownership and fencing of replacement attempts. |
 | Replay | Native-verify every recording, replay twice with network access denied, compare output bytes and delivery order, and freshly recompute renders with the pinned renderer. Investigate timeout or pixel disagreements without relaxing validation. |
-| Accounting | Use frozen pricing and exact recorded usage. Count cached input at the full input weight and reasoning within output once. Preserve failed attempts, possible dispatches and uncertain charges. |
+| Accounting | Preserve existing model rows and budget rules when publishing table additions. Verify that running workers accept a new model while old captures still recover and replay at unchanged cost. Count cached input at the full input weight and reasoning within output once. Preserve failed attempts, possible dispatches and uncertain charges. |
 | Membership and round | Check finalized membership refresh, fail-closed stale membership, hotkey ownership and nonce checks. Verify gateway-selected round metadata and server-side round bindings; verify access closes at the generation deadline. |
 | Lifecycle and capacity | Exercise gateway recovery, dormant/active/draining workers, lost create replies, duplicate resources and confirmed exact-ID deletion. Enforce configured compute ceilings using fresh RunPod inventory. |
 | Operations | Configure TLS, stable hostname/revivor, private R2 permissions, spool persistence and bounded concurrency. Check representative miner bursts, backpressure, resource limits and failure diagnostics. |

@@ -1,5 +1,4 @@
 import asyncio
-import hashlib
 import json
 import os
 import shutil
@@ -16,12 +15,14 @@ from aiohttp import web
 from bittensor_wallet import Keypair
 from pydantic import SecretStr
 from support import MemoryState
+from test_recording import PRICING
 from witness_client.auth import hotkey_headers
 
 from pod_gateway.artifacts import ArtifactProfile
 from pod_gateway.auth import AuthRejected, Membership
 from pod_gateway.dependencies import gateway_spec, worker_spec
 from pod_gateway.models import Scope
+from pod_gateway.pricing import PricingStore
 from pod_gateway.renderer import renderer_profile_sha256, require_artifact_profile
 from pod_gateway.settings import GatewaySettings, Settings
 
@@ -108,9 +109,7 @@ def test_round_refresh_rejects_intervals_outside_policy_bounds(
 
 
 @pytest.fixture
-def values(tmp_path: Path) -> dict[str, object]:
-    pricing = tmp_path / "pricing.json"
-    pricing.write_bytes(b"{}")
+def values() -> dict[str, object]:
     return {
         "WITNESS_DEPLOYMENT": "competition",
         "WITNESS_ACTIVE_ROUND": "test-0",
@@ -129,7 +128,6 @@ def values(tmp_path: Path) -> dict[str, object]:
         "SUBTENSOR_RPC_URL": "https://rpc.test",
         "GATEWAY_TLS_CERT_B64": "fixture-cert",
         "GATEWAY_TLS_KEY_B64": "fixture-key",
-        "WITNESS_PRICING_FILE": str(pricing),
     }
 
 
@@ -143,7 +141,6 @@ def test_split_images_select_the_same_roles_after_gateway_revival(values: dict[s
     revived = Settings.model_validate({
         **gateway.env,
         "WITNESS_DEPLOYMENT": settings.deployment,
-        "WITNESS_PRICING_FILE": values["WITNESS_PRICING_FILE"],
     })
     assert worker_spec(revived).image == worker.image
     assert gateway_spec(revived).image == gateway.image
@@ -172,7 +169,6 @@ def test_typed_settings_build_equivalent_pod_specs(values: dict[str, object]) ->
             "R2_SECRET_ACCESS_KEY": SecretStr("fixture-secret"),
             "WITNESS_DATA_CENTERS": ("EU-RO-1", "EU-CZ-1"),
             "WITNESS_MAX_PODS": 20,
-            "WITNESS_PRICING_FILE": Path(str(values["WITNESS_PRICING_FILE"])),
             "WITNESS_TEST_HOTKEY": None,
         }
     )
@@ -307,8 +303,8 @@ def test_assigned_pod_starts_artifact_storage_without_a_source_commit(
     class Started(Exception):
         pass
 
-    pricing = Path(str(values["WITNESS_PRICING_FILE"]))
-    pricing.write_bytes(b'{"models":{}}')
+    saved = MemoryState()
+    PricingStore(saved, "competition").publish(PRICING)
     (tmp_path / "verifying.bin").write_bytes(b"fixture verification key")
     for name, value in values.items():
         monkeypatch.setenv(name, str(value))
@@ -324,7 +320,7 @@ def test_assigned_pod_starts_artifact_storage_without_a_source_commit(
                          "source_url": "https://prompts.test/official-chair.png",
                          "image_key": "competition-inputs/v1/" + "d" * 64}],
         }),
-        "WITNESS_PRICING_SHA256": hashlib.sha256(pricing.read_bytes()).hexdigest(), "DINOV3_REVISION": "fixture",
+        "DINOV3_REVISION": "fixture",
         "WITNESS_ARTIFACTS": json.dumps({
             "profile": {"image_digest": "sha256:" + "a" * 64, "validation_sha256": "b" * 64},
             "seed": 42, "prompt_ids": {"d" * 64: "official-chair"},
@@ -339,7 +335,7 @@ def test_assigned_pod_starts_artifact_storage_without_a_source_commit(
     monkeypatch.setattr(pod, "PodRuntime", Mock(return_value=runtime))
     monkeypatch.setattr("pod.signal.signal", Mock())
     monkeypatch.setattr(pod, "render_service", lambda _: nullcontext())
-    monkeypatch.setattr(state, "R2StateStore", Mock(return_value=MemoryState(), connect=Mock(return_value=MemoryState())))
+    monkeypatch.setattr(state, "R2StateStore", Mock(return_value=saved, connect=Mock(return_value=saved)))
     monkeypatch.setattr(certs, "pod_context", Mock(return_value=(None, "fixture-certificate")))
     monkeypatch.setattr(renderer, "require_artifact_profile", Mock())
     monkeypatch.setattr(direct, "Witness", service)

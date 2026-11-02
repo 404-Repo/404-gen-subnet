@@ -652,7 +652,6 @@ class PodRuntime:
                                         "certificate": self.certificate,
                                         "active": len(self.active) + self.rendering,
                                         "proof_key_sha256": self.proof_hash,
-                                        "pricing_sha256": self.budget.pricing_hash,
                                     },
                                 )
                 except Exception as error:  # noqa: BLE001 - reconnect without replaying capture
@@ -677,6 +676,7 @@ def main() -> None:
     from pod_gateway.artifacts import ArtifactConfig, ArtifactRepository
     from pod_gateway.certs import pod_context
     from pod_gateway.direct import Witness
+    from pod_gateway.pricing import PricingStore
     from pod_gateway.state import PrefixedState, R2StateStore
     from storage import R2Store
 
@@ -686,16 +686,14 @@ def main() -> None:
         secret_key=os.environ["R2_SECRET_ACCESS_KEY"],
         bucket=os.environ["R2_BUCKET"],
     )
-    pricing = Path(os.environ["WITNESS_PRICING_FILE"]).read_bytes()
-    if hashlib.sha256(pricing).hexdigest() != os.environ["WITNESS_PRICING_SHA256"]:
-        raise ValueError("Witness image has different frozen pricing bytes")
+    prices = PricingStore(state, os.environ["WITNESS_DEPLOYMENT"])
     evidence = R2Store()
     inputs = RoundInputs.model_validate_json(os.environ["WITNESS_ROUND_INPUTS"])
     journals = PrefixedState(state, inputs.storage_prefix)
     runtime = PodRuntime(
         evidence=evidence,
         records=CallRecords(journals),
-        budget=Budget(journals, pricing),
+        budget=Budget(journals, prices.read(), refresh=prices.read),
         scope=Scope(
             os.environ["WITNESS_DEPLOYMENT"],
             os.environ["WITNESS_ROUND"],

@@ -10,6 +10,7 @@ from pod_gateway.budget import Budget, BudgetRejected
 from pod_gateway.control import DrainControl, Registry
 from pod_gateway.lifecycle import Allocator
 from pod_gateway.models import Pod, PodSpec, Scope
+from pod_gateway.pricing import PricingStore
 from pod_gateway.records import CallRecords
 from pod_gateway.replay import export_bundle, native_verifier
 from pod_gateway.security import capability
@@ -44,7 +45,7 @@ STORE = None
 MEMBERSHIP = None
 GATEWAY_RUNNER = None
 WITNESS_RUNNER = None
-PRICING = Path('/app/config/pricing.json').read_bytes()
+PRICING = b''
 PROOF = hashlib.sha256((worker.PARAMETERS/'verifying.bin').read_bytes()).hexdigest()
 
 def event(name, **data):
@@ -192,7 +193,7 @@ async def main():
     admin=web.AppRunner(app,access_log=None)
 
     async def boot(request):
-        global STORE,RUNTIME,MEMBERSHIP,GATEWAY_RUNNER,WITNESS_RUNNER,PHASE
+        global STORE,RUNTIME,MEMBERSHIP,GATEWAY_RUNNER,WITNESS_RUNNER,PHASE,PRICING
         if RUNTIME is not None:raise web.HTTPConflict()
         body=await request.json()
         for key in ('R2_ENDPOINT','R2_ACCESS_KEY_ID','R2_SECRET_ACCESS_KEY','R2_BUCKET'):os.environ[key]=body['storage'][key]
@@ -202,7 +203,8 @@ async def main():
         tls=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER);tls.load_cert_chain(ROOT/'cert.pem',ROOT/'key.pem')
         renderer_start()
         await renderer_ready(http)
-        STORE=Storage();records=CallRecords(STORE);budget=CappedBudget(STORE,PRICING)
+        STORE=Storage();prices=PricingStore(STORE.state,DEPLOYMENT);PRICING=prices.read()
+        records=CallRecords(STORE);budget=CappedBudget(STORE,PRICING,refresh=prices.read)
         secret=secrets.token_bytes(32);scope=Scope(DEPLOYMENT,ROUND,HOTKEY);spec=PodSpec(IMAGE,capability_secret=secret)
         pod=Pod(POD,scope.name(START)+'-active',IMAGE,'RUNNING',scope.markers(START,spec.fingerprint,time.time_ns()),
             tcp={8000:(os.environ['RUNPOD_PUBLIC_IP'],int(os.environ['RUNPOD_TCP_PORT_8000']))},hourly_cost=str(body['hourly']))
@@ -212,7 +214,7 @@ async def main():
         MEMBERSHIP.snapshot=dict(version=1,network='finney',netuid=17,block=0,fetched_at=now,block_time=now,hotkeys=[])
         gateway=Gateway(allocator=allocator,auth=Authenticator(MEMBERSHIP),registry=registry,
             deployment=DEPLOYMENT,round_number=ROUND,round_end=END,secret=secret,proof_hash=PROOF,
-            fence=lambda:True,pricing_hash=hashlib.sha256(PRICING).hexdigest())
+            fence=lambda:True)
         GATEWAY_RUNNER=web.AppRunner(gateway.application(),access_log=None);await GATEWAY_RUNNER.setup()
         await web.TCPSite(GATEWAY_RUNNER,'0.0.0.0',8004,ssl_context=tls).start()
         await web.TCPSite(admin,'0.0.0.0',8443,ssl_context=tls).start()
@@ -266,7 +268,7 @@ async def main():
         output=ROOT/'bundles'/key;output.parent.mkdir(exist_ok=True)
         if output.exists():return web.json_response({'verified':True,'saved':True})
         await asyncio.to_thread(export_bundle,records=app['records'],evidence=STORE,scope=app['scope'],execution=path,
-            output=output,proof_hash=PROOF,pricing=PRICING,
+            output=output,proof_hash=PROOF,pricing=PricingStore(STORE.state,DEPLOYMENT).read(),
             verify=native_verifier(Path('/app/witness-server/worker/verify.mjs'),worker.PARAMETERS))
         event('bundle_verified',execution=key);return web.json_response({'verified':True})
     async def download(request):

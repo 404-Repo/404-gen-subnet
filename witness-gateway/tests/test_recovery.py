@@ -465,7 +465,7 @@ def test_incomplete_r2_evidence_does_not_issue_a_result(missing: str) -> None:
     assert budget.summary(SCOPE, item)["pending_usage"] == 1
 
 
-@pytest.mark.parametrize("changed", ["pod_start_id", "pricing_sha256", "response_sha256"])
+@pytest.mark.parametrize("changed", ["pod_start_id", "response_sha256"])
 def test_recovery_rejects_mismatched_capture_evidence(changed: str) -> None:
     state = MemoryState()
     records, budget, item, call = capture(state)
@@ -478,6 +478,20 @@ def test_recovery_rejects_mismatched_capture_evidence(changed: str) -> None:
     with pytest.raises(RecordingConflict, match="differs"):
         recover_issued(records, budget, state.read, SCOPE, item, call, PROOF)
     assert budget.summary(SCOPE, item)["pending_usage"] == 1
+
+
+def test_added_model_does_not_prevent_recovery_of_an_existing_capture() -> None:
+    state = MemoryState()
+    records, budget, item, call = capture(state)
+    for name, content in evidence(budget, item, call).items():
+        state.put(prefix(call) + name, content)
+    pricing = json.loads(PRICING)
+    pricing["models"]["added"] = dict(pricing["models"]["fixture"])
+    updated = Budget(state, canonical(pricing))
+    recovered = recover_issued(records, updated, state.read, SCOPE, item, call, PROOF)
+    assert recovered.phase == "issued"
+    assert updated.summary(SCOPE, item)["pending_usage"] == 0
+    assert updated.summary(SCOPE, item)["known_credits"] == "2.0"
 
 
 @pytest.mark.parametrize("completed", [False, True])

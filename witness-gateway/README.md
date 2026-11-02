@@ -45,6 +45,38 @@ Pods or send paid inference requests. Deployment acceptance uses the exact image
 client, proof parameters and configuration in the
 [release checklist](../docs/witness-server-release-plan.md).
 
+## Model table
+
+The **model table** is one JSON object in the configured R2 bucket at
+`pod-pricing/v1/<deployment>.json`. It contains supported model IDs, token weights,
+the context threshold and prompt limits. The operator's `publish-pricing` command
+is its only writer. Updates may add models; existing rows, limits and routing
+configuration cannot change or be removed.
+
+With the operator's `R2_ENDPOINT`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY` and
+`R2_BUCKET` configured, publish from this directory:
+
+```sh
+python -m pod_gateway publish-pricing --deployment witness-public-v3 \
+  --pricing ../miner-reference/budgets/pricing.json
+```
+
+The command writes the shared table; it does not build images or restart Pods.
+Publish the initial table before starting workers. To add a model, append its row
+to the input JSON and run the same command. Workers load the table at startup and
+refresh it when a request names a model missing from their cache. An addition is
+available to the next call in an existing generation. Known model rows remain
+valid, so pending usage, retries and old captures keep their existing prices.
+The 60-call cap, 5,000,000-credit allowance, cache accounting and context tiers
+remain unchanged.
+
+Gateway readiness checks the selected Pod and proof key. Pricing file hashes in
+retained journals are informational; they do not require old and new tables to
+match. Replay bundles still protect their own embedded pricing bytes by hash.
+Images contain the pricing reader rather than a baked model table. This runtime
+support must be installed once before model additions can be published without
+rebuilding images.
+
 ## Artifact storage
 
 The Pod saves final results in the configured bucket under

@@ -191,8 +191,10 @@ def test_retained_pricing_keeps_validation_captures_replayable(tmp_path: Path) -
     bundle = live.export(tmp_path / "bundle")
     assert run_replay(generate, b"PNG", 42, ReplayWitness(bundle), None) == expected
     live.pricing = (prices / "pricing.json").read_bytes()
-    with pytest.raises(ValueError, match="Recorded evidence binding differs"):
-        live.export(tmp_path / "mismatched")
+    updated = live.export(tmp_path / "updated")
+    replay = ReplayWitness(updated)
+    assert run_replay(generate, b"PNG", 42, replay, None) == expected
+    assert sum(value for value in replay.budget.charges.values() if value is not None) == 40
     assert run_replay(generate, b"PNG", 42, ReplayWitness(bundle), None) == expected
     assert live.paid == 1
 

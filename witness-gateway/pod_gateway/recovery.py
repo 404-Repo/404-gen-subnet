@@ -50,7 +50,6 @@ def recover_issued(
         "pod_id": call.pod_id,
         "pod_start_id": call.start_id,
         "proof_key_sha256": proof_hash,
-        "pricing_sha256": budget.pricing_hash,
     }
     if any(metadata.get(key) != value for key, value in binding.items()):
         raise RecordingConflict("Durable capture binding differs")

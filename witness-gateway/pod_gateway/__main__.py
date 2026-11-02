@@ -37,27 +37,20 @@ def main() -> None:
     export.add_argument(
         "--pricing",
         type=Path,
-        default=Path(
-            os.environ.get(
-                "WITNESS_PRICING_FILE",
-                str(root / "miner-reference/budgets/pricing.json"),
-            )
-        ),
+        help="local pricing table override; defaults to the shared model table",
     )
+    publish = commands.add_parser("publish-pricing", help="publish additions to the shared model table")
+    publish.add_argument("--deployment", required=True)
+    publish.add_argument("--pricing", type=Path, required=True)
     args = parser.parse_args()
     role = args.role or os.environ.get("WITNESS_ROLE", "worker")
     if role == "certs":
         from .certs import create
 
         create(args.directory)
-    elif role == "export":
-        from .models import Scope
-        from .records import CallRecords
-        from .replay import export_bundle, native_verifier
-        from .state import PrefixedState, R2StateStore
-        from subnet_common.competition.schedule import RoundSchedule
-
-        RoundSchedule.storage_prefix(args.storage_prefix)
+    elif role in ("export", "publish-pricing"):
+        from .pricing import PricingStore
+        from .state import R2StateStore
 
         state = R2StateStore.connect(
             endpoint=os.environ["R2_ENDPOINT"],
@@ -65,6 +58,20 @@ def main() -> None:
             secret_key=os.environ["R2_SECRET_ACCESS_KEY"],
             bucket=os.environ["R2_BUCKET"],
         )
+        prices = PricingStore(state, args.deployment)
+        if role == "publish-pricing":
+            prices.publish(args.pricing.read_bytes())
+            print(f"Published model table for {args.deployment}")
+            return
+
+        from subnet_common.competition.schedule import RoundSchedule
+
+        from .models import Scope
+        from .records import CallRecords
+        from .replay import export_bundle, native_verifier
+        from .state import PrefixedState
+
+        RoundSchedule.storage_prefix(args.storage_prefix)
         export_bundle(
             records=CallRecords(PrefixedState(state, args.storage_prefix)),
             evidence=state,
@@ -74,7 +81,7 @@ def main() -> None:
             proof_hash=hashlib.sha256(
                 (args.parameters / "verifying.bin").read_bytes()
             ).hexdigest(),
-            pricing=args.pricing.read_bytes(),
+            pricing=prices.read() if args.pricing is None else args.pricing.read_bytes(),
             verify=native_verifier(args.verifier, args.parameters),
             storage_prefix=args.storage_prefix,
         )

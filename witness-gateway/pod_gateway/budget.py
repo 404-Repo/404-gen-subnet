@@ -5,13 +5,16 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
+from collections.abc import Callable
 from decimal import Decimal
 from typing import Literal
 
+from miner_runtime.accounting import credits as usage_credits
 from pydantic import BaseModel, ConfigDict, Field
 from witness_client.calls import RequestKey, request_digest
 
 from .models import Scope
+from .pricing import ModelTable
 from .state import StateConflict, StateStore, WriteRejected
 
 
@@ -44,12 +47,21 @@ class Ledger(BaseModel):
 
 
 class Budget:
-    def __init__(self, store: StateStore, pricing: bytes) -> None:
+    def __init__(self, store: StateStore, pricing: bytes, *, refresh: Callable[[], bytes] | None = None) -> None:
         self.store = store
         self.pricing_hash = hashlib.sha256(pricing).hexdigest()
-        self.rates = json.loads(pricing, parse_float=Decimal)
-        if not isinstance(self.rates, dict) or not isinstance(self.rates.get("models"), dict):
-            raise ValueError("Invalid frozen pricing file")  # noqa: TRY004 - invalid file data
+        self.rates = ModelTable.model_validate_json(pricing)
+        self.refresh = refresh
+
+    def _require_model(self, model: str) -> None:
+        if model not in self.rates.models and self.refresh is not None:
+            pricing = self.refresh()
+            updated = ModelTable.model_validate_json(pricing)
+            updated.require_extension(self.rates)
+            self.rates = updated
+            self.pricing_hash = hashlib.sha256(pricing).hexdigest()
+        if model not in self.rates.models:
+            raise BudgetRejected("Unknown priced model")
 
     @staticmethod
     def key(scope: Scope, invocation: RequestKey) -> str:
@@ -66,8 +78,8 @@ class Budget:
                 pricing_sha256=self.pricing_hash,
             )
         )
-        if ledger.scope_key != scope.key or ledger.pricing_sha256 != self.pricing_hash:
-            raise BudgetRejected("Call ledger identity or frozen pricing changed")
+        if ledger.scope_key != scope.key:
+            raise BudgetRejected("Call ledger identity changed")
         return ledger, None if snapshot is None else snapshot.etag
 
     @staticmethod
@@ -81,8 +93,12 @@ class Budget:
             raise BudgetNotReserved("Verified request differs from reserved request hash")
         request = json.loads(body)
         model = request.get("model")
-        if model not in self.rates["models"] or request.get("service_tier") == "flex":
+        if request.get("service_tier") == "flex":
             raise BudgetNotReserved("Unknown model or unsupported service tier")
+        try:
+            self._require_model(model)
+        except Exception as error:
+            raise BudgetNotReserved("Unknown model or unavailable pricing") from error
         base = self.charge_key(invocation)
         for _ in range(16):
             try:
@@ -147,18 +163,8 @@ class Budget:
                 return
             credits: str | None = None
             if normalized is not None:
-                rate = self.rates["models"][charge.model]
-                long = normalized["input_tokens"] > self.rates["long_context_above_input_tokens"]
-                prefix = "long_" if long else ""
-                credits = str(
-                    sum(
-                        (
-                            Decimal(str(rate[f"{prefix}{kind}_credits_per_token"])) * normalized[f"{kind}_tokens"]
-                            for kind in ("input", "output")
-                        ),
-                        Decimal(0),
-                    )
-                )
+                self._require_model(charge.model)
+                credits = str(usage_credits(self.rates.model_dump(), charge.model, normalized))
             if charge.state != "possible":
                 if charge.usage != normalized or charge.credits != credits:
                     raise BudgetRejected("Verified usage changed after settlement")

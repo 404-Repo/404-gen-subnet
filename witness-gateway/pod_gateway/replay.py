@@ -104,7 +104,6 @@ def export_bundle(
                     "round": scope.round,
                     "exchange_id": call.exchange_id,
                     "proof_key_sha256": proof_hash,
-                    "pricing_sha256": pricing_hash,
                 }
                 if (
                     hashlib.sha256(manifest_bytes).hexdigest() != call.manifest_sha256

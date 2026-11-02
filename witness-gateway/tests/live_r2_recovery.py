@@ -119,7 +119,10 @@ def main() -> None:
     records = CallRecords(state)
     pricing = canonical(
         {
-            "models": {"fixture": {"input_credits_per_token": 0.1, "output_credits_per_token": 0.2}},
+            "calls_per_prompt": 60,
+            "credits_per_prompt": 5_000_000,
+            "models": {"fixture": {"input_credits_per_token": 0.1, "output_credits_per_token": 0.2,
+                                     "long_input_credits_per_token": 0.2, "long_output_credits_per_token": 0.4}},
             "long_context_above_input_tokens": 100000,
         }
     )

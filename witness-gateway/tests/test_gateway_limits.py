@@ -74,7 +74,7 @@ async def running(provider: Provider, state: MemoryState, *, interval: float = 0
                           clock=time.time if clock is None else lambda: clock[0])
     gateway = Gateway(allocator=allocator, auth=Authenticator(membership), registry=registry,
                       deployment="test", round_number="test-1", round_end=int(time.time()) + 86400,
-                      secret=b"s" * 32, proof_hash="c" * 64, pricing_hash="d" * 64, fence=lambda: True,
+                      secret=b"s" * 32, proof_hash="c" * 64, fence=lambda: True,
                       request_interval=interval, create_interval=create_interval,
                       poll_seconds=poll_seconds, refresh_seconds=0.01, body_timeout=0.05)
     async with TestClient(TestServer(gateway.application())) as client:
@@ -113,7 +113,7 @@ async def coordinator(provider: Provider, state: MemoryState, clock: list[float]
                           admission=Admission(max_pods=250), selection=Selection(state), clock=lambda: clock[0])
     gateway = Gateway(allocator=allocator, auth=Authenticator(membership), registry=registry,
                       deployment="test", round_number="test-1", round_end=int(time.time()) + 86400,
-                      secret=b"s" * 32, proof_hash="c" * 64, pricing_hash="d" * 64, fence=lambda: True)
+                      secret=b"s" * 32, proof_hash="c" * 64, fence=lambda: True)
     gateway._loaded = gateway._fence_ok = True
     gateway._fence_at = time.monotonic()
     try:
@@ -341,11 +341,11 @@ def test_start_waits_for_worker_readiness_without_blocking_other_miners() -> Non
             }) as socket:
                 assert (await socket.receive_json())["type"] == "activate"
                 await socket.send_json({"type": "ready", "ready": False, "certificate": "offline-ca",
-                                        "proof_key_sha256": gateway.proof_hash, "pricing_sha256": gateway.pricing_hash})
+                                        "proof_key_sha256": gateway.proof_hash, "pricing_sha256": "old-model-table"})
                 await asyncio.sleep(0.05)
                 assert not allocation.done()
                 await socket.send_json({"type": "ready", "ready": True, "certificate": "offline-ca",
-                                        "proof_key_sha256": gateway.proof_hash, "pricing_sha256": gateway.pricing_hash})
+                                        "proof_key_sha256": gateway.proof_hash, "pricing_sha256": "updated-model-table"})
                 response = await asyncio.wait_for(allocation, 2)
                 ready = await response.json()
                 assert response.status == 200 and ready["ready"] is True

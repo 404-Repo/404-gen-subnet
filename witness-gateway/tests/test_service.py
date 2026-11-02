@@ -34,6 +34,7 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
 from pod import PodRuntime
 from support import MemoryState, Provider
+from test_pricing import extended_pricing
 from test_recording import PRICING
 from witness_client import WitnessClient, WitnessError
 from witness_client.auth import hotkey_headers
@@ -49,6 +50,7 @@ from pod_gateway.control import DrainControl, Registry
 from pod_gateway.direct import Witness
 from pod_gateway.lifecycle import Allocator
 from pod_gateway.models import Pod, PodSpec, Scope
+from pod_gateway.pricing import PricingStore
 from pod_gateway.records import Call, CallRecord, CallRecords
 from pod_gateway.replay import export_bundle
 from pod_gateway.rounds import RoundInputs
@@ -102,7 +104,7 @@ def test_fresh_signature_does_not_expire_while_waiting_for_runpod(
                               selection=Selection(MemoryState()))
         gateway = Gateway(allocator=allocator, auth=Authenticator(membership), registry=Registry(),
                           deployment="test", round_number="test-1", round_end=int(time.time()) + 600,
-                          secret=SECRET, proof_hash=PROOF, fence=lambda: selected, pricing_hash="d" * 64)
+                          secret=SECRET, proof_hash=PROOF, fence=lambda: selected)
         monkeypatch.setattr(gateway, "_live", fence)
         try:
             response = await Gateway.middleware(gateway, request, handler)
@@ -395,7 +397,6 @@ class Harness:
             secret=SECRET,
             proof_hash=self.proof,
             fence=lambda: True,
-            pricing_hash=hashlib.sha256(PRICING).hexdigest(),
             request_interval=0, poll_seconds=0.05, create_interval=0, refresh_seconds=0.02,
         )
 
@@ -442,6 +443,32 @@ class Harness:
                 await asyncio.wait_for(asyncio.gather(*self.tasks), 15)
             for runner in reversed(self.runners):
                 await runner.cleanup()
+
+
+def test_running_generation_accepts_an_added_model(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def scenario() -> None:
+        fixture = Harness(tmp_path, monkeypatch)
+        prices = PricingStore(fixture.state, fixture.scope.deployment)
+        prices.publish(PRICING)
+        fixture.response_text = lambda body, _: str(json.loads(body)["model"])
+        async with fixture.running():
+            def run() -> None:
+                def generate(image: bytes, seed: int, client: WitnessClient, renderer: None) -> str:
+                    first = client.create(model="fixture", input="image").output_text
+                    prices.publish(extended_pricing())
+                    second = client.create(model="gpt-6.1-terra", input="image").output_text
+                    return first + "," + second
+
+                with fixture.client() as witness:
+                    witness._gateway.ensure_pod()
+                    fixture.runtimes[0].budget.refresh = prices.read
+                    assert run_generation(generate, fixture.image, 42, witness, None) == "fixture,gpt-6.1-terra"
+                assert fixture.paid == 2
+                assert fixture.provider.creates == len(fixture.runtimes) == 1
+
+            await asyncio.wait_for(asyncio.to_thread(run), 30)
+
+    asyncio.run(scenario())
 
 
 @pytest.mark.parametrize("failure", ["", "before", "lost"])

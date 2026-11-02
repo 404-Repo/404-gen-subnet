@@ -415,8 +415,11 @@ change competition accounting. The runtime and validator must enforce this on
 both API and subscription routes, explicitly defaulting to Standard so account
 defaults cannot select Flex.
 
-The [rate file](budgets/pricing.json) contains all eight candidate
-models, checked 2026-10-27. Values below are **credits per token**. With this credit
+The [published rate file](budgets/pricing.json) lists eight supported
+models, checked 2026-10-27. The operator can add models through the
+[shared model table](../witness-gateway/README.md#model-table) while generations
+run. Existing model rows and budget rules remain fixed. Values below are
+**credits per token**. With this credit
 scale, the numbers also equal the published USD price per million tokens: 2 credits
 per token represents $2 per million tokens.
 
@@ -438,13 +441,14 @@ to long-context weights. Exactly 272,000 uses the short tier. It is a pricing
 threshold, not an input limit or a total across the prompt's calls. Weights use the
 official [Standard prices](https://developers.openai.com/api/docs/pricing);
 each model's source is linked in the rate file. The credit scale and weights are
-frozen for the round, even if provider prices change.
+fixed for existing models, even if provider prices change.
 
 For example, Sol 6.1 with 10,000 input and 20,000 output tokens uses
 **220,000 credits and one call**, equivalent to $0.22 at Standard prices.
 
-Each round freezes the rate-file bytes/hash, exact allowed model IDs, endpoint
-mappings and context tiers. The witness supports API and Codex subscription
+The model table may grow without changing existing model weights, endpoint
+mappings, context tiers or prompt limits. New models become available to the next
+call, including in a running generation. The witness supports API and Codex subscription
 Responses routes; access and usage support must be confirmed for each allowed
 combination. UI labels and undocumented aliases do not establish a pricing
 identity. Unknown model IDs cannot receive a guessed rate. Other providers or

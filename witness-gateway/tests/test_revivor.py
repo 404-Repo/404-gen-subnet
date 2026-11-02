@@ -200,7 +200,8 @@ def test_idle_expiry_waits_for_capture_and_upload_completion(tmp_path: Path) -> 
     assert session.pod_id is not None
     now = [0.0]
     pricing = canonical(
-        {"calls_per_prompt": 60, "credits_per_prompt": 5_000_000, "models": {}}
+        {"calls_per_prompt": 60, "credits_per_prompt": 5_000_000,
+         "long_context_above_input_tokens": 272000, "models": {}}
     )
     runtime = PodRuntime(
         evidence=state,

@@ -71,10 +71,6 @@ class Settings(BaseSettings):
     netuid: int = Field(default=17, alias="WITNESS_NETUID")
     test_hotkey: str | None = Field(default=None, alias="WITNESS_TEST_HOTKEY")
 
-    pricing_path: Path = Field(
-        default=Path(__file__).resolve().parents[2] / "miner-reference/budgets/pricing.json",
-        alias="WITNESS_PRICING_FILE",
-    )
     tls_certificate: SecretStr = Field(..., alias="GATEWAY_TLS_CERT_B64")
     tls_key: SecretStr = Field(..., alias="GATEWAY_TLS_KEY_B64")
 

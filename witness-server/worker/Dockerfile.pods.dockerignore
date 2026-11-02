@@ -44,11 +44,6 @@ witness-gateway/**
 !witness-gateway/pod_gateway/
 witness-gateway/pod_gateway/**
 !witness-gateway/pod_gateway/*.py
-!miner-reference/
-miner-reference/**
-!miner-reference/budgets/
-miner-reference/budgets/**
-!miner-reference/budgets/pricing.json
 
 !witness-gateway/benchmarks/
 witness-gateway/benchmarks/**

@@ -65,7 +65,6 @@ def test_missing_durable_capture_never_completes_or_permits_a_paid_retry(missing
         "pod_id",
         "pod_start_id",
         "proof_key_sha256",
-        "pricing_sha256",
         "request_sha256",
         "response_sha256",
         "provider_status",

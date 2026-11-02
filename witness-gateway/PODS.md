@@ -286,7 +286,7 @@ The verified bundle and its descriptor must remain in trusted validator storage.
 | client/server/authorization ciphertext, credential claim, session | TLS capture and hidden-credential proof | Private evidence/spool; native verifier | Cannot authenticate request/response, hidden credential or allocation binding |
 | certificate_time_unix_ns, proof_key_sha256 | Verifier plus sealed operator context | Manifest; replay verifier | Later certificate expiry/key changes could invalidate or misverify captures |
 | artifacts: object key, SHA256, size; signed URL | Authenticated Pod descriptor, scoped R2 signer | Manifest/retrieval reply; artifact client | Cannot retrieve bounded evidence from the intended immutable object |
-| pricing_sha256, model, charge state, usage, credits | Frozen operator policy, verified request/usage | Per-call dispatch journal and verified bundle; settlement/budget | Cannot price consistently, fence uncertain dispatch or distinguish unknown from zero |
+| model, charge state, usage, credits | Append-only operator model table, verified request/usage | Per-call dispatch journal and verified bundle; settlement/budget | Cannot price consistently, fence uncertain dispatch or distinguish unknown from zero |
 | provider_status and response SSE | Authenticated provider HTTP/TLS | Manifest/response.sse; SDK decoder | Cannot reproduce results, errors, event contents, refusals or failed Responses |
 | image_sha256, generation seed | Execution host's frozen inputs; validator rechecks expected inputs | Local execution.json; execution host/replay | Cannot select/resume/check the same execution inputs; never call attribution |
 | occurrence, action, index, stream | Execution boundary | Local execution observations | Cannot resume repeated invocations and stream operations within a recorded generation |
@@ -384,8 +384,8 @@ New Pods start dormant and connect outbound for lifecycle control using a per-st
 capability. The gateway durably selects the exact Pod ID. The Pod checks this
 selection before claiming a capture and before releasing a provider request;
 draining Pods retain control
-access to report completion. Readiness requires the expected proof-key
-and frozen-pricing hashes. RunPod credentials stay on the gateway/revivor;
+access to report completion. Readiness requires the expected proof-key hash.
+RunPod credentials stay on the gateway/revivor;
 witness Pods receive a per-start control capability and private evidence-storage
 credentials. The miner's OpenAI credentials remain hidden by the existing
 credential proof.
@@ -690,7 +690,9 @@ Building these images does not change running Pods or pins.
 Set the actual
 competition repository and branch, renderer profile, canonical operator hotkey, capacity limits, keys and
 HTTPS origin. Keep the deployment namespace/master key stable for the round.
-Both roles must use the image's frozen pricing bytes. Images must use digests.
+Workers use the deployment's [shared model table](README.md#model-table), which
+must be published before starting them. Model additions do not change Pod image
+digests or allocation fingerprints. Images must use digests.
 Gateway and worker state protocols must match. Finish active captures and replace
 both roles before resuming miner traffic with an updated state protocol.
 
@@ -713,22 +715,21 @@ not performed by installation.
 ## Verified offline replay
 
 Export the trusted execution-host observation file with the operator's retained
-capture store and exact frozen pricing bytes:
+capture store and the deployment's shared model table:
 
 ```sh
 python -m pod_gateway export --deployment competition --round test-0 \
   --hotkey "$MINER_HOTKEY" --execution /private/host/execution.json \
-  --output /private/replay/bundle --pricing /private/host/pricing.json
+  --output /private/replay/bundle
 ```
 
-`--pricing` defaults to the checkout's current `miner-reference/budgets/pricing.json`.
-Select the exact pricing snapshot used by the retained captures. The
-[2026-10-19 snapshot](../miner-reference/budgets/pricing-2026-10-19.json) preserves
-SHA-256 `7a39f67c1381fd45f82e9f719776f83041174544124560cb5138e2fb4fcc77d6`;
-from this directory, select it with
-`--pricing ../miner-reference/budgets/pricing-2026-10-19.json`.
-Existing verified bundles contain their own `pricing.json`; keep those bytes
-unchanged when replaying them.
+The exporter reads the shared table from R2. Adding rows does not change the cost
+of captured calls. `--pricing /private/host/pricing.json` selects an explicit
+local table when reproducing a particular validation. The retained
+[2026-10-19 table](../miner-reference/budgets/pricing-2026-10-19.json) remains
+available for that purpose. Existing verified bundles contain their own
+`pricing.json`; keep those bytes unchanged when replaying them. The bundle's
+pricing hash checks those embedded bytes, not the current live model table.
 
 The exporter selects current successful calls by logical request key, reads their
 retained evidence and rechecks the credential/TLS proof using
