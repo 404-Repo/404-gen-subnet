@@ -516,6 +516,64 @@ def test_live_response_is_delivered_before_diagnostic_upload(
         worker.executor.shutdown(wait=True)
 
 
+@pytest.mark.parametrize("replace_after_poll", [False, True])
+@pytest.mark.parametrize("provider_status", [404, 200])
+def test_polling_a_failed_response_preserves_its_diagnostic(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, provider_status: int, replace_after_poll: bool,
+) -> None:
+    class PollingState(MemoryState):
+        polled = False
+
+        def put(self, key: str, data: bytes, content_type: str = "application/octet-stream") -> None:
+            super().put(key, data, content_type)
+            if key == exchange_prefix + "manifest.json" and not self.polled:
+                self.polled = True
+                located = records.locate(scope, call.exchange_id)
+                assert located is not None
+                view = asyncio.run(service._snapshot(scope, item, located[1]))
+                assert Call.model_validate(view["call"]).failure == reason
+                if replace_after_poll:
+                    request = MagicMock(spec=web.Request)
+                    request.read = AsyncMock(return_value=canonical({"request": item.model_dump()}))
+                    response = asyncio.run(service.start(request))
+                    assert isinstance(response.body, bytes)
+                    replacement = json.loads(response.body)["call"]
+                    assert replacement["phase"] == "assigned" and replacement["exchange_id"] != call.exchange_id
+
+    state = PollingState()
+    scope = Scope(
+        SCOPE.deployment, SCOPE.round, Keypair.create_from_mnemonic(Keypair.generate_mnemonic()).ss58_address,
+    )
+    records, budget, item = CallRecords(state), Budget(state, PRICING), invocation()
+    call = records.assign(scope, item, START, "pod-one")
+    assert records.claim(scope, item, "pod-one", call.capture_id or "")
+    worker = runtime(state, records, budget, tmp_path / "spool", scope=scope)
+    worker.accepting = True
+    service = Witness(worker, lambda key: "https://fixture.test/" + key)
+    directory = worker.spool / call.exchange_id
+    exchange_prefix = f"rounds/{scope.round}/{scope.hotkey}/{call.exchange_id}/"
+    reason = "ProviderHTTPError" if provider_status == 404 else "InvalidProviderResponse"
+    files = evidence(budget, item, call)
+    files["response.sse"] = b"unusable provider response"
+    metadata = json.loads(files["manifest.json"])
+    metadata.update(hotkey=scope.hotkey, provider_status=provider_status, usage=None if provider_status == 404 else USAGE,
+                    response_sha256=hashlib.sha256(files["response.sse"]).hexdigest())
+    channel = capture_io(monkeypatch, directory, files, metadata)
+    monkeypatch.setattr(worker, "_retry_upload", lambda operation: operation())
+    try:
+        worker._capture(item, call, channel)
+        assert state.polled
+        diagnostic, = saved_diagnostics(state, exchange_prefix).values()
+        record = json.loads(diagnostic)
+        assert record["operation"] == "outcome"
+        assert record["identity"]["exchange_id"] == call.exchange_id
+        assert record["failure"]["reason"] == reason
+        assert record["failure"]["provider_status"] == provider_status
+        assert not directory.exists()
+    finally:
+        worker.executor.shutdown(wait=True)
+
+
 @pytest.mark.parametrize("rejection", [False, True])
 def test_capture_and_retained_verification_failures_have_separate_records(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, rejection: bool,

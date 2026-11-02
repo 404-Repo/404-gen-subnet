@@ -536,6 +536,13 @@ class PodRuntime:
 
             def issued() -> None:
                 nonlocal save_evidence
+                rejected = response_failure(final, (directory / "response.sse").read_bytes())
+                if rejected is not None:
+                    status = final.get("provider_status")
+                    self._save_diagnostic(call, FailureFact(
+                        stage="provider_response", reason=rejected,
+                        provider_status=status if isinstance(status, int) else None,
+                    ), "outcome")
                 located = self.records.locate(self.scope, call.exchange_id)
                 if located is None:
                     if self.records.replaced(self.scope, call.exchange_id):
@@ -549,18 +556,12 @@ class PodRuntime:
                     self.save_failure(current)
                     save_evidence = True
                     return
-                rejected = response_failure(final, (directory / "response.sse").read_bytes())
                 if rejected is not None:
                     self.budget.discard(self.scope, invocation, call.exchange_id)
                     self.records.failed(
                         self.scope, invocation, self.pod_id, rejected, exchange_id=call.exchange_id,
                     )
                     current = current.model_copy(update={"phase": "failed", "failure": rejected})
-                    status = final.get("provider_status")
-                    self._save_diagnostic(current, FailureFact(
-                        stage="provider_response", reason=rejected,
-                        provider_status=status if isinstance(status, int) else None,
-                    ), "outcome")
                     self.save_failure(current)
                 for name in (
                     "client.bin",
