@@ -12,33 +12,32 @@ supported; its helper and replay documentation follows the quickstart.
 
 ## Launch quickstart
 
-Use Linux x86_64 with glibc 2.34+, Python 3.13, Go 1.27.3, a C compiler and Git.
+Use Linux x86_64 with glibc 2.34+ or macOS 13+ arm64, Python 3.13 and Git.
 Use a local sr25519 wallet hotkey registered on **Finney netuid 17**. The public
 witness origin is **https://witness.subnet404.xyz**. The gateway assigns your
 round and Pod; generation, rendering and submission use that authenticated Pod.
 
-Install these matching launch sources into sibling directories. The SDK packages
-are `404-witness-client==0.2.15` and `404-renderer-client==0.1.4`.
-`404-miner-runtime==0.1.2` is optional for the synchronous execution/replay
-helpers and is not needed by this base miner.
+The matching packages are `404-witness-client==0.2.17`,
+`404-renderer-client==0.1.4` and `404-miner-runtime==0.1.5`.
+The base miner and leader both use `miner_runtime.batch.run` for pending prompts,
+witness sessions, recovery passes and submission. The launchers supply their own
+generation function, prompt mapping, seed and wallet settings.
 
 ```sh
-git clone --branch witness-client-v0.2.15 --depth 1 \
-  https://github.com/404-Repo/404-subnet.git 404-sdk
+git clone --branch miner-runtime-v0.1.5 --depth 1 \
+  https://github.com/404-Repo/404-gen-subnet.git 404-sdk
 git clone https://github.com/404-Repo/404-base-miner-gpt.git 404-base-miner
-git -C 404-base-miner checkout 26c3ad32f9c4f202c9cd896c955695ab1964b75c
+git -C 404-base-miner checkout f9876fb76c07f01831aece93070b8580da50da09
 python3.13 -m venv .venv
 . .venv/bin/activate
-python -m pip install build==1.6.1 setuptools==84.0.0 wheel==0.48.0
-(cd 404-sdk/witness-client && GOTOOLCHAIN=local python build_wheel.py)
+python -m pip install -r https://github.com/404-Repo/404-gen-subnet/releases/download/miner-runtime-v0.1.5/sdk-requirements.txt
 python -m pip install ./404-base-miner
 python -m pip check
 cd 404-base-miner
 ```
 
-The base miner's package metadata resolves the clients from `../404-sdk/`.
-These pip commands build and install those local packages without relying on a
-previous Poetry lock. Keep the SDK checkout and its three proof-parameter files.
+The base miner's package metadata pins the same released wheel URLs and hashes.
+Keep the SDK checkout for its three public proof-parameter files.
 Create `witness.json` at the base miner's root with the absolute parameter path:
 
 ```sh

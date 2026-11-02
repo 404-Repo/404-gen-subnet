@@ -76,17 +76,18 @@ The distribution name is `404-witness-client`; the Python import remains
 `witness_client`. Wheels use the filename prefix `404_witness_client-`.
 
 Artifact hashes, validation results, and the exact source tag and commit are
-recorded in [release.json](release.json). The launch set is witness `0.2.15`,
-renderer `0.1.4` and optional miner runtime `0.1.2`, built from
-`witness-client-v0.2.15`. The manifest identifies the exact source commit; its
-checks apply only to the listed bytes. Historical releases remain under `releases/`. When using a release wheel,
+recorded in [release.json](release.json). The release set is witness `0.2.17`,
+renderer `0.1.4` and miner runtime `0.1.5`. The manifest identifies each package's
+source commit and tag. These checks apply only to the listed bytes. Historical releases remain under `releases/`. When using a release wheel,
 check its SHA-256 against the record and use the checkout of its source tag.
 For the current checkout, follow the [README installation steps](README.md#install).
 Proof parameter sizes and hashes are pinned in
 [native/parameters.go](native/parameters.go). The verification-key SHA-256 is
 `6478059e4ad0d39e8c157c76cea9c6dd777c2ab5143cf8694876094facf39b16`.
 
-Build releases from a clean `git archive` of an annotated source tag. Record the
+Build new releases from a clean `git archive` of an annotated source tag.
+For the current release, retain the existing witness and renderer wheels identified
+in the manifest; build the runtime from `miner-runtime-v0.1.5`. Record the
 tag, commit, artifact hashes, and verification results in [release.json](release.json).
 Test and publish the same wheel. Each source change requires a new package version;
 released artifacts and tags are immutable.
@@ -109,10 +110,10 @@ before the next release. Updating the compiler does not require new proof parame
 For the Linux target (from the repository root):
 
 ```sh
-docker build --platform linux/amd64 -f witness-client/Dockerfile -t 404-witness-python:0.2.15 .
+docker build --platform linux/amd64 -f witness-client/Dockerfile -t 404-witness-python:0.2.17 .
 docker run --rm --network none --platform linux/amd64 \
   -v "$PWD/witness-server/verifier/params:/app/witness-server/verifier/params:ro" \
-  404-witness-python:0.2.15
+  404-witness-python:0.2.17
 ```
 
 The Docker build runs `auditwheel repair` and checks the resulting
@@ -124,9 +125,9 @@ older renderer from a registry. All three wheels are under
 `/app/witness-client/dist` in that image. Extract them without starting the container:
 
 ```sh
-container=$(docker create --platform linux/amd64 404-witness-python:0.2.15)
-mkdir -p dist/0.2.15
-docker cp "$container:/app/witness-client/dist/." dist/0.2.15/
+container=$(docker create --platform linux/amd64 404-witness-python:0.2.17)
+mkdir -p dist/0.2.17
+docker cp "$container:/app/witness-client/dist/." dist/0.2.17/
 docker rm "$container"
 ```
 
@@ -140,8 +141,8 @@ Use a fresh virtual environment to install the exact extracted wheels, run
 and run the existing tests with `-o pythonpath=` so imports resolve to installed
 packages. Test without provider access; fixture tests do not establish live
 gateway admission, Pod availability or paid generation. Never describe historical
-live checks as validation of a new wheel. Registry upload requires separate
-authorization; retain and publish the same tested bytes.
+live checks as validation of a new wheel. GitHub release availability and PyPI
+publication are recorded separately in the manifest; publish the same tested bytes.
 
 ## Licence packaging
 

@@ -16,32 +16,29 @@ For the complete miner setup, use the [launch quickstart](../miner-reference/REA
 It installs the separate async base miner, authenticates your wallet, and runs
 model calls, previews and final submission through your assigned Pod.
 
-The launch source tag is `witness-client-v0.2.15`. Its packages are
-`404-witness-client==0.2.15`, `404-renderer-client==0.1.4`, and the optional
-`404-miner-runtime==0.1.2`. They are installed from source; registry publication
-is separate. Use Python 3.11+ on Linux x86_64 with glibc 2.34+, Go 1.27.3 and a C
-compiler. The base miner requires Python 3.13. To install just the clients:
+The release set is `404-witness-client==0.2.17`, `404-renderer-client==0.1.4`
+and `404-miner-runtime==0.1.5`. Miners and the leader use the shared
+`miner_runtime.batch.run` runner. Install the immutable wheels from the
+[GitHub release](https://github.com/404-Repo/404-gen-subnet/releases/tag/miner-runtime-v0.1.5).
+The requirements file selects Linux x86_64 with glibc 2.34+ or macOS 13+ arm64.
+The packages require Python 3.11+; the base miner requires Python 3.13.
 
 ```sh
-git clone --branch witness-client-v0.2.15 --depth 1 \
-  https://github.com/404-Repo/404-subnet.git 404-sdk
-cd 404-sdk
+git clone --branch miner-runtime-v0.1.5 --depth 1 \
+  https://github.com/404-Repo/404-gen-subnet.git 404-sdk
 python3.13 -m venv .venv
 . .venv/bin/activate
-python -m pip install build==1.6.1 setuptools==84.0.0 wheel==0.48.0
-(cd witness-client && GOTOOLCHAIN=local python build_wheel.py)
-python -m pip install ./renderer-client ./witness-client/dist/*.whl
+python -m pip install -r https://github.com/404-Repo/404-gen-subnet/releases/download/miner-runtime-v0.1.5/sdk-requirements.txt
 python -m pip check
 ```
 
-Keep this checkout for its matching public proof parameters. No parameter download
-or local state directory is required. Use an absolute parameter path in the
-configuration below. An editable install is optional for development; rebuild the
-native library and refresh metadata after changing source. See the
-[development guide](DEVELOPMENT.md#build-and-verification) for the Linux release
-wheels, verification and macOS source builds. Exact prepared artifact hashes and
-verification scope are recorded in [release.json](release.json) on the public branch;
-that manifest names the source commit used to build them.
+Keep the checkout for its matching public proof parameters. Use an absolute
+parameter path in the configuration below. Wheel URLs include their SHA-256
+hashes; [release.json](release.json) records each artifact's source commit,
+source tag and verification scope. The witness wheel uses
+`witness-client-v0.2.17`; the runtime uses `miner-runtime-v0.1.5`.
+See the [development guide](DEVELOPMENT.md#build-and-verification) for source
+builds and native verification.
 
 Use the distribution name `404-witness-client`; `witness-client` is a different
 package.
