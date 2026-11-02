@@ -1,6 +1,6 @@
 {
   "release": "witness-0.2.17-runtime-0.1.5",
-  "status": "Published on GitHub Releases; source pushed and exact release packages installed in both launchers",
+  "status": "Published on GitHub Releases; exact packages verified locally and on native CPU Runpod with both launchers",
   "release_tag": "miner-runtime-v0.1.5",
   "source_commit": "eb45a121c9e02175aeca11b348e050a0aee063ac",
   "source_archive_sha256": "88efe283c84e3807666bc707a4c93e1bc4c4c273937b1ecbb71c00c35cb1b72a",
@@ -134,7 +134,7 @@
       "scope": "Native proof tests and shared batch/both launcher probes"
     },
     "skips": "Two renderer integration tests require a rendering service",
-    "network": "External networking disabled for Linux test execution; launcher probes replace witness and HTTP boundaries",
+    "network": "Earlier isolated Linux suites ran with external networking disabled; the Runpod live validation below used real subscription, witness, renderer and R2 requests",
     "artifact_integrity": "All wheel RECORD hashes, packaged Python/type members, licence bytes and metadata verified; installed members equal their wheels",
     "mypy": {
       "runtime": "passed: 6 source files",
@@ -154,7 +154,6 @@
     "pip_check": "Passed for both Linux artifact environments, the clean macOS environment and both launcher environments",
     "base_miner_failure_reproduction": "main.py --help failed before installation with missing miner_runtime and passes after the locked install",
     "generation_source": "Common batch module byte-identical to 3fa81ee095a53f23837c3dc0169508b4ff9cb3bf; validator byte-identical to witness-client-v0.2.17; launcher generate implementations unchanged",
-    "paid_provider_calls": 0,
     "review": {
       "method": "Serial multi-lens source review plus isolated execution and mandatory analysis tools",
       "crapper": {
@@ -197,6 +196,86 @@
       "macos_python3.13": "Fresh Poetry environment with an empty cache; locked installation from public URLs, pip check, main.py --help and installed-member comparison passed",
       "downloads": "All seven release assets retrieved without authentication with HTTP 200 and matching SHA-256",
       "local_origins": "Both existing launcher environments identify the public release URLs for all three SDK distributions"
+    },
+    "provider_calls": {
+      "codex_subscription": 14,
+      "openai_api_key": 0
+    },
+    "runpod": {
+      "date": "2026-11-02",
+      "status": "passed",
+      "source_snapshot": "a8337db099581ac03da5e44852b61f1da38e4e88",
+      "round": "test-sdk-public-be46703f",
+      "verification_url": "https://subnet404.xyz/rounds/test-sdk-public-be46703f/verification.json",
+      "round_manifest_url": "https://subnet404.xyz/rounds/test-sdk-public-be46703f/test-round.json",
+      "native_tests": {
+        "python": "3.13.0",
+        "platform": "Linux x86_64",
+        "passed": 516,
+        "skipped": 2,
+        "skips": "Standalone renderer-service integration tests require RENDERER_TEST_URL/ID"
+      },
+      "environment": {
+        "client_python": "3.13.0",
+        "worker_python": "3.14.9",
+        "cpu": "cpu3g, 4 vCPU, 16 GB RAM, EU-RO-1",
+        "client_ca_bundle": "/etc/ssl/certs/ca-certificates.crt",
+        "temporary_storage": "RAM /tmp for renderer and disposable witness spool",
+        "embedding_cache": "Pinned DINOv3 revision loaded offline from the approved private copy; no Hugging Face token exported",
+        "worker_image": "sha256:4bfdaf5c7dcee7c623c9b83a62f3dd25736ad52f11e71aaf31406f65b980939e"
+      },
+      "installed_members": "All packaged Python, typing and native module members match the public release wheels; pip check passed",
+      "artifact_sha256": {
+        "404-witness-client": "70a7fda820edaa90d109817ac671487a3ac6a053ae0bb9b17991fe858671adfd",
+        "404-renderer-client": "35b1b77efe479a18713a0d817bd60749089cc7d0725c1738edbbcd8caccaa4fa",
+        "404-miner-runtime": "db3f70f71b25f57bd06030bb637ee2e643b3a60849d541074d9da7e15ddc6f0c"
+      },
+      "launchers": {
+        "miner": {
+          "source_commit": "f9876fb76c07f01831aece93070b8580da50da09",
+          "hotkey": "5HRDKXmi4443u3AcPxFcnZFqecNgz76Hj3yfqyyaBT6pyfpR",
+          "index_url": "https://subnet404.xyz/rounds/test-sdk-public-be46703f/rounds/test-sdk-public-be46703f/5HRDKXmi4443u3AcPxFcnZFqecNgz76Hj3yfqyyaBT6pyfpR/submitted.json",
+          "js_url": "https://subnet404.xyz/rounds/test-sdk-public-be46703f/rounds/test-sdk-public-be46703f/5HRDKXmi4443u3AcPxFcnZFqecNgz76Hj3yfqyyaBT6pyfpR/submitted/miner.js",
+          "grid_url": "https://subnet404.xyz/rounds/test-sdk-public-be46703f/rounds/test-sdk-public-be46703f/5HRDKXmi4443u3AcPxFcnZFqecNgz76Hj3yfqyyaBT6pyfpR/submitted/miner/grid.png",
+          "js_sha256": "f3c1ec2b39176923ee081e36a0fda080ba5f8102d3cfde0a40ca9ac67e576f0e",
+          "js_bytes": 12534,
+          "white_views": 8,
+          "gray_views": 4,
+          "captured_calls": 7
+        },
+        "leader": {
+          "source_commit": "181620933924a72c779d69eb879f382a3dc129a8",
+          "hotkey": "5E2V2Ru2bf5ZfQnKJbYPqfP7JeCggSS8rAU8fKNPj7DKi2Su",
+          "index_url": "https://subnet404.xyz/rounds/test-sdk-public-be46703f/rounds/test-sdk-public-be46703f/5E2V2Ru2bf5ZfQnKJbYPqfP7JeCggSS8rAU8fKNPj7DKi2Su/submitted.json",
+          "js_url": "https://subnet404.xyz/rounds/test-sdk-public-be46703f/rounds/test-sdk-public-be46703f/5E2V2Ru2bf5ZfQnKJbYPqfP7JeCggSS8rAU8fKNPj7DKi2Su/submitted/leader.js",
+          "grid_url": "https://subnet404.xyz/rounds/test-sdk-public-be46703f/rounds/test-sdk-public-be46703f/5E2V2Ru2bf5ZfQnKJbYPqfP7JeCggSS8rAU8fKNPj7DKi2Su/submitted/leader/grid.png",
+          "js_sha256": "6803d68bcb419ef16a7067779b3bf3176e69d5eaab7a65d5c605add453650a98",
+          "js_bytes": 21014,
+          "white_views": 8,
+          "gray_views": 4,
+          "captured_calls": 7
+        }
+      },
+      "resume_checks": {
+        "miner": {
+          "status": "passed",
+          "additional_model_captures": 0
+        },
+        "leader": {
+          "status": "passed",
+          "additional_model_captures": 0
+        }
+      },
+      "saved_outputs": "Each launcher saved JavaScript, 8 white views, 4 gray views, a grid and 9 finite normalized DINO embeddings; public files and hashes verified",
+      "provider_status": "Every final captured provider response returned HTTP 200; usage settled with no pending entries",
+      "scope": "Exact released SDK packages and committed generator/launcher bodies; isolated input/output bindings and assigned test identities",
+      "finney_admission_tested": false,
+      "cloud_worker_replacement_tested": false,
+      "cleanup": {
+        "pod_id": "gsqabuarg2xvc3",
+        "verified_absent": true,
+        "temporary_control_records": "Owned test allocation records removed; test-round results retained"
+      }
     }
   },
   "dependency_findings": [
