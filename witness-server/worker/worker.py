@@ -2,11 +2,8 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
-import platform
-import re
 import select
 import socket
 import subprocess
@@ -14,18 +11,17 @@ import time
 from collections.abc import Callable
 from contextlib import suppress
 from pathlib import Path
-from time import time_ns
-from typing import cast
 
 from channel import Channel
+from diagnostics import FailureFact, failure_fact, verifier_failure
 from identity import Provider, miner_prefix
+from pydantic import TypeAdapter
 from storage import MAX_BYTES, Store, json_bytes
 from timing import emit, identify_exchange, measure, progress, timed, transport
 from timing import exchange_id as _exchange_id
 from timing import forward as _verifier_timings
 from timing import started as timing_started
 from websockets.exceptions import WebSocketException
-from witness_client.state import save
 
 HERE = Path(__file__).resolve().parent
 WITNESS = HERE.parent / "verifier"
@@ -37,54 +33,7 @@ PROVIDERS: dict[Provider, tuple[str, str]] = {
     "api": ("api.openai.com", "/v1/responses"),
 }
 Verifier = Callable[[str, Path], dict[str, object]]
-
-
-def record_failure(
-    directory: Path,
-    error: Exception | None,
-    stage: str,
-    *,
-    reason: str | None = None,
-    context: dict[str, object] | None = None,
-    verifier: dict[str, object] | None = None,
-) -> None:
-    """Spool the first failure without exception messages, locals or source lines."""
-    path = directory / "failure.json"
-    data: dict[str, object] = json.loads(path.read_bytes()) if path.is_file() else {}
-    if "diagnostic" not in data:
-        data["schema"] = 1
-        frames: list[dict[str, object]] = []
-        trace = None if error is None else error.__traceback__
-        while trace is not None:
-            frames.append({
-                "file": "/".join(trace.tb_frame.f_code.co_filename.replace("\\", "/").split("/")[-2:]),
-                "function": trace.tb_frame.f_code.co_name,
-                "line": trace.tb_lineno,
-            })
-            trace = trace.tb_next
-        error_reason = getattr(error, "witness_reason", None)
-        data["diagnostic"] = {
-            "timestamp_ns": time_ns(),
-            "stage": stage,
-            "reason": reason or (error_reason if isinstance(error_reason, str) else f"{stage}_failed"),
-            "error_type": None if error is None else type(error).__name__,
-            "cause_type": type(error.__cause__).__name__ if error is not None and error.__cause__ is not None else None,
-            "stack": frames[-32:],
-            "verifier": verifier,
-        }
-        sources = {
-            "pod.py": HERE / "pod.py", "worker.py": HERE / "worker.py", "verify.mjs": HERE / "verify.mjs",
-            "verifier/verify.mjs": WITNESS / "verify.mjs",
-            "pod_gateway/budget.py": HERE.parent.parent / "witness-gateway" / "pod_gateway" / "budget.py",
-        }
-        data["runtime"] = {
-            "python_version": platform.python_version(),
-            "pod_spec_sha256": os.environ.get("WITNESS_POD_SPEC"),
-            "source_sha256": {name: hashlib.sha256(source.read_bytes()).hexdigest() for name, source in sources.items()},
-        }
-    if context is not None:
-        data.update(context)
-    save(path, json_bytes(data))
+_RESULT = TypeAdapter(dict[str, object])
 
 
 def complete_records(data: bytes | bytearray) -> bool:
@@ -96,40 +45,35 @@ def complete_records(data: bytes | bytearray) -> bool:
     return offset == len(data)
 
 
-def verifier_failure(stderr: bytes, mode: str, returncode: int | None) -> dict[str, object]:
-    """Read the verifier's content-free failure event, ignoring other stderr."""
-    details: dict[str, object] = {"mode": mode, "returncode": returncode}
-    for line in stderr.splitlines():
-        try:
-            value = json.loads(line)
-        except ValueError:
-            continue
-        if not isinstance(value, dict) or value.get("event") != "witness_verifier_failure" or value.get("mode") != mode:
-            continue
-        error_type, frames = value.get("error_type"), value.get("stack")
-        if not isinstance(error_type, str) or not error_type.isidentifier() or not isinstance(frames, list):
-            continue
-        stack = []
-        for frame in frames[:32]:
-            if not isinstance(frame, dict):
-                continue
-            file, function, number, column = (frame.get(key) for key in ("file", "function", "line", "column"))
-            if (not isinstance(file, str) or not re.fullmatch(r"(?:worker|verifier)/[A-Za-z0-9_.-]+\.mjs", file)
-                    or (function is not None and (not isinstance(function, str)
-                        or not re.fullmatch(r"[A-Za-z_$][A-Za-z0-9_.$]*", function)))
-                    or type(number) is not int or number <= 0 or type(column) is not int or column <= 0):
-                continue
-            stack.append({"file": file, "function": function, "line": number, "column": column})
-        details.update(error_type=error_type, stack=stack)
-    return details
+def _verifier_result(mode: str, result: subprocess.CompletedProcess[bytes]) -> dict[str, object]:
+    if result.returncode:
+        if mode == "finish" and result.returncode != 2:
+            raise RuntimeError("Witness verifier did not complete")
+        raise ValueError("Witness verification rejected the exchange")
+    try:
+        return _RESULT.validate_json(result.stdout)
+    except ValueError as error:
+        raise RuntimeError("Witness verifier returned an invalid result") from error
+
+
+def _verifier_reason(error: Exception, mode: str, returncode: int | None) -> str:
+    if isinstance(error, subprocess.TimeoutExpired):
+        return "verifier_timeout"
+    if isinstance(error, OSError):
+        return "verifier_unavailable"
+    if returncode == 0:
+        return "verifier_invalid_result"
+    if mode == "finish" and returncode == 2:
+        return "verification_rejected"
+    return "verifier_process_failed"
 
 
 def verify(
-    mode: str, directory: Path, *, provider: Provider | None = None
+    mode: str, directory: Path, *, provider: Provider | None = None,
+    observe_failure: Callable[[FailureFact], None] | None = None,
 ) -> dict[str, object]:
     returncode = None
     stderr = b""
-    reason = "verifier_process_failed"
     try:
         with measure("verifier_subprocess"):
             result = subprocess.run(
@@ -154,23 +98,11 @@ def verify(
         returncode = result.returncode
         stderr = result.stderr
         _verifier_timings(result.stderr)
-        if result.returncode:
-            if mode == "finish" and result.returncode != 2:
-                raise RuntimeError("Witness verifier did not complete")
-            reason = "verification_rejected" if mode == "finish" else "verifier_process_failed"
-            raise ValueError("Witness verification rejected the exchange")
-        try:
-            return cast(dict[str, object], json.loads(result.stdout))
-        except ValueError as error:
-            reason = "verifier_invalid_result"
-            raise RuntimeError("Witness verifier returned an invalid result") from error
+        return _verifier_result(mode, result)
     except Exception as error:
-        if isinstance(error, subprocess.TimeoutExpired):
-            reason = "verifier_timeout"
-        elif isinstance(error, OSError):
-            reason = "verifier_unavailable"
-        record_failure(directory, error, "verifier_" + mode, reason=reason,
-                       verifier=verifier_failure(stderr, mode, returncode))
+        if observe_failure is not None:
+            observe_failure(failure_fact(error, "verifier_" + mode, reason=_verifier_reason(error, mode, returncode),
+                                         verifier=verifier_failure(stderr, mode, returncode)))
         raise
 
 
@@ -192,6 +124,7 @@ def relay(
     extra_metadata: dict[str, object] | None = None,
     seal: Callable[[dict[str, object]], object] | None = None,
     before_delivery: Callable[[dict[str, object]], None] | None = None,
+    observe_failure: Callable[[FailureFact], None] | None = None,
 ) -> dict[str, object]:
     """Finish TLS promptly, then hold HTTP until a durable authorization exists.
 
@@ -451,10 +384,8 @@ def relay(
         transport("capture_failed", _exchange_id(), reason=stage, error_type=type(error).__name__)
         if stage == "provider_connect":
             reason = "provider_connection_failed"
-        record_failure(directory, error, stage, reason=reason, context={
-            **(extra_metadata or {}), "round": round_number, "hotkey": hotkey,
-            "exchange_id": prefix.rsplit("/", 1)[1],
-        })
+        if observe_failure is not None:
+            observe_failure(failure_fact(error, stage, reason=reason))
         raise
     finally:
         # Ordinary Pods retain the spool for upload/finalization recovery. This

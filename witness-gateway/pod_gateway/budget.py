@@ -23,7 +23,7 @@ class BudgetNotReserved(BudgetRejected):
     """This reservation made no accepted or uncertain dispatch write."""
 
     def __init__(self, message: str, *, reason: str = "budget_not_reserved") -> None:
-        self.witness_reason = reason
+        self.reason = reason
         super().__init__(message)
 
 

@@ -49,6 +49,15 @@ _output = _DiagnosticOutput()
 _stall_output = _DiagnosticOutput(capacity=128, name="witness-stall-diagnostics")
 
 
+def diagnostic_error(exchange_id: str, phase: str, error: Exception) -> None:
+    """Report collection failures without affecting the capture outcome."""
+    with suppress(Exception):
+        _output.write({
+            "event": "witness_diagnostic_error", "exchange_id": exchange_id,
+            "phase": phase, "error_type": type(error).__name__,
+        })
+
+
 class TimingRecord(TypedDict):
     event: Literal["witness_timing"]
     schema: int

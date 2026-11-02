@@ -20,19 +20,30 @@ Evidence lives under `rounds/<round>/<hotkey>/<exchange-id>/`. Generation
 recordings retain invocation and delivery order. Durable claims and usage live in
 R2; Pod identity, ownership and lifecycle come from RunPod.
 
-Capture and verifier diagnostics are saved atomically in the exchange's local spool as
-`failure.json`, then uploaded to that exchange's R2 directory before spool cleanup.
-The configured storage prefix applies to this path. Upload retries and Pod restarts
-preserve the first diagnostic. An error recovered from retained evidence also keeps
-its diagnostic in R2; call state and the manifest determine the final outcome.
+The Pod saves capture, verifier and reservation failure facts atomically in the
+exchange's private spool under `diagnostics/<record-id>.json`. Each record is
+immutable. The ID identifies its operation, exchange identity and failure facts;
+repeated observations reuse the original bytes and observation time. Recovery
+failures have separate records from the original capture failure. The Pod uploads
+these bytes to the same path in the exchange's R2 directory before spool cleanup.
+The configured storage prefix applies. Upload retries and Pod restarts retain
+pending records without repeating a provider request.
 
-The record includes the failure stage and reason, exception and cause types,
+The record includes the observed stage and reason, exception and cause types,
 bounded Python stack locations, verifier mode/exit status and safe Node stack
 locations when available. Call, exchange and Pod identities correlate the evidence;
-Python version, the Pod specification fingerprint and source hashes identify the
-runtime. Reservation reasons distinguish unsupported models/tiers from unavailable
-or busy ledgers. These records do not require `WITNESS_TIMINGS=1` and contain no
-exception messages, locals, source lines, raw subprocess output or credentials.
+Python version, the Pod specification fingerprint and proof/pricing pins identify
+the runtime. Reservation reasons distinguish unsupported models/tiers from
+unavailable or busy ledgers. These records do not require `WITNESS_TIMINGS=1` and
+contain no exception messages, locals, source lines, raw subprocess output or
+credentials. They remain private and are excluded from downloadable evidence.
+
+`failure.json` is the small outcome marker with `status` and `error_type`.
+Call state and the manifest determine the outcome; diagnostics do not assign blame
+or decide whether a call can be retried. Diagnostic collection errors emit a
+content-free `witness_diagnostic_error` event and do not interrupt finalization.
+Diagnostic uploads follow live response delivery; pending uploads keep the spool
+until R2 accepts the saved bytes.
 
 Content-addressed completed evidence lives under `evidence/v1/`. The Pod returns
 expected hashes and object-specific signed R2 URLs through authenticated TLS;

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import hashlib
 import json
 import subprocess
+import tempfile
 import threading
 import time
 from collections.abc import Callable
@@ -16,12 +18,12 @@ from aiohttp import web
 from bittensor_wallet import Keypair
 from botocore.exceptions import EndpointConnectionError
 from channel import WorkerChannel
+from diagnostics import failure_fact
 from pod import PodRuntime
 from support import MemoryState
 from test_recording import BODY, PRICING, SCOPE, invocation
 from test_state import FakeS3, s3_error
 from witness_client.calls import RequestKey, canonical
-from worker import record_failure
 
 from pod_gateway.budget import Budget
 from pod_gateway.direct import Witness
@@ -87,6 +89,10 @@ def prefix(call: Call) -> str:
     return f"rounds/{SCOPE.round}/{SCOPE.hotkey}/{call.exchange_id}/"
 
 
+def saved_diagnostics(state: MemoryState, exchange_prefix: str) -> dict[str, bytes]:
+    return {key: value.data for key, value in state.objects.items() if key.startswith(exchange_prefix + "diagnostics/")}
+
+
 def runtime(
     state: MemoryState, records: CallRecords, budget: Budget, spool: Path, *, scope: Scope = SCOPE,
 ) -> PodRuntime:
@@ -125,14 +131,18 @@ def test_prefixed_capture_reaches_provider_and_records_its_connection_failure(
         assert saved is not None and saved.call.failure == "ConnectionRefusedError"
         failure = state.get(f"isolated/rounds/{scope.round}/{scope.hotkey}/{call.exchange_id}/failure.json")
         assert failure is not None and json.loads(failure)["error_type"] == "ConnectionRefusedError"
-        diagnostic = json.loads(failure)
-        assert diagnostic["exchange_id"] == call.exchange_id
-        assert diagnostic["call_id"] == item.id
-        assert diagnostic["pod_id"] == "pod-one"
-        assert diagnostic["diagnostic"]["stage"] == "provider_connect"
-        assert diagnostic["diagnostic"]["reason"] == "provider_connection_failed"
-        assert diagnostic["diagnostic"]["stack"][-1]["function"] == "unavailable"
-        assert diagnostic["runtime"]["source_sha256"]["pod.py"]
+        assert json.loads(failure) == {"status": "failed", "error_type": "ConnectionRefusedError"}
+        diagnostic, = saved_diagnostics(
+            state, f"isolated/rounds/{scope.round}/{scope.hotkey}/{call.exchange_id}/",
+        ).values()
+        record = json.loads(diagnostic)
+        assert record["identity"]["exchange_id"] == call.exchange_id
+        assert record["identity"]["call_id"] == item.id
+        assert record["identity"]["pod_id"] == "pod-one"
+        assert record["failure"]["stage"] == "provider_connect"
+        assert record["failure"]["reason"] == "provider_connection_failed"
+        assert record["failure"]["stack"][-1]["function"] == "unavailable"
+        assert record["identity"]["runtime"]["python_version"]
     finally:
         worker.executor.shutdown(wait=True)
 
@@ -144,7 +154,7 @@ def test_failure_diagnostics_survive_r2_outage_and_pod_restart(
         offline = True
 
         def put(self, key: str, data: bytes, content_type: str = "application/octet-stream") -> None:
-            if self.offline and key.endswith("/failure.json"):
+            if self.offline and "/diagnostics/" in key:
                 raise EndpointConnectionError(endpoint_url="https://offline.invalid")
             super().put(key, data, content_type)
 
@@ -169,11 +179,14 @@ def test_failure_diagnostics_survive_r2_outage_and_pod_restart(
     finally:
         worker.executor.shutdown(wait=True)
     directory = worker.spool / call.exchange_id
-    pending = (directory / "failure.json").read_bytes()
-    assert json.loads(pending)["diagnostic"]["reason"] == "provider_connection_failed"
+    path, = (directory / "diagnostics").glob("*.json")
+    pending = path.read_bytes()
+    assert json.loads(pending)["failure"]["reason"] == "provider_connection_failed"
     assert secret.encode() not in pending
-    key = f"rounds/{scope.round}/{scope.hotkey}/{call.exchange_id}/failure.json"
+    key = f"rounds/{scope.round}/{scope.hotkey}/{call.exchange_id}/diagnostics/{path.name}"
     assert state.get(key) is None
+    failed = records.load(scope, item.id)
+    assert failed is not None and failed.call.phase == "failed"
 
     state.offline = False
     restarted = runtime(state, records, budget, worker.spool, scope=scope)
@@ -201,21 +214,31 @@ def test_recovered_capture_uploads_its_original_failure_before_cleanup(tmp_path:
         try:
             raise ConnectionError("private storage message")
         except ConnectionError as error:
-            record_failure(directory, error, "evidence_persist", context=worker._binding(item, call))
-        original = (directory / "failure.json").read_bytes()
+            worker._save_diagnostic(call, failure_fact(error, "evidence_persist"), "capture")
+        path, = (directory / "diagnostics").glob("*.json")
+        original = path.read_bytes()
         worker._finalize(item, call, metadata, "ConnectionError")
         saved = records.load(SCOPE, item.id)
         assert saved is not None and saved.call.phase == "issued"
-        assert state.get(prefix(call) + "failure.json") == original
+        assert state.get(prefix(call) + "diagnostics/" + path.name) == original
         assert not directory.exists()
     finally:
         worker.executor.shutdown(wait=True)
 
 
+@pytest.mark.parametrize("diagnostic_outage", [False, True])
 def test_unresolved_verifier_failure_uploads_diagnostics_without_failing_the_call(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, diagnostic_outage: bool,
 ) -> None:
-    state = MemoryState()
+    class DiagnosticState(MemoryState):
+        offline = diagnostic_outage
+
+        def put(self, key: str, data: bytes, content_type: str = "application/octet-stream") -> None:
+            if self.offline and "/diagnostics/" in key:
+                raise EndpointConnectionError(endpoint_url="https://offline.invalid")
+            super().put(key, data, content_type)
+
+    state = DiagnosticState()
     records, budget, item, call = capture(state)
     worker = runtime(state, records, budget, tmp_path / "spool")
     directory = worker.spool / call.exchange_id
@@ -224,16 +247,31 @@ def test_unresolved_verifier_failure_uploads_diagnostics_without_failing_the_cal
         return_value=subprocess.CompletedProcess([], 1, b"", b"private verifier failure"),
     ))
     monkeypatch.setattr(worker, "_retry_upload", lambda operation: operation())
+    events: list[object] = []
+    monkeypatch.setattr("timing._output.write", events.append)
     try:
         with pytest.raises(RuntimeError, match="verifier did not complete"):
             worker._recover(call.exchange_id)
-        pending = (directory / "failure.json").read_bytes()
-        assert state.get(prefix(call) + "failure.json") == pending
+        path, = (directory / "diagnostics").glob("*.json")
+        pending = path.read_bytes()
+        assert state.get(prefix(call) + "diagnostics/" + path.name) == (None if diagnostic_outage else pending)
         diagnostic = json.loads(pending)
-        assert diagnostic["exchange_id"] == call.exchange_id
-        assert diagnostic["diagnostic"]["reason"] == "verifier_process_failed"
-        assert diagnostic["diagnostic"]["verifier"] == {"mode": "finish", "returncode": 1}
+        assert diagnostic["identity"]["exchange_id"] == call.exchange_id
+        assert diagnostic["failure"]["reason"] == "verifier_process_failed"
+        assert diagnostic["failure"]["verifier"]["mode"] == "finish"
+        assert diagnostic["failure"]["verifier"]["returncode"] == 1
         assert b"private verifier failure" not in pending
+        assert events == ([{
+            "event": "witness_diagnostic_error", "exchange_id": call.exchange_id,
+            "phase": "upload", "error_type": "EndpointConnectionError",
+        }] if diagnostic_outage else [])
+        state.offline = False
+        events.clear()
+        with pytest.raises(RuntimeError, match="verifier did not complete"):
+            worker._recover(call.exchange_id)
+        assert [file.read_bytes() for file in (directory / "diagnostics").glob("*.json")] == [pending]
+        assert state.get(prefix(call) + "diagnostics/" + path.name) == pending
+        assert events == []
         saved = records.load(SCOPE, item.id)
         assert saved is not None and saved.call.phase == "capturing"
         assert budget.summary(SCOPE, item)["pending_usage"] == 1
@@ -273,9 +311,253 @@ def test_capture_preserves_the_reason_for_a_rejected_reservation(
         worker._capture(item, call, MagicMock())
         saved = json.loads(state.get(prefix(call) + "failure.json") or b"{}")
         assert saved["error_type"] == "BudgetNotReserved"
-        assert saved["diagnostic"]["reason"] == failure
-        assert saved["not_dispatched"] is True
-        assert "private ledger endpoint" not in json.dumps(saved)
+        diagnostic, = saved_diagnostics(state, prefix(call)).values()
+        assert json.loads(diagnostic)["failure"]["reason"] == failure
+        current = records.load(SCOPE, item.id)
+        assert current is not None and current.call.not_dispatched
+        assert b"private ledger endpoint" not in diagnostic
+    finally:
+        worker.executor.shutdown(wait=True)
+
+
+def test_full_spool_does_not_leave_a_failed_capture_running(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = MemoryState()
+    scope = Scope(
+        SCOPE.deployment, SCOPE.round, Keypair.create_from_mnemonic(Keypair.generate_mnemonic()).ss58_address,
+    )
+    records, budget, item = CallRecords(state), Budget(state, PRICING), invocation()
+    call = records.assign(scope, item, START, "pod-one")
+    assert records.claim(scope, item, "pod-one", call.capture_id or "")
+    worker = runtime(state, records, budget, tmp_path / "spool", scope=scope)
+    worker.accepting = True
+    original = tempfile.mkstemp
+
+    def disk_full(
+        suffix: str | None = None, prefix: str | None = None, dir: str | Path | None = None, text: bool = False,
+    ) -> tuple[int, str]:
+        if dir is not None and Path(dir).name == "diagnostics":
+            raise OSError(errno.ENOSPC, "fixture full spool")
+        return original(suffix, prefix, dir, text)
+
+    def unavailable(*args: object, **kwargs: object) -> None:
+        raise ConnectionRefusedError("fixture provider unavailable")
+
+    monkeypatch.setattr(tempfile, "mkstemp", disk_full)
+    monkeypatch.setattr("worker.socket.create_connection", unavailable)
+    try:
+        worker._capture(item, call, MagicMock())
+        failed = records.load(scope, item.id)
+        assert failed is not None and failed.call.phase == "failed"
+        assert failed.call.failure == "ConnectionRefusedError" and failed.call.not_dispatched
+        request = MagicMock(spec=web.Request)
+        request.read = AsyncMock(return_value=canonical({"request": item.model_dump()}))
+        response = asyncio.run(Witness(worker, lambda key: "https://fixture.test/" + key).start(request))
+        assert isinstance(response.body, bytes)
+        retry = json.loads(response.body)["call"]
+        assert retry["phase"] == "assigned" and retry["exchange_id"] != call.exchange_id
+    finally:
+        worker.executor.shutdown(wait=True)
+
+
+def test_snapshot_failure_marker_cannot_overwrite_capture_diagnostics(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    failed, release_capture = threading.Event(), threading.Event()
+    snapshot_saving, release_snapshot = threading.Event(), threading.Event()
+    uploaded, release_upload = threading.Event(), threading.Event()
+
+    class ConcurrentState(MemoryState):
+        enabled = False
+        paused = False
+
+        def save(self, key: str, data: bytes, expected: str | None) -> Snapshot:
+            result = super().save(key, data, expected)
+            if self.enabled and not self.paused and key.startswith("pod-calls/") and json.loads(data)["call"]["phase"] == "failed":
+                self.paused = True
+                failed.set()
+                assert release_capture.wait(5)
+            return result
+
+        def put(self, key: str, data: bytes, content_type: str = "application/octet-stream") -> None:
+            super().put(key, data, content_type)
+            if self.enabled and "/diagnostics/" in key:
+                uploaded.set()
+                assert release_upload.wait(5)
+
+    state = ConcurrentState()
+    records, budget, item, call = capture(state)
+    worker = runtime(state, records, budget, tmp_path / "spool")
+    directory = worker.spool / call.exchange_id
+    directory.mkdir(mode=0o700)
+    files = evidence(budget, item, call)
+    response = canonical({"error": {"code": "fixture_rejection", "message": "private provider message"}})
+    metadata = json.loads(files["manifest.json"])
+    metadata.update(provider_status=404, usage=None, response_sha256=hashlib.sha256(response).hexdigest())
+    files.update({"manifest.json": canonical(metadata), "response.sse": response})
+    for name, data in files.items():
+        state.put(prefix(call) + name, data)
+        (directory / name).write_bytes(data)
+    original = tempfile.mkstemp
+
+    def pause_snapshot(
+        suffix: str | None = None, prefix: str | None = None, dir: str | Path | None = None, text: bool = False,
+    ) -> tuple[int, str]:
+        if threading.current_thread().name.endswith("_1") and prefix is not None and prefix.startswith(".failure.json."):
+            snapshot_saving.set()
+            assert release_snapshot.wait(5)
+        return original(suffix, prefix, dir, text)
+
+    monkeypatch.setattr(tempfile, "mkstemp", pause_snapshot)
+    state.enabled = True
+    try:
+        with ThreadPoolExecutor(max_workers=2) as tasks:
+            writer = tasks.submit(worker._finalize, item, call, metadata, "CaptureInterrupted")
+            try:
+                assert failed.wait(5)
+                reader = tasks.submit(recover_issued, records, budget, state.read, SCOPE, item, call, PROOF, worker.save_failure)
+                assert snapshot_saving.wait(5)
+                release_capture.set()
+                assert uploaded.wait(5)
+                original_records = saved_diagnostics(state, prefix(call))
+                release_snapshot.set()
+                assert reader.result(timeout=5).phase == "failed"
+                release_upload.set()
+                writer.result(timeout=5)
+            finally:
+                release_capture.set()
+                release_snapshot.set()
+                release_upload.set()
+        assert saved_diagnostics(state, prefix(call)) == original_records
+        diagnostic, = original_records.values()
+        assert json.loads(diagnostic)["failure"]["reason"] == "ProviderHTTPError"
+        assert b"private provider message" not in diagnostic
+        assert not directory.exists()
+    finally:
+        worker.executor.shutdown(wait=True)
+
+
+def capture_io(
+    monkeypatch: pytest.MonkeyPatch, directory: Path, files: dict[str, bytes], metadata: dict[str, object],
+    *, finish_errors: tuple[int, ...] = (),
+) -> MagicMock:
+    record = b"\x16\x03\x03\x00\x01x"
+    provider = MagicMock()
+    connection = provider.__enter__.return_value
+    connection.recv.side_effect = [record, record, record, b""]
+    monkeypatch.setattr("worker.socket.create_connection", lambda *args, **kwargs: provider)
+    monkeypatch.setattr("worker.select.select", lambda *args: ([connection], [], []))
+    errors = iter(finish_errors)
+
+    def process(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        mode = args[2]
+        if mode == "finish" and (error := next(errors, 0)):
+            return subprocess.CompletedProcess(args, error, b"", b"private verifier failure")
+        result: dict[str, object]
+        if mode == "hello":
+            result = {"released": len(record)}
+        else:
+            for name in {"handshake": ["handshake.json"], "authorize": ["authorization.json", "request.json"],
+                         "finish": ["response.sse"]}[mode]:
+                (directory / name).write_bytes(files.get(name, b"{}"))
+            result = metadata if mode == "finish" else {}
+        return subprocess.CompletedProcess(args, 0, canonical(result), b"")
+
+    monkeypatch.setattr("worker.subprocess.run", process)
+    channel = MagicMock()
+    channel.recv.return_value = record
+    channel.claim.side_effect = lambda phase: canonical({"client_bytes": len(record) * (2 if phase == "handshake" else 3)})
+    return channel
+
+
+@pytest.mark.parametrize("provider_status", [200, 404])
+def test_live_response_is_delivered_before_diagnostic_upload(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, provider_status: int,
+) -> None:
+    delivered = threading.Event()
+
+    class DeliveryState(MemoryState):
+        def put(self, key: str, data: bytes, content_type: str = "application/octet-stream") -> None:
+            if delivered.is_set() and provider_status == 200:
+                raise EndpointConnectionError(endpoint_url="https://offline.invalid")
+            if "/diagnostics/" in key:
+                assert delivered.is_set(), "Diagnostic upload blocked response delivery"
+            super().put(key, data, content_type)
+
+    state = DeliveryState()
+    scope = Scope(
+        SCOPE.deployment, SCOPE.round, Keypair.create_from_mnemonic(Keypair.generate_mnemonic()).ss58_address,
+    )
+    records, budget, item = CallRecords(state), Budget(state, PRICING), invocation()
+    call = records.assign(scope, item, START, "pod-one")
+    assert records.claim(scope, item, "pod-one", call.capture_id or "")
+    worker = runtime(state, records, budget, tmp_path / "spool", scope=scope)
+    worker.accepting = True
+    directory = worker.spool / call.exchange_id
+    files = evidence(budget, item, call)
+    metadata = json.loads(files["manifest.json"])
+    metadata.update(hotkey=scope.hotkey, provider_status=provider_status, usage=None if provider_status == 404 else USAGE)
+    channel = capture_io(monkeypatch, directory, files, metadata)
+    monkeypatch.setattr(worker, "_retry_upload", lambda operation: operation())
+    channel.finish.side_effect = delivered.set
+    try:
+        worker._capture(item, call, channel)
+        current = records.load(scope, item.id)
+        assert delivered.is_set() and current is not None
+        if provider_status == 404:
+            assert current.call.failure == "ProviderHTTPError"
+            diagnostic, = saved_diagnostics(state, f"rounds/{scope.round}/{scope.hotkey}/{call.exchange_id}/").values()
+            assert json.loads(diagnostic)["operation"] == "outcome"
+        else:
+            assert current.call.phase == "issued" and budget.summary(scope, item)["pending_usage"] == 0
+        assert not directory.exists()
+    finally:
+        worker.executor.shutdown(wait=True)
+
+
+@pytest.mark.parametrize("rejection", [False, True])
+def test_capture_and_retained_verification_failures_have_separate_records(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, rejection: bool,
+) -> None:
+    class TranscriptOutage(MemoryState):
+        failed = False
+
+        def put(self, key: str, data: bytes, content_type: str = "application/octet-stream") -> None:
+            if not self.failed and key.endswith("/server.bin") and len(data) == 18:
+                self.failed = True
+                raise ConnectionError("private storage failure")
+            super().put(key, data, content_type)
+
+    state = TranscriptOutage()
+    scope = Scope(
+        SCOPE.deployment, SCOPE.round, Keypair.create_from_mnemonic(Keypair.generate_mnemonic()).ss58_address,
+    )
+    records, budget, item = CallRecords(state), Budget(state, PRICING), invocation()
+    call = records.assign(scope, item, START, "pod-one")
+    assert records.claim(scope, item, "pod-one", call.capture_id or "")
+    worker = runtime(state, records, budget, tmp_path / "spool", scope=scope)
+    worker.accepting = True
+    files = evidence(budget, item, call)
+    metadata = json.loads(files["manifest.json"])
+    metadata["hotkey"] = scope.hotkey
+    channel = capture_io(
+        monkeypatch, worker.spool / call.exchange_id, files, metadata, finish_errors=(2 if rejection else 1,),
+    )
+    try:
+        worker._capture(item, call, channel)
+        current = records.load(scope, item.id)
+        assert current is not None and current.call.phase == ("failed" if rejection else "issued")
+        if rejection:
+            assert current.call.failure == "ConnectionError"
+        saved = saved_diagnostics(state, f"rounds/{scope.round}/{scope.hotkey}/{call.exchange_id}/")
+        observations = {json.loads(raw)["operation"]: json.loads(raw)["failure"] for raw in saved.values()}
+        assert len(saved) == 2
+        assert observations["capture"]["stage"] == "final_transcript_persist"
+        assert observations["capture"]["error_type"] == "ConnectionError"
+        assert observations["recovery"]["reason"] == ("verification_rejected" if rejection else "verifier_process_failed")
+        assert all(b"private storage failure" not in raw and b"private verifier failure" not in raw for raw in saved.values())
+        assert budget.summary(scope, item)["pending_usage"] == 0
     finally:
         worker.executor.shutdown(wait=True)
 
@@ -516,6 +798,39 @@ def test_expired_capture_saves_partial_evidence_before_cleanup(
         worker.executor.shutdown(wait=True)
 
 
+@pytest.mark.parametrize("replaced", [False, True])
+@pytest.mark.parametrize("has_metadata", [False, True])
+def test_deferred_cleanup_retains_newer_evidence_for_an_already_failed_capture(
+    tmp_path: Path, replaced: bool, has_metadata: bool,
+) -> None:
+    state = MemoryState()
+    records, budget, item, call = capture(state)
+    worker = runtime(state, records, budget, tmp_path / "spool")
+    directory = worker.spool / call.exchange_id
+    directory.mkdir(mode=0o700)
+    files = evidence(budget, item, call)
+    metadata = json.loads(files["manifest.json"])
+    metadata.update(provider_status=404, usage=None)
+    files["manifest.json"] = canonical(metadata)
+    for name, content in files.items():
+        state.put(prefix(call) + name, content)
+        (directory / name).write_bytes(content)
+    latest = b"newer retained provider ciphertext"
+    (directory / "server.bin").write_bytes(latest)
+    try:
+        assert recover_issued(records, budget, state.read, SCOPE, item, call, PROOF, worker.save_failure).phase == "failed"
+        if replaced:
+            records.assign(SCOPE, item, START, "pod-one", expected_exchange_id=call.exchange_id)
+        save_evidence = worker._finalize(
+            item, call, metadata if has_metadata else None, "CaptureInterrupted", defer_cleanup=True,
+        )
+        assert directory.is_dir()
+        worker._cleanup(call.exchange_id, save_evidence=save_evidence)
+        assert not directory.exists() and state.get(prefix(call) + "server.bin") == latest
+    finally:
+        worker.executor.shutdown(wait=True)
+
+
 @pytest.mark.parametrize("operation", ["issued", "failed", "recover"])
 @pytest.mark.parametrize("status", [None, "issued"])
 def test_replaced_failed_capture_cleans_up_without_failure_diagnostics(
@@ -715,7 +1030,7 @@ def test_restarted_worker_retains_pending_upload_until_durable(
     for name, content in files.items():
         (directory / name).write_bytes(content)
 
-    def finish(mode: str, path: Path, *, provider: str) -> dict[str, object]:
+    def finish(mode: str, path: Path, *, provider: str, observe_failure: object) -> dict[str, object]:
         assert mode == "finish" and path == directory
         return json.loads(files["manifest.json"])  # type: ignore[no-any-return]
 
