@@ -12,7 +12,7 @@ from functools import partial
 from types import SimpleNamespace
 from typing import cast
 
-from aiohttp import ClientResponse, web
+from aiohttp import ClientResponse, WSMsgType, web
 from aiohttp.test_utils import TestClient, TestServer, make_mocked_request
 from bittensor_wallet import Keypair
 import pytest
@@ -198,6 +198,167 @@ def test_cached_status_and_unauthenticated_rejection_survive_a_stalled_provider(
                                          {"start_id": SECOND})
                 assert response.status == 202 and (await response.json())["session"]["start_id"] == SECOND
             assert provider.creates == 1
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("phase", ["activation", "heartbeat", "drained", "retirement"])
+def test_gateway_authority_loss_preserves_the_selected_worker(phase: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def scenario() -> None:
+        provider, state = PausedProvider(), MemoryState()
+        async with running(provider, state) as (gateway, client):
+            scope = gateway.scope(KEYS[0].ss58_address)
+            response = await request(client, KEYS[0], "POST", "/v1/pods/start", {"start_id": FIRST})
+            assert response.status == 202
+            await response.read()
+            async with asyncio.timeout(2):
+                while not gateway._pods or not gateway._selected(scope, FIRST, next(iter(gateway._pods))):
+                    await asyncio.sleep(0.01)
+            pod = next(iter(gateway._pods.values()))
+            selection = state.load(Selection.key(scope))
+            gateway._due[scope] = time.time() + 60
+
+            async def lose_authority() -> None:
+                observed = threading.Event()
+
+                def fenced() -> bool:
+                    observed.set()
+                    return False
+
+                gateway.fence = fenced
+                async with asyncio.timeout(2):
+                    while not observed.is_set() or gateway._fence_ok:
+                        await asyncio.sleep(0.01)
+
+            if phase == "activation":
+                send_policy = gateway._send_policy
+
+                async def handover(peer: Peer) -> None:
+                    await send_policy(peer)
+                    await lose_authority()
+
+                monkeypatch.setattr(gateway, "_send_policy", handover)
+            async with client.ws_connect(f"/v1/control/{scope.hotkey}/{FIRST}", headers={
+                "Authorization": "Bearer " + capability(gateway.secret, scope, FIRST), "x-witness-pod": pod.id,
+            }) as socket:
+                if phase != "activation":
+                    assert (await socket.receive_json())["type"] == "activate"
+                    if phase == "retirement":
+                        provider.pause = "list"
+                        provider.entered.clear()
+                        provider.release.clear()
+                        async with asyncio.timeout(2):
+                            while not provider.entered.is_set():
+                                await asyncio.sleep(0.01)
+                        await socket.send_json({"type": "drained"})
+                        async with asyncio.timeout(2):
+                            while pod.id not in gateway._retiring:
+                                await asyncio.sleep(0.01)
+                    await lose_authority()
+                    if phase == "retirement":
+                        provider.release.set()
+                        await asyncio.wait_for(gateway._run(gateway._worker, lambda: None), 2)
+                        assert provider.get(pod.id) == pod
+                    await socket.send_json({"type": "drained"} if phase == "drained" else {
+                        "type": "heartbeat", "ready": True, "proof_key_sha256": gateway.proof_hash,
+                    })
+                assert (await socket.receive(timeout=2)).type == WSMsgType.CLOSE
+            assert gateway._selected(scope, FIRST, pod.id)
+            assert provider.get(pod.id) == pod and provider.creates == 1
+            assert state.load(Selection.key(scope)) == selection
+            response = await request(client, KEYS[1], "POST", "/v1/pods/start", {"start_id": SECOND})
+            assert response.status == 503 and (await response.json())["error"] == "gateway_fenced"
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("connected", [False, True])
+def test_authoritative_gateway_drains_a_superseded_worker(connected: bool) -> None:
+    async def scenario() -> None:
+        provider = Provider()
+        async with running(provider, MemoryState()) as (gateway, client):
+            scope = gateway.scope(KEYS[0].ss58_address)
+            response = await request(client, KEYS[0], "POST", "/v1/pods/start", {"start_id": FIRST})
+            assert response.status == 202
+            await response.read()
+            async with asyncio.timeout(2):
+                while not gateway._pods or not gateway._selected(scope, FIRST, next(iter(gateway._pods))):
+                    await asyncio.sleep(0.01)
+            pod = next(iter(gateway._pods.values()))
+            gateway._due[scope] = time.time() + 60
+
+            async def supersede() -> Pod:
+                successor = provider.create(gateway.allocator.spec.body(scope, SECOND, epoch_ns=pod.epoch_ns + 1))
+                async with asyncio.timeout(2):
+                    while gateway._current[scope].start_id != SECOND:
+                        await asyncio.sleep(0.01)
+                assert not gateway._selected(scope, FIRST, pod.id)
+                return successor
+
+            successor = None if connected else await supersede()
+            async with client.ws_connect(f"/v1/control/{scope.hotkey}/{FIRST}", headers={
+                "Authorization": "Bearer " + capability(gateway.secret, scope, FIRST), "x-witness-pod": pod.id,
+            }) as socket:
+                if connected:
+                    assert (await socket.receive_json())["type"] == "activate"
+                    successor = await supersede()
+                    await socket.send_json({"type": "heartbeat", "ready": True,
+                                            "proof_key_sha256": gateway.proof_hash})
+                assert (await socket.receive_json(timeout=2))["type"] == "drain"
+                await socket.send_json({"type": "drained"})
+                assert (await socket.receive_json(timeout=2))["type"] == "retired"
+            assert provider.get(pod.id) is None
+            assert successor is not None and provider.get(successor.id) == successor
+
+    asyncio.run(scenario())
+
+
+def test_background_retirement_preserves_worker_after_gateway_authority_loss() -> None:
+    async def scenario() -> None:
+        provider, state, authority = PausedProvider(), MemoryState(), [True]
+        async with running(provider, state, create_interval=0) as (gateway, client):
+            gateway.fence = lambda: authority[0]
+            scope = gateway.scope(KEYS[0].ss58_address)
+            response = await request(client, KEYS[0], "POST", "/v1/pods/start", {"start_id": FIRST})
+            assert response.status == 202
+            await response.read()
+            async with asyncio.timeout(2):
+                while not gateway._pods or not gateway._selected(scope, FIRST, next(iter(gateway._pods))):
+                    await asyncio.sleep(0.01)
+            pod = next(iter(gateway._pods.values()))
+            selection = state.load(Selection.key(scope))
+            async with client.ws_connect(f"/v1/control/{scope.hotkey}/{FIRST}", headers={
+                "Authorization": "Bearer " + capability(gateway.secret, scope, FIRST), "x-witness-pod": pod.id,
+            }) as socket:
+                assert (await socket.receive_json())["type"] == "activate"
+                async with asyncio.timeout(2):
+                    while (gateway.queue.pending(scope) is not None or
+                           gateway._due.get(scope, 0) > gateway.allocator.clock()):
+                        await asyncio.sleep(0.01)
+                provider.pause = "create"
+                provider.entered.clear()
+                provider.release.clear()
+                response = await request(client, KEYS[1], "POST", "/v1/pods/start", {"start_id": SECOND})
+                assert response.status == 202
+                await response.read()
+                async with asyncio.timeout(2):
+                    while not provider.entered.is_set():
+                        await asyncio.sleep(0.01)
+                await socket.send_json({"type": "drained"})
+                async with asyncio.timeout(2):
+                    while pod.id not in gateway._retiring:
+                        await asyncio.sleep(0.01)
+                authority[0] = False
+                async with asyncio.timeout(2):
+                    while gateway._fence_ok:
+                        await asyncio.sleep(0.01)
+                cycle = gateway._changed
+                provider.release.set()
+                await asyncio.wait_for(cycle.wait(), 2)
+                assert provider.get(pod.id) == pod and provider.creates == 2
+                assert state.load(Selection.key(scope)) == selection
+                await socket.send_json({"type": "heartbeat"})
+                assert (await socket.receive(timeout=2)).type == WSMsgType.CLOSE
 
     asyncio.run(scenario())
 
