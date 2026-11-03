@@ -8,8 +8,8 @@ import hashlib
 import json
 import shutil
 import threading
-import time
 from contextlib import ExitStack
+from contextvars import ContextVar
 from functools import partial
 from itertools import count
 from pathlib import Path
@@ -104,9 +104,24 @@ def test_artifact_completion_keeps_signed_requests_responsive_during_storage_wai
             with fixture.client() as witness:
                 await asyncio.to_thread(witness._gateway.ensure_pod)
                 await enable(fixture)
-                runtime, service = fixture.runtimes[-1], fixture.services[-1]
+                runtime = fixture.runtimes[-1]
                 direct = witness._gateway._service()
                 held, release, expired = threading.Event(), threading.Event(), threading.Event()
+                cleanup_waiting = threading.Event()
+                # Background control uses the same lock; only this request signals cleanup.
+                finishing = ContextVar("finishing", default=False)
+                lock = runtime.lock
+
+                class ObservedLock:
+                    def __enter__(self) -> None:
+                        if finishing.get():
+                            cleanup_waiting.set()
+                        lock.acquire()
+
+                    def __exit__(self, *_args: object) -> None:
+                        lock.release()
+
+                monkeypatch.setattr(runtime, "lock", ObservedLock())
                 load = fixture.state.load
                 selection_key = Selection.key(runtime.scope)
 
@@ -120,9 +135,9 @@ def test_artifact_completion_keeps_signed_requests_responsive_during_storage_wai
                 monkeypatch.setattr(fixture.state, "load", delayed_load)
 
                 def probe() -> tuple[int, bool]:
-                    time.sleep(0.1)
                     path = "/v1/calls/00000000-0000-4000-8000-000000000001"
                     try:
+                        assert cleanup_waiting.wait(3)
                         reply = direct.http.get(
                             path, headers=direct._headers("GET", path, b""),
                             extensions={"sni_hostname": direct.server_name}, timeout=5,
@@ -133,25 +148,20 @@ def test_artifact_completion_keeps_signed_requests_responsive_during_storage_wai
 
                 probes: list[asyncio.Task[tuple[int, bool]]] = []
                 captures: list[threading.Thread] = []
+                send = httpx.AsyncHTTPTransport.handle_async_request
 
-                async def backend(request: web.Request) -> web.Response:
-                    if request.path == "/render":
-                        count = len(request.query["thetas"].split(","))
-                        return web.json_response({"images": [base64.b64encode(PNG).decode()] * count})
-                    capture = threading.Thread(target=runtime.selected, name="capture-selection")
-                    captures.append(capture)
-                    capture.start()
-                    assert await asyncio.to_thread(held.wait, 3)
-                    probes.append(asyncio.create_task(asyncio.to_thread(probe)))
-                    return web.Response(body=PNG, content_type="image/png")
+                async def renderer_response(transport: httpx.AsyncHTTPTransport, request: httpx.Request) -> httpx.Response:
+                    response = await send(transport, request)
+                    if request.url.path == "/render/grid":
+                        capture = threading.Thread(target=runtime.selected, name="capture-selection")
+                        captures.append(capture)
+                        capture.start()
+                        assert await asyncio.to_thread(held.wait, 3)
+                        finishing.set(True)
+                        probes.append(asyncio.create_task(asyncio.to_thread(probe)))
+                    return response
 
-                app = web.Application()
-                app.router.add_post("/render", backend)
-                app.router.add_post("/render/grid", backend)
-                origin = await fixture.listen(app, None)
-                service.renderer_url = origin + "/render/grid"
-                assert service.result_saver is not None
-                service.result_saver.endpoint = origin
+                monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", renderer_response)
                 try:
                     with client(fixture, witness.renderer_transport()) as renderer:
                         if operation == "preview":
