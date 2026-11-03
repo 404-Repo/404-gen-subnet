@@ -212,7 +212,7 @@ Defaults remain four active prompts, two simultaneous model calls, and one rende
 All concurrency settings accept 1 through 32. Match `--parallel-calls` to the witness
 Pod's configured `WITNESS_MAX_CAPTURES`, and `--parallel-renders` to renderer capacity.
 For example, eight prompt pipelines with a 12-call limit require a witness Pod
-configured and sized for 12 concurrent captures. The Pod default is two.
+configured and sized for 12 concurrent captures. The Pod default is 32.
 
 Use the pinned `witness_client`, `renderer_client` and `miner_runtime` packages supplied
 by your runtime. The runner in `miner_runtime.runner` owns generation and recovery of

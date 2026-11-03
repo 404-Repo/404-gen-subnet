@@ -131,19 +131,28 @@ def values() -> dict[str, object]:
     }
 
 
-def test_split_images_select_the_same_roles_after_gateway_revival(values: dict[str, object]) -> None:
+@pytest.mark.parametrize("max_captures", [None, "12", "32"])
+def test_split_images_select_the_same_roles_after_gateway_revival(
+    values: dict[str, object], max_captures: str | None,
+) -> None:
+    if max_captures is not None:
+        values["WITNESS_MAX_CAPTURES"] = max_captures
     settings = Settings.model_validate(values)
     worker, gateway = worker_spec(settings), gateway_spec(settings)
     assert worker.image == values["WITNESS_IMAGE"]
     assert gateway.image == values["WITNESS_GATEWAY_IMAGE"]
     assert worker.env["WITNESS_ROLE"] == "worker"
     assert gateway.env["WITNESS_ROLE"] == "gateway"
+    assert settings.max_captures == int(max_captures or "32")
+    assert worker.env["WITNESS_MAX_CAPTURES"] == (max_captures or "32")
     revived = Settings.model_validate({
         **gateway.env,
         "WITNESS_DEPLOYMENT": settings.deployment,
     })
     assert worker_spec(revived).image == worker.image
     assert gateway_spec(revived).image == gateway.image
+    assert worker_spec(revived).env["WITNESS_MAX_CAPTURES"] == worker.env["WITNESS_MAX_CAPTURES"]
+    assert revived.max_captures == settings.max_captures
 
 
 def test_gateway_image_is_explicit_for_split_and_legacy_deployments(values: dict[str, object]) -> None:

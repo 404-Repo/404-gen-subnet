@@ -315,6 +315,7 @@ class Harness:
             proof_hash=self.proof,
             round_end=int(time.time()) + 600 if inputs is None else None,
             spool=spool,
+            max_captures=2,
             selection=self.selection,
             round_inputs=inputs,
         )

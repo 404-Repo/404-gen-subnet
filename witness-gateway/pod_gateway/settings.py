@@ -41,7 +41,7 @@ class Settings(BaseSettings):
     runpod_api_key: SecretStr = Field(..., alias="GATEWAY_RUNPOD_API_KEY")
     runpod_min_request_interval: float = Field(default=1.1, alias="RUNPOD_MIN_REQUEST_INTERVAL")
     max_pods: int = Field(default=250, alias="WITNESS_MAX_PODS", ge=1, le=1000)
-    max_captures: int = Field(default=2, alias="WITNESS_MAX_CAPTURES", ge=1, le=32)
+    max_captures: int = Field(default=32, alias="WITNESS_MAX_CAPTURES", ge=1, le=32)
     idle_seconds: int = Field(default=1800, alias="WITNESS_IDLE_SECONDS", ge=1800)
     create_interval: int = Field(default=10, alias="GATEWAY_CREATE_INTERVAL_SECONDS", ge=1, le=3600)
     request_interval: int = Field(default=10, alias="GATEWAY_REQUEST_INTERVAL_SECONDS", ge=1, le=300)

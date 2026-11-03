@@ -30,7 +30,7 @@ def worker_spec(settings: Settings, inputs: RoundInputs | None = None) -> PodSpe
         {
             "WITNESS_ROLE": "worker",
             "WITNESS_IDLE_SECONDS": settings.pod_environment.get("WITNESS_IDLE_SECONDS", "1800"),
-            "WITNESS_MAX_CAPTURES": settings.pod_environment.get("WITNESS_MAX_CAPTURES", "2"),
+            "WITNESS_MAX_CAPTURES": settings.pod_environment.get("WITNESS_MAX_CAPTURES", "32"),
         }
     )
     profile = settings.profile
