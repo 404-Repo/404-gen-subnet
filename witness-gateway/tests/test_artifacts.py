@@ -8,6 +8,7 @@ import hashlib
 import json
 import shutil
 import threading
+import time
 from contextlib import ExitStack
 from functools import partial
 from itertools import count
@@ -27,6 +28,7 @@ from test_service import Harness
 from pod_gateway.artifacts import ArtifactConfig, ArtifactRepository, SubmissionContext
 from pod_gateway.models import Scope
 from pod_gateway.results import ResultSaver
+from pod_gateway.selection import Selection
 from pod_gateway.state import Snapshot
 
 
@@ -90,6 +92,80 @@ def client(
         transport=transport,
         timeout=timeout,
     )
+
+
+@pytest.mark.parametrize("operation", ["preview", "save"])
+def test_artifact_completion_keeps_signed_requests_responsive_during_storage_wait(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str,
+) -> None:
+    async def scenario() -> None:
+        fixture = Harness(tmp_path, monkeypatch)
+        async with fixture.running():
+            with fixture.client() as witness:
+                await asyncio.to_thread(witness._gateway.ensure_pod)
+                await enable(fixture)
+                runtime, service = fixture.runtimes[-1], fixture.services[-1]
+                direct = witness._gateway._service()
+                held, release, expired = threading.Event(), threading.Event(), threading.Event()
+                load = fixture.state.load
+                selection_key = Selection.key(runtime.scope)
+
+                def delayed_load(key: str) -> Snapshot | None:
+                    if key == selection_key and threading.current_thread().name == "capture-selection":
+                        held.set()
+                        if not release.wait(3):
+                            expired.set()
+                    return load(key)
+
+                monkeypatch.setattr(fixture.state, "load", delayed_load)
+
+                def probe() -> tuple[int, bool]:
+                    time.sleep(0.1)
+                    path = "/v1/calls/00000000-0000-4000-8000-000000000001"
+                    try:
+                        reply = direct.http.get(
+                            path, headers=direct._headers("GET", path, b""),
+                            extensions={"sni_hostname": direct.server_name}, timeout=5,
+                        )
+                        return reply.status_code, not expired.is_set()
+                    finally:
+                        release.set()
+
+                probes: list[asyncio.Task[tuple[int, bool]]] = []
+                captures: list[threading.Thread] = []
+
+                async def backend(request: web.Request) -> web.Response:
+                    if request.path == "/render":
+                        count = len(request.query["thetas"].split(","))
+                        return web.json_response({"images": [base64.b64encode(PNG).decode()] * count})
+                    capture = threading.Thread(target=runtime.selected, name="capture-selection")
+                    captures.append(capture)
+                    capture.start()
+                    assert await asyncio.to_thread(held.wait, 3)
+                    probes.append(asyncio.create_task(asyncio.to_thread(probe)))
+                    return web.Response(body=PNG, content_type="image/png")
+
+                app = web.Application()
+                app.router.add_post("/render", backend)
+                app.router.add_post("/render/grid", backend)
+                origin = await fixture.listen(app, None)
+                service.renderer_url = origin + "/render/grid"
+                assert service.result_saver is not None
+                service.result_saver.endpoint = origin
+                try:
+                    with client(fixture, witness.renderer_transport()) as renderer:
+                        if operation == "preview":
+                            assert await asyncio.to_thread(renderer.render, SOURCE) == PNG
+                        else:
+                            assert (await asyncio.to_thread(renderer.save_final, SOURCE))["failure_reason"] is None
+                    assert await probes[0] == (404, True)
+                    assert runtime.rendering == 0
+                finally:
+                    release.set()
+                    for capture in captures:
+                        await asyncio.to_thread(capture.join, 5)
+
+    asyncio.run(scenario())
 
 
 def test_result_saver_saves_every_view_when_larger_render_jobs_time_out(monkeypatch: pytest.MonkeyPatch) -> None:
