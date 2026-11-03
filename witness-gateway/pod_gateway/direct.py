@@ -330,9 +330,7 @@ class Witness:
                     },
                 )
         finally:
-            with self.runtime.lock:
-                self.runtime.rendering -= 1
-                self.runtime.last_used = self.runtime.clock()
+            await asyncio.to_thread(self._artifact_done)
 
     def _artifacts(self, generation: SubmissionContext | None = None) -> ArtifactRepository:
         if self.artifacts is None:
@@ -414,7 +412,7 @@ class Witness:
                         {"submission": result.model_dump()}, headers={"Cache-Control": "no-store"}
                     )
                 finally:
-                    self._artifact_done()
+                    await asyncio.to_thread(self._artifact_done)
             finally:
                 self._save_lock.release()
         finally:
