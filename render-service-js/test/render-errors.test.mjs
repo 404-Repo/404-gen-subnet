@@ -61,6 +61,11 @@ test('render routes return the same validation rejections and metrics', async ()
     ['export default function(THREE) { return null; }', 'INVALID_RETURN_TYPE'],
     ['export default function(THREE) { return new THREE.Group(); }', 'EMPTY_SCENE'],
     [VALID.replace('0.5, 0.5, 0.5', '3, 3, 3'), 'BOUNDING_BOX_OUT_OF_RANGE'],
+    [`export default function generate(THREE) {
+      const geometry = new THREE.BoxGeometry(0.5, 0.5, 0.5);
+      geometry.setIndex(geometry.getIndex().array.slice().reverse());
+      return new THREE.Mesh(geometry, new THREE.MeshStandardMaterial());
+    }`, 'INVALID_GEOMETRY_INDEX'],
   ];
   for (const [source, rule] of fixtures) {
     const expected = await post('/render', source);

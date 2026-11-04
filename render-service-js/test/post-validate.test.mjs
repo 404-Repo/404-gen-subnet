@@ -287,6 +287,17 @@ await validationPool.init();
 }
 
 {
+  const source = `export default function(THREE) {
+    const geometry = new THREE.BoxGeometry(0.5, 0.5, 0.5);
+    const data = new THREE.InterleavedBuffer(geometry.getIndex().array.slice(), 1);
+    geometry.setIndex(new THREE.InterleavedBufferAttribute(data, 1, 0));
+    return new THREE.Mesh(geometry, new THREE.MeshStandardMaterial());
+  }`;
+  const result = await poolValidate(source);
+  assert('pool: interleaved geometry index passes', result.passed, JSON.stringify(result.failures));
+}
+
+{
   const source = `// This comment mentions export default function
 export default function(THREE) {
     return new THREE.Mesh(
