@@ -155,7 +155,8 @@ class PodGatewayClient:
         host = f"[{address}]" if ":" in address else address
         tls = ssl.create_default_context(cadata=endpoint["certificate"])
         http = httpx.Client(base_url=f"https://{host}:{endpoint['port']}", verify=tls,
-                            timeout=30, follow_redirects=False, trust_env=False)
+                            timeout=30, follow_redirects=False, trust_env=False,
+                            limits=httpx.Limits(max_connections=None, max_keepalive_connections=20))
         service = SignedTransport(
             http, self.hotkey, self.delivery_timeout,
             headers={"Authorization": "Bearer " + endpoint["access"]},

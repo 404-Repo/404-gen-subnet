@@ -88,11 +88,11 @@ stored under `<prefix>/`.
 A final save supplies JavaScript or an explicit `None`. For JavaScript, the Pod
 writes the source, renders the 12 canonical judging views and grid, computes
 embeddings, and saves the result. One final save runs at a time per Pod, with up
-to eight additional saves waiting in arrival order for up to two minutes. A full
-queue returns HTTP 503 `save_queue_full`; an expired queue wait returns HTTP 503
-`save_queue_wait_timeout`. Requests authenticate on arrival; Pod selection and
-fresh round permission are checked before queued work starts. The client retries these
-two queue errors within its configured save timeout, using the same output.
+to 256 additional saves waiting in arrival order until a slot becomes available.
+A full queue returns HTTP 503 `save_queue_full`. Requests authenticate on arrival;
+Pod selection and fresh round permission are checked before queued work starts.
+The legacy `ArtifactClient` retries full-queue responses within its configured
+retry window, using the same output. `WitnessClient.submit()` makes one request.
 Preview rendering uses the renderer's existing concurrency limit.
 
 The Pod publishes `<storage-prefix>rounds/<full-round-name>/<hotkey>/submitted.json`, mapping

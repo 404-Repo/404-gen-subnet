@@ -537,8 +537,9 @@ The worker role starts the renderer before connecting to the gateway. It uses
 UID/GID 1001, an isolated environment without witness credentials, one rendering
 slot and one validation slot. The execution budget is five seconds; rendering
 has a thirty-second deadline. SwiftShader respects the CPU quota and assigned
-CPU IDs. The local renderer listens on port 8002, with an eight-request queue
-and a two-minute queue-wait limit. No renderer port is published by Pod allocation.
+CPU IDs. The local renderer listens on port 8002. Its validation and rendering
+pools queue waiting requests without a configured length limit. No renderer port
+is published by Pod allocation.
 Gateway, revivor, export, certificate and help commands do not start Chromium.
 
 Renderer startup has a sixty-second readiness deadline. A Node process exit

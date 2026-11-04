@@ -39,23 +39,24 @@ class RenderPool {
     this._waiting = [];
   }
 
-  async renderViews(source, params) {
+  async renderViews(source, params, isCancelled) {
     return this._withSlot(async () => {
       const dataUrls = await this._executeInContext(source, params, 'views');
       return dataUrls.map(dataUrlToBuffer);
-    });
+    }, isCancelled);
   }
 
-  async renderGrid(source, params) {
+  async renderGrid(source, params, isCancelled) {
     return this._withSlot(async () => {
       const dataUrl = await this._executeInContext(source, params, 'grid');
       return dataUrlToBuffer(dataUrl);
-    });
+    }, isCancelled);
   }
 
-  async _withSlot(fn) {
+  async _withSlot(fn, isCancelled) {
     await this._acquire();
     try {
+      if (isCancelled?.()) throw new Error('Render request cancelled');
       return await fn();
     } finally {
       this._release();

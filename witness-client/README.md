@@ -274,7 +274,10 @@ Each `submit()` makes one request. The SDK does not queue submissions or limit
 submission concurrency. Pod overload responses such as `save_queue_full/503`
 propagate to the caller, which can report the failure and try another pass later.
 
-Submission has a 150-second request timeout. Errors raise `WitnessError`, retaining
+Submission waits for the Pod's final response without a read timeout. Connection
+and upload waits each retain a 150-second timeout. The client opens direct Pod
+connections as needed; the Pod queues simultaneous saves.
+Errors raise `WitnessError`, retaining
 the Pod's `status_code` and `code` when available and the HTTPX cause for transport
 failures. There is no automatic submission retry. Async cancellation propagates
 and the Pod may finish saving independently. An identical submitted result returns
@@ -315,8 +318,10 @@ absent entry may still be saving. Server and transport failures raise
 `WitnessError`, with no automatic retry. Generation and replay stubs reject lookup;
 it belongs to the live runner.
 
-The existing `ArtifactClient.save_final()` API remains supported. Its explicit
-seed must match the configured round. `submit()` without a seed and
+The existing `ArtifactClient.save_final()` API remains supported. It also waits
+for the final response without a read timeout; its configured timeout bounds
+connection, upload and connection-pool waits and the retry window for busy responses.
+Its explicit seed must match the configured round. `submit()` without a seed and
 `get_submitted()` require a Pod supporting these APIs. The reference
 `run_and_save()` helper still uses an explicit local checkpoint; it is separate
 from the SDK's Pod-based recovery flow.

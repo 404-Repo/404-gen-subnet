@@ -14,12 +14,12 @@ const DEFAULT_CAM_RADIUS = 2.0;
 const DEFAULT_CAM_FOV_DEG = 49.1;
 const DEFAULT_GRID_GAP = 5;
 
-export async function renderViews(source, options = {}) {
-  return renderPool.renderViews(source, buildParams(options));
+export async function renderViews(source, options = {}, isCancelled) {
+  return renderPool.renderViews(source, buildParams(options), isCancelled);
 }
 
-export async function renderGrid(source, options = {}) {
-  return renderPool.renderGrid(source, buildParams(options));
+export async function renderGrid(source, options = {}, isCancelled) {
+  return renderPool.renderGrid(source, buildParams(options), isCancelled);
 }
 
 function buildParams(options) {

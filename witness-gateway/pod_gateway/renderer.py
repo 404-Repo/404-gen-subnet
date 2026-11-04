@@ -65,8 +65,6 @@ def render_service(drain: Callable[[], None]) -> Iterator[subprocess.Popen[bytes
             VALIDATION_POOL_SIZE="1",
             RENDER_TIMEOUT_MS="30000",
             VALIDATION_TIMEOUT_MS="5000",
-            RENDER_QUEUE_CAPACITY="8",
-            RENDER_QUEUE_WAIT_MS="120000",
             LD_PRELOAD="/opt/witness-affinity/libwitness-affinity.so",
         )
         process = subprocess.Popen(

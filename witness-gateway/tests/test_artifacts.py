@@ -19,6 +19,7 @@ from unittest.mock import AsyncMock
 import httpx
 import pytest
 from aiohttp import web
+from aiohttp.test_utils import make_mocked_request
 from renderer_client import ArtifactClient, ArtifactUnavailable, RenderRejected, RenderUnavailable
 from subnet_common.competition.generations import GenerationResult, GenerationsAdapter
 from subnet_common.render import GRAY_BG, GRAY_VIEWS, WHITE_BG, WHITE_VIEWS
@@ -26,6 +27,7 @@ from support import MemoryState
 from test_service import Harness
 
 from pod_gateway.artifacts import ArtifactConfig, ArtifactRepository, SubmissionContext
+from pod_gateway.auth import AuthRejected
 from pod_gateway.models import Scope
 from pod_gateway.results import ResultSaver
 from pod_gateway.selection import Selection
@@ -662,7 +664,7 @@ def test_concurrent_result_index_updates_preserve_each_prompt(monkeypatch: pytes
     assert second.result(prompts[1]) == results[1]
 
 
-@pytest.mark.parametrize("case", ["queued", "queue_full", "queue_wait_timeout", "access_expiry"])
+@pytest.mark.parametrize("case", ["queued", "queue_full", "access_expiry"])
 def test_final_saves_complete_without_generating_again(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str,
 ) -> None:
@@ -677,8 +679,6 @@ def test_final_saves_complete_without_generating_again(
         errors: list[str] = []
         if case == "queue_full":
             monkeypatch.setattr("pod_gateway.direct.SAVE_QUEUE_CAPACITY", 1)
-        elif case == "queue_wait_timeout":
-            monkeypatch.setattr("pod_gateway.direct.SAVE_QUEUE_WAIT_SECONDS", 0.05)
 
         async def embeddings(*args: object, **kwargs: object) -> bytes:
             started.set()
@@ -734,7 +734,7 @@ def test_final_saves_complete_without_generating_again(
                             )))
                             event = started if index == 0 else arrived[prompts[index]]
                             await asyncio.wait_for(event.wait(), 5)
-                        if case in ("queue_full", "queue_wait_timeout"):
+                        if case == "queue_full":
                             await asyncio.wait_for(retryable.wait(), 2)
                         else:
                             assert rendered == [SOURCE]
@@ -749,7 +749,7 @@ def test_final_saves_complete_without_generating_again(
                         assert fixture.state.get(str(result["js"])) == source.encode()
                         assert result["failure_reason"] is None
                     assert generated == sources
-                    if case in ("queue_full", "queue_wait_timeout"):
+                    if case == "queue_full":
                         assert sorted(rendered) == sorted(sources)
                         assert statuses.count(200) == 3 and set(statuses) == {200, 503}
                         assert errors and set(errors) == {"save_" + case}
@@ -761,7 +761,70 @@ def test_final_saves_complete_without_generating_again(
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize("failure", ["full", "timeout", "round_closed", "not_selected", "first_save"])
+def test_final_save_queue_accepts_256_waiting_requests(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        fixture = Harness(tmp_path, monkeypatch)
+        prompts = [hashlib.sha256(f"prompt-{index}".encode()).hexdigest() for index in range(258)]
+        started, release, arrived = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        async with fixture.running():
+            with fixture.client() as witness:
+                await asyncio.to_thread(witness._gateway.ensure_pod)
+                await enable(fixture, prompt_ids={prompt: f"official-{i}" for i, prompt in enumerate(prompts)})
+                service = fixture.services[-1]
+                store, saver = service.artifacts, service.result_saver
+                assert store is not None and saver is not None
+                original_require, original_save = store.require, saver.save
+                seen: set[str] = set()
+                active = peak = 0
+
+                def require(generation: SubmissionContext) -> None:
+                    original_require(generation)
+                    seen.add(generation.prompt_sha256)
+                    if len(seen) == 257:
+                        arrived.set()
+
+                async def save(prompt: str, source: str | None, image: bytes | None) -> GenerationResult:
+                    nonlocal active, peak
+                    active += 1
+                    peak = max(peak, active)
+                    try:
+                        if prompt == prompts[0]:
+                            started.set()
+                            await release.wait()
+                        return await original_save(prompt, source, image)
+                    finally:
+                        active -= 1
+
+                def request(prompt: str) -> web.Request:
+                    value = make_mocked_request("POST", "/v1/submissions")
+                    value._read_bytes = json.dumps({"generation": {"prompt_sha256": prompt}, "source": None}).encode()
+                    return value
+
+                monkeypatch.setattr(store, "require", require)
+                monkeypatch.setattr(saver, "save", save)
+                pending = [asyncio.create_task(service.save_choice(request(prompts[0])))]
+                try:
+                    await asyncio.wait_for(started.wait(), 5)
+                    pending.extend(
+                        asyncio.create_task(service.save_choice(request(prompt))) for prompt in prompts[1:257]
+                    )
+                    await asyncio.wait_for(arrived.wait(), 5)
+                    with pytest.raises(AuthRejected) as overflow:
+                        await service.save_choice(request(prompts[257]))
+                    assert (str(overflow.value), overflow.value.status) == ("save_queue_full", 503)
+                finally:
+                    release.set()
+                    results = await asyncio.wait_for(asyncio.gather(*pending, return_exceptions=True), 30)
+                assert sum(isinstance(result, web.Response) and result.status == 200 for result in results) == 257
+                assert len(store.results()) == 257
+                assert peak == 1 and fixture.paid == 0
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("failure", ["full", "round_closed", "not_selected", "first_save"])
 def test_save_queue_limits_and_failures_release_the_next_job(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str,
 ) -> None:
@@ -771,8 +834,6 @@ def test_save_queue_limits_and_failures_release_the_next_job(
         other_image, other_source = b"another prompt", SOURCE + "\n// other"
         prompt = hashlib.sha256(other_image).hexdigest()
         monkeypatch.setattr("pod_gateway.direct.SAVE_QUEUE_CAPACITY", 1, raising=False)
-        if failure == "timeout":
-            monkeypatch.setattr("pod_gateway.direct.SAVE_QUEUE_WAIT_SECONDS", 0.05, raising=False)
 
         async def embeddings(image: bytes, *args: object, **kwargs: object) -> bytes:
             if image == fixture.image:
@@ -803,7 +864,7 @@ def test_save_queue_limits_and_failures_release_the_next_job(
                     client(fixture, witness.renderer_transport()) as first,
                     client(
                         fixture, witness.renderer_transport(), prompt_image=other_image,
-                        timeout=1 if failure == "timeout" else 5,
+                        timeout=5,
                     ) as second,
                 ):
                     pending = asyncio.create_task(asyncio.to_thread(first.save_final, SOURCE))
@@ -822,10 +883,6 @@ def test_save_queue_limits_and_failures_release_the_next_job(
                                 ):
                                     await asyncio.to_thread(overflow.save_final, other_source)
                                 assert (full.value.status, full.value.code) == (503, "save_queue_full")
-                            elif failure == "timeout":
-                                with pytest.raises(ArtifactUnavailable) as timeout:
-                                    await asyncio.wait_for(asyncio.shield(other), 2)
-                                assert (timeout.value.status, timeout.value.code) == (503, "save_queue_wait_timeout")
                             elif failure == "round_closed":
                                 admission.setattr(service, "round_end", 0)
                             elif failure == "not_selected":
@@ -842,7 +899,7 @@ def test_save_queue_limits_and_failures_release_the_next_job(
                         else:
                             assert isinstance(first_result, dict) and first_result["failure_reason"] is None
                         errors = {
-                            "timeout": (503, "save_queue_wait_timeout"), "round_closed": (403, "round_closed"),
+                            "round_closed": (403, "round_closed"),
                             "not_selected": (409, "pod_not_selected"),
                         }
                         if failure in errors:

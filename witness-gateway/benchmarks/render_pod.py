@@ -129,7 +129,6 @@ def renderer_start():
     env={k:v for k,v in os.environ.items() if k in ('PATH','LANG','PUPPETEER_EXECUTABLE_PATH')}
     env.update(HOME='/tmp/renderer-home',PORT='8002',STATIC_PORT='3000',RENDER_POOL_SIZE='1',
         VALIDATION_POOL_SIZE='1',RENDER_TIMEOUT_MS='30000',VALIDATION_TIMEOUT_MS='5000',
-        RENDER_QUEUE_CAPACITY='8',RENDER_QUEUE_WAIT_MS='120000',
         LD_PRELOAD='/opt/witness-affinity/libwitness-affinity.so')
     Path('/tmp/renderer-home').mkdir(exist_ok=True);os.chown('/tmp/renderer-home',1001,1001)
     RENDERER=subprocess.Popen(['node','src/server.js'],cwd='/opt/renderer',env=env,
@@ -247,9 +246,9 @@ async def main():
         async with http.post('http://127.0.0.1:8002'+request.rel_url.path_qs,data=await request.read(),headers={'Content-Type':'application/json'}) as response:
             data=await response.read();elapsed=time.monotonic()-started
             event('render_reply',status=response.status,seconds=elapsed,bytes=len(data),
-                wait_ms=response.headers.get('X-Render-Queue-Wait-Ms'),png_sha256=hashlib.sha256(data).hexdigest() if response.status==200 else None)
+                png_sha256=hashlib.sha256(data).hexdigest() if response.status==200 else None)
             return web.Response(body=data,status=response.status,headers={'Content-Type':response.headers.get('Content-Type','application/octet-stream'),
-                'X-Render-Queue-Wait-Ms':response.headers.get('X-Render-Queue-Wait-Ms',''),'X-Render-Wall-Ms':str(elapsed*1000)})
+                'X-Render-Wall-Ms':str(elapsed*1000)})
     async def fault(request):
         kind=(await request.json())['kind']
         if kind=='browser_kill':count=chromium(signal.SIGKILL)
