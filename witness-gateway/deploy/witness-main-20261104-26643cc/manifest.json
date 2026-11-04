@@ -1,0 +1,203 @@
+{
+  "version": 1,
+  "id": "witness-main-20261104-26643cc",
+  "source_commit": "26643cce2136df2722d5d7de37bd7a807c6cc3b6",
+  "source_tree": "a32c8c72e5ac4e311f09a98410ceaea588ddb2c0",
+  "release_branch": "main",
+  "source_pushed_before_build": true,
+  "platform": "linux/amd64",
+  "build_context": {
+    "type": "clean git archive",
+    "archive_sha256": "56e8f2ac27b85dbf381c9073746e062c65faee047a645f09b59fb1d2e7430c71",
+    "regular_files_verified": 481,
+    "runtime_application_source_overlay": false,
+    "directory_permissions": "Standard readable source directories"
+  },
+  "images": {
+    "gateway": {
+      "tag": "europe-west3-docker.pkg.dev/gen-456515/witness-runtime/gateway:main-26643cce2136-20261104-02",
+      "digest": "sha256:06bf0175da58414ea037db43d83de236746ccc177beee97f13bb9895288654fa",
+      "reference": "europe-west3-docker.pkg.dev/gen-456515/witness-runtime/gateway@sha256:06bf0175da58414ea037db43d83de236746ccc177beee97f13bb9895288654fa",
+      "published": true,
+      "registry_digest_verified": true,
+      "deployed_roles": [
+        "gateway",
+        "revivor"
+      ]
+    },
+    "worker": {
+      "tag": "europe-west3-docker.pkg.dev/gen-456515/witness-runtime/pods:main-26643cce2136-20261104-02",
+      "digest": "sha256:130765464b0b49ff71d508799ace81d0bddae7cc916cebff3bc4ad71ace578c0",
+      "reference": "europe-west3-docker.pkg.dev/gen-456515/witness-runtime/pods@sha256:130765464b0b49ff71d508799ace81d0bddae7cc916cebff3bc4ad71ace578c0",
+      "published": true,
+      "registry_digest_verified": true,
+      "deployed_as": "future_allocation_default"
+    }
+  },
+  "runtime": {
+    "python": "3.14.9",
+    "node": "v22.23.3",
+    "aiohttp": "3.14.4",
+    "openai": "3.35.1",
+    "proof_key_sha256": "6478059e4ad0d39e8c157c76cea9c6dd777c2ab5143cf8694876094facf39b16",
+    "chromium": "Chromium 155.0.8059.79 built on Debian GNU/Linux 12 (bookworm)",
+    "torch": "2.10.0+cpu",
+    "transformers": "5.6.2",
+    "renderer_profile_sha256": "6e950fa1931f93358695ddd71c9c93186edda2d40f5dbaca0220da0dbe47631d",
+    "renderer_version": "0.4.10"
+  },
+  "validation": {
+    "execution": "Local Linux amd64 containers under emulation; final gateway also checked natively on the frontend",
+    "gateway_lifecycle_fencing_cases_passed": 65,
+    "worker_admission_revivor_handover_cases_passed": 40,
+    "worker_opt_in_container_cases_passed": 5,
+    "renderer_javascript_suite_passed": true,
+    "caddy_maintenance_handover": {
+      "passed": true,
+      "predecessor_gateway_image": "europe-west3-docker.pkg.dev/gen-456515/witness-runtime/gateway@sha256:9b4a75bee5709ba1fa9ea04812aa202f4ed08cd1bb1e4b79e776ef9417d93f44",
+      "existing_worker_fixture_image": "europe-west3-docker.pkg.dev/gen-456515/witness-runtime/pods@sha256:a28f675032df5690742a7755903d06a475192534744e7d2d8859bab4dcd92069",
+      "worker_count_before": 1,
+      "worker_count_after": 1,
+      "allocation_and_settings_preserved": true,
+      "authorized_capture_completed_during_maintenance": true,
+      "completed_results_reused": true,
+      "new_work_after_reconnect": true
+    },
+    "provider_generation_calls": 0,
+    "new_miner_canary_allocations": 0,
+    "native_tls_recovery_cases_passed": 3,
+    "native_tls_cases": [
+      "provider-200-durable-completion",
+      "miner-disconnect-after-authorization-and-recovery",
+      "provider-401-durable-completion"
+    ],
+    "native_gateway_preflight": {
+      "runtime_files_match": 79,
+      "python": "3.14.9",
+      "node": "v22.23.3",
+      "aiohttp": "3.14.4",
+      "openai": "3.35.1",
+      "verifier": "ready",
+      "proof_key_sha256": "6478059e4ad0d39e8c157c76cea9c6dd777c2ab5143cf8694876094facf39b16",
+      "role_help_checks": 6
+    },
+    "renderer_javascript_assertions_passed": 312,
+    "runtime_source_files_verified": {
+      "gateway": 79,
+      "worker": 109
+    },
+    "python_dependencies_consistent": true,
+    "native_tls_fixture_adaptations": [
+      "Accept existing optional observe_failure verifier keyword",
+      "Allow 45 seconds for fixture shutdown across the existing 30-second reconnect backoff"
+    ],
+    "runtime_application_source_overlay": false
+  },
+  "client_artifacts_published": false,
+  "limitations": [
+    "The production preflight contained no miner worker Pods; live worker survival across this rollout cannot be established.",
+    "The final worker renderer ran under local amd64 emulation; no new native RunPod worker canary or paid provider generation was performed.",
+    "The existing native TLS fixtures required disposable adaptations for the existing optional observe_failure keyword and for shutdown to allow the 30-second reconnect backoff. Capture assertions and deadlines are unchanged. Existing ABI-2 client prover and final-image verifier components are test fixtures; no production application source is overlaid."
+  ],
+  "production": {
+    "deployment": "witness-public-v3",
+    "origin": "https://witness.subnet404.xyz",
+    "gateway_pod_id": "d9yneg8xtgi1ng",
+    "previous_gateway_pod_id": "dd98s453tl380r",
+    "previous_gateway_absence_confirmed": true,
+    "controller_image": "europe-west3-docker.pkg.dev/gen-456515/witness-runtime/gateway@sha256:06bf0175da58414ea037db43d83de236746ccc177beee97f13bb9895288654fa",
+    "controller_image_id": "sha256:f4279a11046c962c17a61eebf439e2d53b265f01f775aaba85de81004ea4e755",
+    "controller_source_commit": "26643cce2136df2722d5d7de37bd7a807c6cc3b6",
+    "worker_rollout": "Future allocations only; no existing miner Pod was restarted, deleted, drained, reconfigured or replaced.",
+    "future_worker_image": "europe-west3-docker.pkg.dev/gen-456515/witness-runtime/pods@sha256:130765464b0b49ff71d508799ace81d0bddae7cc916cebff3bc4ad71ace578c0",
+    "renderer_profile": {
+      "bootstrap_sha256": null,
+      "image_digest": "sha256:130765464b0b49ff71d508799ace81d0bddae7cc916cebff3bc4ad71ace578c0",
+      "validation_sha256": "6e950fa1931f93358695ddd71c9c93186edda2d40f5dbaca0220da0dbe47631d"
+    },
+    "max_captures": 32,
+    "non_image_configuration_unchanged": true,
+    "persistent_and_runtime_configuration_match": true,
+    "changed_environment_keys": [
+      "WITNESS_GATEWAY_IMAGE",
+      "WITNESS_IMAGE",
+      "WITNESS_RENDERER_PROFILE"
+    ],
+    "health": {
+      "http_status": 200,
+      "body": {
+        "status": "ready",
+        "transport": "pods-v1",
+        "receiver": "404-witness",
+        "round": "gpt-2",
+        "admission_ready": false
+      },
+      "client": "curl"
+    },
+    "independent_httpx_health": {
+      "checked_utc": "2026-11-04T14:12:01.716021+00:00",
+      "http_status": 200,
+      "body": {
+        "status": "ready",
+        "transport": "pods-v1",
+        "receiver": "404-witness",
+        "round": "gpt-2",
+        "admission_ready": false
+      },
+      "client": "httpx/0.28.1"
+    },
+    "competition_state": {
+      "revision": "cec819622552e2fad53dc6a3ddd28d61acc54a9e",
+      "state": {
+        "current_round": 2,
+        "stage": "duels",
+        "next_stage_eta": null
+      },
+      "generation_open": false,
+      "generation_deadline_block": 9432493,
+      "round_inputs_fingerprint": "6702c1ff97b7f0b649715a0a72db0a9e117ac0300e4f44c72bc21cad9f2ff4ea",
+      "round_inputs_and_schedule_unchanged": true,
+      "installed_round": "gpt-2"
+    },
+    "pricing": {
+      "sha256": "6f718c597b0cd47f08d99cf59791b73770fa26cd641334bf56175b9abb937806",
+      "model_count": 8,
+      "existing_table_unchanged": true
+    },
+    "workers": {
+      "first_inventory_utc": "2026-11-04T13:02:27.032435+00:00",
+      "first_inventory_count": 0,
+      "before_ids": [],
+      "after_ids": [],
+      "baseline_count": 0,
+      "removed_by_rollout": 0,
+      "modified_by_rollout": 0,
+      "prior_deployment_record_count": 9,
+      "prior_record_workers_absent_before_activation": true,
+      "live_worker_handover_exercised": false
+    },
+    "maintenance": {
+      "old_upstream_connections_before_fencing": 0,
+      "ingress_restored_after_round_installation": true
+    },
+    "activated_utc": "2026-11-04T14:06:38.206368+00:00",
+    "completed_utc": "2026-11-04T14:08:50.602717+00:00",
+    "verified_utc": "2026-11-04T14:12:06.345428+00:00"
+  },
+  "rollback": {
+    "private_configuration_backups_retained": true,
+    "rollback_procedure_prepared_before_activation": true,
+    "previous_gateway_image": "europe-west3-docker.pkg.dev/gen-456515/witness-runtime/gateway@sha256:9b4a75bee5709ba1fa9ea04812aa202f4ed08cd1bb1e4b79e776ef9417d93f44",
+    "previous_worker_image": "europe-west3-docker.pkg.dev/gen-456515/witness-runtime/pods@sha256:a28f675032df5690742a7755903d06a475192534744e7d2d8859bab4dcd92069",
+    "previous_controller_image_id": "sha256:6540b23421f95d04afb3fb642c4ac48fe4c0ab30238af66e554eebc6cc260370",
+    "worker_mutation_required": false
+  },
+  "other_published_candidates": [
+    {
+      "tag": "europe-west3-docker.pkg.dev/gen-456515/witness-runtime/gateway:main-26643cce2136-20261104-01",
+      "digest": "sha256:d8c2370720a2ad7f28f776531a1abfa240f8c4852838ea7ef8e474df79c40b5c",
+      "deployed": false
+    }
+  ],
+  "status": "deployed_and_verified"
+}
