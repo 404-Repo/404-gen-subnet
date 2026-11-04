@@ -308,6 +308,10 @@ class Gateway:
                 self._busy.discard(hotkey)
 
     def _scope(self, request: web.Request) -> Scope:
+        if self.rounds is not None and (
+            self.rounds.inputs is None or self.round != self.rounds.inputs.round
+        ):
+            raise AuthRejected("round_unavailable", 503)
         return self.scope(str(request["hotkey"]))
 
     async def health(self, request: web.Request) -> web.Response:

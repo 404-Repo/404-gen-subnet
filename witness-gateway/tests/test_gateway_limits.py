@@ -1230,3 +1230,66 @@ def test_a_lost_cancellation_acknowledgement_allows_a_new_connection(monkeypatch
             assert gateway.queue.pending(scope) is None
 
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("wait", [None, 20])
+def test_cold_gateway_preserves_existing_workers_until_its_round_is_installed(wait: int | None) -> None:
+    from test_rounds import Competition, publication
+
+    async def scenario() -> None:
+        provider, state = Provider(), MemoryState()
+        competition = Competition(publication(number=1), state=state)
+        await competition.controller.refresh()
+        inputs = competition.controller.require()
+        async with coordinator(provider, state, [time.time()]) as previous:
+            base = previous.allocator.spec
+            spec = replace(base, env={"WITNESS_ROUND_INPUTS": inputs.model_dump_json()})
+            previous.allocator.spec = spec
+            originals = []
+            for key, start_id in zip(KEYS, (FIRST, SECOND)):
+                scope = previous.scope(key.ss58_address)
+                pending = provider.create(spec.body(scope, start_id, epoch_ns=time.time_ns()))
+                previous.allocator.reconcile(scope)
+                pod = provider.get(pending.id)
+                assert pod is not None
+                assert previous.allocator.selection is not None
+                assert previous.allocator.selection.grant(pod)
+                originals.append(pod)
+            previous.allocator.spec = base
+            cold = Competition(publication(number=1), state=state)
+            gateway = Gateway(
+                allocator=previous.allocator, auth=previous.auth, registry=previous.registry,
+                deployment=previous.deployment, round_number="unconfigured", round_end=None,
+                secret=previous.secret, proof_hash=previous.proof_hash, fence=lambda: True,
+                rounds=cold.controller, spec_for_round=lambda frozen: replace(
+                    base, env={"WITNESS_ROUND_INPUTS": frozen.model_dump_json()},
+                ), request_interval=0, poll_seconds=0.02, refresh_seconds=0.01,
+            )
+            async with TestClient(TestServer(gateway.application())) as client:
+                async with asyncio.timeout(2):
+                    while not gateway._loaded or not gateway._fence_ok:
+                        await asyncio.sleep(0.01)
+                for resolved in (False, True):
+                    if resolved:
+                        await cold.controller.refresh()
+                    for key in KEYS:
+                        response = await request(client, key, "GET", "/v1/pods/current", wait=wait)
+                        assert response.status == 503
+                        assert int(response.headers["Retry-After"]) > 0
+                        assert (await response.json())["error"] == "round_unavailable"
+                    assert provider.list() == originals
+                await gateway.round_changed()
+                assert (await (await client.get("/health")).json())["admission_ready"]
+                for key, original in zip(KEYS, originals):
+                    response = await request(client, key, "GET", "/v1/pods/current")
+                    assert response.status == 200
+                    session = (await response.json())["session"]
+                    assert session["pod_id"] == original.id
+                    assert session["start_id"] == original.markers["WITNESS_START_ID"]
+                    assert gateway.allocator.selection is not None
+                    original_scope = original.scope()
+                    assert original_scope is not None
+                    assert gateway.allocator.selection.selected(original_scope, session["start_id"], original.id)
+                assert provider.list() == originals and provider.creates == len(originals)
+
+    asyncio.run(scenario())
