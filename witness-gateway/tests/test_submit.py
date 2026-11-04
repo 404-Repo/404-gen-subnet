@@ -5,7 +5,8 @@ from __future__ import annotations
 import asyncio
 import hashlib
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import ExitStack, asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Literal
@@ -22,7 +23,7 @@ from test_service import Harness
 from witness_client import AsyncWitnessClient, WitnessClient, WitnessError
 from witness_client.async_tunnel import AsyncWebSocketTunnel
 
-from pod_gateway.artifacts import ArtifactRepository
+from pod_gateway.artifacts import ArtifactRepository, SubmissionContext
 from pod_gateway.models import Scope
 
 Mode = Literal["sync", "async"]
@@ -273,6 +274,158 @@ def test_submit_propagates_admission_and_judging_failures_without_retrying(
                 await enable(fixture)
                 assert (await submit(witness, image, source))["failure_reason"] is None
             assert fixture.paid == 0
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("kind", ["sync", "async", "artifact"])
+def test_slow_final_saves_complete_while_another_save_is_waiting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str,
+) -> None:
+    # Scale finite client timeouts from seconds to milliseconds; use real local TLS I/O.
+    original_sync = httpx.HTTPTransport.handle_request
+    original_async = httpx.AsyncHTTPTransport.handle_async_request
+
+    def scale_timeout(request: httpx.Request) -> None:
+        if request.method == "POST" and request.url.path == "/v1/submissions":
+            request.extensions["timeout"] = {
+                name: None if seconds is None else seconds / 1000
+                for name, seconds in request.extensions["timeout"].items()
+            }
+
+    def handle_sync(transport: httpx.HTTPTransport, request: httpx.Request) -> httpx.Response:
+        scale_timeout(request)
+        return original_sync(transport, request)
+
+    async def handle_async(transport: httpx.AsyncHTTPTransport, request: httpx.Request) -> httpx.Response:
+        scale_timeout(request)
+        return await original_async(transport, request)
+
+    monkeypatch.setattr(httpx.HTTPTransport, "handle_request", handle_sync)
+    monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", handle_async)
+
+    async def scenario() -> None:
+        fixture = Harness(tmp_path, monkeypatch)
+        started, release, arrived = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        images = [fixture.image, b"another frozen prompt"]
+        prompts = [hashlib.sha256(image).hexdigest() for image in images]
+        sources = [SOURCE, SOURCE + "\n// another"]
+        async with fixture.running(), live_client(fixture, "async" if kind == "async" else "sync") as witness:
+            rendered = await enable(fixture, prompt_ids={prompt: prompt for prompt in prompts})
+            store = fixture.services[-1].artifacts
+            assert store is not None
+            original_require = store.require
+
+            def require(generation: SubmissionContext) -> None:
+                original_require(generation)
+                if generation.prompt_sha256 == prompts[1]:
+                    arrived.set()
+
+            async def embeddings(image: bytes, *args: object, **kwargs: object) -> bytes:
+                if image == images[0]:
+                    started.set()
+                    await release.wait()
+                return b"retained embeddings"
+
+            monkeypatch.setattr(store, "require", require)
+            monkeypatch.setattr("pod_gateway.results.build_embeddings_npz", embeddings)
+            with ExitStack() as stack:
+                legacy = []
+                if kind == "artifact":
+                    assert isinstance(witness, WitnessClient)
+                    legacy = [stack.enter_context(client(
+                        fixture, witness.renderer_transport(), prompt_image=image,
+                    )) for image in images]
+
+                async def save(index: int) -> dict[str, object]:
+                    if legacy:
+                        return await asyncio.to_thread(legacy[index].save_final, sources[index])
+                    return await submit(witness, images[index], sources[index])
+
+                pending = [asyncio.create_task(save(0))]
+                try:
+                    await asyncio.wait_for(started.wait(), 5)
+                    pending.append(asyncio.create_task(save(1)))
+                    await asyncio.wait_for(arrived.wait(), 5)
+                    await asyncio.sleep(0.3)
+                finally:
+                    release.set()
+                    results = await asyncio.wait_for(asyncio.gather(*pending, return_exceptions=True), 5)
+                for result, source in zip(results, sources, strict=True):
+                    assert isinstance(result, dict), result
+                    assert fixture.state.get(str(result["js"])) == source.encode()
+                    assert result["failure_reason"] is None
+                assert rendered == sources and fixture.paid == 0
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("mode", ["sync", "async"])
+@pytest.mark.parametrize("case", ["pool_timeout", "stale_auth"])
+def test_concurrent_final_saves_reach_the_pod_with_fresh_authentication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: Mode, case: str,
+) -> None:
+    original_sync = httpx.HTTPTransport.handle_request
+    original_async = httpx.AsyncHTTPTransport.handle_async_request
+
+    def scale_pool_timeout(request: httpx.Request) -> None:
+        if case == "pool_timeout" and request.method == "POST" and request.url.path == "/v1/submissions":
+            request.extensions["timeout"]["pool"] /= 750
+
+    def handle_sync(transport: httpx.HTTPTransport, request: httpx.Request) -> httpx.Response:
+        scale_pool_timeout(request)
+        return original_sync(transport, request)
+
+    async def handle_async(transport: httpx.AsyncHTTPTransport, request: httpx.Request) -> httpx.Response:
+        scale_pool_timeout(request)
+        return await original_async(transport, request)
+
+    monkeypatch.setattr(httpx.HTTPTransport, "handle_request", handle_sync)
+    monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", handle_async)
+
+    async def scenario() -> None:
+        if mode == "sync":
+            # Client calls and Pod storage share this test loop's executor.
+            asyncio.get_running_loop().set_default_executor(ThreadPoolExecutor(max_workers=128))
+        fixture = Harness(tmp_path, monkeypatch)
+        images = [f"prompt-{i}".encode() for i in range(101)]
+        prompts = [hashlib.sha256(image).hexdigest() for image in images]
+        started, release, arrived = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        async with fixture.running(), live_client(fixture, mode) as witness:
+            await enable(fixture, prompt_ids={prompt: prompt for prompt in prompts})
+            service = fixture.services[-1]
+            store, saver = service.artifacts, service.result_saver
+            assert store is not None and saver is not None
+            original_save, original_require = saver.save, store.require
+            arrivals: set[str] = set()
+
+            def require(generation: SubmissionContext) -> None:
+                original_require(generation)
+                arrivals.add(generation.prompt_sha256)
+                if len(arrivals) == 100:
+                    arrived.set()
+
+            async def save(prompt: str, source: str | None, image: bytes | None) -> GenerationResult:
+                if prompt == prompts[0]:
+                    started.set()
+                    await release.wait()
+                return await original_save(prompt, source, image)
+
+            monkeypatch.setattr(store, "require", require)
+            monkeypatch.setattr(saver, "save", save)
+            pending = [asyncio.create_task(submit(witness, images[0], None))]
+            try:
+                await asyncio.wait_for(started.wait(), 5)
+                pending.extend(asyncio.create_task(submit(witness, image, None)) for image in images[1:])
+                await asyncio.wait_for(arrived.wait(), 10)
+                await asyncio.sleep(11 if case == "stale_auth" else 0.3)
+            finally:
+                release.set()
+                results = await asyncio.wait_for(asyncio.gather(*pending, return_exceptions=True), 30)
+            for result in results:
+                assert isinstance(result, dict), result
+                assert result["failure_reason"] == "generation_failed"
+            assert len(store.results()) == 101 and fixture.paid == 0
 
     asyncio.run(scenario())
 

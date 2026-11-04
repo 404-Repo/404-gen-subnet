@@ -19,7 +19,7 @@ from test_recording import PRICING
 from witness_client.auth import hotkey_headers
 
 from pod_gateway.artifacts import ArtifactProfile
-from pod_gateway.auth import AuthRejected, Membership
+from pod_gateway.auth import Authenticator, AuthRejected, Membership
 from pod_gateway.dependencies import gateway_spec, worker_spec
 from pod_gateway.models import Scope
 from pod_gateway.pricing import PricingStore
@@ -49,6 +49,49 @@ def test_test_hotkey_can_authenticate_without_registration(round_number: str) ->
 def test_test_hotkey_is_rejected_for_competition_rounds() -> None:
     with pytest.raises(ValueError, match="Invalid membership configuration"):
         Membership("test", 17, "56", "5" * 48)
+
+
+@pytest.mark.parametrize("age_ns,accepted", [
+    (-30_000_000_000, True), (30_000_000_000, True),
+    (-30_000_000_001, False), (30_000_000_001, False),
+])
+def test_hotkey_timestamp_window(monkeypatch: pytest.MonkeyPatch, age_ns: int, accepted: bool) -> None:
+    key = Keypair.create_from_uri("//Alice")
+    clock = [time.time_ns()]
+    monkeypatch.setattr("pod_gateway.auth.time.time_ns", lambda: clock[0])
+    headers = hotkey_headers(key, b"", method="GET", path="/v1/pods/current")
+    membership = Membership("test", 17, "test-1")
+    now = int(time.time() * 1000)
+    membership.snapshot = {
+        "version": 1, "network": "finney", "netuid": 17, "block": 1,
+        "fetched_at": now, "block_time": now, "hotkeys": [key.ss58_address],
+    }
+    auth = Authenticator(membership)
+    clock[0] += age_ns
+    if accepted:
+        assert auth.verify("GET", "/v1/pods/current", b"", headers) == key.ss58_address
+    else:
+        with pytest.raises(AuthRejected, match="stale_hotkey_auth"):
+            auth.verify("GET", "/v1/pods/current", b"", headers)
+
+
+@pytest.mark.parametrize("age_ns", [10_000_000_001, 20_000_000_000, 30_000_000_000])
+def test_hotkey_replay_is_rejected_through_timestamp_window(monkeypatch: pytest.MonkeyPatch, age_ns: int) -> None:
+    key = Keypair.create_from_uri("//Alice")
+    clock = [time.time_ns()]
+    monkeypatch.setattr("pod_gateway.auth.time.time_ns", lambda: clock[0])
+    headers = hotkey_headers(key, b"", method="GET", path="/v1/pods/current")
+    membership = Membership("test", 17, "test-1")
+    now = int(time.time() * 1000)
+    membership.snapshot = {
+        "version": 1, "network": "finney", "netuid": 17, "block": 1,
+        "fetched_at": now, "block_time": now, "hotkeys": [key.ss58_address],
+    }
+    auth = Authenticator(membership)
+    assert auth.verify("GET", "/v1/pods/current", b"", headers) == key.ss58_address
+    clock[0] += age_ns
+    with pytest.raises(AuthRejected, match="replayed_hotkey_auth"):
+        auth.verify("GET", "/v1/pods/current", b"", headers)
 
 
 def test_private_registry_can_launch_both_pod_roles(values: dict[str, object]) -> None:
@@ -131,19 +174,28 @@ def values() -> dict[str, object]:
     }
 
 
-def test_split_images_select_the_same_roles_after_gateway_revival(values: dict[str, object]) -> None:
+@pytest.mark.parametrize("max_captures", [None, "12", "32"])
+def test_split_images_select_the_same_roles_after_gateway_revival(
+    values: dict[str, object], max_captures: str | None,
+) -> None:
+    if max_captures is not None:
+        values["WITNESS_MAX_CAPTURES"] = max_captures
     settings = Settings.model_validate(values)
     worker, gateway = worker_spec(settings), gateway_spec(settings)
     assert worker.image == values["WITNESS_IMAGE"]
     assert gateway.image == values["WITNESS_GATEWAY_IMAGE"]
     assert worker.env["WITNESS_ROLE"] == "worker"
     assert gateway.env["WITNESS_ROLE"] == "gateway"
+    assert settings.max_captures == int(max_captures or "32")
+    assert worker.env["WITNESS_MAX_CAPTURES"] == (max_captures or "32")
     revived = Settings.model_validate({
         **gateway.env,
         "WITNESS_DEPLOYMENT": settings.deployment,
     })
     assert worker_spec(revived).image == worker.image
     assert gateway_spec(revived).image == gateway.image
+    assert worker_spec(revived).env["WITNESS_MAX_CAPTURES"] == worker.env["WITNESS_MAX_CAPTURES"]
+    assert revived.max_captures == settings.max_captures
 
 
 def test_gateway_image_is_explicit_for_split_and_legacy_deployments(values: dict[str, object]) -> None:

@@ -582,3 +582,52 @@ def test_admitted_provider_call_finishes_across_rollover_and_grant_renewal(
                 assert fixture.paid == fixture.provider.creates == 1
 
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("applied", [False, True])
+def test_health_waits_for_failed_cold_round_installation_to_succeed(
+    monkeypatch: pytest.MonkeyPatch, applied: bool,
+) -> None:
+    import json
+
+    from aiohttp.test_utils import make_mocked_request
+    from support import MemoryState, Provider
+    from test_gateway_limits import coordinator
+
+    async def scenario() -> None:
+        state, provider = MemoryState(), Provider()
+        competition = Competition(publication(number=1), state=state)
+        await competition.controller.refresh()
+        async with coordinator(provider, state, [time.time()]) as gateway:
+            base = gateway.allocator.spec
+            gateway.round = "unconfigured"
+            gateway.rounds = competition.controller
+            gateway.spec_for_round = lambda inputs: replace(base, env={
+                "WITNESS_ROUND_INPUTS": inputs.model_dump_json(),
+            })
+            save = state.save
+
+            def failed_write(key: str, data: bytes, expected: str | None) -> Snapshot:
+                if applied:
+                    save(key, data, expected)
+                    raise WriteUncertain("Round installation acknowledgement lost")
+                raise StateConflict("Round installation write failed")
+
+            with monkeypatch.context() as patch:
+                patch.setattr(state, "save", failed_write)
+                with pytest.raises((StateConflict, WriteUncertain)):
+                    await gateway.round_changed()
+            response = await gateway.health(make_mocked_request("GET", "/health"))
+            assert response.status == 200 and response.text is not None
+            health = json.loads(response.text)
+            assert health["transport"] == "pods-v1" and health["round"] == "unconfigured"
+            assert health["admission_ready"] is False
+
+            await gateway.round_changed()
+            response = await gateway.health(make_mocked_request("GET", "/health"))
+            assert response.status == 200 and response.text is not None
+            health = json.loads(response.text)
+            assert health["round"] == "test-1" and health["admission_ready"] is True
+            assert provider.creates == 0
+
+    asyncio.run(scenario())

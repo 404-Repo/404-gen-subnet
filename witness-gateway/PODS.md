@@ -327,8 +327,9 @@ sampling thread.
 ## Provisioning and lifecycle
 
 Miner HTTP requests and WebSocket upgrades use `btauth/1`, canonical sr25519
-hotkeys, ten-second nonces and ownership checks. A Python refresher checks the
-Finney genesis, one finalized block, its timestamp and every subnet hotkey. The
+hotkeys and ownership checks. Signed nonce timestamps are accepted from 30 seconds
+old through 30 seconds ahead, including both boundaries. A Python refresher checks
+the Finney genesis, one finalized block, its timestamp and every subnet hotkey. The
 complete membership snapshot and gateway nonce cache stay in gateway memory.
 Absent/stale membership fails closed. Automatic competition admission uses
 Finney membership for every configured source branch.
@@ -536,8 +537,9 @@ The worker role starts the renderer before connecting to the gateway. It uses
 UID/GID 1001, an isolated environment without witness credentials, one rendering
 slot and one validation slot. The execution budget is five seconds; rendering
 has a thirty-second deadline. SwiftShader respects the CPU quota and assigned
-CPU IDs. The local renderer listens on port 8002, with an eight-request queue
-and a two-minute queue-wait limit. No renderer port is published by Pod allocation.
+CPU IDs. The local renderer listens on port 8002. Its validation and rendering
+pools queue waiting requests without a configured length limit. No renderer port
+is published by Pod allocation.
 Gateway, revivor, export, certificate and help commands do not start Chromium.
 
 Renderer startup has a sixty-second readiness deadline. A Node process exit

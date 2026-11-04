@@ -86,7 +86,7 @@ def test_fresh_signature_does_not_expire_while_waiting_for_runpod(
     handled: list[str] = []
 
     def fence() -> bool:
-        clock[0] += 11_000_000_000
+        clock[0] += 31_000_000_000
         return selected
 
     async def handler(request: web.Request) -> web.Response:
@@ -315,6 +315,7 @@ class Harness:
             proof_hash=self.proof,
             round_end=int(time.time()) + 600 if inputs is None else None,
             spool=spool,
+            max_captures=int(env.get("WITNESS_MAX_CAPTURES", "2")),
             selection=self.selection,
             round_inputs=inputs,
         )
@@ -814,6 +815,79 @@ def test_lost_start_response_reuses_the_assigned_attempt(
                 assert response.output_text == "answer-1"
                 assert len(attempts) == 2 and len(set(attempts)) == 1
                 assert fixture.paid == fixture.provider.creates == 1
+
+    asyncio.run(scenario())
+
+
+def test_gateway_handover_preserves_worker_and_inflight_capture(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        fixture = Harness(tmp_path, monkeypatch)
+        async with fixture.running():
+            fixture.allocator.spec = replace(fixture.allocator.spec, env={"WITNESS_MAX_CAPTURES": "12"})
+            with fixture.client() as witness:
+                witness._gateway.delivery_timeout = 15
+                start_id = await asyncio.to_thread(witness._gateway.ensure_pod)
+                runtime = fixture.runtimes[0]
+                assert runtime.max_captures == 12
+                pod = fixture.provider.get(runtime.pod_id)
+                settings = runtime.max_captures, runtime.idle_seconds, runtime.round_inputs
+                fixture.allow_response.clear()
+                capture = asyncio.create_task(asyncio.to_thread(witness.create, model="fixture", input="image"))
+                assert await asyncio.to_thread(fixture.dispatched.wait, 2)
+                recording = fixture.records.load(fixture.scope, call_key().id)
+                assert recording is not None and recording.call.authorized
+
+                registry = Registry()
+                successor = Gateway(
+                    allocator=Allocator(
+                        fixture.provider, DrainControl(registry),
+                        replace(fixture.allocator.spec, env={"WITNESS_MAX_CAPTURES": "32"}),
+                        selection=fixture.selection,
+                    ),
+                    auth=fixture.gateway.auth, registry=registry,
+                    deployment=fixture.scope.deployment, round_number=fixture.scope.round,
+                    round_end=fixture.gateway.round_end, secret=SECRET, proof_hash=fixture.proof,
+                    fence=lambda: True, request_interval=0, poll_seconds=0.05, create_interval=0, refresh_seconds=0.02,
+                )
+                origin = (await fixture.listen(successor.application(), fixture.server_tls)).replace("127.0.0.1", "localhost")
+                runtime.origin = origin.replace("https://", "wss://")
+                fixture.gateway.fence = lambda: False
+                fixture.gateway._fence_ok = False
+                fixture.gateway._fence_at = time.monotonic()
+                async with asyncio.timeout(8):
+                    while not registry.ready(runtime.pod_id):
+                        assert not runtime.draining
+                        await asyncio.sleep(0.01)
+                assert runtime.active and runtime.accepting and not runtime.draining
+                assert runtime.start_id == start_id
+                assert (runtime.max_captures, runtime.idle_seconds, runtime.round_inputs) == settings
+                assert fixture.provider.get(runtime.pod_id) == pod
+                assert fixture.selection.selected(fixture.scope, start_id, runtime.pod_id)
+
+                fixture.allow_response.set()
+                answer = await asyncio.wait_for(capture, 5)
+                assert answer.output_text == "answer-1"
+                completed = fixture.records.load(fixture.scope, call_key().id)
+                assert completed is not None and completed.call.phase == "issued"
+                assert completed.call.exchange_id == recording.call.exchange_id
+                assert completed.call.start_id == start_id and completed.call.pod_id == runtime.pod_id
+                evidence = f"rounds/{fixture.scope.round}/{fixture.scope.hotkey}/{completed.call.exchange_id}"
+                response = fixture.state.get(evidence + "/response.sse")
+                assert response is not None and fixture.state.get(evidence + "/manifest.json") is not None
+                witness._gateway.http.base_url = origin
+                witness._gateway._expires = 0
+                assert await asyncio.to_thread(witness._gateway.ensure_pod) == start_id
+                assert (await asyncio.to_thread(witness.create, model="fixture", input="image")).output_text == "answer-1"
+                assert (await asyncio.to_thread(witness.create, model="fixture", input="next")).output_text == "answer-2"
+                assert (await asyncio.to_thread(witness.resume, completed.call.exchange_id)).output_text == "answer-1"
+                assert fixture.state.get(evidence + "/response.sse") == response
+                summary = runtime.budget.summary(fixture.scope, call_key())
+                assert summary["possible_dispatches"] == 1 and summary["pending_usage"] == 0
+                assert fixture.provider.creates == len(fixture.runtimes) == 1 and fixture.paid == 2
+                assert fixture.provider.get(runtime.pod_id) == pod and not runtime.draining
+                await registry.close()
 
     asyncio.run(scenario())
 

@@ -272,6 +272,7 @@ class AsyncPodGatewayClient:
             timeout=30,
             follow_redirects=False,
             trust_env=False,
+            limits=httpx.Limits(max_connections=None, max_keepalive_connections=20),
         )
         service = AsyncSignedTransport(
             http,

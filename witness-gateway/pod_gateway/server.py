@@ -308,10 +308,16 @@ class Gateway:
                 self._busy.discard(hotkey)
 
     def _scope(self, request: web.Request) -> Scope:
+        if self.rounds is not None and (
+            self.rounds.inputs is None or self.round != self.rounds.inputs.round
+        ):
+            raise AuthRejected("round_unavailable", 503)
         return self.scope(str(request["hotkey"]))
 
     async def health(self, request: web.Request) -> web.Response:
-        ready = self._live()
+        ready = self._live() and (self.rounds is None or (
+            self.rounds.inputs is not None and self.round == self.rounds.inputs.round
+        ))
         try:
             self._require_round()
         except AuthRejected:
@@ -661,8 +667,10 @@ class Gateway:
             if drained is not None:
                 # A permanent drain report remains valid after its socket closes.
                 self._due[scope] = now + self.poll_seconds
-                await self._run(self._worker, partial(self.allocator.retire, scope,
-                                                     drained.markers["WITNESS_START_ID"], drained.id, drain=False))
+                def retire_drained(owner: Scope, pod: Pod) -> None:
+                    if self.fence():
+                        self.allocator.retire(owner, pod.markers["WITNESS_START_ID"], pod.id, drain=False)
+                await self._run(self._worker, partial(retire_drained, scope, drained))
                 break
             if len(pods) > 1 or any(p.lifecycle != "active" or p.status in ("EXITED", "ERROR") or
                                     p.id in self._retiring for p in pods):
@@ -732,18 +740,24 @@ class Gateway:
         self.registry.peers[pod_id] = peer
         retirement: asyncio.Task[None] | None = None
 
+        def retire_worker() -> Session | None:
+            if not self.fence():
+                return None
+            return self.allocator.retire(scope, start_id, pod_id, drain=False)
+
         async def retire() -> None:
             try:
-                retired = await self._run(self._worker, partial(self.allocator.retire, scope, start_id, pod_id,
-                                                               drain=False))
-                if retired.phase == "retired" and not socket.closed:
+                retired = await self._run(self._worker, retire_worker)
+                if retired is not None and retired.phase == "retired" and not socket.closed:
                     await socket.send_json({"type": "retired"})
             except Exception:  # noqa: BLE001 - retain permanent drain for lifecycle retries
                 self._wake.set()
 
         try:
-            selected = self._selected(scope, start_id, pod_id)
             await self._send_policy(peer)
+            if not self._live():
+                return socket
+            selected = self._selected(scope, start_id, pod_id)
             await socket.send_json(
                 {
                     "type": "activate" if selected else "drain",
@@ -752,7 +766,7 @@ class Gateway:
                 }
             )
             async for message in socket:
-                if message.type != WSMsgType.TEXT:
+                if message.type != WSMsgType.TEXT or not self._live():
                     break
                 data = object_dict(json.loads(message.data))
                 peer.seen = time.monotonic()
@@ -760,14 +774,14 @@ class Gateway:
                 if isinstance(certificate, str) and len(certificate) <= 8192:
                     peer.certificate = certificate
                 if data.get("type") in ("ready", "heartbeat"):
-                    selected = self._fence_ok and self._selected(scope, start_id, pod_id)
+                    selected = self._selected(scope, start_id, pod_id)
                     peer.ready = (
                         selected
                         and data.get("ready") is True
                         and data.get("proof_key_sha256") == self.proof_hash
                     )
                     self._wake.set()
-                    if not selected and self._fence_at > 0:
+                    if not selected:
                         await socket.send_json({"type": "drain", "id": "selection"})
                 elif data.get("type") == "reply":
                     pending = peer.replies.get(str(data.get("id")))

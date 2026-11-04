@@ -4,6 +4,7 @@ import { after, test } from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
 import { server } from '../src/server.js';
 import { validationPool, ValidationUnavailableError } from '../src/validation-pool.js';
+import { renderPool } from '../src/render-pool.js';
 import { staticValidate } from '../src/validator/index.js';
 import { boundValidationResult, MAX_FAILURES, MAX_DETAIL_BYTES, MAX_REPORT_BYTES } from '../src/validation-report.js';
 
@@ -51,6 +52,100 @@ async function resetValidationPool() {
   await validationPool.init();
 }
 
+for (const route of ROUTES) {
+  test(`${route}: concurrent render requests wait for the render pool`, async () => {
+    const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aN3sAAAAASUVORK5CYII=', 'base64');
+    const image = `data:image/png;base64,${png.toString('base64')}`;
+    const execute = renderPool._executeInContext;
+    let release;
+    const blocked = new Promise(resolve => { release = resolve; });
+    let active = 0;
+    let peak = 0;
+    renderPool._executeInContext = async (source, params, mode) => {
+      peak = Math.max(peak, ++active);
+      await blocked;
+      --active;
+      return mode === 'views' ? [image] : image;
+    };
+    const count = 32;
+    const pending = Array.from({ length: count }, async () => {
+      const response = await fetch(base + route + '?thetas=30&phis=0&img_size=8', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ source: VALID }), signal: AbortSignal.timeout(15000),
+      });
+      return { status: response.status, body: Buffer.from(await response.arrayBuffer()) };
+    });
+    try {
+      await waitFor(() => renderPool._waiting.length === count - 1);
+      release();
+      const responses = await Promise.all(pending);
+      assert.deepEqual(responses.map(response => response.status), Array(count).fill(200));
+      for (const response of responses) {
+        assert.deepEqual(response.body, png);
+      }
+      assert.equal(peak, 1);
+    } finally {
+      release();
+      await Promise.allSettled(pending);
+      renderPool._executeInContext = execute;
+    }
+  });
+
+  test(`${route}: cancelled queued previews skip browser work`, async () => {
+    const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aN3sAAAAASUVORK5CYII=', 'base64');
+    const image = `data:image/png;base64,${png.toString('base64')}`;
+    const execute = renderPool._executeInContext;
+    const rendered = [];
+    let release;
+    const blocked = new Promise(resolve => { release = resolve; });
+    renderPool._executeInContext = async (source, params, mode) => {
+      rendered.push(source);
+      if (source === VALID) await blocked;
+      return mode === 'views' ? [image] : image;
+    };
+    let closed = 0;
+    const trackClose = (req, res) => {
+      if (req.url.includes('cancelled=1')) res.once('close', () => { ++closed; });
+    };
+    server.on('request', trackClose);
+    const request = async (source, signal, cancelled = false) => {
+      const response = await fetch(base + route + '?thetas=30&phis=0&img_size=8' + (cancelled ? '&cancelled=1' : ''), {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ source }), signal,
+      });
+      return { status: response.status, body: Buffer.from(await response.arrayBuffer()) };
+    };
+    const first = request(VALID, AbortSignal.timeout(15000));
+    const controllers = Array.from({ length: 6 }, () => new AbortController());
+    const abandoned = [];
+    let fresh;
+    const freshSource = VALID + '\n// fresh';
+    try {
+      await waitFor(() => rendered.length === 1);
+      abandoned.push(...controllers.map((controller, index) => request(
+        VALID + `\n// cancelled ${index}`, controller.signal, true,
+      ).catch(error => error)));
+      await waitFor(() => renderPool._waiting.length === 6);
+      for (const controller of controllers) controller.abort();
+      assert.ok((await Promise.all(abandoned)).every(error => error.name === 'AbortError'));
+      await waitFor(() => closed === 6);
+      fresh = request(freshSource, AbortSignal.timeout(15000));
+      release();
+      for (const response of await Promise.all([first, fresh])) {
+        assert.equal(response.status, 200);
+        assert.deepEqual(response.body, png);
+      }
+      assert.deepEqual(rendered, [VALID, freshSource]);
+    } finally {
+      release();
+      for (const controller of controllers) controller.abort();
+      await Promise.allSettled([first, fresh, ...abandoned].filter(Boolean));
+      server.off('request', trackClose);
+      renderPool._executeInContext = execute;
+    }
+  });
+}
+
 test('render routes return the same validation rejections and metrics', async () => {
   const fixtures = [
     ['export default function(THREE) {\n  const x = ;\n}', 'PARSE_ERROR'],
@@ -61,6 +156,11 @@ test('render routes return the same validation rejections and metrics', async ()
     ['export default function(THREE) { return null; }', 'INVALID_RETURN_TYPE'],
     ['export default function(THREE) { return new THREE.Group(); }', 'EMPTY_SCENE'],
     [VALID.replace('0.5, 0.5, 0.5', '3, 3, 3'), 'BOUNDING_BOX_OUT_OF_RANGE'],
+    [`export default function generate(THREE) {
+      const geometry = new THREE.BoxGeometry(0.5, 0.5, 0.5);
+      geometry.setIndex(geometry.getIndex().array.slice().reverse());
+      return new THREE.Mesh(geometry, new THREE.MeshStandardMaterial());
+    }`, 'INVALID_GEOMETRY_INDEX'],
   ];
   for (const [source, rule] of fixtures) {
     const expected = await post('/render', source);

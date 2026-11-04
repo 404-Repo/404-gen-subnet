@@ -109,6 +109,14 @@ export function postValidate(THREE, root) {
 
     if (node.isMesh || node.isLine || node.isPoints) {
       drawCalls++;
+      const index = node.geometry?.index;
+      if (index != null && !index.isBufferAttribute && !index.isInterleavedBufferAttribute) {
+        failures.push({
+          stage: 'post_validation',
+          rule: 'INVALID_GEOMETRY_INDEX',
+          detail: 'geometry index must be a BufferAttribute, InterleavedBufferAttribute, or null',
+        });
+      }
       if (node.geometry?.attributes?.position) {
         vertices += node.geometry.attributes.position.count;
       }

@@ -30,8 +30,7 @@ from .security import verify_miner_access
 if TYPE_CHECKING:
     from pod import PodRuntime
 
-SAVE_QUEUE_CAPACITY = 8
-SAVE_QUEUE_WAIT_SECONDS = 120
+SAVE_QUEUE_CAPACITY = 256
 
 
 class StrictInput(BaseModel):
@@ -330,9 +329,7 @@ class Witness:
                     },
                 )
         finally:
-            with self.runtime.lock:
-                self.runtime.rendering -= 1
-                self.runtime.last_used = self.runtime.clock()
+            await asyncio.to_thread(self._artifact_done)
 
     def _artifacts(self, generation: SubmissionContext | None = None) -> ArtifactRepository:
         if self.artifacts is None:
@@ -388,11 +385,7 @@ class Witness:
             raise AuthRejected("save_queue_full", 503)
         self._pending_saves += 1
         try:
-            try:
-                async with asyncio.timeout(SAVE_QUEUE_WAIT_SECONDS):
-                    await self._save_lock.acquire()
-            except TimeoutError as error:
-                raise AuthRejected("save_queue_wait_timeout", 503) from error
+            await self._save_lock.acquire()
             try:
                 previous = await asyncio.to_thread(store.result, data.generation.prompt_sha256)
                 if previous is not None:
@@ -414,7 +407,7 @@ class Witness:
                         {"submission": result.model_dump()}, headers={"Cache-Control": "no-store"}
                     )
                 finally:
-                    self._artifact_done()
+                    await asyncio.to_thread(self._artifact_done)
             finally:
                 self._save_lock.release()
         finally:

@@ -207,7 +207,9 @@ class AsyncWitnessClient(_ClientState):
     async def submit(self, image: bytes, source: str | None) -> dict[str, object]:
         """Submit the runner's returned result to the assigned Pod without retrying."""
         body = _submission_body(image, source)
-        request = self._http.build_request("POST", "/v1/submissions", json=body, timeout=150)
+        request = self._http.build_request(
+            "POST", "/v1/submissions", json=body, timeout=httpx.Timeout(150, read=None)
+        )
         try:
             response = await self._gateway.send(request)
         except httpx.HTTPError as error:

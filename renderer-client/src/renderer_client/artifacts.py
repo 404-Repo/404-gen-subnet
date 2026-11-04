@@ -65,11 +65,14 @@ class ArtifactClient(RendererClient):
         deadline = time.monotonic() + self._timeout
         while True:
             try:
+                timeout = httpx.Timeout(max(0, deadline - time.monotonic()))
+                if method == "POST" and path == "/submissions":
+                    timeout.read = None
                 with self._http.stream(
                     method,
                     self._origin + path,
                     json=value,
-                    timeout=max(0, deadline - time.monotonic()),
+                    timeout=timeout,
                 ) as response:
                     raw = _read_bounded(response, MAX_ERROR_BYTES)
                     if response.status_code == 422:
@@ -111,7 +114,7 @@ class ArtifactClient(RendererClient):
             raise RenderUnavailable("Invalid saved submission") from error
 
     def save_final(self, output: str | None) -> dict[str, object]:
-        """Save final artifacts, retrying busy and queue errors within the configured timeout."""
+        """Wait for final artifacts; retry busy responses within the configured timeout."""
         if output is not None:
             if not isinstance(output, str):
                 raise ValueError("generate() must return JavaScript or None")

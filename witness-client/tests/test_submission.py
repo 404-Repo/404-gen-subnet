@@ -117,7 +117,7 @@ def test_submit_computes_prompt_identity_and_reuses_owned_authenticated_connecti
         assert request.headers["authorization"] == "Bearer scoped-access"
         assert request.extensions["sni_hostname"] == "witness.internal"
         assert request.extensions["timeout"] == {
-            name: 150 for name in ("connect", "read", "write", "pool")
+            "connect": 150, "read": None, "write": 150, "pool": 150,
         }
         assert json.loads(request.content) == {
             "generation": {"prompt_sha256": hashlib.sha256(IMAGE).hexdigest()},

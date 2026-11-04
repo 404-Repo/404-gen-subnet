@@ -8,6 +8,10 @@ Each request passes through three stages:
 2. **Execution + post-validation** — runs `generate(THREE)` in a `worker_threads` pool with V8 heap limits (256 MB) and wall-clock timeout (5 s), then validates the returned scene (bounding box, vertex count, draw calls, depth, instances, texture data)
 3. **Render** — only validated submissions reach Chromium; each render gets a fresh BrowserContext from a bounded render slot pool
 
+Validation and rendering each use their own pool. Requests wait for a worker or
+render slot; these waiting lists have no configured length limit.
+Queued requests whose HTTP connection has closed are skipped before browser execution.
+
 ## Local development
 
 Requires Node.js >= 20.
@@ -31,8 +35,6 @@ The development server above listens on `http://localhost:8000`. The default por
 | `VALIDATION_POOL_SIZE` | `2` | Number of worker_threads for execution + post-validation |
 | `VALIDATION_TIMEOUT_MS` | `5000` | Wall-clock timeout for miner code execution (spec: 5 s) |
 | `RENDER_POOL_SIZE` | `1` | Max concurrent browser render slots |
-| `RENDER_QUEUE_CAPACITY` | `8` | Maximum requests waiting for the single validation-and-render job slot |
-| `RENDER_QUEUE_WAIT_MS` | `120000` | Maximum queue wait before returning 503 |
 
 ## Docker
 
@@ -132,7 +134,6 @@ Both render endpoints use these responses:
 | 422 | `validation_failed` | Static validation failed |
 | 422 | `post_validation_failed` | Execution or scene validation failed |
 | 503 | `validation_unavailable` | Unexpected validation worker failure or unavailable pool |
-| 503 | `queue_full` / `queue_wait_timeout` | Render admission queue is full or its wait limit expired; includes `Retry-After: 1` |
 | 500 | Error message | Render or internal error |
 
 Generator exceptions, execution timeouts and confirmed V8 heap-limit failures
