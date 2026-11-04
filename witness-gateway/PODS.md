@@ -327,8 +327,9 @@ sampling thread.
 ## Provisioning and lifecycle
 
 Miner HTTP requests and WebSocket upgrades use `btauth/1`, canonical sr25519
-hotkeys, ten-second nonces and ownership checks. A Python refresher checks the
-Finney genesis, one finalized block, its timestamp and every subnet hotkey. The
+hotkeys and ownership checks. Signed nonce timestamps are accepted from 30 seconds
+old through 30 seconds ahead, including both boundaries. A Python refresher checks
+the Finney genesis, one finalized block, its timestamp and every subnet hotkey. The
 complete membership snapshot and gateway nonce cache stay in gateway memory.
 Absent/stale membership fails closed. Automatic competition admission uses
 Finney membership for every configured source branch.

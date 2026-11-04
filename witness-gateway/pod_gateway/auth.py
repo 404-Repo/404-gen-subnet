@@ -128,7 +128,7 @@ class Authenticator:
         ):
             raise AuthRejected("invalid_hotkey_auth")
         now = time.time_ns()
-        if not -2_000_000_000 <= now - int(nonce) <= 10_000_000_000:
+        if not -30_000_000_000 <= now - int(nonce) <= 30_000_000_000:
             raise AuthRejected("stale_hotkey_auth")
         self.membership.require(hotkey)
         with self._lock:
@@ -153,7 +153,7 @@ class Authenticator:
         self.membership.require(hotkey)
         with self._lock:
             self._check_nonce(hotkey, nonce, now)
-            expiry = int(nonce) + 10_000_000_001
+            expiry = int(nonce) + 30_000_000_001
             self._nonces[(hotkey, nonce)] = expiry
             heapq.heappush(self._expiry, (expiry, hotkey, nonce))
             self._counts[hotkey] = self._counts.get(hotkey, 0) + 1

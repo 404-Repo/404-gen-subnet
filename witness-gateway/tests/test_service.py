@@ -86,7 +86,7 @@ def test_fresh_signature_does_not_expire_while_waiting_for_runpod(
     handled: list[str] = []
 
     def fence() -> bool:
-        clock[0] += 11_000_000_000
+        clock[0] += 31_000_000_000
         return selected
 
     async def handler(request: web.Request) -> web.Response:
