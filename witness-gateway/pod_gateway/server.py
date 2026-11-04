@@ -315,7 +315,9 @@ class Gateway:
         return self.scope(str(request["hotkey"]))
 
     async def health(self, request: web.Request) -> web.Response:
-        ready = self._live()
+        ready = self._live() and (self.rounds is None or (
+            self.rounds.inputs is not None and self.round == self.rounds.inputs.round
+        ))
         try:
             self._require_round()
         except AuthRejected:
