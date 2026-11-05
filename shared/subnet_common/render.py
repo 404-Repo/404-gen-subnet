@@ -233,6 +233,7 @@ async def _render_grid(
 
     response = await client.post(
         f"{endpoint}{_RENDER_GRID_PATH}",
+        params={"lighting": _RENDER_DEFAULTS["lighting"]},
         json={"source": js_content.decode("utf-8")},
         headers=_build_headers(api_key),
     )
