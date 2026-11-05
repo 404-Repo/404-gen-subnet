@@ -22,16 +22,15 @@ import (
 	"github.com/consensys/gnark/logger"
 )
 
-// In-process C ABI for the Python client. Serialize proofs to bound RAM.
+// The process shares a bounded pool for the pinned parameter set.
 var pythonProver struct {
 	sync.Mutex
 	directory string
-	ccs       constraint.ConstraintSystem
-	key       groth16.ProvingKey
+	pool      *pythonProofPool
 }
 
-// Caller holds pythonProver's mutex. Only a complete, pinned pair enters the
-// cache; subsequent proofs use those objects even if disk contents change.
+var pythonLoggerOnce sync.Once
+
 type proofTimings struct {
 	DurationMS       float64            `json:"duration_ms"`
 	StepsMS          map[string]float64 `json:"steps_ms"`
@@ -48,21 +47,22 @@ func (t *proofTimings) step(name string, started time.Time) {
 	}
 }
 
+// Caller holds pythonProver's mutex. Only authenticated bytes enter the cache.
 func loadPythonProver(directory string, timings *proofTimings) error {
-	if pythonProver.directory == directory && pythonProver.ccs != nil {
+	if pythonProver.directory == directory && pythonProver.pool != nil {
 		if timings != nil {
 			timings.ParametersCached = true
 		}
 		return nil
 	}
 	configurePythonProverRuntime()
+	pythonLoggerOnce.Do(logger.Disable)
 	started := time.Now()
 	_, verifyingError := verifyingParameter.read(directory)
 	timings.step("parameter_read_verify", started)
 	if err := verifyingError; err != nil {
 		return err
 	}
-	ccs, key := groth16.NewCS(ecc.BN254), groth16.NewProvingKey(ecc.BN254)
 	started = time.Now()
 	circuit, err := circuitParameter.read(directory)
 	timings.step("parameter_read_verify", started)
@@ -70,25 +70,57 @@ func loadPythonProver(directory string, timings *proofTimings) error {
 		return err
 	}
 	started = time.Now()
-	_, err = ccs.ReadFrom(bytes.NewReader(circuit))
-	timings.step("circuit_deserialize", started)
-	if err != nil {
-		return errors.New("cannot load pinned circuit")
-	}
-	started = time.Now()
 	proving, err := provingParameter.read(directory)
 	timings.step("parameter_read_verify", started)
 	if err != nil {
 		return err
 	}
-	started = time.Now()
-	_, err = key.ReadFrom(bytes.NewReader(proving))
-	timings.step("proving_key_deserialize", started)
-	if err != nil {
-		return errors.New("cannot load pinned proving key")
+	if pythonProver.pool == nil {
+		limit, err := pythonProverContextLimit()
+		if err != nil {
+			return err
+		}
+		first, err := newPythonProofContext(circuit, proving, timings)
+		if err != nil {
+			return err
+		}
+		pythonProver.pool = newPythonProofPool(first, circuit, proving, limit)
 	}
-	pythonProver.directory, pythonProver.ccs, pythonProver.key = directory, ccs, key
+	// All accepted directories contain the same pinned bytes, so clients with
+	// different paths reuse this pool instead of multiplying its resource limit.
+	pythonProver.directory = directory
 	return nil
+}
+
+type pythonProofContext struct {
+	ccs constraint.ConstraintSystem
+	key groth16.ProvingKey
+}
+
+func newPythonProofContext(circuit, proving []byte, timings *proofTimings) (*pythonProofContext, error) {
+	ccs, key := groth16.NewCS(ecc.BN254), groth16.NewProvingKey(ecc.BN254)
+	started := time.Now()
+	if _, err := ccs.ReadFrom(bytes.NewReader(circuit)); err != nil {
+		return nil, errors.New("cannot load pinned circuit")
+	}
+	timings.step("circuit_deserialize", started)
+	started = time.Now()
+	if _, err := key.ReadFrom(bytes.NewReader(proving)); err != nil {
+		return nil, errors.New("cannot load pinned proving key")
+	}
+	timings.step("proving_key_deserialize", started)
+	return &pythonProofContext{ccs: ccs, key: key}, nil
+}
+
+func cachedPythonProver(directory string, timings *proofTimings) (*pythonProofPool, error) {
+	wait := time.Now()
+	pythonProver.Lock()
+	timings.step("mutex_wait", wait)
+	defer pythonProver.Unlock()
+	if err := loadPythonProver(directory, timings); err != nil {
+		return nil, err
+	}
+	return pythonProver.pool, nil
 }
 
 func pythonProof(directory string, raw []byte) ([]byte, error) {
@@ -103,16 +135,19 @@ func pythonProof(directory string, raw []byte) ([]byte, error) {
 	if d.Decode(new(any)) != io.EOF {
 		return nil, errors.New("trailing proof input")
 	}
-	wait := time.Now()
-	pythonProver.Lock()
-	timings.step("mutex_wait", wait)
-	defer pythonProver.Unlock()
-	logger.Disable()
-	if err := loadPythonProver(directory, timings); err != nil {
+	pool, err := cachedPythonProver(directory, timings)
+	if err != nil {
 		return nil, err
 	}
+	wait := time.Now()
+	context, err := pool.acquire()
+	timings.step("mutex_wait", wait)
+	if err != nil {
+		return nil, err
+	}
+	defer pool.release(context)
 	proofStarted := time.Now()
-	bundle, err := prove(in, pythonProver.ccs, pythonProver.key)
+	bundle, err := prove(in, context.ccs, context.key)
 	timings.step("proof_generate", proofStarted)
 	if err != nil {
 		return nil, err
@@ -136,12 +171,7 @@ func WitnessProofInit(directory *C.char) (result *C.char) {
 	if directory == nil {
 		return C.CString(`{"error":"missing proof parameters directory"}`)
 	}
-	wait := time.Now()
-	pythonProver.Lock()
-	timings.step("mutex_wait", wait)
-	defer pythonProver.Unlock()
-	logger.Disable()
-	if err := loadPythonProver(C.GoString(directory), timings); err != nil {
+	if _, err := cachedPythonProver(C.GoString(directory), timings); err != nil {
 		out, _ := json.Marshal(map[string]string{"error": err.Error()})
 		return C.CString(string(out))
 	}
