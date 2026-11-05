@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"runtime"
 	"runtime/debug"
+	"strconv"
 	"testing"
 
 	"github.com/consensys/gnark-crypto/ecc"
@@ -90,47 +91,70 @@ func TestPythonProverConcurrentProofs(t *testing.T) {
 	if err := readObject(publishedParameters+"/verifying.bin", vk); err != nil {
 		t.Fatal(err)
 	}
-	inputs := []Input{
-		makeInput(bytes.Repeat([]byte{'a'}, 64)),
-		makeInput(bytes.Repeat([]byte{'b'}, 257)),
-	}
 	type result struct {
 		index int
 		raw   []byte
 		err   error
 	}
-	results := make(chan result, len(inputs))
-	start := make(chan struct{})
-	for index, in := range inputs {
-		go func() {
-			<-start
-			raw, _ := json.Marshal(in)
-			out, err := pythonProof(publishedParameters, raw)
-			results <- result{index, out, err}
-		}()
-	}
-	close(start)
-	completed := make([]result, len(inputs))
-	for i := range completed {
-		completed[i] = <-results
-	}
-	for _, out := range completed {
-		if out.err != nil {
-			t.Fatal(out.err)
-		}
-		var decoded struct{ Bundle *Bundle }
-		if err := json.Unmarshal(out.raw, &decoded); err != nil {
-			t.Fatal(err)
-		}
-		public := inputs[out.index]
-		public.Key, public.Bundle = "", decoded.Bundle
-		if err := verify(public, vk); err != nil {
-			t.Fatalf("concurrent exchange %d: %v", out.index, err)
-		}
-		other := inputs[1-out.index]
-		other.Key, other.Bundle = "", decoded.Bundle
-		if verify(other, vk) == nil {
-			t.Fatal("proof accepted for a different concurrent exchange")
-		}
+	for _, limit := range []int{1, 2, 4} {
+		t.Run(strconv.Itoa(limit), func(t *testing.T) {
+			resetPythonProver(t)
+			t.Setenv("WITNESS_PROVER_CONTEXTS", strconv.Itoa(limit))
+			pool, err := cachedPythonProver(publishedParameters, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Warm all contexts before the barrier, so these calls exercise
+			// simultaneous proving rather than waiting for pool growth.
+			var contexts []*pythonProofContext
+			for i := 0; i < limit; i++ {
+				context, err := pool.acquire()
+				if err != nil {
+					t.Fatal(err)
+				}
+				contexts = append(contexts, context)
+			}
+			for _, context := range contexts {
+				pool.release(context)
+			}
+			inputs := make([]Input, limit+1)
+			for i := range inputs {
+				inputs[i] = makeInput(bytes.Repeat([]byte{byte('a' + i)}, 64+193*(i%2)))
+			}
+			results := make(chan result, len(inputs))
+			start := make(chan struct{})
+			for index, in := range inputs {
+				go func() {
+					<-start
+					raw, _ := json.Marshal(in)
+					out, err := pythonProof(publishedParameters, raw)
+					results <- result{index, out, err}
+				}()
+			}
+			close(start)
+			completed := make([]result, len(inputs))
+			for i := range completed {
+				completed[i] = <-results
+			}
+			for _, out := range completed {
+				if out.err != nil {
+					t.Fatal(out.err)
+				}
+				var decoded struct{ Bundle *Bundle }
+				if err := json.Unmarshal(out.raw, &decoded); err != nil {
+					t.Fatal(err)
+				}
+				public := inputs[out.index]
+				public.Key, public.Bundle = "", decoded.Bundle
+				if err := verify(public, vk); err != nil {
+					t.Fatalf("concurrent exchange %d: %v", out.index, err)
+				}
+				other := inputs[(out.index+1)%len(inputs)]
+				other.Key, other.Bundle = "", decoded.Bundle
+				if verify(other, vk) == nil {
+					t.Fatal("proof accepted for a different concurrent exchange")
+				}
+			}
+		})
 	}
 }

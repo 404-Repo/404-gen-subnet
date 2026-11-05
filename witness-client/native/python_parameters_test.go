@@ -96,6 +96,8 @@ func TestPythonProverRejectsModifiedKeys(t *testing.T) {
 }
 
 func TestPythonProverUsesAuthenticatedSnapshot(t *testing.T) {
+	resetPythonProver(t)
+	t.Setenv("WITNESS_PROVER_CONTEXTS", "2")
 	directory := copyParameters(t)
 	pythonProver.Lock()
 	timings := newProofTimings()
@@ -121,6 +123,14 @@ func TestPythonProverUsesAuthenticatedSnapshot(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	// Holding the first context forces this proof to initialize a second one
+	// from the authenticated snapshot after the files have disappeared.
+	pool := pythonProver.pool
+	first, err := pool.acquire()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.release(first)
 	in := makeInput(bytes.Repeat([]byte{'a'}, 64))
 	raw, _ := json.Marshal(in)
 	result, err := pythonProof(directory, raw)

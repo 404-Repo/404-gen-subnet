@@ -84,6 +84,15 @@ before starting Python to choose different limits. The Go memory limit excludes
 Python and other non-Go allocations. See the
 [local synthetic benchmark](benchmarks/README.md) for measurement and tuning.
 
+`WITNESS_PROVER_CONTEXTS` sets the process-wide maximum number of independent
+native prover contexts (1–8, default 1). Initialization prepares one context;
+queued proofs create additional contexts one at a time when all ready contexts
+are busy. Contexts remain cached for later calls. Each owns its constraint system
+and proving key, so memory use grows with the number initialized. They share the
+same `GOMAXPROCS` and `GOMEMLIMIT` budgets. Set these environment variables before
+starting Python. A client's `parallel_preparations` must be at least the desired
+proof concurrency to supply that many simultaneous preparations.
+
 ## Generate
 
 An async miner exports `generate(image, seed, witness)` and awaits its model calls

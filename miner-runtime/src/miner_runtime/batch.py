@@ -35,6 +35,7 @@ async def run(
     witness_config: Path,
     workers: int = 8,
     parallel_calls: int = 3,
+    parallel_preparations: int = 3,
     attempts: int = 3,
     wallet_name: str = "miner",
     wallet_hotkey: str = "default",
@@ -54,6 +55,7 @@ async def run(
             openai_api_key=os.environ["OPENAI_API_KEY"] if api else None,
             subscription=None if api else "codex",
             parallel_calls=parallel_calls,
+            parallel_preparations=parallel_preparations,
         ) as witness, httpx.AsyncClient(timeout=30, follow_redirects=True, trust_env=False) as http:
             submitted = await witness.get_submitted()
             queue = asyncio.Queue[tuple[str, str | bytes]]()
