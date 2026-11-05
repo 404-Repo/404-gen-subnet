@@ -188,19 +188,20 @@ def test_result_saver_saves_every_view_when_larger_render_jobs_time_out(monkeypa
         index=state, seed=42, submission_commit=COMMIT, prompt_ids={prompt: prompt},
     )
     expected = {
-        f"{background}/{view.name}.png": PNG + f"{color}:{view.theta}:{view.phi}".encode()
+        f"{background}/{view.name}.png": PNG + f"neutral:{color}:{view.theta}:{view.phi}".encode()
         for background, color, views in (("white", WHITE_BG, WHITE_VIEWS), ("gray", GRAY_BG, GRAY_VIEWS))
         for view in views
-    } | {"grid.png": PNG, "embeddings.npz": b"fixture embeddings"}
+    } | {"grid.png": PNG + b"neutral", "embeddings.npz": b"fixture embeddings"}
 
     def backend(request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/render/grid":
-            return httpx.Response(200, content=PNG)
         query = request.url.params
+        lighting = query.get("lighting", "studio")
+        if request.url.path == "/render/grid":
+            return httpx.Response(200, content=PNG + lighting.encode())
         angles = list(zip(query["thetas"].split(","), query["phis"].split(","), strict=True))
         if len(angles) > 4:
             return httpx.Response(500, json={"error": "render timed out after 30000ms"})
-        images = [PNG + f"{query['bg_color']}:{theta}:{phi}".encode() for theta, phi in angles]
+        images = [PNG + f"{lighting}:{query['bg_color']}:{theta}:{phi}".encode() for theta, phi in angles]
         if len(images) == 1:
             return httpx.Response(200, content=images[0])
         return httpx.Response(200, json={"images": [base64.b64encode(image).decode() for image in images]})
