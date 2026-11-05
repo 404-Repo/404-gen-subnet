@@ -1,0 +1,134 @@
+{
+  "version": 1,
+  "id": "s2-neutral-20261105-d41cc70",
+  "status": "deployed_and_verified",
+  "source_commit": "d41cc70098fa5782d865fb2b0042a4c2ca37d109",
+  "source_tree": "ab90f16e24769887fc549d2b497df0bc31da3585",
+  "release_branch": "main",
+  "source_pushed_before_build": true,
+  "fix_pr": "https://github.com/404-Repo/404-gen-subnet/pull/80",
+  "build_context": {
+    "type": "clean git archive",
+    "archive_sha256": "658fdfc260cb8583a8fb3ac68dc08427cadaf38505a55e42d0fc81b1e8bb6613",
+    "application_source_overlay": false
+  },
+  "build_transport": {
+    "snapshot_ipv4_override": "151.101.66.132",
+    "hostname": "snapshot.debian.org",
+    "reason": "Default edge stalled on pinned package downloads; alternate edge serves the identical pinned package with valid TLS and unchanged apt verification."
+  },
+  "platform": "linux/amd64",
+  "images": {
+    "worker": {
+      "tag": "europe-west3-docker.pkg.dev/gen-456515/witness-runtime/pods:s2-neutral-main-d41cc70098fa-20261105-01",
+      "digest": "sha256:aa61f7ff431c53fcc78365f9a7e627f144d44f0b9ef2449cfea09b10a3f78203",
+      "reference": "europe-west3-docker.pkg.dev/gen-456515/witness-runtime/pods@sha256:aa61f7ff431c53fcc78365f9a7e627f144d44f0b9ef2449cfea09b10a3f78203",
+      "published": true,
+      "registry_digest_verified": true,
+      "deployed_as": "future_allocation_default"
+    },
+    "gateway": {
+      "reference": "europe-west3-docker.pkg.dev/gen-456515/witness-runtime/gateway@sha256:06bf0175da58414ea037db43d83de236746ccc177beee97f13bb9895288654fa",
+      "rebuilt": false,
+      "source_commit": "26643cce2136df2722d5d7de37bd7a807c6cc3b6"
+    }
+  },
+  "renderer_profile": {
+    "bootstrap_sha256": null,
+    "image_digest": "sha256:aa61f7ff431c53fcc78365f9a7e627f144d44f0b9ef2449cfea09b10a3f78203",
+    "validation_sha256": "6e950fa1931f93358695ddd71c9c93186edda2d40f5dbaca0220da0dbe47631d"
+  },
+  "changed_runtime_sources": [
+    "/app/shared/subnet_common/render.py"
+  ],
+  "validation": {
+    "gateway_unit_and_artifact_tests": {
+      "passed": 597,
+      "skipped": 3,
+      "excluded_native_modules": [
+        "test_direct_tls.py",
+        "test_native_outcomes.py"
+      ]
+    },
+    "native_tls_recovery": {
+      "passed": 3,
+      "fixture_adjustments": [
+        "Existing optional observe_failure keyword accepted by the fixture verifier",
+        "Fixture shutdown permits the existing reconnect backoff"
+      ],
+      "network": "local fixture only"
+    },
+    "native_outcomes_module_rerun": false,
+    "native_grid_canary": {
+      "execution_host": "RunPod cpu3c, 2 vCPU, 4 GB RAM",
+      "pod_id": "9u6gcoj30u73mh",
+      "removed": true,
+      "runtime_source_files_verified": 84,
+      "render_client_sha256": "1b3a68c129b7d7f4b48264eff4879c6934225d064c0925bd38effa5c88a9d368",
+      "fixture_source_sha256": "39cdc9cee18f29c1b441023f6261ed65d7d7b13df2185f56487f46808e53e344",
+      "request_lighting": "neutral",
+      "canonical_grid_sha256": "c0b6ba655d1880b1759bbb1f082f7502662b8ecc2ab8a77d5a12d8f1468cbf1b",
+      "explicit_neutral_sha256": "c0b6ba655d1880b1759bbb1f082f7502662b8ecc2ab8a77d5a12d8f1468cbf1b",
+      "studio_grid_sha256": "5547a8bf92bfabf5b603bbccd910fdda1609b440d4bf296cde795b1142941dfb",
+      "canonical_equals_neutral": true,
+      "canonical_differs_from_studio": true,
+      "repeat_byte_identical": true,
+      "node": "v22.23.3",
+      "chromium": "Chromium 155.0.8059.79 built on Debian GNU/Linux 12 (bookworm)",
+      "model_generation_calls": 0,
+      "production_submissions_modified": false
+    },
+    "frontend_canary": {
+      "status": "render_timeout",
+      "host_machine_type": "e2-small",
+      "timeout_ms": 30000,
+      "production_pins_changed": false
+    }
+  },
+  "production": {
+    "deployment": "witness-public-v3",
+    "origin": "https://witness.subnet404.xyz",
+    "gateway_pod_id": "1d1tzqjrulnuyy",
+    "previous_gateway_pod_id": "d9yneg8xtgi1ng",
+    "previous_gateway_absence_confirmed": true,
+    "gateway_image_unchanged": true,
+    "controller_image_unchanged": true,
+    "future_worker_image": "europe-west3-docker.pkg.dev/gen-456515/witness-runtime/pods@sha256:aa61f7ff431c53fcc78365f9a7e627f144d44f0b9ef2449cfea09b10a3f78203",
+    "changed_environment_keys": [
+      "WITNESS_IMAGE",
+      "WITNESS_RENDERER_PROFILE"
+    ],
+    "persistent_and_runtime_configuration_match": true,
+    "non_image_configuration_unchanged": true,
+    "max_captures": 32,
+    "worker_ids_before": [],
+    "worker_ids_after": [],
+    "workers_modified": 0,
+    "pricing_sha256": "6f718c597b0cd47f08d99cf59791b73770fa26cd641334bf56175b9abb937806",
+    "model_count": 8,
+    "public_health": {
+      "http_status": 200,
+      "body": {
+        "status": "ready",
+        "transport": "pods-v1",
+        "receiver": "404-witness",
+        "round": "gpt-2",
+        "admission_ready": false
+      },
+      "client": "curl"
+    },
+    "verified_utc": "2026-11-05T09:43:19.784130+00:00"
+  },
+  "limitations": [
+    "No production miner worker Pods were present during rollout. New-image rendering was verified on a temporary RunPod CPU Pod; no paid provider generation or live miner allocation was performed.",
+    "The first grid canary on the shared-core e2-small frontend exceeded the unchanged 30-second render deadline. The same canary passed on the intended two-vCPU RunPod worker shape.",
+    "Native TLS tests use the previously documented disposable fixture adjustments for the optional observe_failure keyword and reconnect-backoff shutdown. Production application source is unchanged."
+  ],
+  "rollback": {
+    "private_configuration_backups_retained": true,
+    "rollback_prepared_before_activation": true,
+    "previous_worker_image": "europe-west3-docker.pkg.dev/gen-456515/witness-runtime/pods@sha256:130765464b0b49ff71d508799ace81d0bddae7cc916cebff3bc4ad71ace578c0",
+    "worker_mutation_required": false
+  },
+  "model_generation_unchanged": true
+}
