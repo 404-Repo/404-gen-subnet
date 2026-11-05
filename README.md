@@ -54,6 +54,7 @@ FINALIZING ──► OPEN ──► MINER_GENERATION ──► COLLECTING ──
 | `render-service-js` | Renders miner Three.js submissions to multi-view PNG images via headless Chromium with WebGL. |
 | `miner-reference` | Miner guide, token budgets, a Three.js validator, examples and local tools. |
 | `judge-service` | Runs VLM-based pairwise duels, requests verification for winners, selects the round winner. Owns the DUELS stage. |
+| [`validation-service`](validation-service/README.md) | Replays candidate submissions against recorded witness evidence, verifies outputs and budgets, and publishes terminal validation verdicts. |
 | `round-manager` | Updates the global leader, creates new rounds with schedules, decides when the competition ends. Owns the FINALIZING stage. |
 | `vllm` | External vLLM instance hosting the vision-language model for pairwise comparisons. |
 
