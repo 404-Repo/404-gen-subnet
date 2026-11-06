@@ -33,8 +33,9 @@ from miner_runtime.validator import ReplayWitness, run_replay
 from openai.types.responses import ResponseStreamEvent
 from pod_gateway.control import DrainControl, Registry
 from pod_gateway.lifecycle import Allocator
+from pod_gateway.membership import Membership
 from pod_gateway.server import Gateway
-from subnet_common.witness.auth import Authenticator, Membership
+from subnet_common.witness.auth import Authenticator
 from subnet_common.witness.certs import pod_context
 from subnet_common.witness.models import Pod, PodSpec, Scope
 from subnet_common.witness.pricing import PricingStore
@@ -71,7 +72,7 @@ def test_fresh_signature_does_not_expire_while_waiting_for_runpod(
     headers = hotkey_headers(key, b"", method="GET", path="/v1/pods/current")
     clock = [int(headers["x-bittensor-nonce"])]
     monkeypatch.setattr("subnet_common.witness.auth.time.time_ns", lambda: clock[0])
-    membership = Membership("test", 17, "test-1", key.ss58_address)
+    membership = Membership(17, "test-1", key.ss58_address)
     now = int(time.time() * 1000)
     membership.snapshot = {
         "version": 1,
@@ -101,7 +102,7 @@ def test_fresh_signature_does_not_expire_while_waiting_for_runpod(
         )
         allocator = Allocator(Provider(), DrainControl(), PodSpec("registry/witness@sha256:" + "a" * 64),
                               selection=Selection(MemoryState()))
-        gateway = Gateway(allocator=allocator, auth=Authenticator(membership), registry=Registry(),
+        gateway = Gateway(allocator=allocator, auth=Authenticator(membership.require), registry=Registry(),
                           deployment="test", round_number="test-1", round_end=int(time.time()) + 600,
                           secret=SECRET, proof_hash=PROOF, fence=lambda: selected)
         monkeypatch.setattr(gateway, "_live", fence)
@@ -375,7 +376,7 @@ class Harness:
             PodSpec("registry/witness@sha256:" + "a" * 64, capability_secret=SECRET),
             selection=self.selection,
         )
-        membership = Membership("test", 17, self.scope.round)
+        membership = Membership(17, self.scope.round)
         now = int(time.time() * 1000)
         membership.snapshot = {
             "version": 1,
@@ -389,7 +390,7 @@ class Harness:
         self.membership = membership
         self.gateway = Gateway(
             allocator=self.allocator,
-            auth=Authenticator(membership),
+            auth=Authenticator(membership.require),
             registry=self.registry,
             deployment=self.scope.deployment,
             round_number=self.scope.round,

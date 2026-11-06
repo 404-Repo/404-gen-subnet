@@ -9,17 +9,15 @@ from typing import Annotated, Literal
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 
-class Frozen(BaseModel):
+class StackFrame(BaseModel):
     model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
 
-
-class StackFrame(Frozen):
     file: str
     function: str
     line: int
 
 
-class VerifierFrame(Frozen):
+class VerifierFrame(BaseModel):
     model_config = ConfigDict(frozen=True, strict=True, extra="ignore")
 
     file: Annotated[str, Field(pattern=r"^(worker|verifier)/[A-Za-z0-9_.-]+\.mjs$")]
@@ -28,7 +26,7 @@ class VerifierFrame(Frozen):
     column: Annotated[int, Field(gt=0)]
 
 
-class VerifierEvent(Frozen):
+class VerifierEvent(BaseModel):
     model_config = ConfigDict(frozen=True, strict=True, extra="ignore")
 
     event: Literal["witness_verifier_failure"]
@@ -37,7 +35,9 @@ class VerifierEvent(Frozen):
     stack: Annotated[tuple[VerifierFrame, ...], Field(max_length=32)]
 
 
-class VerifierFailure(Frozen):
+class VerifierFailure(BaseModel):
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+
     mode: str
     returncode: int | None
     error_type: str | None = None
@@ -56,7 +56,9 @@ def verifier_failure(stderr: bytes, mode: str, returncode: int | None) -> Verifi
     return VerifierFailure(mode=mode, returncode=returncode)
 
 
-class FailureFact(Frozen):
+class FailureFact(BaseModel):
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+
     stage: str
     reason: str
     error_type: str | None = None
@@ -96,12 +98,16 @@ class FailureObservation:
             self.failure = failure
 
 
-class RuntimeIdentity(Frozen):
+class RuntimeIdentity(BaseModel):
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+
     python_version: str
     pod_spec_sha256: str | None
 
 
-class ExchangeIdentity(Frozen):
+class ExchangeIdentity(BaseModel):
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+
     deployment: str
     round: str
     hotkey: str
@@ -117,7 +123,9 @@ class ExchangeIdentity(Frozen):
 Operation = Literal["capture", "recovery", "outcome"]
 
 
-class DiagnosticRecord(Frozen):
+class DiagnosticRecord(BaseModel):
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+
     version: Literal[1] = 1
     observed_at_ns: int
     operation: Operation

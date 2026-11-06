@@ -11,11 +11,13 @@ from collections.abc import AsyncIterator
 import httpx
 from aiohttp import web
 from subnet_common.github import GitHubClient
-from subnet_common.witness.auth import Authenticator, Membership, MembershipRefresher
+from subnet_common.witness.auth import Authenticator
 from subnet_common.witness.models import PodSpec
 from subnet_common.witness.rounds import repository
 from subnet_common.witness.selection import Selection
 from subnet_common.witness.state import R2StateStore
+
+from pod_gateway.membership import Membership, MembershipRefresher
 
 from .admission import Admission
 from .control import DrainControl, Registry
@@ -51,7 +53,6 @@ async def application(settings: GatewaySettings, worker_spec: PodSpec) -> web.Ap
         selection=Selection(state),
     )
     membership = Membership(
-        settings.deployment,
         settings.netuid,
         "unconfigured",
     )
@@ -80,7 +81,7 @@ async def application(settings: GatewaySettings, worker_spec: PodSpec) -> web.Ap
 
     gateway = Gateway(
         allocator=allocator,
-        auth=Authenticator(membership),
+        auth=Authenticator(membership.require),
         registry=registry,
         deployment=settings.deployment,
         round_number="unconfigured",

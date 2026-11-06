@@ -19,9 +19,10 @@ from bittensor_wallet import Keypair
 from pod_gateway.admission import Admission, PendingStart, QueueState
 from pod_gateway.control import DrainControl, Peer, Registry
 from pod_gateway.lifecycle import Allocator
+from pod_gateway.membership import Membership
 from pod_gateway.runpod import CreateRejected, CreateUnknown, ProviderUnavailable
 from pod_gateway.server import Gateway
-from subnet_common.witness.auth import Authenticator, Membership
+from subnet_common.witness.auth import Authenticator
 from subnet_common.witness.models import Pod, PodSpec, Scope, json_bytes
 from subnet_common.witness.security import capability
 from subnet_common.witness.selection import Selection
@@ -63,7 +64,7 @@ async def running(provider: Provider, state: MemoryState, *, interval: float = 0
                   create_interval: float = 10,
                   poll_seconds: float = 0.02,
                   clock: list[float] | None = None) -> AsyncIterator[tuple[Gateway, TestClient[web.Request, web.Application]]]:
-    membership = Membership("test", 17, "test-1")
+    membership = Membership(17, "test-1")
     now = int(time.time() * 1000)
     membership.snapshot = dict(version=1, network="finney", netuid=17, block=1,
                                fetched_at=now, block_time=now, hotkeys=[key.ss58_address for key in KEYS])
@@ -71,7 +72,7 @@ async def running(provider: Provider, state: MemoryState, *, interval: float = 0
     allocator = Allocator(provider, DrainControl(registry), PodSpec("registry/witness@sha256:" + "a" * 64),
                           admission=Admission(max_pods=4), selection=Selection(state),
                           clock=time.time if clock is None else lambda: clock[0])
-    gateway = Gateway(allocator=allocator, auth=Authenticator(membership), registry=registry,
+    gateway = Gateway(allocator=allocator, auth=Authenticator(membership.require), registry=registry,
                       deployment="test", round_number="test-1", round_end=int(time.time()) + 86400,
                       secret=b"s" * 32, proof_hash="c" * 64, fence=lambda: True,
                       request_interval=interval, create_interval=create_interval,
@@ -101,8 +102,10 @@ async def request(client: TestClient[web.Request, web.Application], key: Keypair
 
 @asynccontextmanager
 async def coordinator(provider: Provider, state: MemoryState, clock: list[float], *,
-                      keys: tuple[Keypair, ...] = KEYS) -> AsyncIterator[Gateway]:
-    membership = Membership("test", 17, "test-1")
+                      keys: tuple[Keypair, ...] = KEYS,
+                      membership: Membership | None = None) -> AsyncIterator[Gateway]:
+    if membership is None:
+        membership = Membership(17, "test-1")
     now = int(time.time() * 1000)
     membership.snapshot = dict(version=1, network="finney", netuid=17, block=1,
                                fetched_at=now, block_time=now, hotkeys=[key.ss58_address for key in keys])
@@ -110,7 +113,7 @@ async def coordinator(provider: Provider, state: MemoryState, clock: list[float]
     allocator = Allocator(provider, DrainControl(registry),
                           PodSpec("registry/witness@sha256:" + "a" * 64, port=8443),
                           admission=Admission(max_pods=250), selection=Selection(state), clock=lambda: clock[0])
-    gateway = Gateway(allocator=allocator, auth=Authenticator(membership), registry=registry,
+    gateway = Gateway(allocator=allocator, auth=Authenticator(membership.require), registry=registry,
                       deployment="test", round_number="test-1", round_end=int(time.time()) + 86400,
                       secret=b"s" * 32, proof_hash="c" * 64, fence=lambda: True)
     gateway._loaded = gateway._fence_ok = True
@@ -978,7 +981,8 @@ def test_removed_members_do_not_block_other_miners_or_release_unknown_creates(
 ) -> None:
     async def scenario() -> None:
         provider, clock = Provider(), [1000.0]
-        async with coordinator(provider, MemoryState(), clock) as gateway:
+        membership = Membership(17, "test-1")
+        async with coordinator(provider, MemoryState(), clock, membership=membership) as gateway:
             first, second = (gateway.scope(key.ss58_address) for key in KEYS)
             gateway.queue.enqueue(first, FIRST, None)
             if submitted:
@@ -986,7 +990,7 @@ def test_removed_members_do_not_block_other_miners_or_release_unknown_creates(
                 provider.create(gateway.allocator.spec.body(first, FIRST))
                 clock[0] += 10
             gateway.queue.enqueue(second, SECOND, None)
-            snapshot = gateway.auth.membership.snapshot
+            snapshot = membership.snapshot
             assert snapshot is not None
             inventory = provider.list
 
@@ -1203,10 +1207,11 @@ def test_a_lost_cancellation_acknowledgement_allows_a_new_connection(monkeypatch
 
     async def scenario() -> None:
         provider, state, clock = Provider(), State(), [1000.0]
-        async with coordinator(provider, state, clock) as gateway:
+        membership = Membership(17, "test-1")
+        async with coordinator(provider, state, clock, membership=membership) as gateway:
             scope = gateway.scope(KEYS[0].ss58_address)
             gateway.queue.enqueue(scope, FIRST, None)
-            snapshot = gateway.auth.membership.snapshot
+            snapshot = membership.snapshot
             assert snapshot is not None
             inventory = provider.list
 

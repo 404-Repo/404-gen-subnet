@@ -16,7 +16,7 @@ from pydantic import (
     model_validator,
 )
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
-from subnet_common.witness.auth import public_key
+from subnet_common.witness.auth import keypair_from_hotkey
 from subnet_common.witness.models import Scope
 from subnet_common.witness.rounds import repository
 
@@ -143,7 +143,7 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def validate_round(self) -> Self:
         Scope(self.deployment, self.round, self.gateway_owner_hotkey)
-        public_key(self.gateway_owner_hotkey)
+        keypair_from_hotkey(self.gateway_owner_hotkey)
         if len(self.secret) < 32 or self.round == "gateway":
             raise ValueError("Invalid master key or round deadline")
         repository(self.competition_repo)

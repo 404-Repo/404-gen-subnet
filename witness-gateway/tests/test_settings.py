@@ -14,9 +14,10 @@ import pytest
 from aiohttp import web
 from bittensor_wallet import Keypair
 from pod_gateway.dependencies import gateway_spec, worker_spec
+from pod_gateway.membership import Membership
 from pod_gateway.settings import GatewaySettings, Settings
 from pydantic import SecretStr
-from subnet_common.witness.auth import Authenticator, AuthRejected, Membership
+from subnet_common.witness.auth import Authenticator, AuthRejected
 from subnet_common.witness.models import Scope
 from subnet_common.witness.pricing import PricingStore
 from support import MemoryState
@@ -27,7 +28,7 @@ from witness_client.auth import hotkey_headers
 @pytest.mark.parametrize("round_number", ["test-0", "test-1", "test-2"])
 def test_test_hotkey_can_authenticate_without_registration(round_number: str) -> None:
     hotkey = Keypair.create_from_mnemonic(Keypair.generate_mnemonic()).ss58_address
-    membership = Membership("test", 17, round_number, hotkey)
+    membership = Membership(17, round_number, hotkey)
     now = int(time.time() * 1000)
     membership.snapshot = {
         "version": 1,
@@ -45,7 +46,7 @@ def test_test_hotkey_can_authenticate_without_registration(round_number: str) ->
 
 def test_test_hotkey_is_rejected_for_competition_rounds() -> None:
     with pytest.raises(ValueError, match="Invalid membership configuration"):
-        Membership("test", 17, "56", "5" * 48)
+        Membership(17, "56", "5" * 48)
 
 
 @pytest.mark.parametrize("age_ns,accepted", [
@@ -57,13 +58,13 @@ def test_hotkey_timestamp_window(monkeypatch: pytest.MonkeyPatch, age_ns: int, a
     clock = [time.time_ns()]
     monkeypatch.setattr("subnet_common.witness.auth.time.time_ns", lambda: clock[0])
     headers = hotkey_headers(key, b"", method="GET", path="/v1/pods/current")
-    membership = Membership("test", 17, "test-1")
+    membership = Membership(17, "test-1")
     now = int(time.time() * 1000)
     membership.snapshot = {
         "version": 1, "network": "finney", "netuid": 17, "block": 1,
         "fetched_at": now, "block_time": now, "hotkeys": [key.ss58_address],
     }
-    auth = Authenticator(membership)
+    auth = Authenticator(membership.require)
     clock[0] += age_ns
     if accepted:
         assert auth.verify("GET", "/v1/pods/current", b"", headers) == key.ss58_address
@@ -78,13 +79,13 @@ def test_hotkey_replay_is_rejected_through_timestamp_window(monkeypatch: pytest.
     clock = [time.time_ns()]
     monkeypatch.setattr("subnet_common.witness.auth.time.time_ns", lambda: clock[0])
     headers = hotkey_headers(key, b"", method="GET", path="/v1/pods/current")
-    membership = Membership("test", 17, "test-1")
+    membership = Membership(17, "test-1")
     now = int(time.time() * 1000)
     membership.snapshot = {
         "version": 1, "network": "finney", "netuid": 17, "block": 1,
         "fetched_at": now, "block_time": now, "hotkeys": [key.ss58_address],
     }
-    auth = Authenticator(membership)
+    auth = Authenticator(membership.require)
     assert auth.verify("GET", "/v1/pods/current", b"", headers) == key.ss58_address
     clock[0] += age_ns
     with pytest.raises(AuthRejected, match="replayed_hotkey_auth"):

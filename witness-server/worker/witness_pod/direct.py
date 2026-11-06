@@ -18,7 +18,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from renderer_client import RenderRejected, RenderUnavailable
 from renderer_client.client import MAX_ERROR_BYTES, MAX_RESPONSE_BYTES, PNG_SIGNATURE
 from subnet_common.competition.generations import GenerationsAdapter
-from subnet_common.witness.auth import Authenticator, AuthRejected, Membership
+from subnet_common.witness.auth import Authenticator, AuthRejected
 from subnet_common.witness.models import Scope, identifier
 from subnet_common.witness.security import verify_miner_access
 from witness_client.calls import RequestKey
@@ -36,28 +36,19 @@ if TYPE_CHECKING:
 SAVE_QUEUE_CAPACITY = 256
 
 
-class StrictInput(BaseModel):
+class Start(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
-
-class Start(StrictInput):
     request: RequestKey
     expected_exchange_id: str | None = None
 
 
-class SaveChoice(StrictInput):
+class SaveChoice(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
     generation: SubmissionContext
     source: str | None = Field(max_length=1024 * 1024)
     prompt_image: str | None = Field(default=None, max_length=12 * 1024 * 1024)
-
-
-class AssignedMiner(Membership):
-    def __init__(self, hotkey: str) -> None:
-        self.hotkey = hotkey
-
-    def require(self, hotkey: str) -> None:
-        if hotkey != self.hotkey:
-            raise AuthRejected("miner_not_assigned", 403)
 
 
 class Witness:
@@ -75,7 +66,13 @@ class Witness:
         self.prompt_url = prompt_url or artifact_url
         self.records, self.budget, self.evidence = runtime.records, runtime.budget, runtime.evidence
         self.round, self.round_end, self.proof_hash = runtime.scope.round, runtime.round_end, runtime.proof_hash
-        self.auth = Authenticator(AssignedMiner(runtime.scope.hotkey))
+        assigned_hotkey = runtime.scope.hotkey
+
+        def authorize(hotkey: str) -> None:
+            if hotkey != assigned_hotkey:
+                raise AuthRejected("miner_not_assigned", 403)
+
+        self.auth = Authenticator(authorize)
         self.renderer_url = "http://127.0.0.1:8002/render/grid"
         if artifacts is not None and artifacts.scope != runtime.scope:
             raise ValueError("Artifact storage belongs to another miner")
