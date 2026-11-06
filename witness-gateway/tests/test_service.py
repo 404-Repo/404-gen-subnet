@@ -20,19 +20,34 @@ from typing import cast
 import httpx
 import openai
 import pytest
-from openai.types.responses import ResponseStreamEvent
 from aiohttp import web
 from aiohttp.test_utils import make_mocked_request
 from bittensor_wallet import Keypair
-from miner_runtime.observations import Execution
-from miner_runtime.runner import run_generation
-from miner_runtime.validator import ReplayWitness, run_replay
 from channel import Channel, WorkerChannel
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
+from miner_runtime.observations import Execution
+from miner_runtime.runner import run_generation
+from miner_runtime.validator import ReplayWitness, run_replay
+from openai.types.responses import ResponseStreamEvent
 from pod import PodRuntime
+from pod_gateway.budget import Budget
+from pod_gateway.control import DrainControl, Registry
+from pod_gateway.direct import Witness
+from pod_gateway.lifecycle import Allocator
+from pod_gateway.records import Call, CallRecord, CallRecords
+from pod_gateway.replay import export_bundle
+from pod_gateway.server import Gateway
+from subnet_common.witness.auth import Authenticator, Membership
+from subnet_common.witness.certs import pod_context
+from subnet_common.witness.models import Pod, PodSpec, Scope
+from subnet_common.witness.pricing import PricingStore
+from subnet_common.witness.rounds import RoundInputs
+from subnet_common.witness.security import capability
+from subnet_common.witness.selection import Selection
+from subnet_common.witness.state import PrefixedState, WriteUncertain
 from support import MemoryState, Provider
 from test_pricing import extended_pricing
 from test_recording import PRICING
@@ -42,22 +57,6 @@ from witness_client.calls import RequestKey, canonical
 from witness_client.pods import Snapshot
 from witness_client.request import serialize_body
 from witness_client.tunnel import WebSocketTunnel
-
-from pod_gateway.auth import Authenticator, Membership
-from pod_gateway.budget import Budget
-from pod_gateway.certs import pod_context
-from pod_gateway.control import DrainControl, Registry
-from pod_gateway.direct import Witness
-from pod_gateway.lifecycle import Allocator
-from pod_gateway.models import Pod, PodSpec, Scope
-from pod_gateway.pricing import PricingStore
-from pod_gateway.records import Call, CallRecord, CallRecords
-from pod_gateway.replay import export_bundle
-from pod_gateway.rounds import RoundInputs
-from pod_gateway.security import capability
-from pod_gateway.selection import Selection
-from pod_gateway.server import Gateway
-from pod_gateway.state import PrefixedState, WriteUncertain
 
 SECRET = b"s" * 32
 PROOF = "c" * 64
@@ -71,7 +70,7 @@ def test_fresh_signature_does_not_expire_while_waiting_for_runpod(
     key = Keypair.create_from_mnemonic(Keypair.generate_mnemonic())
     headers = hotkey_headers(key, b"", method="GET", path="/v1/pods/current")
     clock = [int(headers["x-bittensor-nonce"])]
-    monkeypatch.setattr("pod_gateway.auth.time.time_ns", lambda: clock[0])
+    monkeypatch.setattr("subnet_common.witness.auth.time.time_ns", lambda: clock[0])
     membership = Membership("test", 17, "test-1", key.ss58_address)
     now = int(time.time() * 1000)
     membership.snapshot = {

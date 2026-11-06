@@ -8,13 +8,12 @@ from typing import Literal
 
 import pytest
 from miner_runtime.accounting import credits as replay_credits
+from pod_gateway.budget import Budget, BudgetRejected
+from pod_gateway.records import Call, CallRecords, RecordingConflict
+from subnet_common.witness.models import Scope
 from support import MemoryState
 from witness_client.calls import RequestKey, canonical, request_digest
 from witness_client.request import serialize_body
-
-from pod_gateway.budget import Budget, BudgetRejected
-from pod_gateway.models import Scope
-from pod_gateway.records import Call, CallRecords, RecordingConflict
 
 SCOPE = Scope("competition", "test-0", "5" * 48)
 BODY = canonical({"model": "fixture", "input": "image", "stream": True, "service_tier": "default"})

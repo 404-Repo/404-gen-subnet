@@ -22,14 +22,13 @@ import httpx
 import pytest
 from channel import WorkerChannel
 from pod import PodRuntime
-from support import MemoryState
-from test_recording import BODY, PRICING, SCOPE, invocation
-from test_recovery import PROOF, RESPONSE, START, evidence, prefix, runtime
-
 from pod_gateway.budget import Budget
 from pod_gateway.records import CallRecords
 from pod_gateway.recovery import recover_issued
-from pod_gateway.state import Snapshot, StateConflict
+from subnet_common.witness.state import Snapshot, StateConflict
+from support import MemoryState
+from test_recording import BODY, PRICING, SCOPE, invocation
+from test_recovery import PROOF, RESPONSE, START, evidence, prefix, runtime
 
 
 class DiskState(MemoryState):

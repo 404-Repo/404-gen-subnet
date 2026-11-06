@@ -5,9 +5,10 @@ import ssl
 import tempfile
 from pathlib import Path
 
-from .artifacts import ArtifactConfig
-from .models import PodSpec
-from .rounds import RoundInputs
+from subnet_common.witness.artifacts import ArtifactConfig
+from subnet_common.witness.models import PodSpec
+from subnet_common.witness.rounds import RoundInputs
+
 from .settings import Settings
 
 

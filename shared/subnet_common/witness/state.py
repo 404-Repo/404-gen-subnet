@@ -31,6 +31,10 @@ class Snapshot:
     data: bytes
 
 
+class Evidence(Protocol):
+    def read(self, key: str, limit: int = 16 * 1024 * 1024) -> bytes | None: ...
+
+
 class StateStore(Protocol):
     def load(self, key: str) -> Snapshot | None: ...
     def save(self, key: str, data: bytes, expected: str | None) -> Snapshot: ...

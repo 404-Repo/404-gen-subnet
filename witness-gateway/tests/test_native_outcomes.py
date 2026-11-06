@@ -19,16 +19,15 @@ from miner_runtime.observations import ReplayMismatch
 from miner_runtime.runner import run_generation
 from miner_runtime.validator import ReplayWitness, run_replay
 from openai.types.responses import Response
+from pod_gateway.replay import export_bundle
 from storage import Store
+from subnet_common.witness.certs import create
 from test_recording import PRICING
 from test_service import Harness
 from witness_client import WitnessClient
 from witness_client.response import ModelStream
 from witness_client.transport import exchange
 from worker import Verifier, relay
-
-from pod_gateway.certs import create
-from pod_gateway.replay import export_bundle
 
 
 def outcome_body(outcome: str) -> tuple[int, bytes]:

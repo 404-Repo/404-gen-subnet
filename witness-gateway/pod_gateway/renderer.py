@@ -17,12 +17,11 @@ from typing import TYPE_CHECKING, Protocol
 import httpx
 from renderer_client import RenderUnavailable
 from renderer_client.client import MAX_ERROR_BYTES, MAX_RESPONSE_BYTES
-
-from .artifacts import Objects
-from .models import Scope, json_bytes
+from subnet_common.witness.artifacts import Objects
+from subnet_common.witness.models import Scope, json_bytes
 
 if TYPE_CHECKING:
-    from .artifacts import ArtifactProfile
+    from subnet_common.witness.artifacts import ArtifactProfile
 
 READY_SECONDS = 60
 MAX_SUCCESSFUL_RENDERS = 10_000

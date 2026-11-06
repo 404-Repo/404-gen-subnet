@@ -6,8 +6,8 @@ import threading
 from collections.abc import Callable, Iterator
 from dataclasses import replace
 
-from pod_gateway.models import MARKERS, Pod, object_dict, string
-from pod_gateway.state import Snapshot, StateConflict
+from subnet_common.witness.models import MARKERS, Pod, object_dict, string
+from subnet_common.witness.state import Snapshot, StateConflict
 
 
 class MemoryState:

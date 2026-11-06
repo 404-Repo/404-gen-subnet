@@ -16,11 +16,10 @@ from pydantic import (
     model_validator,
 )
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
-
-from .artifacts import ArtifactConfig, ArtifactProfile
-from .auth import public_key
-from .models import Scope
-from .rounds import repository
+from subnet_common.witness.artifacts import ArtifactConfig, ArtifactProfile
+from subnet_common.witness.auth import public_key
+from subnet_common.witness.models import Scope
+from subnet_common.witness.rounds import repository
 
 
 class Settings(BaseSettings):

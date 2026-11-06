@@ -20,18 +20,17 @@ from botocore.exceptions import EndpointConnectionError
 from channel import WorkerChannel
 from diagnostics import failure_fact
 from pod import PodRuntime
+from pod_gateway.budget import Budget
+from pod_gateway.direct import Witness
+from pod_gateway.records import Call, CallRecord, CallRecords, RecordingConflict
+from pod_gateway.recovery import recover_issued
+from subnet_common.witness.models import Scope
+from subnet_common.witness.rounds import PromptImage, RoundInputs
+from subnet_common.witness.state import R2StateStore, Snapshot, StateConflict, WriteUncertain
 from support import MemoryState
 from test_recording import BODY, PRICING, SCOPE, invocation
 from test_state import FakeS3, s3_error
 from witness_client.calls import RequestKey, canonical
-
-from pod_gateway.budget import Budget
-from pod_gateway.direct import Witness
-from pod_gateway.models import Scope
-from pod_gateway.records import Call, CallRecord, CallRecords, RecordingConflict
-from pod_gateway.recovery import recover_issued
-from pod_gateway.rounds import PromptImage, RoundInputs
-from pod_gateway.state import R2StateStore, Snapshot, StateConflict, WriteUncertain
 
 START = "00000000-0000-4000-8000-000000000001"
 PROOF = "c" * 64

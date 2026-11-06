@@ -11,11 +11,10 @@ from typing import Literal
 
 from miner_runtime.accounting import credits as usage_credits
 from pydantic import BaseModel, ConfigDict, Field
+from subnet_common.witness.models import Scope
+from subnet_common.witness.pricing import ModelTable
+from subnet_common.witness.state import StateConflict, StateStore, WriteRejected
 from witness_client.calls import RequestKey, request_digest
-
-from .models import Scope
-from .pricing import ModelTable
-from .state import StateConflict, StateStore, WriteRejected
 
 
 class BudgetRejected(RuntimeError):

@@ -2,13 +2,12 @@ from collections.abc import Callable
 from dataclasses import replace
 
 import pytest
-from support import MemoryState, Provider
-
 from pod_gateway.control import DrainControl
 from pod_gateway.lifecycle import Allocator, InventoryConflict
-from pod_gateway.models import Pod, PodSpec, Scope
-from pod_gateway.selection import Selection
-from pod_gateway.state import Snapshot, StateConflict
+from subnet_common.witness.models import Pod, PodSpec, Scope
+from subnet_common.witness.selection import Selection
+from subnet_common.witness.state import Snapshot, StateConflict
+from support import MemoryState, Provider
 
 SCOPE = Scope("competition", "test-0", "5" * 48)
 START = "00000000-0000-4000-8000-000000000001"

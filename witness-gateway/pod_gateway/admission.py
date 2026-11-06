@@ -10,9 +10,8 @@ from collections.abc import Callable
 from typing import Literal, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field
-
-from .models import Pod, Scope, identifier
-from .state import MAX_JOURNAL_BYTES, StateConflict, StateStore
+from subnet_common.witness.models import Pod, Scope, identifier
+from subnet_common.witness.state import MAX_JOURNAL_BYTES, StateConflict, StateStore
 
 T = TypeVar("T")
 

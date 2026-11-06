@@ -10,10 +10,9 @@ from collections.abc import Callable
 from typing import Literal, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field
+from subnet_common.witness.models import Scope, identifier, json_bytes
+from subnet_common.witness.state import StateConflict, StateStore
 from witness_client.calls import RequestKey
-
-from .models import Scope, identifier, json_bytes
-from .state import StateConflict, StateStore
 
 T = TypeVar("T")
 

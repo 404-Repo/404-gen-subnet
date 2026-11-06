@@ -12,15 +12,14 @@ from typing import Any, Callable
 import openai
 import pytest
 from subnet_common.competition.generations import GenerationResult
+from subnet_common.witness.auth import AuthRejected
+from subnet_common.witness.models import PodSpec, Scope
+from subnet_common.witness.rounds import PromptImage, RoundInputs, RoundPolicy
+from subnet_common.witness.state import Snapshot, StateConflict, WriteUncertain
 from test_artifacts import SOURCE, client, enable
 from test_rounds import Competition, policy, publication
 from test_service import Harness, call_key
 from witness_client import AsyncWitnessClient, WitnessError
-
-from pod_gateway.auth import AuthRejected
-from pod_gateway.models import PodSpec, Scope
-from pod_gateway.rounds import PromptImage, RoundInputs, RoundPolicy
-from pod_gateway.state import Snapshot, StateConflict, WriteUncertain
 
 
 def freeze(fixture: Harness, *, images: tuple[bytes, ...] | None = None) -> RoundInputs:
@@ -369,7 +368,7 @@ def test_disabled_final_storage_returns_an_error_while_provider_recordings_remai
 
 def test_gateway_restart_retains_a_pending_pod_until_its_frozen_specification_is_resolved() -> None:
     from support import MemoryState, Provider
-    from test_gateway_limits import KEYS, FIRST, coordinator
+    from test_gateway_limits import FIRST, KEYS, coordinator
 
     async def scenario() -> None:
         state, provider = MemoryState(), Provider()
@@ -399,7 +398,7 @@ def test_allocation_resumes_when_policy_is_lost_after_authorization(
     monkeypatch: pytest.MonkeyPatch, closed: bool,
 ) -> None:
     from support import MemoryState, Provider
-    from test_gateway_limits import FIRST, SECOND, KEYS, coordinator
+    from test_gateway_limits import FIRST, KEYS, SECOND, coordinator
 
     async def scenario() -> None:
         state, provider, clock = MemoryState(), Provider(), [1000.0]
@@ -452,7 +451,7 @@ def test_allocation_resumes_when_policy_is_lost_after_authorization(
 @pytest.mark.parametrize("applied", [False, True])
 def test_round_rollover_retries_a_failed_queue_write(monkeypatch: pytest.MonkeyPatch, applied: bool) -> None:
     from support import MemoryState, Provider
-    from test_gateway_limits import FIRST, SECOND, KEYS, coordinator
+    from test_gateway_limits import FIRST, KEYS, SECOND, coordinator
 
     async def scenario() -> None:
         state, provider, clock = MemoryState(), Provider(), [1000.0]

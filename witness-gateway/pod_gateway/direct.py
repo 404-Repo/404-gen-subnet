@@ -18,17 +18,17 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from renderer_client import RenderRejected, RenderUnavailable
 from renderer_client.client import MAX_ERROR_BYTES, MAX_RESPONSE_BYTES, PNG_SIGNATURE
 from subnet_common.competition.generations import GenerationsAdapter
+from subnet_common.witness.auth import Authenticator, AuthRejected, Membership
+from subnet_common.witness.models import Scope, identifier
+from subnet_common.witness.security import verify_miner_access
 from witness_client.calls import RequestKey
 from witness_client.request import PROVIDERS
 
 from .artifacts import ArtifactRepository, SubmissionContext
-from .auth import Authenticator, AuthRejected, Membership
-from .models import Scope, identifier
 from .records import Call, RecordingConflict
 from .recovery import recover_issued
 from .renderer import RenderCache
 from .results import ResultSaver
-from .security import verify_miner_access
 
 if TYPE_CHECKING:
     from pod import PodRuntime

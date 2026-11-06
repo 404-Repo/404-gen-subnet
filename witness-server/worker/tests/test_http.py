@@ -9,7 +9,7 @@ from typing import cast
 
 import pytest
 from aiohttp import web
-from pod_gateway.certs import pod_context
+from subnet_common.witness.certs import pod_context
 
 
 @pytest.mark.parametrize(

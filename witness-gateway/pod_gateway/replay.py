@@ -12,12 +12,12 @@ from collections.abc import Callable
 from pathlib import Path
 
 from miner_runtime.observations import Execution
+from subnet_common.witness.models import Scope, json_bytes
+from subnet_common.witness.state import Evidence
 from witness_client.calls import request_digest
 
-from .models import Scope, json_bytes
 from .records import CallRecords
 from .recovery import response_failure
-from .server import Evidence
 
 Verify = Callable[[str, Path], dict[str, object]]
 

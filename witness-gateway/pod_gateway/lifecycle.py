@@ -8,10 +8,11 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from typing import Protocol
 
+from subnet_common.witness.models import Pod, PodSpec, Scope, Session, identifier
+from subnet_common.witness.selection import Selection
+
 from .admission import Admission
-from .models import Pod, PodSpec, Scope, Session, identifier
 from .runpod import CreateRejected, PodProvider, ProviderUnavailable
-from .selection import Selection
 
 
 class AllocationConflict(RuntimeError):

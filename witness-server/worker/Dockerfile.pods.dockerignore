@@ -100,3 +100,7 @@ shared/subnet_common/competition/**
 !shared/subnet_common/competition/seed.py
 !shared/subnet_common/competition/prompts.py
 !NOTICE.md
+
+!shared/subnet_common/witness/
+shared/subnet_common/witness/**
+!shared/subnet_common/witness/*.py

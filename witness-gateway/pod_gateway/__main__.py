@@ -45,12 +45,12 @@ def main() -> None:
     args = parser.parse_args()
     role = args.role or os.environ.get("WITNESS_ROLE", "worker")
     if role == "certs":
-        from .certs import create
+        from subnet_common.witness.certs import create
 
         create(args.directory)
     elif role in ("export", "publish-pricing"):
-        from .pricing import PricingStore
-        from .state import R2StateStore
+        from subnet_common.witness.pricing import PricingStore
+        from subnet_common.witness.state import R2StateStore
 
         state = R2StateStore.connect(
             endpoint=os.environ["R2_ENDPOINT"],
@@ -65,11 +65,11 @@ def main() -> None:
             return
 
         from subnet_common.competition.schedule import RoundSchedule
+        from subnet_common.witness.models import Scope
+        from subnet_common.witness.state import PrefixedState
 
-        from .models import Scope
         from .records import CallRecords
         from .replay import export_bundle, native_verifier
-        from .state import PrefixedState
 
         sys.path.insert(0, str(root / "witness-server/worker"))
         from storage import R2Store

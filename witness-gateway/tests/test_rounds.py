@@ -13,19 +13,20 @@ from pathlib import Path
 import httpx
 import pytest
 from PIL import Image
-from subnet_common.github import GitHubClient
-from support import MemoryState, Provider
-from test_lifecycle import Drain, FIRST, SECOND, SCOPE, SPEC
-from test_settings import values as settings_values
-
-from pod_gateway.artifacts import ArtifactConfig, ArtifactRepository
-from pod_gateway.auth import AuthRejected
+from pod_gateway.artifacts import ArtifactRepository
 from pod_gateway.dependencies import gateway_spec, worker_spec
 from pod_gateway.lifecycle import Allocator
 from pod_gateway.revivor import Revivor
-from pod_gateway.rounds import RoundController, RoundInputs, RoundPolicy
+from pod_gateway.rounds import RoundController
 from pod_gateway.settings import Settings
-from pod_gateway.state import PrefixedState
+from subnet_common.github import GitHubClient
+from subnet_common.witness.artifacts import ArtifactConfig
+from subnet_common.witness.auth import AuthRejected
+from subnet_common.witness.rounds import RoundInputs, RoundPolicy
+from subnet_common.witness.state import PrefixedState
+from support import MemoryState, Provider
+from test_lifecycle import FIRST, SCOPE, SECOND, SPEC, Drain
+from test_settings import values as settings_values
 
 values = settings_values
 
@@ -359,9 +360,9 @@ def test_repository_image_urls_pin_the_exact_selected_branch_name(host: str, rou
 
 
 def test_frozen_prompt_objects_keep_their_image_media_type() -> None:
-    from test_state import FakeS3
     from pod_gateway.rounds import RoundImages
-    from pod_gateway.state import R2StateStore
+    from subnet_common.witness.state import R2StateStore
+    from test_state import FakeS3
 
     s3 = FakeS3()
     images = RoundImages(R2StateStore(s3, "private"))
@@ -424,8 +425,8 @@ def test_automatic_round_configuration_does_not_enable_a_test_hotkey_exemption(v
 
 
 def test_storage_namespaces_keep_results_and_call_journals_separate_with_unchanged_official_paths() -> None:
-    from subnet_common.competition.generations import GenerationResult
     from pod_gateway.records import CallRecords
+    from subnet_common.competition.generations import GenerationResult
     from test_recording import invocation
 
     state = MemoryState()

@@ -5,8 +5,7 @@ from typing import cast
 
 import pytest
 from botocore.exceptions import ClientError, ReadTimeoutError
-
-from pod_gateway.state import MAX_JOURNAL_BYTES, R2StateStore, StateConflict, WriteRejected, WriteUncertain
+from subnet_common.witness.state import MAX_JOURNAL_BYTES, R2StateStore, StateConflict, WriteRejected, WriteUncertain
 
 
 def s3_error(code: str, status: int) -> ClientError:
@@ -208,7 +207,7 @@ def test_client_disables_implicit_sdk_retries(monkeypatch: pytest.MonkeyPatch) -
         captured.update(kwargs)
         return s3
 
-    monkeypatch.setattr("pod_gateway.state.boto3.client", client)
+    monkeypatch.setattr("subnet_common.witness.state.boto3.client", client)
     store = R2StateStore.connect(
         endpoint="https://r2.invalid", access_key="offline", secret_key="offline", bucket="private"
     )

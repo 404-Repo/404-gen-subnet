@@ -16,15 +16,14 @@ import httpx
 import openai
 import pytest
 from bittensor_wallet import Keypair
+from pod_gateway.artifacts import ArtifactRepository, SubmissionContext
 from renderer_client import ArtifactUnavailable, RenderOptions, RenderRejected, RenderUnavailable
 from subnet_common.competition.generations import GenerationResult, GenerationsAdapter
+from subnet_common.witness.models import Scope
 from test_artifacts import PNG, SOURCE, client, enable
 from test_service import Harness
 from witness_client import AsyncWitnessClient, WitnessClient, WitnessError
 from witness_client.async_tunnel import AsyncWebSocketTunnel
-
-from pod_gateway.artifacts import ArtifactRepository, SubmissionContext
-from pod_gateway.models import Scope
 
 Mode = Literal["sync", "async"]
 

@@ -12,23 +12,22 @@ from functools import partial
 from types import SimpleNamespace
 from typing import cast
 
+import pytest
 from aiohttp import ClientResponse, WSMsgType, web
 from aiohttp.test_utils import TestClient, TestServer, make_mocked_request
 from bittensor_wallet import Keypair
-import pytest
-from support import MemoryState, Provider
-from witness_client.auth import hotkey_headers
-
 from pod_gateway.admission import Admission, PendingStart, QueueState
-from pod_gateway.auth import Authenticator, Membership
 from pod_gateway.control import DrainControl, Peer, Registry
 from pod_gateway.lifecycle import Allocator
-from pod_gateway.models import Pod, PodSpec, Scope, json_bytes
 from pod_gateway.runpod import CreateRejected, CreateUnknown, ProviderUnavailable
-from pod_gateway.selection import Selection
-from pod_gateway.security import capability
 from pod_gateway.server import Gateway
-from pod_gateway.state import Snapshot, WriteUncertain
+from subnet_common.witness.auth import Authenticator, Membership
+from subnet_common.witness.models import Pod, PodSpec, Scope, json_bytes
+from subnet_common.witness.security import capability
+from subnet_common.witness.selection import Selection
+from subnet_common.witness.state import Snapshot, WriteUncertain
+from support import MemoryState, Provider
+from witness_client.auth import hotkey_headers
 
 KEYS = (Keypair.create_from_uri("//Alice"), Keypair.create_from_uri("//Bob"))
 FIRST = "00000000-0000-4000-8000-000000000001"

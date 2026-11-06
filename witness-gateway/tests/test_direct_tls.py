@@ -16,14 +16,13 @@ import openai
 import pytest
 from channel import Channel
 from storage import Store
+from subnet_common.witness.certs import create
 from test_service import Harness, exchange_id
 from witness_client import WitnessClient
 from witness_client.calls import RequestKey
 from witness_client.request import serialize_body
 from witness_client.transport import exchange
 from worker import Verifier, relay
-
-from pod_gateway.certs import create
 
 
 @pytest.mark.parametrize("leave,status", [(False, 200), (True, 200), (False, 401)])

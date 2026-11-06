@@ -20,19 +20,18 @@ import httpx
 import pytest
 from aiohttp import web
 from aiohttp.test_utils import make_mocked_request
+from pod_gateway.artifacts import ArtifactRepository, SubmissionContext
+from pod_gateway.results import ResultSaver
 from renderer_client import ArtifactClient, ArtifactUnavailable, RenderRejected, RenderUnavailable
 from subnet_common.competition.generations import GenerationResult, GenerationsAdapter
 from subnet_common.render import GRAY_BG, GRAY_VIEWS, WHITE_BG, WHITE_VIEWS
+from subnet_common.witness.artifacts import ArtifactConfig
+from subnet_common.witness.auth import AuthRejected
+from subnet_common.witness.models import Scope
+from subnet_common.witness.selection import Selection
+from subnet_common.witness.state import Snapshot
 from support import MemoryState
 from test_service import Harness
-
-from pod_gateway.artifacts import ArtifactConfig, ArtifactRepository, SubmissionContext
-from pod_gateway.auth import AuthRejected
-from pod_gateway.models import Scope
-from pod_gateway.results import ResultSaver
-from pod_gateway.selection import Selection
-from pod_gateway.state import Snapshot
-
 
 PNG = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aN3sAAAAASUVORK5CYII=")
 SOURCE = "export default function generate(THREE) { return new THREE.Mesh(new THREE.BoxGeometry(.5,.5,.5)); }"
@@ -347,12 +346,12 @@ def test_reference_miner_completes_authenticated_flow(
 ) -> None:
     import json
 
-    from test_recording import PRICING
     from main import generate
     from miner_reference.batch import BatchSettings, Prompt, run_batch
     from miner_reference.submissions import run_and_save
     from miner_runtime.runner import run_generation
     from renderer_client import RendererClient
+    from test_recording import PRICING
     from witness_client.calls import canonical
 
     pricing = json.loads(PRICING)
@@ -741,7 +740,7 @@ def test_final_saves_complete_without_generating_again(
                             assert rendered == [SOURCE]
                             if case == "access_expiry":
                                 monkeypatch.setattr(
-                                    "pod_gateway.security.time", SimpleNamespace(time=lambda: float("inf")),
+                                    "subnet_common.witness.security.time", SimpleNamespace(time=lambda: float("inf")),
                                 )
                     finally:
                         release.set()

@@ -28,16 +28,16 @@ from diagnostics import (
     RuntimeIdentity,
     failure_fact,
 )
-from pod_gateway.auth import AuthRejected
 from pod_gateway.budget import Budget, BudgetNotReserved
-from pod_gateway.models import Scope, identifier, json_bytes, object_dict
 from pod_gateway.records import Call, CallRecords
 from pod_gateway.recovery import recover_issued, response_failure
 from pod_gateway.renderer import render_service
-from pod_gateway.rounds import RoundInputs, RoundPolicy
-from pod_gateway.selection import Selection
-from pod_gateway.state import WriteUncertain
 from storage import Store
+from subnet_common.witness.auth import AuthRejected
+from subnet_common.witness.models import Scope, identifier, json_bytes, object_dict
+from subnet_common.witness.rounds import RoundInputs, RoundPolicy
+from subnet_common.witness.selection import Selection
+from subnet_common.witness.state import WriteUncertain
 from timing import diagnostic_error, identify_exchange, measure, timed
 from websockets.sync.client import connect
 from websockets.sync.connection import Connection
@@ -740,12 +740,13 @@ class PodRuntime:
 
 def main() -> None:
     from aiohttp import web
-    from pod_gateway.artifacts import ArtifactConfig, ArtifactRepository
-    from pod_gateway.certs import pod_context
+    from pod_gateway.artifacts import ArtifactRepository
     from pod_gateway.direct import Witness
-    from pod_gateway.pricing import PricingStore
-    from pod_gateway.state import PrefixedState, R2StateStore
     from storage import R2Store
+    from subnet_common.witness.artifacts import ArtifactConfig
+    from subnet_common.witness.certs import pod_context
+    from subnet_common.witness.pricing import PricingStore
+    from subnet_common.witness.state import PrefixedState, R2StateStore
 
     state = R2StateStore.connect(
         endpoint=os.environ["R2_ENDPOINT"],

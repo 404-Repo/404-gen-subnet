@@ -9,8 +9,7 @@ import uuid
 from dataclasses import dataclass, field
 
 from aiohttp import web
-
-from .models import Pod, Scope
+from subnet_common.witness.models import Pod, Scope
 
 
 @dataclass

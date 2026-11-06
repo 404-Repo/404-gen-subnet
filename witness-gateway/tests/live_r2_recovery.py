@@ -20,12 +20,11 @@ from botocore.exceptions import ClientError, ReadTimeoutError
 logging.getLogger("urllib3").setLevel(logging.CRITICAL)
 SOURCE = Path(__file__).resolve().parents[2]
 from bittensor_wallet import Keypair
-from witness_client.calls import RequestKey, canonical
-
 from pod_gateway.budget import Budget
-from pod_gateway.models import Scope
 from pod_gateway.records import CallRecords
-from pod_gateway.state import R2StateStore, StateConflict, WriteUncertain
+from subnet_common.witness.models import Scope
+from subnet_common.witness.state import R2StateStore, StateConflict, WriteUncertain
+from witness_client.calls import RequestKey, canonical
 
 
 def main() -> None:

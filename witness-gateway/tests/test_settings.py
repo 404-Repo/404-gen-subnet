@@ -13,18 +13,17 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 from aiohttp import web
 from bittensor_wallet import Keypair
+from pod_gateway.dependencies import gateway_spec, worker_spec
+from pod_gateway.renderer import renderer_profile_sha256, require_artifact_profile
+from pod_gateway.settings import GatewaySettings, Settings
 from pydantic import SecretStr
+from subnet_common.witness.artifacts import ArtifactProfile
+from subnet_common.witness.auth import Authenticator, AuthRejected, Membership
+from subnet_common.witness.models import Scope
+from subnet_common.witness.pricing import PricingStore
 from support import MemoryState
 from test_recording import PRICING
 from witness_client.auth import hotkey_headers
-
-from pod_gateway.artifacts import ArtifactProfile
-from pod_gateway.auth import Authenticator, AuthRejected, Membership
-from pod_gateway.dependencies import gateway_spec, worker_spec
-from pod_gateway.models import Scope
-from pod_gateway.pricing import PricingStore
-from pod_gateway.renderer import renderer_profile_sha256, require_artifact_profile
-from pod_gateway.settings import GatewaySettings, Settings
 
 
 @pytest.mark.parametrize("round_number", ["test-0", "test-1", "test-2"])
@@ -58,7 +57,7 @@ def test_test_hotkey_is_rejected_for_competition_rounds() -> None:
 def test_hotkey_timestamp_window(monkeypatch: pytest.MonkeyPatch, age_ns: int, accepted: bool) -> None:
     key = Keypair.create_from_uri("//Alice")
     clock = [time.time_ns()]
-    monkeypatch.setattr("pod_gateway.auth.time.time_ns", lambda: clock[0])
+    monkeypatch.setattr("subnet_common.witness.auth.time.time_ns", lambda: clock[0])
     headers = hotkey_headers(key, b"", method="GET", path="/v1/pods/current")
     membership = Membership("test", 17, "test-1")
     now = int(time.time() * 1000)
@@ -79,7 +78,7 @@ def test_hotkey_timestamp_window(monkeypatch: pytest.MonkeyPatch, age_ns: int, a
 def test_hotkey_replay_is_rejected_through_timestamp_window(monkeypatch: pytest.MonkeyPatch, age_ns: int) -> None:
     key = Keypair.create_from_uri("//Alice")
     clock = [time.time_ns()]
-    monkeypatch.setattr("pod_gateway.auth.time.time_ns", lambda: clock[0])
+    monkeypatch.setattr("subnet_common.witness.auth.time.time_ns", lambda: clock[0])
     headers = hotkey_headers(key, b"", method="GET", path="/v1/pods/current")
     membership = Membership("test", 17, "test-1")
     now = int(time.time() * 1000)
@@ -372,7 +371,8 @@ def test_assigned_pod_starts_artifact_storage_without_a_source_commit(
     save_submissions: bool,
 ) -> None:
     import pod
-    from pod_gateway import certs, direct, renderer, state
+    from pod_gateway import direct, renderer
+    from subnet_common.witness import certs, state
 
     class Started(Exception):
         pass
@@ -453,7 +453,11 @@ def test_settings_import_with_the_shared_modules_packaged_in_the_pod(tmp_path: P
             target = tmp_path / parts[-1].removeprefix("/app/")
             target.mkdir(parents=True, exist_ok=True)
             for name in parts[1:-1]:
-                shutil.copyfile(root / name, target / Path(name).name)
+                source = root / name
+                if source.is_dir():
+                    shutil.copytree(source, target, dirs_exist_ok=True)
+                else:
+                    shutil.copyfile(source, target / source.name)
     result = subprocess.run(
         [sys.executable, "-c", "import pod_gateway.settings"],
         cwd=tmp_path,
