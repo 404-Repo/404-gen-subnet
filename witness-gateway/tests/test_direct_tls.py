@@ -10,7 +10,6 @@ import subprocess
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import cast
 
 import openai
 import pytest
@@ -20,6 +19,7 @@ from witness_client import WitnessClient
 from witness_client.calls import RequestKey
 from witness_client.request import serialize_body
 from witness_client.transport import exchange
+from witness_pod import VERIFY_SCRIPT
 from witness_pod.channel import Channel
 from witness_pod.storage import Store
 from witness_pod.worker import Verifier, relay
@@ -91,23 +91,17 @@ def test_native_direct_tls_durable_completion_and_exact_recovery(
 
         captured = pool.submit(provider)
 
-        def verify(mode: str, directory: Path, *, provider: str) -> dict[str, object]:
-            (directory / "ca.pem").write_bytes((provider_dir / "ca.pem").read_bytes())
-            result = subprocess.run(
-                [
-                    "node",
-                    str(root / "witness-server/worker/tests/verify-fixture.mjs"),
-                    mode,
-                    str(directory),
-                    str(root / "witness-server/verifier/params"),
-                    provider,
-                ],
-                capture_output=True,
-                timeout=180,
-                check=False,
-            )
-            assert result.returncode == 0, result.stderr.decode()
-            return cast(dict[str, object], json.loads(result.stdout))
+        original_run = subprocess.run
+
+        def run_verifier(
+            args: list[str], *, capture_output: bool, timeout: float, check: bool,
+            env: dict[str, str] | None = None,
+        ) -> subprocess.CompletedProcess[bytes]:
+            if args[0] == "node" and args[1] == str(VERIFY_SCRIPT):
+                directory = Path(args[3])
+                (directory / "ca.pem").write_bytes((provider_dir / "ca.pem").read_bytes())
+                args = [args[0], str(root / "witness-server/worker/tests/verify-fixture.mjs"), *args[2:]]
+            return original_run(args, capture_output=capture_output, timeout=timeout, check=check, env=env)
 
         def direct_relay(
             store: Store,
@@ -134,7 +128,7 @@ def test_native_direct_tls_durable_completion_and_exact_recovery(
         async def scenario() -> None:
             fixture = Harness(tmp_path, monkeypatch, native=True)
             monkeypatch.setattr("witness_pod.pod.relay", direct_relay)
-            monkeypatch.setattr("witness_pod.pod.verify", verify)
+            monkeypatch.setattr("witness_pod.worker.subprocess.run", run_verifier)
             monkeypatch.setitem(
                 __import__("witness_client.request", fromlist=["PROVIDERS"]).PROVIDERS,
                 "api",

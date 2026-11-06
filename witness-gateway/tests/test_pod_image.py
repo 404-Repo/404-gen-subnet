@@ -32,22 +32,28 @@ def test_pod_contains_current_client_worker_and_renderer() -> None:
         ("miner-runtime/src/miner_runtime", "/app/miner-runtime/src/miner_runtime", "*.py"),
         ("renderer-client/src/renderer_client", "/app/renderer-client/src/renderer_client", "*.py"),
         ("shared/subnet_common/witness", "/app/shared/subnet_common/witness", "*.py"),
-        ("witness-server/worker/witness_pod", "/app/witness-server/worker/witness_pod", "*.py"),
-        ("witness-server/verifier", "/app/witness-server/verifier", "*.mjs"),
         ("render-service-js/src", "/opt/renderer/src", "*.js"),
     ):
         for path in (ROOT / source).rglob(pattern):
             if "tests" in path.relative_to(ROOT / source).parts or path.name.endswith(".test.mjs"):
                 continue
             expected[str(Path(target) / path.relative_to(ROOT / source))] = hashlib.sha256(path.read_bytes()).hexdigest()
+    package = ROOT / "witness-server/worker/witness_pod"
+    package_files = [*package.glob("*.py"), package / "verify.mjs",
+                     *(path for path in (package / "verifier").glob("*.mjs") if not path.name.endswith(".test.mjs"))]
+    package_expected = {str(path.relative_to(package)): hashlib.sha256(path.read_bytes()).hexdigest()
+                        for path in package_files}
     expected["/opt/renderer/package.json"] = hashlib.sha256((ROOT / "render-service-js/package.json").read_bytes()).hexdigest()
     run(f"""
 import hashlib
 from pathlib import Path
 import witness_pod.direct
+import witness_pod
 from witness_pod import pod
 for name, digest in {expected!r}.items():
     assert hashlib.sha256(Path(name).read_bytes()).hexdigest() == digest, name
+for name, digest in {package_expected!r}.items():
+    assert hashlib.sha256((Path(witness_pod.__file__).parent / name).read_bytes()).hexdigest() == digest, name
 assert Path('/opt/witness-affinity/libwitness-affinity.so').is_file()
 assert not Path('/opt/benchmark').exists()
 assert not Path('/opt/fixtures').exists()

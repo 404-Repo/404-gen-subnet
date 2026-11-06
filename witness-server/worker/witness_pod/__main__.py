@@ -7,6 +7,8 @@ import hashlib
 import os
 from pathlib import Path
 
+from . import PROOF_PARAMETERS, VERIFY_SCRIPT
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Witness Pod")
@@ -17,9 +19,8 @@ def main() -> None:
     export.add_argument("--execution", type=Path, required=True)
     export.add_argument("--output", type=Path, required=True)
     export.add_argument("--storage-prefix", default="")
-    root = Path(__file__).resolve().parents[3]
-    export.add_argument("--parameters", type=Path, default=root / "witness-server/verifier/params")
-    export.add_argument("--verifier", type=Path, default=root / "witness-server/worker/verify.mjs")
+    export.add_argument("--parameters", type=Path, default=PROOF_PARAMETERS)
+    export.add_argument("--verifier", type=Path, default=VERIFY_SCRIPT)
     export.add_argument(
         "--pricing", type=Path, help="local pricing table override; defaults to the shared model table"
     )

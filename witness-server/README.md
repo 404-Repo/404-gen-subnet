@@ -5,7 +5,7 @@ Bittensor hotkeys and assigns ordinary RunPod CPU Pods. The
 [witness worker](worker/README.md) captures OpenAI exchanges, verifies them and
 saves requests, responses, proofs and usage in private R2 storage.
 
-The [verifier](verifier/README.md) runs inside the worker and in local fixtures.
+The [verifier](worker/witness_pod/verifier/README.md) runs inside the worker and in local fixtures.
 Its native proof binary is built from `witness-client/native`. The public client
 is [WitnessClient](../witness-client/README.md). Recordings preserve call identity,
 output bytes and delivery order so recovery and replay can use saved responses.
@@ -21,15 +21,16 @@ and deployment gates.
 Use Node 22 for the verifier. The Pod runtime pins Python 3.14.9. Build the
 client/native verifier and install development dependencies as described in
 [client development](../witness-client/DEVELOPMENT.md). Matching proof parameters
-are included in `witness-server/verifier/params/`.
+are included in `witness-server/worker/witness_pod/verifier/params/`.
 
 From the repository root:
 
 ```sh
 python -m pip install -c witness-gateway/constraints-pods.txt -r witness-gateway/requirements-pods.txt
 python -m pip install --no-deps -e witness-gateway -e witness-server/worker
-npm --prefix witness-server/verifier ci --ignore-scripts
-npm --prefix witness-server/verifier run build:proof
+npm --prefix witness-server/worker/witness_pod/verifier ci --ignore-scripts
+npm --prefix witness-server/worker/witness_pod/verifier run build:proof
+export PATH="$PWD/witness-client/native:$PATH"
 ```
 
 Run each suite from its directory:
@@ -38,7 +39,7 @@ Run each suite from its directory:
 | --- | --- |
 | `witness-gateway` | `python -m mypy`, `PYTHONPATH=../witness-client/src:../witness-server/worker python -m pytest -q` |
 | `witness-server/worker` | `python -m pytest -q`, `python -m mypy` |
-| `witness-server/verifier` | `npm test`, `npm run test:proof` |
+| `witness-server/worker/witness_pod/verifier` | `npm test`, `npm run test:proof` |
 | `witness-client` | `python -m pytest -q`, `python -m mypy` |
 
 Worker tests use real local WebSockets, provider TLS and native credential proofs.

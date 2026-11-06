@@ -280,7 +280,7 @@ async def main():
         if output.exists():return web.json_response({'verified':True,'saved':True})
         await asyncio.to_thread(export_bundle,records=app['records'],evidence=STORE,scope=app['scope'],execution=path,
             output=output,proof_hash=PROOF,pricing=PricingStore(STORE.state,DEPLOYMENT).read(),
-            verify=native_verifier(Path('/app/witness-server/worker/verify.mjs'),worker.PARAMETERS))
+            verify=native_verifier(worker.VERIFY_SCRIPT,worker.PARAMETERS))
         event('bundle_verified',execution=key);return web.json_response({'verified':True})
     async def download(request):
         proc=await asyncio.create_subprocess_exec('tar','czf','-','--exclude=ca.pem','--exclude=cert.pem','--exclude=key.pem',

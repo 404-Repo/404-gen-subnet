@@ -155,7 +155,7 @@ class Harness:
         self.records, self.selection = CallRecords(self.state), Selection(self.state)
         self.proof = (
             hashlib.sha256(
-                (Path(__file__).resolve().parents[2] / "witness-server/verifier/params/verifying.bin").read_bytes()
+                (Path(__file__).resolve().parents[2] / "witness-server/worker/witness_pod/verifier/params/verifying.bin").read_bytes()
             ).hexdigest()
             if native
             else PROOF
@@ -184,7 +184,7 @@ class Harness:
         return WitnessClient(
             {
                 "witness_url": self.origin,
-                "proof_parameters": str(Path(__file__).resolve().parents[2] / "witness-server/verifier/params"),
+                "proof_parameters": str(Path(__file__).resolve().parents[2] / "witness-server/worker/witness_pod/verifier/params"),
                 "state_directory": str(self.directory / state),
             },
             hotkey=self.key,

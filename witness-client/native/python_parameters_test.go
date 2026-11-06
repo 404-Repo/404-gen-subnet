@@ -17,7 +17,7 @@ import (
 	"github.com/consensys/gnark/frontend/cs/r1cs"
 )
 
-const publishedParameters = "../../witness-server/verifier/params"
+const publishedParameters = "../../witness-server/worker/witness_pod/verifier/params"
 
 func copyParameters(t *testing.T) string {
 	t.Helper()

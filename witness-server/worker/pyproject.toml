@@ -10,9 +10,13 @@ requires-python = ">=3.11"
 
 [tool.setuptools.packages.find]
 include = ["witness_pod*"]
+namespaces = false
 
 [tool.setuptools.package-data]
-witness_pod = ["py.typed"]
+witness_pod = ["py.typed", "verify.mjs", "verifier/*.mjs", "verifier/package*.json", "verifier/THIRD_PARTY_NOTICES.md", "verifier/params/verifying.bin"]
+
+[tool.setuptools.exclude-package-data]
+witness_pod = ["verifier/*.test.mjs"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

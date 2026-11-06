@@ -33,7 +33,7 @@ from witness_pod.identity import Provider, miner_prefix
 from witness_pod.storage import json_bytes
 from witness_pod.worker import PROVIDERS, relay
 
-WITNESS = Path(__file__).resolve().parents[2] / "verifier"
+WITNESS = Path(__file__).resolve().parents[1] / "witness_pod/verifier"
 
 
 class MinerLeft(Exception):

@@ -20,7 +20,7 @@ class StackFrame(BaseModel):
 class VerifierFrame(BaseModel):
     model_config = ConfigDict(frozen=True, strict=True, extra="ignore")
 
-    file: Annotated[str, Field(pattern=r"^(worker|verifier)/[A-Za-z0-9_.-]+\.mjs$")]
+    file: Annotated[str, Field(pattern=r"^(worker|verifier|witness_pod)/[A-Za-z0-9_.-]+\.mjs$")]
     function: Annotated[str, Field(pattern=r"^[A-Za-z_$][A-Za-z0-9_.$]*$")] | None
     line: Annotated[int, Field(gt=0)]
     column: Annotated[int, Field(gt=0)]

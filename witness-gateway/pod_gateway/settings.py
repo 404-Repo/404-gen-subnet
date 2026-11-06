@@ -16,6 +16,7 @@ from pydantic import (
     model_validator,
 )
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+from subnet_common.witness import PROOF_PARAMETERS
 from subnet_common.witness.auth import keypair_from_hotkey
 from subnet_common.witness.models import Scope
 from subnet_common.witness.rounds import repository
@@ -181,7 +182,7 @@ class GatewaySettings(Settings):
     pod_id: str = Field(..., alias="RUNPOD_POD_ID")
     port: int = Field(default=8443, alias="GATEWAY_PORT")
     min_request_interval: float = Field(default=1.1, alias="GATEWAY_MIN_REQUEST_INTERVAL")
-    parameters: Path = Field(default=Path("/app/witness-server/verifier/params"), alias="WITNESS_PARAMETERS")
+    parameters: Path = Field(default=PROOF_PARAMETERS, alias="WITNESS_PARAMETERS")
 
     @field_validator("port", mode="before")
     @classmethod

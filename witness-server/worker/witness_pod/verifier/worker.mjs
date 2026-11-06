@@ -1,9 +1,12 @@
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { existsSync } from 'node:fs';
+import { delimiter, join } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { timing } from './timing.mjs';
 
-export const DEFAULT_BINARY = fileURLToPath(new URL('../../witness-client/native/privateauth', import.meta.url));
+export const DEFAULT_BINARY = (process.env.PATH ?? '').split(delimiter)
+  .map(directory => join(directory, 'privateauth')).find(path => existsSync(path)) ?? 'privateauth';
 export const DEFAULT_PARAMS = fileURLToPath(new URL('params', import.meta.url));
 
 export function runProof(mode, input, { binary = DEFAULT_BINARY, params = DEFAULT_PARAMS, timeout = 120000 } = {}) {

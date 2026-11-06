@@ -15,6 +15,7 @@ from pathlib import Path
 from pydantic import TypeAdapter
 from websockets.exceptions import WebSocketException
 
+from . import PROOF_PARAMETERS, VERIFY_SCRIPT
 from .channel import Channel
 from .diagnostics import FailureFact, failure_fact, verifier_failure
 from .identity import Provider, miner_prefix
@@ -24,9 +25,7 @@ from .timing import exchange_id as _exchange_id
 from .timing import forward as _verifier_timings
 from .timing import started as timing_started
 
-HERE = Path(__file__).resolve().parents[1]
-WITNESS = HERE.parent / "verifier"
-PARAMETERS = Path(os.environ.get("WITNESS_PARAMETERS", str(WITNESS / "params")))
+PARAMETERS = Path(os.environ.get("WITNESS_PARAMETERS", str(PROOF_PARAMETERS)))
 CLIENT_HELLO_TIMEOUT = 60
 AUTHORIZATION_TIMEOUT = 300
 PROVIDERS: dict[Provider, tuple[str, str]] = {
@@ -34,7 +33,7 @@ PROVIDERS: dict[Provider, tuple[str, str]] = {
     "api": ("api.openai.com", "/v1/responses"),
 }
 Verifier = Callable[[str, Path], dict[str, object]]
-_RESULT = TypeAdapter(dict[str, object])
+_RESULT: TypeAdapter[dict[str, object]] = TypeAdapter(dict[str, object])
 
 
 def complete_records(data: bytes | bytearray) -> bool:
@@ -80,7 +79,7 @@ def verify(
             result = subprocess.run(
                 [
                     "node",
-                    str(HERE / "verify.mjs"),
+                    str(VERIFY_SCRIPT),
                     mode,
                     str(directory),
                     str(PARAMETERS),

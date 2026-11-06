@@ -346,7 +346,7 @@ def main() -> None:
     parser.add_argument("--verifier", type=Path, help=argparse.SUPPRESS)
     args = parser.parse_args()
     if args.parameters is None:
-        args.parameters = args.source / "witness-server/verifier/params"
+        args.parameters = args.source / "witness-server/worker/witness_pod/verifier/params"
     if args.repeats < 1 or args.rounds < 1:
         parser.error("rounds and repeats must be positive")
     if any(length < 64 or length > 4096 for length in args.lengths):

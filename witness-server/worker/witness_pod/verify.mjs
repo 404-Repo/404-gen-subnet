@@ -2,10 +2,10 @@
 import { readFileSync, writeFileSync, accessSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { authorizeHandshake, authorizeRequest, finishAuthorizedResponse } from '../verifier/verify.mjs';
-import { ClientHelloGate, responseUsage } from '../verifier/gate.mjs';
-import { DEFAULT_BINARY } from '../verifier/worker.mjs';
-import { measure, timing } from '../verifier/timing.mjs';
+import { authorizeHandshake, authorizeRequest, finishAuthorizedResponse } from './verifier/verify.mjs';
+import { ClientHelloGate, responseUsage } from './verifier/gate.mjs';
+import { DEFAULT_BINARY } from './verifier/worker.mjs';
+import { measure, timing } from './verifier/timing.mjs';
 
 timing('process_start_to_ready', 0);
 
@@ -102,7 +102,7 @@ if (import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
     const cause = error.cause instanceof Error ? error.cause : error;
     const stack = [];
     for (const frame of (cause.stack ?? '').split('\n').slice(1)) {
-      const location = frame.match(/\/(worker|verifier)\/([A-Za-z0-9_.-]+\.mjs):(\d+):(\d+)\)?$/);
+      const location = frame.match(/\/(worker|verifier|witness_pod)\/([A-Za-z0-9_.-]+\.mjs):(\d+):(\d+)\)?$/);
       if (!location) continue;
       const name = frame.match(/^\s+at (?:async )?([A-Za-z_$][A-Za-z0-9_.$]*) \(/);
       stack.push({file: `${location[1]}/${location[2]}`, function: name?.[1] ?? null,

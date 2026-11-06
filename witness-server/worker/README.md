@@ -88,7 +88,7 @@ Saved results remain readable after admission closes.
 3. [channel.py](witness_pod/channel.py): bounded TLS and proof messages over the WebSocket.
 4. [worker.py](witness_pod/worker.py): verification, provider capture and evidence persistence.
 5. [storage.py](witness_pod/storage.py): R2 evidence access.
-6. [verify.mjs](verify.mjs): entrypoint into the TLS/ZK verifier.
+6. [verify.mjs](witness_pod/verify.mjs): entrypoint into the TLS/ZK verifier.
 
 ## Build and deployment
 

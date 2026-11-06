@@ -29,7 +29,7 @@ from witness_client.response import http_body
 from witness_client.types import EarlyDisclosure, HandshakeDisclosure
 from test_tunnel import Socket
 
-PARAMS = Path(__file__).resolve().parents[2] / "witness-server/verifier/params"
+PARAMS = Path(__file__).resolve().parents[2] / "witness-server/worker/witness_pod/verifier/params"
 
 
 @pytest.fixture
