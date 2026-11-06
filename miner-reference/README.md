@@ -46,7 +46,7 @@ import json
 from pathlib import Path
 config = {
     "witness_url": "https://witness.subnet404.xyz",
-    "proof_parameters": str(Path("../404-sdk/witness-server/worker/witness_pod/verifier/params").resolve()),
+    "proof_parameters": str(Path("../404-sdk/witness-server/verifier/params").resolve()),
 }
 Path("witness.json").write_text(json.dumps(config, indent=2) + "\n")
 PYCONFIG

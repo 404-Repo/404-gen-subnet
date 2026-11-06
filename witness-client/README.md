@@ -51,7 +51,7 @@ as `witness.json`, replacing the paths:
 ```json
 {
   "witness_url": "https://witness.subnet404.xyz",
-  "proof_parameters": "/home/miner/404-sdk/witness-server/worker/witness_pod/verifier/params"
+  "proof_parameters": "/home/miner/404-sdk/witness-server/verifier/params"
 }
 ```
 

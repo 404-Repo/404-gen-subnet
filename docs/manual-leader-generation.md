@@ -39,7 +39,7 @@ Prepare a private operator directory containing a file named `witness.json`:
 ```json
 {
   "witness_url": "https://witness.subnet404.xyz",
-  "proof_parameters": "/absolute/path/to/404-sdk/witness-server/worker/witness_pod/verifier/params",
+  "proof_parameters": "/absolute/path/to/404-sdk/witness-server/verifier/params",
   "codex_home": "/absolute/path/to/private/leader-codex"
 }
 ```
