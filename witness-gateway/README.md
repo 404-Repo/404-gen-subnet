@@ -84,11 +84,7 @@ rebuilding images.
 artifacts. `R2_REPLAY_CDN_URL` is that bucket's public HTTPS origin. Both replay
 settings are required.
 
-The production replay bucket is `404-replays`, publicly available through
-`https://replays.subnet404.xyz`, with a 10-day expiration policy. Final results
-remain in `404-gen` at `https://subnet404.xyz` with 60-day expiration. Expiration
-uses object age; operational state, pricing and frozen prompt inputs are excluded
-from artifact expiration rules.
+Replay artifacts expire after 10 days; final-result artifacts after 60 days.
 
 The Pod saves final results in the configured bucket under
 `<storage-prefix>rounds/<full-round-name>/<hotkey>/submitted/<prompt-id>`. The empty
