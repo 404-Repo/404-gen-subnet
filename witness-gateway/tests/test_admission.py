@@ -4,14 +4,13 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 
 import pytest
-from support import MemoryState, Provider
-from test_lifecycle import FIRST, SCOPE, SECOND, SPEC, Drain
-
 from pod_gateway.admission import Admission, CapacityReached, CreateDeferred, StartQueue
 from pod_gateway.lifecycle import Allocator
-from pod_gateway.models import Pod
 from pod_gateway.runpod import CreateUnknown
-from pod_gateway.state import Snapshot, StateConflict, WriteUncertain
+from subnet_common.witness.models import Pod
+from subnet_common.witness.state import Snapshot, StateConflict, WriteUncertain
+from support import MemoryState, Provider
+from test_lifecycle import FIRST, SCOPE, SECOND, SPEC, Drain
 
 
 def test_capacity_uses_actual_inventory_and_frees_when_the_pod_disappears() -> None:

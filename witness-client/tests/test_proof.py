@@ -7,7 +7,7 @@ import pytest
 
 from witness_client.proof import Prover
 
-PARAMS = Path(__file__).resolve().parents[2] / "witness-server/verifier/params"
+PARAMS = Path(__file__).resolve().parents[2] / "witness-server/worker/witness_pod/verifier/params"
 
 
 @pytest.mark.parametrize("name", ["circuit.bin", "proving.bin", "verifying.bin"])

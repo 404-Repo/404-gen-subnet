@@ -10,8 +10,7 @@ from typing import Protocol
 from urllib.parse import quote
 
 import httpx
-
-from .models import MARKERS, Pod, object_dict, string
+from subnet_common.witness.models import MARKERS, Pod, object_dict, string
 
 API = "https://api.runpod.io/v2"
 PodList = list[Pod]

@@ -12,9 +12,11 @@ the local test fixtures.
   `witness-client/native`.
 
 `npm test` runs the verifier tests. See
-[server checks](../README.md#local-checks) for setup.
+[server checks](../../../README.md#local-checks) for setup.
 
 The matching `circuit.bin`, `proving.bin`, and `verifying.bin` are tracked in
 [params/](params/) for client use and local tests. Their sizes and SHA-256 hashes
-are pinned in [parameters.go](../../witness-client/native/parameters.go).
+are pinned in [parameters.go](../../../../witness-client/native/parameters.go).
 The server image includes only `verifying.bin`.
+
+The native `privateauth` executable must be on `PATH`.

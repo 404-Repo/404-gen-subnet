@@ -18,9 +18,8 @@ from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 from websockets.sync.client import connect
 from websockets.sync.server import ServerConnection, serve
 from witness_client.tunnel import WebSocketTunnel
-
-from channel import WorkerChannel
-from storage import MAX_BYTES
+from witness_pod.channel import WorkerChannel
+from witness_pod.storage import MAX_BYTES
 
 
 @pytest.fixture

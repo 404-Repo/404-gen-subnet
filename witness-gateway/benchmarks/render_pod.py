@@ -1,27 +1,39 @@
 """Isolated ordinary-Pod benchmark using production capture and R2 storage."""
 from __future__ import annotations
 
-import asyncio, contextlib, hashlib, json, os, secrets, signal, ssl, subprocess, threading, time
+import asyncio
+import contextlib
+import hashlib
+import json
+import os
+import secrets
+import signal
+import ssl
+import subprocess
+import threading
+import time
 from decimal import Decimal
 from pathlib import Path
-from aiohttp import web, ClientSession, ClientTimeout
-from pod_gateway.auth import Authenticator, Membership
-from pod_gateway.budget import Budget, BudgetRejected
+
+from aiohttp import ClientSession, ClientTimeout, web
 from pod_gateway.control import DrainControl, Registry
 from pod_gateway.lifecycle import Allocator
-from pod_gateway.models import Pod, PodSpec, Scope
-from pod_gateway.pricing import PricingStore
-from pod_gateway.records import CallRecords
-from pod_gateway.replay import export_bundle, native_verifier
-from pod_gateway.security import capability
-from pod_gateway.state import R2StateStore
+from pod_gateway.membership import Membership
 from pod_gateway.server import Gateway
-from pod_gateway.direct import Witness
-from pod_gateway.certs import pod_context
-from pod_gateway.selection import Selection
-from storage import R2Store
-from pod import PodRuntime
-import worker, timing
+from subnet_common.witness.auth import Authenticator
+from subnet_common.witness.certs import pod_context
+from subnet_common.witness.models import Pod, PodSpec, Scope
+from subnet_common.witness.pricing import PricingStore
+from subnet_common.witness.security import capability
+from subnet_common.witness.selection import Selection
+from subnet_common.witness.state import R2StateStore
+from witness_pod import timing, worker
+from witness_pod.budget import Budget, BudgetRejected
+from witness_pod.direct import Witness
+from witness_pod.pod import PodRuntime
+from witness_pod.records import CallRecords
+from witness_pod.replay import export_bundle, native_verifier
+from witness_pod.storage import R2Store
 
 os.umask(0o077)
 ROUND = os.environ.get('BENCH_ROUND', 'test-0')
@@ -209,9 +221,9 @@ async def main():
             tcp={8000:(os.environ['RUNPOD_PUBLIC_IP'],int(os.environ['RUNPOD_TCP_PORT_8000']))},hourly_cost=str(body['hourly']))
         selection=Selection(STORE);selection.update(pod,active=True)
         registry=Registry();allocator=Allocator(FixedProvider(pod),DrainControl(registry),spec,selection=selection)
-        MEMBERSHIP=Membership(DEPLOYMENT,17,ROUND,HOTKEY);now=int(time.time()*1000)
+        MEMBERSHIP=Membership(17,ROUND,HOTKEY);now=int(time.time()*1000)
         MEMBERSHIP.snapshot=dict(version=1,network='finney',netuid=17,block=0,fetched_at=now,block_time=now,hotkeys=[])
-        gateway=Gateway(allocator=allocator,auth=Authenticator(MEMBERSHIP),registry=registry,
+        gateway=Gateway(allocator=allocator,auth=Authenticator(MEMBERSHIP.require),registry=registry,
             deployment=DEPLOYMENT,round_number=ROUND,round_end=END,secret=secret,proof_hash=PROOF,
             fence=lambda:True)
         GATEWAY_RUNNER=web.AppRunner(gateway.application(),access_log=None);await GATEWAY_RUNNER.setup()
@@ -268,7 +280,7 @@ async def main():
         if output.exists():return web.json_response({'verified':True,'saved':True})
         await asyncio.to_thread(export_bundle,records=app['records'],evidence=STORE,scope=app['scope'],execution=path,
             output=output,proof_hash=PROOF,pricing=PricingStore(STORE.state,DEPLOYMENT).read(),
-            verify=native_verifier(Path('/app/witness-server/worker/verify.mjs'),worker.PARAMETERS))
+            verify=native_verifier(worker.VERIFY_SCRIPT,worker.PARAMETERS))
         event('bundle_verified',execution=key);return web.json_response({'verified':True})
     async def download(request):
         proc=await asyncio.create_subprocess_exec('tar','czf','-','--exclude=ca.pem','--exclude=cert.pem','--exclude=key.pem',

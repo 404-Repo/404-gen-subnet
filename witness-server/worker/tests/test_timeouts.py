@@ -12,10 +12,9 @@ from unittest.mock import MagicMock
 import pytest
 from bittensor_wallet import Keypair
 from conftest import MemoryStore, connected_channels
-
-import worker
-from identity import miner_prefix
-from storage import json_bytes
+from witness_pod import worker
+from witness_pod.identity import miner_prefix
+from witness_pod.storage import json_bytes
 
 
 @pytest.mark.parametrize("different", ["namespace", "round", "hotkey"])

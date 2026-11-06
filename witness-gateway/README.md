@@ -3,15 +3,14 @@
 The Python gateway authenticates Bittensor miners, assigns ordinary RunPod CPU
 Pods and returns their direct TCP/TLS endpoints with scoped miner access.
 Miners send calls, proofs and renderer requests directly to the assigned Pod.
-Workers capture and verify OpenAI exchanges, then save evidence and usage in private R2 storage. A separate
-revivor restores the gateway and drains resources owned by the deployment.
+A separate revivor restores the gateway and drains resources owned by the deployment.
 
 See [PODS.md](PODS.md) for configuration, lifecycle, recovery, budgets, replay and
 the immutable runtime manifests. Both images are built from
 [Dockerfile.pods](../witness-server/worker/Dockerfile.pods): target `gateway`
 serves gateways and the independent `revivor`; target `production` serves miner
-witness Pods. Both use `python -m pod_gateway`, defaulting to `gateway` and
-`worker` respectively. Set `WITNESS_GATEWAY_IMAGE` to the gateway digest and
+witness Pods. Their entrypoints are `python -m pod_gateway` and
+`python -m witness_pod`, respectively. Set `WITNESS_GATEWAY_IMAGE` to the gateway digest and
 `WITNESS_IMAGE` to the witness Pod digest. Both pins are required.
 
 The [client](../witness-client/README.md) makes allocation-scoped model calls; the execution host observes each generate() call for replay.
@@ -20,9 +19,7 @@ releasing provider requests and persists responses before delivery. R2 contains
 the durable call state and provider captures; RunPod remains the source of truth
 for Pod identity and lifecycle.
 
-Completion metadata comes from the authenticated Pod. Saved provider evidence
-downloads use signed R2 URLs with size and SHA256 checks. The gateway carries
-allocation and lifecycle control messages only.
+The gateway carries allocation and lifecycle control messages only.
 
 Gateway and direct Pod API routes use `/v1`, including their WebSockets.
 See the [route table](PODS.md#http-api). Configure clients with the gateway origin;
@@ -36,6 +33,7 @@ Install the client development tools and native proof library as described in
 
 ```sh
 python -m pip install -c constraints-pods.txt -r requirements-pods.txt
+python -m pip install --no-deps -e . -e ../witness-server/worker
 python -m mypy
 PYTHONPATH=.:../witness-client/src:../miner-runtime/src:../witness-server/worker:../renderer-client/src:../miner-reference:../shared python -m pytest -q
 ```
@@ -79,75 +77,18 @@ rebuilding images.
 
 ## Artifact storage
 
-The Pod saves final results in the configured bucket under
-`<storage-prefix>rounds/<full-round-name>/<hotkey>/submitted/<prompt-id>`. The empty
-storage prefix preserves the official `404-gen` paths. The JavaScript is
-`<prefix>.js`; white and gray judging views, `grid.png` and `embeddings.npz` are
-stored under `<prefix>/`.
-
-A final save supplies JavaScript or an explicit `None`. For JavaScript, the Pod
-writes the source, renders the 12 canonical judging views and grid, computes
-embeddings, and saves the result. One final save runs at a time per Pod, with up
-to 256 additional saves waiting in arrival order until a slot becomes available.
-A full queue returns HTTP 503 `save_queue_full`. Requests authenticate on arrival;
-Pod selection and fresh round permission are checked before queued work starts.
-The legacy `ArtifactClient` retries full-queue responses within its configured
-retry window, using the same output. `WitnessClient.submit()` makes one request.
-Preview rendering uses the renderer's existing concurrency limit.
-
-The Pod publishes `<storage-prefix>rounds/<full-round-name>/<hotkey>/submitted.json`, mapping
-official prompt IDs to records containing `js`, `views`, `failure_reason` and `size`;
-`js` and `views` are storage keys. A saved final output cannot be replaced;
-retrying the same output returns its saved result without rendering again.
-Conditional writes merge concurrent index updates without losing other prompts.
-An explicit `None` records `generation_failed`. A renderer rejection records
-`render_rejected` and returns HTTP 422. Storage, rendering and embedding failures
-return an error so the runner can retry saving. An incomplete save has no
-completed result record.
-
-The runner checkpoints returned JavaScript or `None` locally before network
-delivery. Retrying the same output directory resends that result without running
-generation again.
+See the [worker README](../witness-server/worker/README.md#rendering-and-artifact-storage)
+for render caching, the per-round allowance and artifact storage.
 
 Set `DINOV3_REVISION` to the approved embedding-model commit and supply `HF_TOKEN`
 for the gated DINOv3 model. These settings are forwarded to witness Pods.
-Set `WITNESS_RENDERER_PROFILE` to JSON in the gateway/revivor environment:
-
-```json
-{
-  "image_digest": "sha256:REPLACE_WITH_WORKER_IMAGE_DIGEST",
-  "validation_sha256": "REPLACE_WITH_RENDERER_PROFILE_SHA256",
-  "bootstrap_sha256": null
-}
-```
-
-Use the immutable `WITNESS_IMAGE` digest. The gateway resolves the seed and prompt
-mapping from the competition snapshot. Only the packaged renderer is supported;
-`bootstrap_sha256` must be null. Compute its profile hash from the exact build
-context, from the repository root:
-
-```sh
-PYTHONPATH=witness-gateway python -c 'from pathlib import Path; from pod_gateway.renderer import renderer_profile_sha256; print(renderer_profile_sha256(Path("render-service-js")))'
-```
-
-The optional legacy `WITNESS_ARTIFACTS` JSON can supply the renderer profile and
-`commits` metadata. Its seed and prompt mapping are replaced by the resolved
-round inputs at allocation. A configured commit is optional checkpoint metadata;
-it does not restrict authenticated, assigned miners from saving. The async and
-sync SDKs accept `submit(image, source)` without a seed or source commit. Explicit
-legacy seeds must still match the frozen seed. Retained hash-keyed indexes recover
-under official IDs without changing their artifact pointers, including saved `None` outcomes.
+The gateway passes the frozen seed, official prompt IDs and saving flag through
+`WITNESS_ROUND_INPUTS`. The immutable `WITNESS_IMAGE` digest identifies the Pod
+and its packaged renderer.
 
 Set `witness_save_submissions` to `false` in the round schedule to disable final
-storage explicitly. Submission endpoints return `artifact_storage_disabled`;
-provider recordings and accounting remain durable. A round with final saving
-enabled requires a renderer profile and embedding revision. Saved results remain
-readable after admission closes. Retain results and evidence through judging and
-the operator's retention period.
-
-The [collector](../submission-collector/README.md) reads one result index per
-round and hotkey, expands the storage keys with its existing `CDN_URL`, and
-writes the per-miner result index to Git.
+storage. Submission endpoints then return `artifact_storage_disabled`; provider
+recordings and accounting remain available.
 
 ## Competition source and admission
 

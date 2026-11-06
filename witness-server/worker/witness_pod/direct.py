@@ -9,52 +9,46 @@ import json
 import queue
 import time
 from collections.abc import Awaitable, Callable
+from contextlib import nullcontext
 from typing import TYPE_CHECKING
 
 import httpx
 from aiohttp import WSMsgType, web
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
-from renderer_client import RenderRejected
+from renderer_client import RenderRejected, RenderUnavailable
+from renderer_client.client import MAX_ERROR_BYTES, MAX_RESPONSE_BYTES, PNG_SIGNATURE
 from subnet_common.competition.generations import GenerationsAdapter
+from subnet_common.witness.auth import Authenticator, AuthRejected
+from subnet_common.witness.models import Scope, identifier
+from subnet_common.witness.security import verify_miner_access
 from witness_client.calls import RequestKey
 from witness_client.request import PROVIDERS
 
 from .artifacts import ArtifactRepository, SubmissionContext
-from .auth import Authenticator, AuthRejected, Membership
-from .models import Scope, identifier
 from .records import Call, RecordingConflict
 from .recovery import recover_issued
+from .renderer import RenderCache
 from .results import ResultSaver
-from .security import verify_miner_access
 
 if TYPE_CHECKING:
-    from pod import PodRuntime
+    from .pod import PodRuntime
 
 SAVE_QUEUE_CAPACITY = 256
 
 
-class StrictInput(BaseModel):
+class Start(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
-
-class Start(StrictInput):
     request: RequestKey
     expected_exchange_id: str | None = None
 
 
-class SaveChoice(StrictInput):
+class SaveChoice(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
     generation: SubmissionContext
     source: str | None = Field(max_length=1024 * 1024)
     prompt_image: str | None = Field(default=None, max_length=12 * 1024 * 1024)
-
-
-class AssignedMiner(Membership):
-    def __init__(self, hotkey: str) -> None:
-        self.hotkey = hotkey
-
-    def require(self, hotkey: str) -> None:
-        if hotkey != self.hotkey:
-            raise AuthRejected("miner_not_assigned", 403)
 
 
 class Witness:
@@ -65,15 +59,28 @@ class Witness:
         *,
         artifacts: ArtifactRepository | None = None,
         result_saver: ResultSaver | None = None,
+        prompt_url: Callable[[str], str] | None = None,
+        render_cache: RenderCache | None = None,
     ) -> None:
         self.runtime, self.artifact_url = runtime, artifact_url
+        self.prompt_url = prompt_url or artifact_url
         self.records, self.budget, self.evidence = runtime.records, runtime.budget, runtime.evidence
         self.round, self.round_end, self.proof_hash = runtime.scope.round, runtime.round_end, runtime.proof_hash
-        self.auth = Authenticator(AssignedMiner(runtime.scope.hotkey))
+        assigned_hotkey = runtime.scope.hotkey
+
+        def authorize(hotkey: str) -> None:
+            if hotkey != assigned_hotkey:
+                raise AuthRejected("miner_not_assigned", 403)
+
+        self.auth = Authenticator(authorize)
         self.renderer_url = "http://127.0.0.1:8002/render/grid"
         if artifacts is not None and artifacts.scope != runtime.scope:
             raise ValueError("Artifact storage belongs to another miner")
         self.artifacts, self.result_saver = artifacts, result_saver
+        if render_cache is not None and render_cache.scope != runtime.scope:
+            raise ValueError("Render cache belongs to another miner")
+        self.render_cache = render_cache
+        self._render_locks: dict[str, asyncio.Lock] = {}
         self._save_lock = asyncio.Lock()
         self._pending_saves = 0
 
@@ -262,7 +269,7 @@ class Witness:
         return {"manifest": manifest.decode(), "session": self.session(invocation, call), "artifacts": links}
 
     async def miner_exchange(self, request: web.Request) -> web.WebSocketResponse:
-        from channel import WorkerChannel
+        from .channel import WorkerChannel
 
         await asyncio.to_thread(self._require_selected)
         exchange_id = identifier(request.match_info["exchange_id"])
@@ -305,29 +312,56 @@ class Witness:
 
         await asyncio.to_thread(admit)
         try:
-            async with (
-                httpx.AsyncClient(timeout=150, trust_env=False) as client,
-                client.stream(
-                    "POST",
-                    self.renderer_url,
-                    params=request.query,
-                    content=await request.read(),
-                    headers={"Content-Type": "application/json"},
-                ) as response,
-            ):
-                body = bytearray()
-                async for chunk in response.aiter_bytes():
-                    body.extend(chunk)
-                    if len(body) > 32 * 1024 * 1024:
-                        raise ValueError("Renderer response exceeds limit")
-                return web.Response(
-                    body=bytes(body),
-                    status=response.status_code,
-                    headers={
-                        "Content-Type": response.headers.get("Content-Type", "application/octet-stream"),
-                        "Cache-Control": "no-store",
-                    },
-                )
+            async with httpx.AsyncClient(timeout=150, trust_env=False) as client:
+                content = await request.read()
+                cache = self.render_cache
+                key = cache.key(content, request.raw_path) if cache is not None else None
+                async with (
+                    self._render_locks.setdefault(key, asyncio.Lock()) if key is not None else nullcontext()
+                ):
+                    if cache is not None and key is not None:
+                        saved = await asyncio.to_thread(cache.get, key)
+                        if saved is not None:
+                            data, status = saved
+                            return web.Response(
+                                body=data, status=status,
+                                content_type="image/png" if status == 200 else "application/json",
+                                headers={"Cache-Control": "no-store"},
+                            )
+                        if cache.full:
+                            raise AuthRejected("render_limit_exhausted", 429)
+                    async with client.stream(
+                        "POST", self.renderer_url, params=request.query, content=content,
+                        headers={"Content-Type": "application/json"},
+                    ) as response:
+                        body = bytearray()
+                        limit = (
+                            MAX_ERROR_BYTES if cache is not None and response.status_code == 422 else MAX_RESPONSE_BYTES
+                        )
+                        async for chunk in response.aiter_bytes():
+                            body.extend(chunk)
+                            if len(body) > limit:
+                                raise RenderUnavailable("Renderer response exceeds limit")
+                        data = bytes(body)
+                        content_type = response.headers.get("Content-Type", "application/octet-stream")
+                        if cache is not None and key is not None and response.status_code in (200, 422):
+                            try:
+                                if response.status_code == 200:
+                                    if (
+                                        content_type.split(";", 1)[0].lower() != "image/png"
+                                        or not data.startswith(PNG_SIGNATURE)
+                                    ):
+                                        raise ValueError("Expected a PNG")
+                                else:
+                                    RenderRejected(data.decode())
+                            except ValueError as error:
+                                raise RenderUnavailable("Invalid renderer outcome") from error
+                            if not await asyncio.to_thread(cache.save, key, data, response.status_code):
+                                raise AuthRejected("render_limit_exhausted", 429)
+                        return web.Response(
+                            body=data, status=response.status_code,
+                            headers={"Content-Type": content_type, "Cache-Control": "no-store"},
+                        )
         finally:
             await asyncio.to_thread(self._artifact_done)
 
@@ -352,14 +386,15 @@ class Witness:
 
     async def artifact_context(self, request: web.Request) -> web.Response:
         inputs = self.runtime.round_inputs
+        context: dict[str, object] = {"submission_commit": None}
         if inputs is None:
-            store = self._artifacts()
-            context: dict[str, object] = {"submission_commit": store.submission_commit}
+            self._artifacts()
         else:
-            context = {"submission_commit": None if self.artifacts is None else self.artifacts.submission_commit,
-                       "round_inputs": inputs.model_dump(mode="json"),
-                       "prompts": [{**p.model_dump(), "url": self.artifact_url(p.image_key)} for p in inputs.prompts],
-                       "saving_enabled": self.artifacts is not None}
+            context.update(
+                round_inputs=inputs.model_dump(mode="json"),
+                prompts=[{**p.model_dump(), "url": self.prompt_url(p.image_key)} for p in inputs.prompts],
+                saving_enabled=self.artifacts is not None,
+            )
         return web.json_response(
             context, headers={"Cache-Control": "no-store"}
         )

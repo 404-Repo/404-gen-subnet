@@ -17,15 +17,15 @@ from typing import Protocol
 from urllib.parse import urlsplit
 
 import httpx
+from subnet_common.witness.models import Pod, PodSpec, Scope, Session
+from subnet_common.witness.selection import Selection
+from subnet_common.witness.state import R2StateStore
 
 from .admission import Admission
 from .control import DrainControl
 from .lifecycle import Allocator, InventoryConflict
-from .models import Pod, PodSpec, Scope, Session
 from .runpod import PodProvider, RunPodClient
-from .selection import Selection
 from .settings import RevivorSettings
-from .state import R2StateStore
 
 
 class Publisher(Protocol):

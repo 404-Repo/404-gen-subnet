@@ -4,12 +4,11 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 
 import pytest
-from support import Provider
-
 from pod_gateway.control import DrainControl
 from pod_gateway.lifecycle import AllocationConflict, Allocator, InventoryConflict
-from pod_gateway.models import Pod, PodSpec, Scope
 from pod_gateway.runpod import CreateUnknown, ProviderUnavailable
+from subnet_common.witness.models import Pod, PodSpec, Scope
+from support import Provider
 
 SCOPE = Scope("competition", "test-0", "5" * 48)
 SPEC = PodSpec("registry/witness@sha256:" + "a" * 64)

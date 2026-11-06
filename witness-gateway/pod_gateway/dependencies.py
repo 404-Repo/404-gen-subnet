@@ -5,9 +5,9 @@ import ssl
 import tempfile
 from pathlib import Path
 
-from .artifacts import ArtifactConfig
-from .models import PodSpec
-from .rounds import RoundInputs
+from subnet_common.witness.models import PodSpec
+from subnet_common.witness.rounds import RoundInputs
+
 from .settings import Settings
 
 
@@ -19,6 +19,8 @@ def worker_spec(settings: Settings, inputs: RoundInputs | None = None) -> PodSpe
             "R2_ACCESS_KEY_ID",
             "R2_SECRET_ACCESS_KEY",
             "R2_BUCKET",
+            "R2_REPLAY_BUCKET",
+            "R2_REPLAY_CDN_URL",
             "WITNESS_GATEWAY_URL",
         )
     }
@@ -29,22 +31,15 @@ def worker_spec(settings: Settings, inputs: RoundInputs | None = None) -> PodSpe
     environment.update(
         {
             "WITNESS_ROLE": "worker",
+            "WITNESS_IMAGE": settings.image,
             "WITNESS_IDLE_SECONDS": settings.pod_environment.get("WITNESS_IDLE_SECONDS", "1800"),
             "WITNESS_MAX_CAPTURES": settings.pod_environment.get("WITNESS_MAX_CAPTURES", "32"),
         }
     )
-    profile = settings.profile
-    if inputs is not None and inputs.save_submissions and profile is None:
-        raise ValueError("Round enables final saving; configure WITNESS_RENDERER_PROFILE")
-    if inputs is not None and inputs.save_submissions and profile is not None:
-        commits = {} if settings.artifacts is None else ArtifactConfig.model_validate_json(settings.artifacts).commits
-        environment["WITNESS_ARTIFACTS"] = ArtifactConfig(
-            profile=profile, seed=inputs.seed, prompt_ids=inputs.prompt_ids, commits=commits,
-        ).model_dump_json()
-    elif inputs is None and settings.artifacts is not None:
-        environment["WITNESS_ARTIFACTS"] = settings.artifacts
-    if "WITNESS_ARTIFACTS" in environment:
-        environment["DINOV3_REVISION"] = str(settings.embedding_revision)
+    if inputs is not None and inputs.save_submissions:
+        if not settings.embedding_revision:
+            raise ValueError("Final saving requires DINOV3_REVISION")
+        environment["DINOV3_REVISION"] = settings.embedding_revision
         if settings.hf_token is not None:
             environment["HF_TOKEN"] = settings.hf_token.get_secret_value()
     return PodSpec(
@@ -73,6 +68,8 @@ def gateway_spec(settings: Settings) -> PodSpec:
             "R2_ACCESS_KEY_ID",
             "R2_SECRET_ACCESS_KEY",
             "R2_BUCKET",
+            "R2_REPLAY_BUCKET",
+            "R2_REPLAY_CDN_URL",
             "SUBTENSOR_RPC_URL",
             "GATEWAY_TLS_CERT_B64",
             "GATEWAY_TLS_KEY_B64",
@@ -84,7 +81,6 @@ def gateway_spec(settings: Settings) -> PodSpec:
         "WITNESS_GITHUB_TOKEN",
         "WITNESS_ROUND_REFRESH_SECONDS",
         "WITNESS_ROUND_POLICY_SECONDS",
-        "WITNESS_RENDERER_PROFILE",
         "WITNESS_CPU_ID",
         "WITNESS_VCPU",
         "WITNESS_DISK_GB",
@@ -101,7 +97,6 @@ def gateway_spec(settings: Settings) -> PodSpec:
         "WITNESS_TEST_HOTKEY",
         "WITNESS_REGISTRY",
         "RUNPOD_MIN_REQUEST_INTERVAL",
-        "WITNESS_ARTIFACTS",
         "DINOV3_REVISION",
         "HF_TOKEN",
     ):

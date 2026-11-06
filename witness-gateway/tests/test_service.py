@@ -20,19 +20,29 @@ from typing import cast
 import httpx
 import openai
 import pytest
-from openai.types.responses import ResponseStreamEvent
 from aiohttp import web
 from aiohttp.test_utils import make_mocked_request
 from bittensor_wallet import Keypair
-from miner_runtime.observations import Execution
-from miner_runtime.runner import run_generation
-from miner_runtime.validator import ReplayWitness, run_replay
-from channel import Channel, WorkerChannel
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
-from pod import PodRuntime
+from miner_runtime.observations import Execution
+from miner_runtime.runner import run_generation
+from miner_runtime.validator import ReplayWitness, run_replay
+from openai.types.responses import ResponseStreamEvent
+from pod_gateway.control import DrainControl, Registry
+from pod_gateway.lifecycle import Allocator
+from pod_gateway.membership import Membership
+from pod_gateway.server import Gateway
+from subnet_common.witness.auth import Authenticator
+from subnet_common.witness.certs import pod_context
+from subnet_common.witness.models import Pod, PodSpec, Scope
+from subnet_common.witness.pricing import PricingStore
+from subnet_common.witness.rounds import RoundInputs
+from subnet_common.witness.security import capability
+from subnet_common.witness.selection import Selection
+from subnet_common.witness.state import PrefixedState, WriteUncertain
 from support import MemoryState, Provider
 from test_pricing import extended_pricing
 from test_recording import PRICING
@@ -42,22 +52,12 @@ from witness_client.calls import RequestKey, canonical
 from witness_client.pods import Snapshot
 from witness_client.request import serialize_body
 from witness_client.tunnel import WebSocketTunnel
-
-from pod_gateway.auth import Authenticator, Membership
-from pod_gateway.budget import Budget
-from pod_gateway.certs import pod_context
-from pod_gateway.control import DrainControl, Registry
-from pod_gateway.direct import Witness
-from pod_gateway.lifecycle import Allocator
-from pod_gateway.models import Pod, PodSpec, Scope
-from pod_gateway.pricing import PricingStore
-from pod_gateway.records import Call, CallRecord, CallRecords
-from pod_gateway.replay import export_bundle
-from pod_gateway.rounds import RoundInputs
-from pod_gateway.security import capability
-from pod_gateway.selection import Selection
-from pod_gateway.server import Gateway
-from pod_gateway.state import PrefixedState, WriteUncertain
+from witness_pod.budget import Budget
+from witness_pod.channel import Channel, WorkerChannel
+from witness_pod.direct import Witness
+from witness_pod.pod import PodRuntime
+from witness_pod.records import Call, CallRecord, CallRecords
+from witness_pod.replay import export_bundle
 
 SECRET = b"s" * 32
 PROOF = "c" * 64
@@ -71,8 +71,8 @@ def test_fresh_signature_does_not_expire_while_waiting_for_runpod(
     key = Keypair.create_from_mnemonic(Keypair.generate_mnemonic())
     headers = hotkey_headers(key, b"", method="GET", path="/v1/pods/current")
     clock = [int(headers["x-bittensor-nonce"])]
-    monkeypatch.setattr("pod_gateway.auth.time.time_ns", lambda: clock[0])
-    membership = Membership("test", 17, "test-1", key.ss58_address)
+    monkeypatch.setattr("subnet_common.witness.auth.time.time_ns", lambda: clock[0])
+    membership = Membership(17, "test-1", key.ss58_address)
     now = int(time.time() * 1000)
     membership.snapshot = {
         "version": 1,
@@ -102,7 +102,7 @@ def test_fresh_signature_does_not_expire_while_waiting_for_runpod(
         )
         allocator = Allocator(Provider(), DrainControl(), PodSpec("registry/witness@sha256:" + "a" * 64),
                               selection=Selection(MemoryState()))
-        gateway = Gateway(allocator=allocator, auth=Authenticator(membership), registry=Registry(),
+        gateway = Gateway(allocator=allocator, auth=Authenticator(membership.require), registry=Registry(),
                           deployment="test", round_number="test-1", round_end=int(time.time()) + 600,
                           secret=SECRET, proof_hash=PROOF, fence=lambda: selected)
         monkeypatch.setattr(gateway, "_live", fence)
@@ -155,7 +155,7 @@ class Harness:
         self.records, self.selection = CallRecords(self.state), Selection(self.state)
         self.proof = (
             hashlib.sha256(
-                (Path(__file__).resolve().parents[2] / "witness-server/verifier/params/verifying.bin").read_bytes()
+                (Path(__file__).resolve().parents[2] / "witness-server/worker/witness_pod/verifier/params/verifying.bin").read_bytes()
             ).hexdigest()
             if native
             else PROOF
@@ -184,7 +184,7 @@ class Harness:
         return WitnessClient(
             {
                 "witness_url": self.origin,
-                "proof_parameters": str(Path(__file__).resolve().parents[2] / "witness-server/verifier/params"),
+                "proof_parameters": str(Path(__file__).resolve().parents[2] / "witness-server/worker/witness_pod/verifier/params"),
                 "state_directory": str(self.directory / state),
             },
             hotkey=self.key,
@@ -368,7 +368,7 @@ class Harness:
                 "witness_client.client.Prover", lambda _: SimpleNamespace(verifying_key_sha256=self.proof)
             )
             self.monkeypatch.setattr("witness_client.client.exchange", self.exchange)
-            self.monkeypatch.setattr("pod.relay", self.relay)
+            self.monkeypatch.setattr("witness_pod.pod.relay", self.relay)
         self.registry = Registry()
         self.allocator = Allocator(
             self.provider,
@@ -376,7 +376,7 @@ class Harness:
             PodSpec("registry/witness@sha256:" + "a" * 64, capability_secret=SECRET),
             selection=self.selection,
         )
-        membership = Membership("test", 17, self.scope.round)
+        membership = Membership(17, self.scope.round)
         now = int(time.time() * 1000)
         membership.snapshot = {
             "version": 1,
@@ -390,7 +390,7 @@ class Harness:
         self.membership = membership
         self.gateway = Gateway(
             allocator=self.allocator,
-            auth=Authenticator(membership),
+            auth=Authenticator(membership.require),
             registry=self.registry,
             deployment=self.scope.deployment,
             round_number=self.scope.round,
@@ -755,7 +755,7 @@ def test_interrupted_capture_allows_an_ordinary_same_id_retry(
             raise PodKilled()
 
         async with fixture.running():
-            monkeypatch.setattr("pod.relay", killed_relay)
+            monkeypatch.setattr("witness_pod.pod.relay", killed_relay)
             with fixture.client() as witness:
                 witness._gateway.delivery_timeout = 5
                 with pytest.raises(openai.APIError):
@@ -774,7 +774,7 @@ def test_interrupted_capture_allows_an_ordinary_same_id_retry(
                     witness._gateway._invalidate_for("pod_not_selected")
                     await asyncio.to_thread(witness._gateway.ensure_pod)
                     assert len(fixture.runtimes) == 2
-                monkeypatch.setattr("pod.relay", fixture.relay)
+                monkeypatch.setattr("witness_pod.pod.relay", fixture.relay)
                 snapshot = await asyncio.to_thread(witness._gateway.snapshot, record.call.exchange_id)
                 assert snapshot.call.phase == "failed" and fixture.paid == 1
                 result = await asyncio.to_thread(witness.create, model="fixture", input="image")

@@ -11,27 +11,24 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
 from functools import partial
-from typing import Protocol, TypeVar
+from typing import TypeVar
 
 from aiohttp import WSMsgType, web
 from pydantic import BaseModel, ConfigDict, ValidationError
+from subnet_common.witness.auth import Authenticator, AuthRejected
+from subnet_common.witness.models import Pod, PodSpec, Scope, Session, identifier, object_dict
+from subnet_common.witness.rounds import RoundInputs
+from subnet_common.witness.security import capability, miner_access
+from subnet_common.witness.state import StateConflict, WriteUncertain
 
 from .admission import CapacityReached, CreateDeferred, PendingStart, StartQueue
-from .auth import Authenticator, AuthRejected
 from .control import Peer, Registry
 from .lifecycle import AllocationConflict, Allocator, InventoryConflict
-from .models import Pod, PodSpec, Scope, Session, identifier, object_dict
-from .rounds import RoundController, RoundInputs
+from .rounds import RoundController
 from .runpod import ProviderUnavailable
-from .security import capability, miner_access
-from .state import StateConflict, WriteUncertain
 
 T = TypeVar("T")
 STARTUP_SECONDS = 600
-
-
-class Evidence(Protocol):
-    def read(self, key: str, limit: int = 16 * 1024 * 1024) -> bytes | None: ...
 
 
 class Start(BaseModel):
@@ -98,7 +95,7 @@ class Gateway:
     def _authorize_create(self, scope: Scope, start_id: str) -> None:
         if scope.round != self.round or not self.fence():
             raise AuthRejected("gateway_fenced", 503)
-        self.auth.membership.require(scope.hotkey)
+        self.auth.authorize(scope.hotkey)
         self._require_round(scope)
         self.queue.authorize(scope, start_id)
         if not self.fence():
@@ -494,7 +491,7 @@ class Gateway:
     def _advance(self, scope: Scope, entry: PendingStart) -> Session | None:
         if not self.fence():
             raise AuthRejected("gateway_fenced", 503)
-        self.auth.membership.require(scope.hotkey)
+        self.auth.authorize(scope.hotkey)
         operation = self.allocator.operations.get(scope)
         if (entry.submitted and operation is not None and not operation.submitted
                 and operation.session.start_id == entry.start_id):

@@ -520,18 +520,18 @@ docker build --platform linux/amd64 --target production \
 ```
 
 The `gateway` target runs `gateway` by default and also supports `revivor`,
-`certs` and offline `export`. It retains the TLS, membership and storage
-dependencies, matching verification key, native verifier, Node and Python
-clients needed by those commands. Pillow handles competition prompt images;
+`certs` and `publish-pricing`. It retains the TLS, membership and storage
+dependencies, shared contracts and matching public verification key.
+Pillow handles competition prompt images;
 the image excludes Chromium, the renderer runtime, Torch, torchvision and
 Transformers. The independent revivor still requires access to
 the host's Caddy executable, admin endpoint, CA file and writable configuration.
 
-The `production` target runs `worker` by default. It contains the matching
-witness client, gateway support modules, worker and verifier,
+The `production` target starts `python -m witness_pod`. It contains the matching
+witness client, shared contracts, Pod package and verifier,
 plus render-service-js 0.4.10 with PMREM caching and bounded diagnostics. Node
 22, Chromium 155, Python 3.14.9 and the base image digests are pinned in the
-Dockerfile. The default entrypoint is `python -m pod_gateway`.
+Dockerfile. The gateway entrypoint is `python -m pod_gateway`.
 
 The worker role starts the renderer before connecting to the gateway. It uses
 UID/GID 1001, an isolated environment without witness credentials, one rendering
@@ -658,39 +658,31 @@ UID 1001 without the Python process's storage credentials. Node and Chromium loa
 a scoped SwiftShader affinity wrapper that preserves the assigned CPU list for
 the driver's default CPU-count mask. The benchmark sets only `ThreadCount` in
 `SwiftShader.ini`; it does not configure an explicit affinity mask. The default
-build continues to start `python -m pod_gateway`.
+build starts `python -m witness_pod`.
 
 Publish both images through the operator's release process and configure their
 immutable digests in [deploy/revivor.env.example](deploy/revivor.env.example):
 `WITNESS_GATEWAY_IMAGE` selects the gateway for creation and revival;
 `WITNESS_IMAGE` selects miner witness Pods. Both pins are required and are
 forwarded to replacement gateways. There is no fallback between image roles.
-`WITNESS_RENDERER_PROFILE.image_digest` must match the witness Pod digest;
-retain the approved model revision and renderer profile hash.
+`WITNESS_IMAGE` pins the Pod and its packaged renderer. Retain the approved
+embedding-model revision for final-result saving.
 
-For an existing shared-image deployment, prepare the revivor source, dependencies
-and private candidate configuration offline. Set both image variables to the
-current shared-image digest for the controller upgrade. Activating the upgraded
-revivor replaces the existing gateway even when both digests are unchanged:
-forwarding `WITNESS_GATEWAY_IMAGE` changes the gateway Pod's fingerprint.
-
+Prepare the revivor source, dependencies and private configuration offline.
 Perform these steps only at the approved rollout:
 
-1. Stop the existing revivor. Upgrade its host checkout and virtualenv to this
-   release, using `requirements-gateway.txt` with `constraints-pods.txt`, before
-   selecting the split gateway image. The launcher must forward both image pins;
-   gateway startup requires `WITNESS_GATEWAY_IMAGE` in the Pod environment.
-2. Start the upgraded revivor with both pins still selecting the shared image.
-   Confirm the replacement gateway is healthy and ready for admission before
-   proceeding.
-3. At the split-image cutover, stop the revivor, set each variable to its
-   corresponding split-image digest and update the artifact profile's worker
-   digest as described above. Restart the upgraded revivor with that configuration.
+1. Finish active captures and stop the existing revivor. Upgrade its host
+   checkout and virtualenv to this release using `requirements-gateway.txt`
+   with `constraints-pods.txt`.
+2. Set `WITNESS_GATEWAY_IMAGE` and `WITNESS_IMAGE` to their corresponding
+   images from this release. Set `R2_REPLAY_BUCKET` and `R2_REPLAY_CDN_URL`,
+   then restart the upgraded revivor. Confirm the replacement gateway is
+   healthy and ready before resuming miner traffic.
 
 Building these images does not change running Pods or pins.
 
 Set the actual
-competition repository and branch, renderer profile, canonical operator hotkey, capacity limits, keys and
+competition repository and branch, embedding revision, canonical operator hotkey, capacity limits, keys and
 HTTPS origin. Keep the deployment namespace/master key stable for the round.
 Workers use the deployment's [shared model table](README.md#model-table), which
 must be published before starting them. Model additions do not change Pod image
@@ -720,7 +712,7 @@ Export the trusted execution-host observation file with the operator's retained
 capture store and the deployment's shared model table:
 
 ```sh
-python -m pod_gateway export --deployment competition --round test-0 \
+python -m witness_pod export --deployment competition --round test-0 \
   --hotkey "$MINER_HOTKEY" --execution /private/host/execution.json \
   --output /private/replay/bundle
 ```

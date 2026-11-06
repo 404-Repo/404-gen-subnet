@@ -4,11 +4,11 @@ import hashlib
 import json
 from collections.abc import Callable
 
+from subnet_common.witness.models import Scope, object_dict
 from witness_client.calls import RequestKey, request_digest
 from witness_client.response import completed_response
 
 from .budget import Budget
-from .models import Scope, object_dict
 from .records import Call, CallRecords, RecordingConflict
 
 

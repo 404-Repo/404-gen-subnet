@@ -2,8 +2,7 @@ from __future__ import annotations
 
 import pytest
 from bittensor_wallet import Keypair
-
-from identity import miner_prefix
+from witness_pod.identity import miner_prefix
 
 
 def test_round_and_hotkey_define_the_transcript_group(

@@ -18,13 +18,12 @@ import pytest
 from bittensor_wallet import Keypair
 from renderer_client import ArtifactUnavailable, RenderOptions, RenderRejected, RenderUnavailable
 from subnet_common.competition.generations import GenerationResult, GenerationsAdapter
+from subnet_common.witness.models import Scope
 from test_artifacts import PNG, SOURCE, client, enable
 from test_service import Harness
 from witness_client import AsyncWitnessClient, WitnessClient, WitnessError
 from witness_client.async_tunnel import AsyncWebSocketTunnel
-
-from pod_gateway.artifacts import ArtifactRepository, SubmissionContext
-from pod_gateway.models import Scope
+from witness_pod.artifacts import ArtifactRepository, SubmissionContext
 
 Mode = Literal["sync", "async"]
 
@@ -94,7 +93,7 @@ def test_get_submitted_resumes_only_this_miners_round_after_client_restart(
                 ):
                     foreign = ArtifactRepository(
                         fixture.state, scope, index=fixture.state, seed=store.seed,
-                        submission_commit=store.submission_commit, prompt_ids={"f" * 64: "f" * 64},
+prompt_ids={"f" * 64: "f" * 64},
                     )
                     foreign.update_result("f" * 64, GenerationResult(failure_reason="generation_failed"))
             fixture.services[-1].round_end = 0
@@ -249,7 +248,7 @@ def test_submit_propagates_admission_and_judging_failures_without_retrying(
             image, source, expected = fixture.image, SOURCE, 503
             if failure == "embeddings":
                 monkeypatch.setattr(
-                    "pod_gateway.results.build_embeddings_npz", AsyncMock(side_effect=OSError("Unavailable"))
+                    "witness_pod.results.build_embeddings_npz", AsyncMock(side_effect=OSError("Unavailable"))
                 )
             elif failure == "closed":
                 fixture.services[-1].round_end = 0
@@ -328,7 +327,7 @@ def test_slow_final_saves_complete_while_another_save_is_waiting(
                 return b"retained embeddings"
 
             monkeypatch.setattr(store, "require", require)
-            monkeypatch.setattr("pod_gateway.results.build_embeddings_npz", embeddings)
+            monkeypatch.setattr("witness_pod.results.build_embeddings_npz", embeddings)
             with ExitStack() as stack:
                 legacy = []
                 if kind == "artifact":
@@ -448,7 +447,7 @@ def test_cancelled_async_submission_can_retrieve_the_result_saved_by_the_pod(
                 await release.wait()
                 return b"retained embeddings"
 
-            monkeypatch.setattr("pod_gateway.results.build_embeddings_npz", embeddings)
+            monkeypatch.setattr("witness_pod.results.build_embeddings_npz", embeddings)
             task = asyncio.create_task(witness.submit(fixture.image, SOURCE))
             try:
                 await asyncio.wait_for(started.wait(), 5)

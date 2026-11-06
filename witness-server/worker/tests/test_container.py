@@ -30,14 +30,15 @@ def test_build_context_excludes_credentials_and_local_state(tmp_path: Path) -> N
         "witness-client/native/go.mod",
         "witness-client/native/go.sum",
         "miner-runtime/src/miner_runtime/runner.py",
-        "witness-server/verifier/THIRD_PARTY_NOTICES.md",
-        "witness-server/verifier/verify.mjs",
-        "witness-server/verifier/package.json",
-        "witness-server/verifier/package-lock.json",
-        "witness-server/verifier/params/verifying.bin",
-        "witness-server/worker/worker.py",
-        "witness-server/worker/channel.py",
-        "witness-server/worker/timing.py",
+        "witness-server/worker/witness_pod/verifier/THIRD_PARTY_NOTICES.md",
+        "witness-server/worker/witness_pod/verifier/verify.mjs",
+        "witness-server/worker/witness_pod/verifier/package.json",
+        "witness-server/worker/witness_pod/verifier/package-lock.json",
+        "shared/subnet_common/witness/params/verifying.bin",
+        "witness-server/worker/pyproject.toml",
+        "witness-server/worker/witness_pod/worker.py",
+        "witness-server/worker/witness_pod/channel.py",
+        "witness-server/worker/witness_pod/timing.py",
     }
     excluded = {
         ".env",
@@ -46,11 +47,11 @@ def test_build_context_excludes_credentials_and_local_state(tmp_path: Path) -> N
         "witness-gateway/.wrangler/state/marker",
         "witness-server/worker/.env",
         "witness-server/worker/.venv/marker",
-        "witness-server/verifier/node_modules/marker",
-        "witness-server/verifier/protocol.test.mjs",
+        "witness-server/worker/witness_pod/verifier/node_modules/marker",
+        "witness-server/worker/witness_pod/verifier/protocol.test.mjs",
         "witness-server/worker/tests/test_tls.py",
-        "witness-server/verifier/params/proving.bin",
-        "witness-server/verifier/params/circuit.bin",
+        "witness-server/worker/witness_pod/verifier/params/proving.bin",
+        "witness-server/worker/witness_pod/verifier/params/circuit.bin",
         "witness-client/native/privateauth",
         "witness-client/.env",
     }
@@ -80,7 +81,7 @@ def test_build_context_excludes_credentials_and_local_state(tmp_path: Path) -> N
 
 def test_worker_image_loads_runtime_and_matching_verification_key() -> None:
     expected = hashlib.sha256(
-        (WORKER.parent / "verifier/params/verifying.bin").read_bytes()
+        (WORKER / "witness_pod/verifier/params/verifying.bin").read_bytes()
     ).hexdigest()
     licences = {
         name: hashlib.sha256(
@@ -89,26 +90,25 @@ def test_worker_image_loads_runtime_and_matching_verification_key() -> None:
         for name in ("LICENSE", "THIRD_PARTY_NOTICES.md")
     }
     licences["VERIFIER_THIRD_PARTY_NOTICES.md"] = hashlib.sha256(
-        (WORKER.parent / "verifier/THIRD_PARTY_NOTICES.md").read_bytes()
+        (WORKER / "witness_pod/verifier/THIRD_PARTY_NOTICES.md").read_bytes()
     ).hexdigest()
     script = f"""
 import hashlib
 from pathlib import Path
 import subprocess
-import worker
+from witness_pod import PROOF_PARAMETERS, VERIFY_SCRIPT, worker
 
-assert worker.HERE == Path('/app/witness-server/worker')
-assert worker.WITNESS == Path('/app/witness-server/verifier')
+assert worker.PARAMETERS == PROOF_PARAMETERS
+assert VERIFY_SCRIPT.is_file()
 assert hashlib.sha256((worker.PARAMETERS / 'verifying.bin').read_bytes()).hexdigest() == {expected!r}
 assert not (worker.PARAMETERS / 'proving.bin').exists()
 assert not (worker.PARAMETERS / 'circuit.bin').exists()
-assert not list(worker.WITNESS.glob('*.test.mjs'))
-assert not (worker.HERE / 'tests').exists()
-assert Path('/app/witness-client/native/privateauth').is_file()
+assert not list(PROOF_PARAMETERS.parent.glob('*.test.mjs'))
+assert not (VERIFY_SCRIPT.parent / 'tests').exists()
+assert Path('/usr/local/bin/privateauth').is_file()
 for name, digest in {licences!r}.items():
     assert hashlib.sha256((Path('/app/licenses') / name).read_bytes()).hexdigest() == digest
-subprocess.run(['node', '--input-type=module', '-e',
-                "await import('../verifier/verify.mjs'); await import('../verifier/gate.mjs')"], check=True)
+subprocess.run(['node', str(VERIFY_SCRIPT), 'health', '/tmp', str(PROOF_PARAMETERS)], check=True)
 """
     subprocess.run(
         [
@@ -120,7 +120,7 @@ subprocess.run(['node', '--input-type=module', '-e',
             "--network",
             "none",
             "--workdir",
-            "/app/witness-server/worker",
+            "/tmp",
             "--entrypoint",
             "python",
             IMAGE,

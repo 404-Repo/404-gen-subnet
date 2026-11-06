@@ -13,19 +13,19 @@ from pathlib import Path
 import httpx
 import pytest
 from PIL import Image
-from subnet_common.github import GitHubClient
-from support import MemoryState, Provider
-from test_lifecycle import Drain, FIRST, SECOND, SCOPE, SPEC
-from test_settings import values as settings_values
-
-from pod_gateway.artifacts import ArtifactConfig, ArtifactRepository
-from pod_gateway.auth import AuthRejected
 from pod_gateway.dependencies import gateway_spec, worker_spec
 from pod_gateway.lifecycle import Allocator
 from pod_gateway.revivor import Revivor
-from pod_gateway.rounds import RoundController, RoundInputs, RoundPolicy
+from pod_gateway.rounds import RoundController
 from pod_gateway.settings import Settings
-from pod_gateway.state import PrefixedState
+from subnet_common.github import GitHubClient
+from subnet_common.witness.auth import AuthRejected
+from subnet_common.witness.rounds import RoundInputs, RoundPolicy
+from subnet_common.witness.state import PrefixedState
+from support import MemoryState, Provider
+from test_lifecycle import FIRST, SCOPE, SECOND, SPEC, Drain
+from test_settings import values as settings_values
+from witness_pod.artifacts import ArtifactRepository
 
 values = settings_values
 
@@ -359,9 +359,9 @@ def test_repository_image_urls_pin_the_exact_selected_branch_name(host: str, rou
 
 
 def test_frozen_prompt_objects_keep_their_image_media_type() -> None:
-    from test_state import FakeS3
     from pod_gateway.rounds import RoundImages
-    from pod_gateway.state import R2StateStore
+    from subnet_common.witness.state import R2StateStore
+    from test_state import FakeS3
 
     s3 = FakeS3()
     images = RoundImages(R2StateStore(s3, "private"))
@@ -394,9 +394,6 @@ def test_resolved_worker_spec_needs_no_manual_round_data_and_keeps_github_creden
         values.pop("WITNESS_ROUND_END")
         values["WITNESS_GITHUB_TOKEN"] = "fixture-read-only-token"
         values["WITNESS_COMPETITION_BRANCH"] = "persistent/witness"
-        values["WITNESS_RENDERER_PROFILE"] = json.dumps({
-            "image_digest": "sha256:" + "a" * 64, "validation_sha256": "b" * 64,
-        })
         values["DINOV3_REVISION"] = "fixture-model"
         settings = Settings.model_validate(values)
         competition = Competition()
@@ -404,9 +401,8 @@ def test_resolved_worker_spec_needs_no_manual_round_data_and_keeps_github_creden
         inputs = competition.controller.require()
         spec = worker_spec(settings, inputs)
         frozen = RoundInputs.model_validate_json(spec.env["WITNESS_ROUND_INPUTS"])
-        artifacts = ArtifactConfig.model_validate_json(spec.env["WITNESS_ARTIFACTS"])
-        assert frozen == inputs and artifacts.seed == inputs.seed and artifacts.prompt_ids == inputs.prompt_ids
-        assert artifacts.commits == {}
+        assert frozen == inputs
+        assert spec.env["DINOV3_REVISION"] == "fixture-model"
         assert "WITNESS_GITHUB_TOKEN" not in spec.env
         assert gateway_spec(settings).env["WITNESS_GITHUB_TOKEN"] == "fixture-read-only-token"
         competition.source.publish(publication(number=1, seed=99, prompt="lamp"))
@@ -425,8 +421,8 @@ def test_automatic_round_configuration_does_not_enable_a_test_hotkey_exemption(v
 
 def test_storage_namespaces_keep_results_and_call_journals_separate_with_unchanged_official_paths() -> None:
     from subnet_common.competition.generations import GenerationResult
-    from pod_gateway.records import CallRecords
     from test_recording import invocation
+    from witness_pod.records import CallRecords
 
     state = MemoryState()
     digest = "d" * 64

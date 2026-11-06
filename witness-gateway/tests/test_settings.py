@@ -13,24 +13,22 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 from aiohttp import web
 from bittensor_wallet import Keypair
+from pod_gateway.dependencies import gateway_spec, worker_spec
+from pod_gateway.membership import Membership
+from pod_gateway.settings import GatewaySettings, Settings
 from pydantic import SecretStr
+from subnet_common.witness.auth import Authenticator, AuthRejected
+from subnet_common.witness.models import Scope
+from subnet_common.witness.pricing import PricingStore
 from support import MemoryState
 from test_recording import PRICING
 from witness_client.auth import hotkey_headers
-
-from pod_gateway.artifacts import ArtifactProfile
-from pod_gateway.auth import Authenticator, AuthRejected, Membership
-from pod_gateway.dependencies import gateway_spec, worker_spec
-from pod_gateway.models import Scope
-from pod_gateway.pricing import PricingStore
-from pod_gateway.renderer import renderer_profile_sha256, require_artifact_profile
-from pod_gateway.settings import GatewaySettings, Settings
 
 
 @pytest.mark.parametrize("round_number", ["test-0", "test-1", "test-2"])
 def test_test_hotkey_can_authenticate_without_registration(round_number: str) -> None:
     hotkey = Keypair.create_from_mnemonic(Keypair.generate_mnemonic()).ss58_address
-    membership = Membership("test", 17, round_number, hotkey)
+    membership = Membership(17, round_number, hotkey)
     now = int(time.time() * 1000)
     membership.snapshot = {
         "version": 1,
@@ -48,7 +46,7 @@ def test_test_hotkey_can_authenticate_without_registration(round_number: str) ->
 
 def test_test_hotkey_is_rejected_for_competition_rounds() -> None:
     with pytest.raises(ValueError, match="Invalid membership configuration"):
-        Membership("test", 17, "56", "5" * 48)
+        Membership(17, "56", "5" * 48)
 
 
 @pytest.mark.parametrize("age_ns,accepted", [
@@ -58,15 +56,15 @@ def test_test_hotkey_is_rejected_for_competition_rounds() -> None:
 def test_hotkey_timestamp_window(monkeypatch: pytest.MonkeyPatch, age_ns: int, accepted: bool) -> None:
     key = Keypair.create_from_uri("//Alice")
     clock = [time.time_ns()]
-    monkeypatch.setattr("pod_gateway.auth.time.time_ns", lambda: clock[0])
+    monkeypatch.setattr("subnet_common.witness.auth.time.time_ns", lambda: clock[0])
     headers = hotkey_headers(key, b"", method="GET", path="/v1/pods/current")
-    membership = Membership("test", 17, "test-1")
+    membership = Membership(17, "test-1")
     now = int(time.time() * 1000)
     membership.snapshot = {
         "version": 1, "network": "finney", "netuid": 17, "block": 1,
         "fetched_at": now, "block_time": now, "hotkeys": [key.ss58_address],
     }
-    auth = Authenticator(membership)
+    auth = Authenticator(membership.require)
     clock[0] += age_ns
     if accepted:
         assert auth.verify("GET", "/v1/pods/current", b"", headers) == key.ss58_address
@@ -79,15 +77,15 @@ def test_hotkey_timestamp_window(monkeypatch: pytest.MonkeyPatch, age_ns: int, a
 def test_hotkey_replay_is_rejected_through_timestamp_window(monkeypatch: pytest.MonkeyPatch, age_ns: int) -> None:
     key = Keypair.create_from_uri("//Alice")
     clock = [time.time_ns()]
-    monkeypatch.setattr("pod_gateway.auth.time.time_ns", lambda: clock[0])
+    monkeypatch.setattr("subnet_common.witness.auth.time.time_ns", lambda: clock[0])
     headers = hotkey_headers(key, b"", method="GET", path="/v1/pods/current")
-    membership = Membership("test", 17, "test-1")
+    membership = Membership(17, "test-1")
     now = int(time.time() * 1000)
     membership.snapshot = {
         "version": 1, "network": "finney", "netuid": 17, "block": 1,
         "fetched_at": now, "block_time": now, "hotkeys": [key.ss58_address],
     }
-    auth = Authenticator(membership)
+    auth = Authenticator(membership.require)
     assert auth.verify("GET", "/v1/pods/current", b"", headers) == key.ss58_address
     clock[0] += age_ns
     with pytest.raises(AuthRejected, match="replayed_hotkey_auth"):
@@ -168,6 +166,8 @@ def values() -> dict[str, object]:
         "R2_ACCESS_KEY_ID": "fixture-id",
         "R2_SECRET_ACCESS_KEY": "fixture-secret",
         "R2_BUCKET": "fixture",
+        "R2_REPLAY_BUCKET": "fixture-replays",
+        "R2_REPLAY_CDN_URL": "https://replays.test",
         "SUBTENSOR_RPC_URL": "https://rpc.test",
         "GATEWAY_TLS_CERT_B64": "fixture-cert",
         "GATEWAY_TLS_KEY_B64": "fixture-key",
@@ -205,6 +205,24 @@ def test_gateway_image_is_explicit_for_split_and_legacy_deployments(values: dict
     for missing in ("WITNESS_IMAGE", "WITNESS_GATEWAY_IMAGE"):
         with pytest.raises(ValueError, match=missing):
             Settings.model_validate({key: value for key, value in values.items() if key != missing})
+
+
+@pytest.mark.parametrize("missing", ["R2_REPLAY_BUCKET", "R2_REPLAY_CDN_URL"])
+def test_replay_storage_configuration_is_required(
+    values: dict[str, object], monkeypatch: pytest.MonkeyPatch, missing: str,
+) -> None:
+    monkeypatch.delenv(missing, raising=False)
+    with pytest.raises(ValueError, match=missing):
+        Settings.model_validate({key: value for key, value in values.items() if key != missing})
+
+
+def test_replay_bucket_is_forwarded_to_workers_after_gateway_revival(values: dict[str, object]) -> None:
+    settings = Settings.model_validate(values)
+    revived = Settings.model_validate({**gateway_spec(settings).env, "WITNESS_DEPLOYMENT": settings.deployment})
+    assert worker_spec(revived).env["R2_REPLAY_BUCKET"] == "fixture-replays"
+    assert worker_spec(revived).env["R2_REPLAY_CDN_URL"] == "https://replays.test"
+    assert worker_spec(revived).env["R2_BUCKET"] == values["R2_BUCKET"]
+    assert worker_spec(revived).env["WITNESS_IMAGE"] == values["WITNESS_IMAGE"]
 
 
 def test_typed_settings_build_equivalent_pod_specs(values: dict[str, object]) -> None:
@@ -247,62 +265,21 @@ def test_string_launch_values_remain_literal(values: dict[str, object]) -> None:
     assert worker_spec(settings).env["WITNESS_IDLE_SECONDS"] == "01800"
 
 
-def test_artifact_configuration_reaches_both_pod_roles_and_pins_the_worker_image(values: dict[str, object]) -> None:
-    config = json.dumps(
-        {
-            "profile": {"image_digest": "sha256:" + "a" * 64, "validation_sha256": "b" * 64},
-            "limits": {"max_renders": 16, "max_bytes": 256 * 1024 * 1024},
-            "seed": 42,
-            "commits": {values["WITNESS_GATEWAY_OWNER_HOTKEY"]: "c" * 40},
-            "prompt_ids": {"d" * 64: "official-prompt"},
-        }
-    )
-    values["WITNESS_ARTIFACTS"] = config
-    values["DINOV3_REVISION"] = "fixture-revision"
-    settings = Settings.model_validate(values)
-    assert gateway_spec(settings).env["WITNESS_ARTIFACTS"] == config
-    assert worker_spec(settings).env["WITNESS_ARTIFACTS"] == config
-    values["WITNESS_IMAGE"] = "registry/witness@sha256:" + "f" * 64
-    with pytest.raises(ValueError, match="pinned worker image"):
-        Settings.model_validate(values)
+def test_final_saving_requires_and_forwards_embedding_settings(values: dict[str, object]) -> None:
+    from test_rounds import Competition
 
+    async def scenario() -> None:
+        competition = Competition()
+        await competition.controller.refresh()
+        inputs = competition.controller.require()
+        with pytest.raises(ValueError, match="DINOV3_REVISION"):
+            worker_spec(Settings.model_validate(values), inputs)
+        values.update(DINOV3_REVISION="fixture-revision", HF_TOKEN="fixture-token")
+        spec = worker_spec(Settings.model_validate(values), inputs)
+        assert spec.env["DINOV3_REVISION"] == "fixture-revision"
+        assert spec.env["HF_TOKEN"] == "fixture-token"
 
-@pytest.mark.parametrize("commits", [None, {}, {"5" * 48: "c" * 40}])
-def test_artifact_commits_do_not_restrict_gateway_membership(
-    values: dict[str, object], tmp_path: Path, monkeypatch: pytest.MonkeyPatch, commits: dict[str, str] | None,
-) -> None:
-    from pod_gateway import main
-
-    miner = Keypair.create_from_uri("//Alice")
-    (tmp_path / "verifying.bin").write_bytes(b"fixture verification key")
-    values.update({
-        "WITNESS_ARTIFACTS": json.dumps({
-            "profile": {"image_digest": "sha256:" + "a" * 64, "validation_sha256": "b" * 64},
-            "seed": 42, "prompt_ids": {"d" * 64: "official-chair"},
-            **({} if commits is None else {"commits": commits}),
-        }),
-        "DINOV3_REVISION": "fixture-revision", "WITNESS_PARAMETERS": tmp_path,
-        "WITNESS_START_ID": "00000000-0000-4000-8000-000000000001", "RUNPOD_POD_ID": "fixture-gateway",
-    })
-    gateway = Mock()
-    gateway.return_value.application.return_value = web.Application()
-    monkeypatch.setattr(main, "Gateway", gateway)
-    monkeypatch.setattr("pod_gateway.main.R2StateStore.connect", Mock(return_value=MemoryState()))
-    monkeypatch.setattr(main, "RoundImages", Mock(return_value=MemoryState()))
-    monkeypatch.setattr("pod_gateway.main.RunPodClient.http_client", Mock())
-    monkeypatch.setattr("pod_gateway.main.httpx.Client", Mock())
-    settings = GatewaySettings.model_validate(values)
-    asyncio.run(main.application(settings, worker_spec(settings)))
-    auth = gateway.call_args.kwargs["auth"]
-    now = int(time.time() * 1000)
-    auth.membership.snapshot = {
-        "version": 1, "network": "finney", "netuid": settings.netuid, "block": 1,
-        "fetched_at": now, "block_time": now, "hotkeys": [miner.ss58_address],
-    }
-    path = "/v1/pods/current"
-    assert auth.verify("GET", path, b"", hotkey_headers(miner, b"", method="GET", path=path)) == miner.ss58_address
-    with pytest.raises(AuthRejected, match="hotkey_not_registered"):
-        auth.membership.require(Keypair.create_from_uri("//Bob").ss58_address)
+    asyncio.run(scenario())
 
 
 def test_gateway_refresh_error_preserves_cached_round_permission(
@@ -345,12 +322,13 @@ def test_gateway_refresh_error_preserves_cached_round_permission(
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize("commits", [None, {}, {"5" * 48: "c" * 40}])
-def test_assigned_pod_starts_artifact_storage_without_a_source_commit(
-    values: dict[str, object], tmp_path: Path, monkeypatch: pytest.MonkeyPatch, commits: dict[str, str] | None,
+@pytest.mark.parametrize("save_submissions", [True, False])
+def test_assigned_pod_uses_frozen_inputs_for_final_saving(
+    values: dict[str, object], tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    save_submissions: bool,
 ) -> None:
-    import pod
-    from pod_gateway import certs, direct, renderer, state
+    from subnet_common.witness import certs, state
+    from witness_pod import direct, pod
 
     class Started(Exception):
         pass
@@ -367,17 +345,12 @@ def test_assigned_pod_starts_artifact_storage_without_a_source_commit(
         "WITNESS_ROUND_INPUTS": json.dumps({
             "repository": "404-repo/404-active-competition", "branch": "fixture", "revision": "a" * 40,
             "round": "test-0", "number": 0, "seed": 42, "generation_deadline_block": None,
-            "storage_prefix": "", "save_submissions": True,
+            "storage_prefix": "", "save_submissions": save_submissions,
             "prompts": [{"id": "official-chair", "sha256": "d" * 64,
                          "source_url": "https://prompts.test/official-chair.png",
                          "image_key": "competition-inputs/v1/" + "d" * 64}],
         }),
         "DINOV3_REVISION": "fixture",
-        "WITNESS_ARTIFACTS": json.dumps({
-            "profile": {"image_digest": "sha256:" + "a" * 64, "validation_sha256": "b" * 64},
-            "seed": 42, "prompt_ids": {"d" * 64: "official-chair"},
-            **({} if commits is None else {"commits": commits}),
-        }),
     }.items():
         monkeypatch.setenv(name, value)
     runtime = SimpleNamespace(scope=Scope("competition", "test-0", str(values["WITNESS_GATEWAY_OWNER_HOTKEY"])),
@@ -385,33 +358,28 @@ def test_assigned_pod_starts_artifact_storage_without_a_source_commit(
     service = Mock(side_effect=Started)
     monkeypatch.setattr(pod, "PARAMETERS", tmp_path)
     monkeypatch.setattr(pod, "PodRuntime", Mock(return_value=runtime))
-    monkeypatch.setattr("pod.signal.signal", Mock())
+    monkeypatch.setattr("witness_pod.pod.signal.signal", Mock())
     monkeypatch.setattr(pod, "render_service", lambda _: nullcontext())
     monkeypatch.setattr(state, "R2StateStore", Mock(return_value=saved, connect=Mock(return_value=saved)))
     monkeypatch.setattr(certs, "pod_context", Mock(return_value=(None, "fixture-certificate")))
-    monkeypatch.setattr(renderer, "require_artifact_profile", Mock())
     monkeypatch.setattr(direct, "Witness", service)
-    monkeypatch.setattr("storage.R2Store", Mock())
+    final_objects = Mock(bucket=str(values["R2_BUCKET"]))
+    replay_objects = Mock(bucket=str(values["R2_REPLAY_BUCKET"]), keys=Mock(return_value=iter(())))
+    monkeypatch.setattr("witness_pod.storage.R2Store", Mock(side_effect=[final_objects, replay_objects]))
     with pytest.raises(Started):
         pod.main()
     store = service.call_args.kwargs["artifacts"]
-    assert store.submission_commit is None
-    assert store.prefix("d" * 64).endswith("/official-chair")
+    if save_submissions:
+        assert store.prefix("d" * 64).endswith("/official-chair")
+        assert store.objects is final_objects
+    else:
+        assert store is None
+    assert service.call_args.args[1] is replay_objects.url
+    assert service.call_args.kwargs["prompt_url"] is final_objects.url
+    assert service.call_args.kwargs["render_cache"].objects is replay_objects
 
 
-def test_worker_refuses_a_profile_for_different_packaged_renderer_bytes(tmp_path: Path) -> None:
-    (tmp_path / "src").mkdir()
-    source = tmp_path / "src/server.js"
-    source.write_text("export const limit = 200;")
-    (tmp_path / "package-lock.json").write_text('{"version":1}')
-    profile = ArtifactProfile(image_digest="sha256:" + "a" * 64, validation_sha256=renderer_profile_sha256(tmp_path))
-    require_artifact_profile(profile, tmp_path)
-    source.write_text("export const limit = 201;")
-    with pytest.raises(ValueError, match="packaged renderer"):
-        require_artifact_profile(profile, tmp_path)
-
-
-def test_settings_import_with_the_shared_modules_packaged_in_the_pod(tmp_path: Path) -> None:
+def test_settings_import_with_the_shared_modules_packaged_in_the_gateway(tmp_path: Path) -> None:
     root = Path(__file__).resolve().parents[2]
     dockerfile = root / "witness-server/worker/Dockerfile.pods"
     for line in dockerfile.read_text().splitlines():
@@ -420,7 +388,11 @@ def test_settings_import_with_the_shared_modules_packaged_in_the_pod(tmp_path: P
             target = tmp_path / parts[-1].removeprefix("/app/")
             target.mkdir(parents=True, exist_ok=True)
             for name in parts[1:-1]:
-                shutil.copyfile(root / name, target / Path(name).name)
+                source = root / name
+                if source.is_dir():
+                    shutil.copytree(source, target, dirs_exist_ok=True)
+                else:
+                    shutil.copyfile(source, target / source.name)
     result = subprocess.run(
         [sys.executable, "-c", "import pod_gateway.settings"],
         cwd=tmp_path,

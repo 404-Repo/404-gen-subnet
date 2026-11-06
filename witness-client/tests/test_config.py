@@ -12,7 +12,7 @@ from bittensor_wallet import Keypair
 from witness_client import WitnessClient, WitnessConfig
 from witness_client.request import prepare_request, serialize_body
 
-PARAMS = Path(__file__).resolve().parents[2] / "witness-server/verifier/params"
+PARAMS = Path(__file__).resolve().parents[2] / "witness-server/worker/witness_pod/verifier/params"
 TOKEN = "sk-proj-" + "a" * 80
 
 

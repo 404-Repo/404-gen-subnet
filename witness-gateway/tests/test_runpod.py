@@ -6,14 +6,13 @@ from dataclasses import replace
 
 import httpx
 import pytest
-
-from pod_gateway.models import MARKERS, PodSpec, Scope, object_dict
 from pod_gateway.runpod import (
     CreateRejected,
     CreateUnknown,
     ProviderUnavailable,
     RunPodClient,
 )
+from subnet_common.witness.models import MARKERS, PodSpec, Scope, object_dict
 
 SCOPE = Scope("competition", "test-0", "5" * 48)
 SPEC = PodSpec("registry/witness@sha256:" + "a" * 64, env={"PRIVATE_KEY": "hidden-operator-key"})

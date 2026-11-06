@@ -8,10 +8,10 @@ from pathlib import Path
 import pytest
 import test_tls as tls_fixture
 from bittensor_wallet import Keypair
-from channel import Channel
-from storage import Store
 from witness_client.calls import request_digest
-from worker import Verifier, relay
+from witness_pod.channel import Channel
+from witness_pod.storage import Store
+from witness_pod.worker import Verifier, relay
 
 
 @pytest.mark.parametrize(

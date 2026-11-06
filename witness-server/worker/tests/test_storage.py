@@ -8,8 +8,7 @@ from unittest.mock import MagicMock
 import boto3
 import pytest
 from botocore.exceptions import ClientError, ConnectionClosedError, ReadTimeoutError
-
-from storage import R2Store
+from witness_pod.storage import R2Store
 
 
 @pytest.fixture
@@ -88,3 +87,44 @@ def test_normal_success_and_access_denial_do_not_read_back(
     else:
         store.put("evidence", b"expected")
     client.get_object.assert_not_called()
+
+
+def test_replay_objects_and_links_use_the_replay_bucket(r2: tuple[R2Store, MagicMock]) -> None:
+    _, client = r2
+    store = R2Store("replays", public_url="https://public-replays.test")
+    objects: dict[tuple[str, str], bytes] = {}
+
+    def get_object(*, Bucket: str, Key: str) -> dict[str, object]:
+        if (Bucket, Key) not in objects:
+            raise ClientError({"Error": {"Code": "NoSuchKey"}}, "GetObject")
+        return {"Body": io.BytesIO(objects[Bucket, Key])}
+
+    def put_object(*, Bucket: str, Key: str, Body: bytes, **_kwargs: object) -> None:
+        objects[Bucket, Key] = Body
+
+    client.get_object.side_effect = get_object
+    client.put_object.side_effect = put_object
+
+    assert store.get("missing") is None
+    store.put("folder/new evidence", b"new evidence")
+    assert objects == {("replays", "folder/new evidence"): b"new evidence"}
+    assert store.read("folder/new evidence") == b"new evidence"
+    assert store.url("folder/new evidence") == "https://public-replays.test/folder/new%20evidence"
+
+
+def test_key_listing_reads_all_pages_from_the_destination_bucket(r2: tuple[R2Store, MagicMock]) -> None:
+    _, client = r2
+    store = R2Store("replays")
+    client.list_objects_v2.side_effect = [
+        {"Contents": [{"Key": "renders/first.png"}], "IsTruncated": True, "NextContinuationToken": "page-two"},
+        {"Contents": [{"Key": "renders/second.png"}], "IsTruncated": False},
+    ]
+    assert list(store.keys("renders/")) == ["renders/first.png", "renders/second.png"]
+    assert [call.kwargs["Bucket"] for call in client.list_objects_v2.call_args_list] == ["replays", "replays"]
+    assert client.list_objects_v2.call_args.kwargs["ContinuationToken"] == "page-two"
+
+
+def test_key_listing_accepts_an_empty_bucket(r2: tuple[R2Store, MagicMock]) -> None:
+    store, client = r2
+    client.list_objects_v2.return_value = {"IsTruncated": False}
+    assert list(store.keys("renders/")) == []

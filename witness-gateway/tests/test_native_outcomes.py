@@ -14,21 +14,21 @@ from typing import cast
 
 import openai
 import pytest
-from channel import Channel
 from miner_runtime.observations import ReplayMismatch
 from miner_runtime.runner import run_generation
 from miner_runtime.validator import ReplayWitness, run_replay
 from openai.types.responses import Response
-from storage import Store
+from subnet_common.witness.certs import create
 from test_recording import PRICING
 from test_service import Harness
 from witness_client import WitnessClient
 from witness_client.response import ModelStream
 from witness_client.transport import exchange
-from worker import Verifier, relay
-
-from pod_gateway.certs import create
-from pod_gateway.replay import export_bundle
+from witness_pod import VERIFY_SCRIPT
+from witness_pod.channel import Channel
+from witness_pod.replay import export_bundle, native_verifier
+from witness_pod.storage import Store
+from witness_pod.worker import PARAMETERS, Verifier, relay
 
 
 def outcome_body(outcome: str) -> tuple[int, bytes]:
@@ -136,26 +136,17 @@ def test_native_provider_outcome_is_recorded_and_replays_without_provider_access
 
         captured = pool.submit(provider)
 
-        def verify(mode: str, directory: Path, *, provider: str) -> dict[str, object]:
-            (directory / "ca.pem").write_bytes((provider_dir / "ca.pem").read_bytes())
-            result = subprocess.run(
-                [
-                    "node",
-                    str(root / "witness-server/worker/tests/verify-fixture.mjs"),
-                    mode,
-                    str(directory),
-                    str(root / "witness-server/verifier/params"),
-                    provider,
-                ],
-                capture_output=True,
-                timeout=180,
-                check=False,
-            )
-            if result.returncode:
-                if mode != "finish" or "Witness verification rejected the exchange" in result.stderr.decode():
-                    raise ValueError("Native fixture rejected the captured evidence")
-                raise RuntimeError("Native fixture verifier did not complete")
-            return cast(dict[str, object], json.loads(result.stdout))
+        original_run = subprocess.run
+
+        def run_verifier(
+            args: list[str], *, capture_output: bool, timeout: float, check: bool,
+            env: dict[str, str] | None = None,
+        ) -> subprocess.CompletedProcess[bytes]:
+            if args[0] == "node" and args[1] == str(VERIFY_SCRIPT):
+                directory = Path(args[3])
+                (directory / "ca.pem").write_bytes((provider_dir / "ca.pem").read_bytes())
+                args = [args[0], str(root / "witness-server/worker/tests/verify-fixture.mjs"), *args[2:]]
+            return original_run(args, capture_output=capture_output, timeout=timeout, check=check, env=env)
 
         def direct_relay(
             store: Store,
@@ -181,8 +172,8 @@ def test_native_provider_outcome_is_recorded_and_replays_without_provider_access
 
         async def scenario() -> None:
             fixture = Harness(tmp_path, monkeypatch, native=True)
-            monkeypatch.setattr("pod.relay", direct_relay)
-            monkeypatch.setattr("pod.verify", verify)
+            monkeypatch.setattr("witness_pod.pod.relay", direct_relay)
+            monkeypatch.setattr("witness_pod.worker.subprocess.run", run_verifier)
             monkeypatch.setitem(
                 __import__("witness_client.request", fromlist=["PROVIDERS"]).PROVIDERS,
                 "api",
@@ -253,7 +244,7 @@ def test_native_provider_outcome_is_recorded_and_replays_without_provider_access
                     output=bundle,
                     proof_hash=fixture.proof,
                     pricing=PRICING,
-                    verify=lambda provider, directory: verify("replay", directory, provider=provider),
+                    verify=native_verifier(VERIFY_SCRIPT, PARAMETERS),
                 )
                 replay = ReplayWitness(bundle)
                 if outcome in ("http-error", "sse-error", "embedded-error", "truncated-http"):
@@ -296,9 +287,7 @@ def test_native_provider_outcome_is_recorded_and_replays_without_provider_access
                                         output=rejected,
                                         proof_hash=fixture.proof,
                                         pricing=PRICING,
-                                        verify=lambda provider, directory: verify(
-                                            "replay", directory, provider=provider
-                                        ),
+                                        verify=native_verifier(VERIFY_SCRIPT, PARAMETERS),
                                     )
                                 assert not rejected.exists()
                             finally:

@@ -112,7 +112,8 @@ For the Linux target (from the repository root):
 ```sh
 docker build --platform linux/amd64 -f witness-client/Dockerfile -t 404-witness-python:0.2.17 .
 docker run --rm --network none --platform linux/amd64 \
-  -v "$PWD/witness-server/verifier/params:/app/witness-server/verifier/params:ro" \
+  -v "$PWD/witness-server/worker/witness_pod/verifier/params:/app/witness-server/worker/witness_pod/verifier/params:ro" \
+  -v "$PWD/shared/subnet_common/witness/params:/app/shared/subnet_common/witness/params:ro" \
   404-witness-python:0.2.17
 ```
 
@@ -132,7 +133,7 @@ docker rm "$container"
 ```
 
 The matching proof parameters are already tracked under
-`witness-server/verifier/params/`. Verify their sizes and SHA-256 values against
+`witness-server/worker/witness_pod/verifier/params/`. Verify their sizes and SHA-256 values against
 `proof_parameter_members` in the manifest. The v1 archive is an existing immutable
 parameter set, not an artifact rebuilt for each Python release.
 
@@ -202,13 +203,14 @@ then build the verifier. From the repository root:
 
 ```sh
 python -m pip install -c witness-gateway/constraints-pods.txt -r witness-gateway/requirements-pods.txt
-npm --prefix witness-server/verifier ci --ignore-scripts
-npm --prefix witness-server/verifier run build:proof
+npm --prefix witness-server/worker/witness_pod/verifier ci --ignore-scripts
+npm --prefix witness-server/worker/witness_pod/verifier run build:proof
+export PATH="$PWD/witness-client/native:$PATH"
 cd witness-server/worker
 GOMAXPROCS=2 GOMEMLIMIT=768MiB python -m pytest -q tests/test_tls.py
 ```
 
-The matching proof parameters are included at `witness-server/verifier/params`.
+The matching proof parameters are included at `witness-server/worker/witness_pod/verifier/params`.
 Integration fixtures use local TLS servers, dummy OpenAI credentials, ephemeral
 Bittensor keys, and real credential proofs. Fixtures supply their certificate
 trust and provider addresses internally. Miners can test their code locally

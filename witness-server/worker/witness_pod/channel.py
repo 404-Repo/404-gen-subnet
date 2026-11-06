@@ -6,8 +6,8 @@ import json
 import time
 from typing import Protocol
 
-from storage import CHUNK_BYTES, MAX_BYTES, json_bytes
-from timing import exchange_id, progress, transport
+from .storage import CHUNK_BYTES, MAX_BYTES, json_bytes
+from .timing import exchange_id, progress, transport
 
 
 class Channel(Protocol):

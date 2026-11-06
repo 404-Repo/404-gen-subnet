@@ -12,31 +12,71 @@ import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager, suppress
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import Protocol
 
 import httpx
-
-from .models import json_bytes
-
-if TYPE_CHECKING:
-    from .artifacts import ArtifactProfile
+from renderer_client import RenderUnavailable
+from renderer_client.client import MAX_ERROR_BYTES, MAX_RESPONSE_BYTES
+from subnet_common.witness.models import Scope, json_bytes
+from subnet_common.witness.state import Objects
 
 READY_SECONDS = 60
+MAX_SUCCESSFUL_RENDERS = 10_000
 
 
-def renderer_profile_sha256(root: Path) -> str:
-    """Identify the packaged JavaScript renderer and its locked dependencies."""
-    paths = sorted(path for path in (root / "src").rglob("*") if path.suffix in {".js", ".html"})
-    if not paths:
-        raise ValueError("Packaged renderer sources are missing")
-    paths.append(root / "package-lock.json")
-    manifest = {str(path.relative_to(root)): hashlib.sha256(path.read_bytes()).hexdigest() for path in paths}
-    return hashlib.sha256(json_bytes(manifest)).hexdigest()
+class RenderObjects(Objects, Protocol):
+    def keys(self, prefix: str) -> Iterator[str]: ...
 
 
-def require_artifact_profile(profile: ArtifactProfile, root: Path) -> None:
-    if profile.bootstrap_sha256 is not None or profile.validation_sha256 != renderer_profile_sha256(root):
-        raise ValueError("Artifact profile differs from the packaged renderer")
+class RenderCache:
+    """Original render outcomes and a startup-restored, in-memory success count."""
+
+    def __init__(self, objects: RenderObjects, scope: Scope, renderer_id: str, *, storage_prefix: str = "") -> None:
+        self.objects, self.scope, self.renderer_id = objects, scope, renderer_id
+        self.prefix = f"{storage_prefix}rounds/{scope.round}/{scope.hotkey}/renders/v1/"
+        saved = set(objects.keys(self.prefix))
+        self._pngs = {key for key in saved if key.endswith(".png")}
+        self._rejections = {key for key in saved if key.endswith(".rejection.json")}
+        self._save_lock = threading.Lock()
+
+    def key(self, body: bytes, path: str) -> str:
+        request = (self.renderer_id, path, hashlib.sha256(body).hexdigest())
+        return self.prefix + hashlib.sha256(json_bytes(request)).hexdigest()
+
+    @property
+    def full(self) -> bool:
+        return len(self._pngs) >= MAX_SUCCESSFUL_RENDERS
+
+    def get(self, key: str) -> tuple[bytes, int] | None:
+        try:
+            if key + ".png" in self._pngs:
+                png = self.objects.get(key + ".png", MAX_RESPONSE_BYTES)
+                if png is None:
+                    raise RenderUnavailable("Saved PNG is missing")
+                return png, 200
+            if key + ".rejection.json" in self._rejections:
+                rejection = self.objects.get(key + ".rejection.json", MAX_ERROR_BYTES)
+                if rejection is None:
+                    raise RenderUnavailable("Saved render rejection is missing")
+                return rejection, 422
+        except ValueError as error:
+            raise RenderUnavailable("Invalid saved render outcome") from error
+        return None
+
+    def save(self, key: str, data: bytes, status: int) -> bool:
+        """Return false when a new PNG would exceed the successful-render allowance."""
+        with self._save_lock:
+            if status == 200:
+                if key + ".png" in self._pngs:
+                    return True
+                if self.full:
+                    return False
+                self.objects.put(key + ".png", data, "image/png")
+                self._pngs.add(key + ".png")
+            else:
+                self.objects.put(key + ".rejection.json", data, "application/json")
+                self._rejections.add(key + ".rejection.json")
+        return True
 
 
 @contextmanager

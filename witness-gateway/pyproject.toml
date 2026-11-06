@@ -1,3 +1,19 @@
+[build-system]
+requires = ["setuptools==80.9.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "404-witness-gateway"
+version = "0.1.0"
+description = "Witness gateway and Pod lifecycle control"
+requires-python = ">=3.11"
+
+[tool.setuptools.packages.find]
+include = ["pod_gateway*"]
+
+[tool.setuptools.package-data]
+pod_gateway = ["py.typed"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]

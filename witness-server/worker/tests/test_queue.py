@@ -6,8 +6,7 @@ import time
 import uuid
 
 from conftest import connected_channels
-
-from storage import CHUNK_BYTES
+from witness_pod.storage import CHUNK_BYTES
 
 
 def test_fragmented_megabyte_stream() -> None:

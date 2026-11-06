@@ -9,19 +9,18 @@ from configparser import ConfigParser
 from dataclasses import replace
 from pathlib import Path
 
-from pod import PodRuntime
+from pod_gateway.admission import Admission
+from pod_gateway.lifecycle import Allocator
+from pod_gateway.revivor import CaddyPublisher, GatewayDrain, Revivor
+from subnet_common.witness.certs import create
+from subnet_common.witness.models import Pod, PodSpec, Scope
+from subnet_common.witness.security import capability
 from support import MemoryState, Provider
 from test_lifecycle import Drain
 from witness_client.calls import canonical
-
-from pod_gateway.admission import Admission
-from pod_gateway.budget import Budget
-from pod_gateway.certs import create
-from pod_gateway.lifecycle import Allocator
-from pod_gateway.models import Pod, PodSpec, Scope
-from pod_gateway.records import CallRecords
-from pod_gateway.revivor import CaddyPublisher, GatewayDrain, Revivor
-from pod_gateway.security import capability
+from witness_pod.budget import Budget
+from witness_pod.pod import PodRuntime
+from witness_pod.records import CallRecords
 
 SECRET = b"x" * 32
 SCOPE = Scope("competition", "test-0", "5" * 48)
@@ -46,7 +45,7 @@ def test_standalone_service_reaches_revivor_configuration(tmp_path: Path) -> Non
     packages = next((virtualenv / "lib").glob("python*/site-packages"))
     for dependency in Path(sysconfig.get_path("purelib")).iterdir():
         if dependency.suffix == ".pth" or dependency.name in {
-            "renderer_client", "witness_client", "miner_runtime", "pod_gateway",
+            "renderer_client", "witness_client", "miner_runtime", "pod_gateway", "witness_pod",
         }:
             continue
         (packages / dependency.name).symlink_to(dependency, target_is_directory=dependency.is_dir())

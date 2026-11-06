@@ -16,11 +16,10 @@ from pydantic import (
     model_validator,
 )
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
-
-from .artifacts import ArtifactConfig, ArtifactProfile
-from .auth import public_key
-from .models import Scope
-from .rounds import repository
+from subnet_common.witness import PROOF_PARAMETERS
+from subnet_common.witness.auth import keypair_from_hotkey
+from subnet_common.witness.models import Scope
+from subnet_common.witness.rounds import repository
 
 
 class Settings(BaseSettings):
@@ -50,8 +49,6 @@ class Settings(BaseSettings):
     max_queue: int = Field(default=1024, alias="GATEWAY_MAX_QUEUE", ge=1, le=4096)
 
     image: str = Field(..., alias="WITNESS_IMAGE")
-    artifacts: str | None = Field(default=None, alias="WITNESS_ARTIFACTS")
-    renderer_profile: str | None = Field(default=None, alias="WITNESS_RENDERER_PROFILE")
     embedding_revision: str | None = Field(default=None, alias="DINOV3_REVISION", min_length=1)
     hf_token: SecretStr | None = Field(default=None, alias="HF_TOKEN")
     registry: str | None = Field(default=None, alias="WITNESS_REGISTRY")
@@ -67,6 +64,8 @@ class Settings(BaseSettings):
     r2_access_key_id: SecretStr = Field(..., alias="R2_ACCESS_KEY_ID")
     r2_secret_access_key: SecretStr = Field(..., alias="R2_SECRET_ACCESS_KEY")
     r2_bucket: str = Field(..., alias="R2_BUCKET")
+    r2_replay_bucket: str = Field(..., alias="R2_REPLAY_BUCKET", min_length=3)
+    r2_replay_cdn_url: str = Field(..., alias="R2_REPLAY_CDN_URL")
     subtensor_rpc_url: str = Field(..., alias="SUBTENSOR_RPC_URL")
     netuid: int = Field(default=17, alias="WITNESS_NETUID")
     test_hotkey: str | None = Field(default=None, alias="WITNESS_TEST_HOTKEY")
@@ -145,7 +144,7 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def validate_round(self) -> Self:
         Scope(self.deployment, self.round, self.gateway_owner_hotkey)
-        public_key(self.gateway_owner_hotkey)
+        keypair_from_hotkey(self.gateway_owner_hotkey)
         if len(self.secret) < 32 or self.round == "gateway":
             raise ValueError("Invalid master key or round deadline")
         repository(self.competition_repo)
@@ -153,18 +152,16 @@ class Settings(BaseSettings):
             raise ValueError("Automatic competition admission requires Finney membership; WITNESS_TEST_HOTKEY is unsupported")
         if self.round_refresh_seconds >= self.round_policy_seconds:
             raise ValueError("Round refresh must be shorter than the admission policy lifetime")
-        if self.artifacts is not None or self.renderer_profile is not None:
-            if not self.embedding_revision:
-                raise ValueError("Artifact saving requires DINOV3_REVISION")
-            if self.image.rsplit("@", 1)[-1] != self.profile.image_digest:  # type: ignore[union-attr]
-                raise ValueError("Artifact renderer profile must match the pinned worker image")
         return self
 
-    @property
-    def profile(self) -> ArtifactProfile | None:
-        if self.renderer_profile is not None:
-            return ArtifactProfile.model_validate_json(self.renderer_profile)
-        return None if self.artifacts is None else ArtifactConfig.model_validate_json(self.artifacts).profile
+    @field_validator("r2_replay_cdn_url")
+    @classmethod
+    def validate_replay_cdn_url(cls, value: str) -> str:
+        origin = urlsplit(value)
+        if (origin.scheme != "https" or not origin.hostname or origin.path not in ("", "/")
+                or origin.query or origin.fragment or origin.username):
+            raise ValueError("Replay CDN origin must be HTTPS")
+        return value
 
     @cached_property
     def secret(self) -> bytes:
@@ -185,7 +182,7 @@ class GatewaySettings(Settings):
     pod_id: str = Field(..., alias="RUNPOD_POD_ID")
     port: int = Field(default=8443, alias="GATEWAY_PORT")
     min_request_interval: float = Field(default=1.1, alias="GATEWAY_MIN_REQUEST_INTERVAL")
-    parameters: Path = Field(default=Path("/app/witness-server/verifier/params"), alias="WITNESS_PARAMETERS")
+    parameters: Path = Field(default=PROOF_PARAMETERS, alias="WITNESS_PARAMETERS")
 
     @field_validator("port", mode="before")
     @classmethod

@@ -12,8 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 from conftest import connected_channels
-
-import timing
+from witness_pod import timing
 
 
 @pytest.fixture

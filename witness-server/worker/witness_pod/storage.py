@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import json
 import os
-from typing import Protocol, cast
+from collections.abc import Iterator
+from typing import Protocol, TypedDict, cast
+from urllib.parse import quote
 
 import boto3
 from botocore.config import Config
 from botocore.exceptions import ClientError, ConnectionClosedError, ReadTimeoutError
-from timing import timed
+
+from .timing import timed
 
 MAX_BYTES = 16 * 1024 * 1024
 CHUNK_BYTES = 256 * 1024
@@ -26,17 +29,29 @@ class Body(Protocol):
     def close(self) -> None: ...
 
 
+class ListedObject(TypedDict):
+    Key: str
+
+
+class ObjectPage(TypedDict, total=False):
+    Contents: list[ListedObject]
+    IsTruncated: bool
+    NextContinuationToken: str
+
+
 class S3(Protocol):
     def get_object(self, **kwargs: object) -> dict[str, object]: ...
     def put_object(self, **kwargs: object) -> dict[str, object]: ...
     def delete_object(self, **kwargs: object) -> object: ...
+    def list_objects_v2(self, **kwargs: object) -> ObjectPage: ...
     def generate_presigned_url(self, operation: str, **kwargs: object) -> str: ...
 
 
 class R2Store:
     @timed("r2_initialize")
-    def __init__(self) -> None:
-        self.bucket = os.environ.get("R2_BUCKET", "404-gen")
+    def __init__(self, bucket: str | None = None, *, public_url: str | None = None) -> None:
+        self.bucket = bucket or os.environ.get("R2_BUCKET", "404-gen")
+        self.public_url = public_url
         self.client = cast(
             S3,
             boto3.client(
@@ -52,6 +67,19 @@ class R2Store:
                 ),
             ),
         )
+
+    def read(self, key: str, limit: int = MAX_BYTES) -> bytes | None:
+        return self.get(key, limit)
+
+    def keys(self, prefix: str) -> Iterator[str]:
+        continuation: dict[str, str] = {}
+        while True:
+            page = self.client.list_objects_v2(Bucket=self.bucket, Prefix=prefix, **continuation)
+            for item in page.get("Contents", []):
+                yield item["Key"]
+            if not page.get("IsTruncated", False):
+                return
+            continuation = {"ContinuationToken": page["NextContinuationToken"]}
 
     def get(self, key: str, limit: int = MAX_BYTES) -> bytes | None:
         try:
@@ -88,6 +116,8 @@ class R2Store:
         self.client.delete_object(Bucket=self.bucket, Key=key)
 
     def url(self, key: str) -> str:
+        if self.public_url is not None:
+            return self.public_url.rstrip("/") + "/" + quote(key, safe="/")
         return str(self.client.generate_presigned_url(
             "get_object", Params={"Bucket": self.bucket, "Key": key}, ExpiresIn=600,
         ))

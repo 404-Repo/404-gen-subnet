@@ -18,8 +18,20 @@ from functools import partial
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from channel import Channel
-from diagnostics import (
+from subnet_common.witness.auth import AuthRejected
+from subnet_common.witness.models import Scope, identifier, json_bytes, object_dict
+from subnet_common.witness.rounds import RoundInputs, RoundPolicy
+from subnet_common.witness.selection import Selection
+from subnet_common.witness.state import WriteUncertain
+from websockets.sync.client import connect
+from websockets.sync.connection import Connection
+from witness_client.calls import RequestKey
+from witness_client.gateway import _GatewayConnection
+from witness_client.state import save
+
+from .budget import Budget, BudgetNotReserved
+from .channel import Channel
+from .diagnostics import (
     DiagnosticRecord,
     ExchangeIdentity,
     FailureFact,
@@ -28,23 +40,12 @@ from diagnostics import (
     RuntimeIdentity,
     failure_fact,
 )
-from pod_gateway.auth import AuthRejected
-from pod_gateway.budget import Budget, BudgetNotReserved
-from pod_gateway.models import Scope, identifier, json_bytes, object_dict
-from pod_gateway.records import Call, CallRecords
-from pod_gateway.recovery import recover_issued, response_failure
-from pod_gateway.renderer import render_service
-from pod_gateway.rounds import RoundInputs, RoundPolicy
-from pod_gateway.selection import Selection
-from pod_gateway.state import WriteUncertain
-from storage import Store
-from timing import diagnostic_error, identify_exchange, measure, timed
-from websockets.sync.client import connect
-from websockets.sync.connection import Connection
-from witness_client.calls import RequestKey
-from witness_client.gateway import _GatewayConnection
-from witness_client.state import save
-from worker import PARAMETERS, PROVIDERS, relay, verify
+from .records import Call, CallRecords
+from .recovery import recover_issued, response_failure
+from .renderer import render_service
+from .storage import Store
+from .timing import diagnostic_error, identify_exchange, measure, timed
+from .worker import PARAMETERS, PROVIDERS, relay, verify
 
 
 class PodRuntime:
@@ -740,12 +741,13 @@ class PodRuntime:
 
 def main() -> None:
     from aiohttp import web
-    from pod_gateway.artifacts import ArtifactConfig, ArtifactRepository
-    from pod_gateway.certs import pod_context
-    from pod_gateway.direct import Witness
-    from pod_gateway.pricing import PricingStore
-    from pod_gateway.state import PrefixedState, R2StateStore
-    from storage import R2Store
+    from subnet_common.witness.certs import pod_context
+    from subnet_common.witness.pricing import PricingStore
+    from subnet_common.witness.state import PrefixedState, R2StateStore
+
+    from .artifacts import ArtifactRepository
+    from .direct import Witness
+    from .storage import R2Store
 
     state = R2StateStore.connect(
         endpoint=os.environ["R2_ENDPOINT"],
@@ -754,7 +756,10 @@ def main() -> None:
         bucket=os.environ["R2_BUCKET"],
     )
     prices = PricingStore(state, os.environ["WITNESS_DEPLOYMENT"])
-    evidence = R2Store()
+    artifacts = R2Store()
+    evidence = R2Store(
+        bucket=os.environ["R2_REPLAY_BUCKET"], public_url=os.environ["R2_REPLAY_CDN_URL"],
+    )
     inputs = RoundInputs.model_validate_json(os.environ["WITNESS_ROUND_INPUTS"])
     journals = PrefixedState(state, inputs.storage_prefix)
     runtime = PodRuntime(
@@ -784,34 +789,39 @@ def main() -> None:
     signal.signal(signal.SIGINT, lambda *_: runtime.drain())
     tls, runtime.certificate = pod_context(runtime.spool.parent / "tls")
     artifact_store = None
-    if inputs.save_submissions and not os.environ.get("WITNESS_ARTIFACTS"):
-        raise ValueError("Final saving requires the frozen artifact configuration")
-    if artifact_config := os.environ.get("WITNESS_ARTIFACTS"):
-        from pod_gateway.renderer import require_artifact_profile
+    embedding_revision = os.environ.get("DINOV3_REVISION", "")
+    if inputs.save_submissions:
         from subnet_common.competition.generations import MAX_GENERATIONS_BYTES
 
-        config = ArtifactConfig.model_validate_json(artifact_config)
-        if (not inputs.save_submissions or config.seed != inputs.seed or config.prompt_ids != inputs.prompt_ids):
-            raise ValueError("Artifact configuration differs from frozen round inputs")
         if os.environ.get("WITNESS_RENDERER_ENABLED") != "1":
             raise ValueError("Artifact storage requires the packaged renderer")
-        require_artifact_profile(config.profile, Path("/opt/renderer"))
+        if not embedding_revision:
+            raise ValueError("Final saving requires DINOV3_REVISION")
         artifact_store = ArtifactRepository(
-            evidence, runtime.scope,
-            index=R2StateStore(evidence.client, evidence.bucket, max_bytes=MAX_GENERATIONS_BYTES),
-            seed=config.seed, submission_commit=config.commits.get(runtime.scope.hotkey),
-            prompt_ids=config.prompt_ids,
-            storage_prefix=inputs.storage_prefix,
+            artifacts, runtime.scope,
+            index=R2StateStore(artifacts.client, artifacts.bucket, max_bytes=MAX_GENERATIONS_BYTES),
+            seed=inputs.seed, prompt_ids=inputs.prompt_ids, storage_prefix=inputs.storage_prefix,
+        )
+
+    render_cache = None
+    if os.environ.get("WITNESS_RENDERER_ENABLED") == "1":
+        from .renderer import RenderCache
+
+        render_cache = RenderCache(
+            evidence, runtime.scope, os.environ["WITNESS_IMAGE"], storage_prefix=inputs.storage_prefix,
         )
 
     async def serve() -> None:
-        from pod_gateway.results import ResultSaver
+        from .results import ResultSaver
 
         result_saver = (
-            ResultSaver(artifact_store, "http://127.0.0.1:8002", os.environ["DINOV3_REVISION"], os.environ.get("HF_TOKEN"))
+            ResultSaver(artifact_store, "http://127.0.0.1:8002", embedding_revision, os.environ.get("HF_TOKEN"))
             if artifact_store is not None else None
         )
-        service = Witness(runtime, evidence.url, artifacts=artifact_store, result_saver=result_saver)
+        service = Witness(
+            runtime, evidence.url, artifacts=artifact_store, result_saver=result_saver, prompt_url=artifacts.url,
+            render_cache=render_cache,
+        )
         runner = web.AppRunner(service.application(), handler_cancellation=False)
         await runner.setup()
         site = web.TCPSite(runner, "0.0.0.0", int(os.environ.get("WITNESS_PORT", "8000")), ssl_context=tls)

@@ -20,12 +20,11 @@ from botocore.exceptions import ClientError, ReadTimeoutError
 logging.getLogger("urllib3").setLevel(logging.CRITICAL)
 SOURCE = Path(__file__).resolve().parents[2]
 from bittensor_wallet import Keypair
+from subnet_common.witness.models import Scope
+from subnet_common.witness.state import R2StateStore, StateConflict, WriteUncertain
 from witness_client.calls import RequestKey, canonical
-
-from pod_gateway.budget import Budget
-from pod_gateway.models import Scope
-from pod_gateway.records import CallRecords
-from pod_gateway.state import R2StateStore, StateConflict, WriteUncertain
+from witness_pod.budget import Budget
+from witness_pod.records import CallRecords
 
 
 def main() -> None:
@@ -188,9 +187,9 @@ def main() -> None:
     report["source_sha256"] = {
         name: hashlib.sha256((SOURCE / name).read_bytes()).hexdigest()
         for name in (
-            "witness-gateway/pod_gateway/state.py",
-            "witness-gateway/pod_gateway/records.py",
-            "witness-gateway/pod_gateway/budget.py",
+            "shared/subnet_common/witness/state.py",
+            "witness-server/worker/witness_pod/records.py",
+            "witness-server/worker/witness_pod/budget.py",
         )
     }
     args.output.write_text(json.dumps(report, indent=2) + "\n")

@@ -23,16 +23,14 @@ from aiohttp.test_utils import make_mocked_request
 from renderer_client import ArtifactClient, ArtifactUnavailable, RenderRejected, RenderUnavailable
 from subnet_common.competition.generations import GenerationResult, GenerationsAdapter
 from subnet_common.render import GRAY_BG, GRAY_VIEWS, WHITE_BG, WHITE_VIEWS
+from subnet_common.witness.auth import AuthRejected
+from subnet_common.witness.models import Scope
+from subnet_common.witness.selection import Selection
+from subnet_common.witness.state import Snapshot
 from support import MemoryState
 from test_service import Harness
-
-from pod_gateway.artifacts import ArtifactConfig, ArtifactRepository, SubmissionContext
-from pod_gateway.auth import AuthRejected
-from pod_gateway.models import Scope
-from pod_gateway.results import ResultSaver
-from pod_gateway.selection import Selection
-from pod_gateway.state import Snapshot
-
+from witness_pod.artifacts import ArtifactRepository, SubmissionContext
+from witness_pod.results import ResultSaver
 
 PNG = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aN3sAAAAASUVORK5CYII=")
 SOURCE = "export default function generate(THREE) { return new THREE.Mesh(new THREE.BoxGeometry(.5,.5,.5)); }"
@@ -41,7 +39,7 @@ COMMIT = "c" * 40
 
 
 async def enable(
-    fixture: Harness, *, fail_first_render: bool = False, commit: str | None = COMMIT,
+    fixture: Harness, *, fail_first_render: bool = False,
     prompt_ids: dict[str, str] | None = None,
 ) -> list[str]:
     rendered: list[str] = []
@@ -70,13 +68,12 @@ async def enable(
         runtime.scope,
         index=fixture.state,
         seed=42,
-        submission_commit=commit,
         prompt_ids=({hashlib.sha256(fixture.image).hexdigest(): hashlib.sha256(fixture.image).hexdigest()}
                     if prompt_ids is None else prompt_ids),
     )
     service.result_saver = ResultSaver(service.artifacts, origin, "fixture-revision", None)
     fixture.monkeypatch.setattr(
-        "pod_gateway.results.build_embeddings_npz", AsyncMock(return_value=b"fixture embeddings")
+        "witness_pod.results.build_embeddings_npz", AsyncMock(return_value=b"fixture embeddings")
     )
     return rendered
 
@@ -185,7 +182,7 @@ def test_result_saver_saves_every_view_when_larger_render_jobs_time_out(monkeypa
     prompt = hashlib.sha256(PNG).hexdigest()
     store = ArtifactRepository(
         state, Scope("test", "test-0", "5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty"),
-        index=state, seed=42, submission_commit=COMMIT, prompt_ids={prompt: prompt},
+        index=state, seed=42, prompt_ids={prompt: prompt},
     )
     expected = {
         f"{background}/{view.name}.png": PNG + f"neutral:{color}:{view.theta}:{view.phi}".encode()
@@ -217,8 +214,8 @@ def test_result_saver_saves_every_view_when_larger_render_jobs_time_out(monkeypa
         assert white == {view.name: expected[f"white/{view.name}.png"] for view in WHITE_VIEWS}
         return expected["embeddings.npz"]
 
-    monkeypatch.setattr("pod_gateway.results.httpx.AsyncClient", render_client)
-    monkeypatch.setattr("pod_gateway.results.build_embeddings_npz", embeddings)
+    monkeypatch.setattr("witness_pod.results.httpx.AsyncClient", render_client)
+    monkeypatch.setattr("witness_pod.results.build_embeddings_npz", embeddings)
     result = asyncio.run(ResultSaver(store, "http://renderer", "fixture-revision", None).save(prompt, SOURCE, PNG))
     assert result.failure_reason is None and result.views == store.prefix(prompt)
     assert store.result(prompt) == result
@@ -226,9 +223,8 @@ def test_result_saver_saves_every_view_when_larger_render_jobs_time_out(monkeypa
     assert {name: state.get(f"{result.views}/{name}") for name in expected} == expected
 
 
-@pytest.mark.parametrize("commit", [COMMIT, None])
 def test_runner_saves_returned_source_and_all_result_files(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, commit: str | None,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from miner_reference.submissions import run_and_save
 
@@ -237,7 +233,7 @@ def test_runner_saves_returned_source_and_all_result_files(
         async with fixture.running():
             with fixture.client() as witness:
                 await asyncio.to_thread(witness._gateway.ensure_pod)
-                await enable(fixture, commit=commit)
+                await enable(fixture)
                 with client(fixture, witness.renderer_transport()) as renderer:
 
                     def generate() -> str:
@@ -302,43 +298,6 @@ def test_final_checkpoint_resumes_after_round_change(
     asyncio.run(scenario())
 
 
-def test_final_checkpoint_rejects_changed_source_commit(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from miner_reference.submissions import run_and_save
-
-    generated: list[str] = []
-
-    def generate() -> str:
-        generated.append(SOURCE)
-        return SOURCE
-
-    async def scenario() -> None:
-        fixture = Harness(tmp_path, monkeypatch)
-        async with fixture.running():
-            with fixture.client() as witness:
-                await asyncio.to_thread(witness._gateway.ensure_pod)
-                first_renders = await enable(fixture)
-                first_store = fixture.services[-1].artifacts
-                assert first_store is not None
-
-                with client(fixture, witness.renderer_transport()) as renderer:
-                    def save() -> None:
-                        run_and_save(generate, renderer, tmp_path / "final.json")
-
-                    await asyncio.to_thread(save)
-                    next_renders = await enable(fixture, commit="d" * 40)
-                    with pytest.raises(ValueError, match="checkpoint context differs"):
-                        await asyncio.to_thread(save)
-                    prompt = hashlib.sha256(fixture.image).hexdigest()
-                    result = first_store.result(prompt)
-                    assert result is not None and fixture.state.get(str(result.js)) == SOURCE.encode()
-                    assert generated == first_renders == [SOURCE] and next_renders == []
-                    assert fixture.paid == 0
-
-    asyncio.run(scenario())
-
-
 @pytest.mark.parametrize("entrypoint", ["main", "batch"])
 @pytest.mark.parametrize("recover", [False, True])
 @pytest.mark.parametrize("subscription", [False, True])
@@ -347,12 +306,12 @@ def test_reference_miner_completes_authenticated_flow(
 ) -> None:
     import json
 
-    from test_recording import PRICING
     from main import generate
     from miner_reference.batch import BatchSettings, Prompt, run_batch
     from miner_reference.submissions import run_and_save
     from miner_runtime.runner import run_generation
     from renderer_client import RendererClient
+    from test_recording import PRICING
     from witness_client.calls import canonical
 
     pricing = json.loads(PRICING)
@@ -596,7 +555,7 @@ def test_embedding_failure_is_reported_and_the_miner_can_retry(tmp_path: Path, m
                 await asyncio.to_thread(witness._gateway.ensure_pod)
                 await enable(fixture)
                 embeddings = AsyncMock(side_effect=OSError("Embedding calculation failed"))
-                monkeypatch.setattr("pod_gateway.results.build_embeddings_npz", embeddings)
+                monkeypatch.setattr("witness_pod.results.build_embeddings_npz", embeddings)
                 with client(fixture, witness.renderer_transport()) as renderer:
                     with pytest.raises(ArtifactUnavailable) as error:
                         await asyncio.to_thread(renderer.save_final, SOURCE)
@@ -634,7 +593,7 @@ def test_concurrent_result_index_updates_preserve_each_prompt(monkeypatch: pytes
 
     def repository() -> ArtifactRepository:
         return ArtifactRepository(
-            state, scope, index=state, seed=42, submission_commit=COMMIT,
+            state, scope, index=state, seed=42,
             prompt_ids={prompt: prompt for prompt in prompts},
         )
 
@@ -679,7 +638,7 @@ def test_final_saves_complete_without_generating_again(
         statuses: list[int] = []
         errors: list[str] = []
         if case == "queue_full":
-            monkeypatch.setattr("pod_gateway.direct.SAVE_QUEUE_CAPACITY", 1)
+            monkeypatch.setattr("witness_pod.direct.SAVE_QUEUE_CAPACITY", 1)
 
         async def embeddings(*args: object, **kwargs: object) -> bytes:
             started.set()
@@ -709,7 +668,7 @@ def test_final_saves_complete_without_generating_again(
                         arrived[generation.prompt_sha256].set()
 
                 monkeypatch.setattr(store, "require", require)
-                monkeypatch.setattr("pod_gateway.results.build_embeddings_npz", embeddings)
+                monkeypatch.setattr("witness_pod.results.build_embeddings_npz", embeddings)
                 inner = witness.renderer_transport()
 
                 def deliver(request: httpx.Request) -> httpx.Response:
@@ -741,7 +700,7 @@ def test_final_saves_complete_without_generating_again(
                             assert rendered == [SOURCE]
                             if case == "access_expiry":
                                 monkeypatch.setattr(
-                                    "pod_gateway.security.time", SimpleNamespace(time=lambda: float("inf")),
+                                    "subnet_common.witness.security.time", SimpleNamespace(time=lambda: float("inf")),
                                 )
                     finally:
                         release.set()
@@ -834,7 +793,7 @@ def test_save_queue_limits_and_failures_release_the_next_job(
         started, release, arrived = asyncio.Event(), asyncio.Event(), asyncio.Event()
         other_image, other_source = b"another prompt", SOURCE + "\n// other"
         prompt = hashlib.sha256(other_image).hexdigest()
-        monkeypatch.setattr("pod_gateway.direct.SAVE_QUEUE_CAPACITY", 1, raising=False)
+        monkeypatch.setattr("witness_pod.direct.SAVE_QUEUE_CAPACITY", 1, raising=False)
 
         async def embeddings(image: bytes, *args: object, **kwargs: object) -> bytes:
             if image == fixture.image:
@@ -860,7 +819,7 @@ def test_save_queue_limits_and_failures_release_the_next_job(
                         arrived.set()
 
                 monkeypatch.setattr(store, "require", require)
-                monkeypatch.setattr("pod_gateway.results.build_embeddings_npz", embeddings)
+                monkeypatch.setattr("witness_pod.results.build_embeddings_npz", embeddings)
                 with (
                     client(fixture, witness.renderer_transport()) as first,
                     client(
@@ -1108,29 +1067,24 @@ def test_managed_batch_recovers_final_save_on_replacement_without_generation(
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize("commits", [None, {}, {"5" * 48: COMMIT}])
-def test_assigned_miner_without_a_commit_submits_and_recovers_official_results(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, commits: dict[str, str] | None,
+def test_assigned_miner_saves_and_recovers_official_results(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def scenario() -> None:
         fixture = Harness(tmp_path, monkeypatch)
         empty_image = b"frozen empty prompt"
         digest, empty_digest = (hashlib.sha256(image).hexdigest() for image in (fixture.image, empty_image))
-        config = ArtifactConfig.model_validate({
-            "profile": {"image_digest": IMAGE, "validation_sha256": "b" * 64},
-            "seed": 987654321,
-            "prompt_ids": {digest: "official-chair", empty_digest: "official-empty"},
-            **({} if commits is None else {"commits": commits}),
-        })
+        seed = 987654321
+        prompt_ids = {digest: "official-chair", empty_digest: "official-empty"}
         async with fixture.running():
             with fixture.client() as witness:
                 await asyncio.to_thread(witness._gateway.ensure_pod)
                 rendered = await enable(
-                    fixture, commit=config.commits.get(fixture.scope.hotkey), prompt_ids=config.prompt_ids,
+                    fixture, prompt_ids=prompt_ids,
                 )
                 store = fixture.services[-1].artifacts
                 assert store is not None
-                store.seed = config.seed
+                store.seed = seed
                 with client(fixture, witness.renderer_transport()) as legacy:
                     assert await asyncio.to_thread(legacy.load_context) == {"submission_commit": None}
                 with httpx.Client(base_url="https://witness.internal", transport=witness.renderer_transport()) as http:
@@ -1150,8 +1104,8 @@ def test_assigned_miner_without_a_commit_submits_and_recovers_official_results(
                     Scope(store.scope.deployment, "another-round", store.scope.hotkey),
                     Scope(store.scope.deployment, store.scope.round, "5" * 48),
                 ):
-                    foreign = ArtifactRepository(fixture.state, scope, index=fixture.state, seed=config.seed,
-                                                 prompt_ids=config.prompt_ids)
+                    foreign = ArtifactRepository(fixture.state, scope, index=fixture.state, seed=seed,
+                                                 prompt_ids=prompt_ids)
                     foreign.update_result(digest, GenerationResult(failure_reason="generation_failed"))
             shutil.rmtree(tmp_path / "client", ignore_errors=True)
             fixture.services[-1].round_end = 0
@@ -1173,7 +1127,7 @@ def test_hash_keyed_results_recover_official_ids_and_keep_artifact_pointers(
             with fixture.client() as witness:
                 await asyncio.to_thread(witness._gateway.ensure_pod)
                 digest = hashlib.sha256(fixture.image).hexdigest()
-                rendered = await enable(fixture, commit=None, prompt_ids={digest: "official-chair"})
+                rendered = await enable(fixture, prompt_ids={digest: "official-chair"})
                 store = fixture.services[-1].artifacts
                 assert store is not None
                 previous = GenerationResult(failure_reason="generation_failed")
