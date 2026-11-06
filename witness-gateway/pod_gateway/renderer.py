@@ -9,19 +9,108 @@ import subprocess
 import tempfile
 import threading
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager, suppress
+from dataclasses import asdict
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 import httpx
+from renderer_client import RenderOptions, RenderRecord, RenderRejected, RenderRequest, RenderUnavailable
+from renderer_client.client import MAX_ERROR_BYTES, MAX_RESPONSE_BYTES
 
-from .models import json_bytes
+from .artifacts import Objects
+from .models import Scope, json_bytes
 
 if TYPE_CHECKING:
     from .artifacts import ArtifactProfile
 
 READY_SECONDS = 60
+MAX_SUCCESSFUL_RENDERS = 10_000
+
+
+def render_options(query: Mapping[str, str]) -> RenderOptions:
+    """Expand the grid endpoint's defaults and scalar phi into effective options."""
+    defaults = RenderOptions()
+    thetas = tuple(float(value) for value in query["thetas"].split(",")) if query.get("thetas") else defaults.thetas
+    phis = tuple(float(value) for value in query.get("phis", "").split(",")) if query.get("phis") else (-15.0,)
+    if len(phis) == 1:
+        phis *= len(thetas)
+    lighting = query.get("lighting", defaults.lighting)
+    if lighting not in ("follow", "studio", "neutral"):
+        raise RenderRejected(json_bytes({
+            "error": f"unknown lighting '{lighting}'; expected one of: follow, studio, neutral",
+        }).decode())
+    return RenderOptions(
+        thetas=tuple(value or 0.0 for value in thetas),
+        phis=tuple(value or 0.0 for value in phis),
+        img_size=int(query.get("img_size") or defaults.img_size) or defaults.img_size,
+        cam_radius=float(query.get("cam_radius") or defaults.cam_radius) or defaults.cam_radius,
+        cam_fov_deg=float(query.get("cam_fov_deg") or defaults.cam_fov_deg) or defaults.cam_fov_deg,
+        gap=int(query.get("gap") or defaults.gap),
+        bg_color=query.get("bg_color") or defaults.bg_color,
+        lighting=lighting,
+    )
+
+
+class RenderObjects(Objects, Protocol):
+    def keys(self, prefix: str) -> Iterator[str]: ...
+
+
+class RenderCache:
+    """Original render outcomes and a startup-restored, in-memory success count."""
+
+    def __init__(self, objects: RenderObjects, scope: Scope, renderer_id: str, *, storage_prefix: str = "") -> None:
+        self.objects, self.scope, self.renderer_id = objects, scope, renderer_id
+        self.prefix = f"{storage_prefix}rounds/{scope.round}/{scope.hotkey}/renders/v1/"
+        saved = set(objects.keys(self.prefix))
+        self._pngs = {key for key in saved if key.endswith(".png")}
+        self._rejections = {key for key in saved if key.endswith(".rejection.json")}
+        self._save_lock = threading.Lock()
+
+    def request(self, source: str, options: RenderOptions) -> RenderRequest:
+        return RenderRequest(self.renderer_id, hashlib.sha256(source.encode()).hexdigest(), options)
+
+    def key(self, request: RenderRequest) -> str:
+        return self.prefix + hashlib.sha256(json_bytes(asdict(request))).hexdigest()
+
+    @property
+    def full(self) -> bool:
+        return len(self._pngs) >= MAX_SUCCESSFUL_RENDERS
+
+    def get(self, request: RenderRequest) -> RenderRecord | None:
+        key = self.key(request)
+        try:
+            if key + ".png" in self._pngs:
+                png = self.objects.get(key + ".png", MAX_RESPONSE_BYTES)
+                if png is None:
+                    raise RenderUnavailable("Saved PNG is missing")
+                return RenderRecord(request, png=png)
+            if key + ".rejection.json" in self._rejections:
+                rejection = self.objects.get(key + ".rejection.json", MAX_ERROR_BYTES)
+                if rejection is None:
+                    raise RenderUnavailable("Saved render rejection is missing")
+                return RenderRecord(request, rejection_json=rejection.decode())
+        except ValueError as error:
+            raise RenderUnavailable("Invalid saved render outcome") from error
+        return None
+
+    def save(self, record: RenderRecord) -> bool:
+        """Return false when a new PNG would exceed the successful-render allowance."""
+        key = self.key(record.request)
+        with self._save_lock:
+            if record.png is not None:
+                if key + ".png" in self._pngs:
+                    return True
+                if self.full:
+                    return False
+                self.objects.put(key + ".png", record.png, "image/png")
+                self._pngs.add(key + ".png")
+            else:
+                assert record.rejection_json is not None
+                self.objects.put(key + ".rejection.json", record.rejection_json.encode(), "application/json")
+                self._rejections.add(key + ".rejection.json")
+        return True
 
 
 def renderer_profile_sha256(root: Path) -> str:

@@ -808,6 +808,13 @@ def main() -> None:
             storage_prefix=inputs.storage_prefix,
         )
 
+    render_cache = None
+    if os.environ.get("WITNESS_RENDERER_ENABLED") == "1":
+        from pod_gateway.renderer import RenderCache, renderer_profile_sha256
+
+        renderer_id = os.environ["WITNESS_IMAGE"] + "/" + renderer_profile_sha256(Path("/opt/renderer"))
+        render_cache = RenderCache(evidence, runtime.scope, renderer_id, storage_prefix=inputs.storage_prefix)
+
     async def serve() -> None:
         from pod_gateway.results import ResultSaver
 
@@ -817,6 +824,7 @@ def main() -> None:
         )
         service = Witness(
             runtime, evidence.url, artifacts=artifact_store, result_saver=result_saver, prompt_url=artifacts.url,
+            render_cache=render_cache,
         )
         runner = web.AppRunner(service.application(), handler_cancellation=False)
         await runner.setup()

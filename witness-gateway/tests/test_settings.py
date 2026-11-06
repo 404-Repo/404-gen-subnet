@@ -215,6 +215,7 @@ def test_replay_bucket_is_forwarded_to_workers_after_gateway_revival(values: dic
     assert worker_spec(revived).env["R2_REPLAY_BUCKET"] == "fixture-replays"
     assert worker_spec(revived).env["R2_REPLAY_CDN_URL"] == "https://replays.test"
     assert worker_spec(revived).env["R2_BUCKET"] == values["R2_BUCKET"]
+    assert worker_spec(revived).env["WITNESS_IMAGE"] == values["WITNESS_IMAGE"]
 
 
 def test_typed_settings_build_equivalent_pod_specs(values: dict[str, object]) -> None:
@@ -357,9 +358,10 @@ def test_gateway_refresh_error_preserves_cached_round_permission(
 
 @pytest.mark.parametrize("commits", [None, {}, {"5" * 48: "c" * 40}])
 @pytest.mark.parametrize("replay_bucket", [None, "fixture-replays"])
+@pytest.mark.parametrize("save_submissions", [True, False])
 def test_assigned_pod_starts_artifact_storage_without_a_source_commit(
     values: dict[str, object], tmp_path: Path, monkeypatch: pytest.MonkeyPatch, commits: dict[str, str] | None,
-    replay_bucket: str | None,
+    replay_bucket: str | None, save_submissions: bool,
 ) -> None:
     import pod
     from pod_gateway import certs, direct, renderer, state
@@ -383,7 +385,7 @@ def test_assigned_pod_starts_artifact_storage_without_a_source_commit(
         "WITNESS_ROUND_INPUTS": json.dumps({
             "repository": "404-repo/404-active-competition", "branch": "fixture", "revision": "a" * 40,
             "round": "test-0", "number": 0, "seed": 42, "generation_deadline_block": None,
-            "storage_prefix": "", "save_submissions": True,
+            "storage_prefix": "", "save_submissions": save_submissions,
             "prompts": [{"id": "official-chair", "sha256": "d" * 64,
                          "source_url": "https://prompts.test/official-chair.png",
                          "image_key": "competition-inputs/v1/" + "d" * 64}],
@@ -396,6 +398,8 @@ def test_assigned_pod_starts_artifact_storage_without_a_source_commit(
         }),
     }.items():
         monkeypatch.setenv(name, value)
+    if not save_submissions:
+        monkeypatch.delenv("WITNESS_ARTIFACTS")
     runtime = SimpleNamespace(scope=Scope("competition", "test-0", str(values["WITNESS_GATEWAY_OWNER_HOTKEY"])),
                               drain=lambda: None, spool=tmp_path / "spool")
     service = Mock(side_effect=Started)
@@ -406,18 +410,23 @@ def test_assigned_pod_starts_artifact_storage_without_a_source_commit(
     monkeypatch.setattr(state, "R2StateStore", Mock(return_value=saved, connect=Mock(return_value=saved)))
     monkeypatch.setattr(certs, "pod_context", Mock(return_value=(None, "fixture-certificate")))
     monkeypatch.setattr(renderer, "require_artifact_profile", Mock())
+    monkeypatch.setattr(renderer, "renderer_profile_sha256", Mock(return_value="b" * 64))
     monkeypatch.setattr(direct, "Witness", service)
     final_objects = Mock(bucket=str(values["R2_BUCKET"]))
-    replay_objects = Mock(bucket=replay_bucket or str(values["R2_BUCKET"]))
+    replay_objects = Mock(bucket=replay_bucket or str(values["R2_BUCKET"]), keys=Mock(return_value=iter(())))
     monkeypatch.setattr("storage.R2Store", Mock(side_effect=[final_objects, replay_objects]))
     with pytest.raises(Started):
         pod.main()
     store = service.call_args.kwargs["artifacts"]
-    assert store.submission_commit is None
-    assert store.prefix("d" * 64).endswith("/official-chair")
-    assert store.objects is final_objects
+    if save_submissions:
+        assert store.submission_commit is None
+        assert store.prefix("d" * 64).endswith("/official-chair")
+        assert store.objects is final_objects
+    else:
+        assert store is None
     assert service.call_args.args[1] is replay_objects.url
     assert service.call_args.kwargs["prompt_url"] is final_objects.url
+    assert service.call_args.kwargs["render_cache"].objects is replay_objects
 
 
 def test_worker_refuses_a_profile_for_different_packaged_renderer_bytes(tmp_path: Path) -> None:

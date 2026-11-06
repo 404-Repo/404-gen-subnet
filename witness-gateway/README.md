@@ -80,8 +80,8 @@ rebuilding images.
 ## Artifact storage
 
 `R2_BUCKET` holds final results, frozen prompt images and operational state.
-Set `R2_REPLAY_BUCKET` to a separate bucket for provider evidence and replay
-artifacts. When omitted, evidence uses `R2_BUCKET`. Reads also check `R2_BUCKET`
+Set `R2_REPLAY_BUCKET` to a separate bucket for provider evidence, intermediate
+renders and replay artifacts. When omitted, evidence uses `R2_BUCKET`. Reads also check `R2_BUCKET`
 for retained evidence that is absent from the replay bucket. Public final-result
 URLs continue to use the collector's `CDN_URL`. Set `R2_REPLAY_CDN_URL` to the
 replay bucket's public HTTPS origin to publish replay links through that CDN.
@@ -108,6 +108,20 @@ Pod selection and fresh round permission are checked before queued work starts.
 The legacy `ArtifactClient` retries full-queue responses within its configured
 retry window, using the same output. `WitnessClient.submit()` makes one request.
 Preview rendering uses the renderer's existing concurrency limit.
+
+The Pod saves original preview PNGs and structured renderer rejections in the
+replay bucket at `<storage-prefix>rounds/<full-round-name>/<hotkey>/renders/v1/`.
+Each filename is a SHA256 of the exact source hash, normalized render options,
+and trusted worker image and renderer profile. Identical requests reuse the saved
+outcome without a prompt association. A PNG or rejection is saved before the
+response is returned; infrastructure failures remain retryable errors.
+
+Each miner has an allowance of 10,000 new successful preview renders per round.
+The Pod lists saved PNGs once at startup and keeps the count in memory. Cache hits,
+rejections, failed renders and failed uploads do not consume the allowance. New
+cache misses return HTTP 429 `render_limit_exhausted` when it is exhausted;
+existing cached outcomes remain available. Cache hits read their saved bytes from
+R2. Final judging renders and validation reads do not consume this allowance.
 
 The Pod publishes `<storage-prefix>rounds/<full-round-name>/<hotkey>/submitted.json`, mapping
 official prompt IDs to records containing `js`, `views`, `failure_reason` and `size`;

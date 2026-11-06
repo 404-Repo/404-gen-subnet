@@ -143,3 +143,21 @@ def test_legacy_copy_does_not_confirm_an_unacknowledged_replay_write(
     assert store.get("legacy") == b"saved evidence"
     with pytest.raises(ReadTimeoutError):
         store.put("legacy", b"saved evidence")
+
+
+def test_key_listing_reads_all_pages_from_the_destination_bucket(r2: tuple[R2Store, MagicMock]) -> None:
+    _, client = r2
+    store = R2Store("replays", fallback_bucket="results")
+    client.list_objects_v2.side_effect = [
+        {"Contents": [{"Key": "renders/first.png"}], "IsTruncated": True, "NextContinuationToken": "page-two"},
+        {"Contents": [{"Key": "renders/second.png"}], "IsTruncated": False},
+    ]
+    assert list(store.keys("renders/")) == ["renders/first.png", "renders/second.png"]
+    assert [call.kwargs["Bucket"] for call in client.list_objects_v2.call_args_list] == ["replays", "replays"]
+    assert client.list_objects_v2.call_args.kwargs["ContinuationToken"] == "page-two"
+
+
+def test_key_listing_accepts_an_empty_bucket(r2: tuple[R2Store, MagicMock]) -> None:
+    store, client = r2
+    client.list_objects_v2.return_value = {"IsTruncated": False}
+    assert list(store.keys("renders/")) == []

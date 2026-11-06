@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import json
 import os
-from typing import Protocol, cast
+from collections.abc import Iterator
+from typing import Protocol, TypedDict, cast
 from urllib.parse import quote
 
 import boto3
@@ -27,11 +28,22 @@ class Body(Protocol):
     def close(self) -> None: ...
 
 
+class ListedObject(TypedDict):
+    Key: str
+
+
+class ObjectPage(TypedDict, total=False):
+    Contents: list[ListedObject]
+    IsTruncated: bool
+    NextContinuationToken: str
+
+
 class S3(Protocol):
     def get_object(self, **kwargs: object) -> dict[str, object]: ...
     def head_object(self, **kwargs: object) -> dict[str, object]: ...
     def put_object(self, **kwargs: object) -> dict[str, object]: ...
     def delete_object(self, **kwargs: object) -> object: ...
+    def list_objects_v2(self, **kwargs: object) -> ObjectPage: ...
     def generate_presigned_url(self, operation: str, **kwargs: object) -> str: ...
 
 
@@ -67,6 +79,16 @@ class R2Store:
 
     def read(self, key: str, limit: int = MAX_BYTES) -> bytes | None:
         return self.get(key, limit)
+
+    def keys(self, prefix: str) -> Iterator[str]:
+        continuation: dict[str, str] = {}
+        while True:
+            page = self.client.list_objects_v2(Bucket=self.bucket, Prefix=prefix, **continuation)
+            for item in page.get("Contents", []):
+                yield item["Key"]
+            if not page.get("IsTruncated", False):
+                return
+            continuation = {"ContinuationToken": page["NextContinuationToken"]}
 
     def _get(self, bucket: str, key: str, limit: int) -> bytes | None:
         try:

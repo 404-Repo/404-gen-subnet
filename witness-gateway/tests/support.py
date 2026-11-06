@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import replace
 
 from pod_gateway.models import MARKERS, Pod, object_dict, string
@@ -49,6 +49,11 @@ class MemoryState:
     def delete(self, key: str) -> None:
         with self.lock:
             self.objects.pop(key, None)
+
+    def keys(self, prefix: str) -> Iterator[str]:
+        with self.lock:
+            keys = sorted(key for key in self.objects if key.startswith(prefix))
+        yield from keys
 
 
 class Provider:
