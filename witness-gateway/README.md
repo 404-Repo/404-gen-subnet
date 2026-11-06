@@ -3,8 +3,7 @@
 The Python gateway authenticates Bittensor miners, assigns ordinary RunPod CPU
 Pods and returns their direct TCP/TLS endpoints with scoped miner access.
 Miners send calls, proofs and renderer requests directly to the assigned Pod.
-Workers capture and verify OpenAI exchanges, then save evidence and usage in private R2 storage. A separate
-revivor restores the gateway and drains resources owned by the deployment.
+A separate revivor restores the gateway and drains resources owned by the deployment.
 
 See [PODS.md](PODS.md) for configuration, lifecycle, recovery, budgets, replay and
 the immutable runtime manifests. Both images are built from
@@ -20,9 +19,7 @@ releasing provider requests and persists responses before delivery. R2 contains
 the durable call state and provider captures; RunPod remains the source of truth
 for Pod identity and lifecycle.
 
-Completion metadata comes from the authenticated Pod. Saved provider evidence
-downloads use signed R2 URLs with size and SHA256 checks. The gateway carries
-allocation and lifecycle control messages only.
+The gateway carries allocation and lifecycle control messages only.
 
 Gateway and direct Pod API routes use `/v1`, including their WebSockets.
 See the [route table](PODS.md#http-api). Configure clients with the gateway origin;
@@ -79,56 +76,8 @@ rebuilding images.
 
 ## Artifact storage
 
-`R2_BUCKET` holds final results, frozen prompt images and operational state.
-`R2_REPLAY_BUCKET` holds provider evidence, intermediate renders and replay
-artifacts. `R2_REPLAY_CDN_URL` is that bucket's public HTTPS origin. Both replay
-settings are required.
-
-Replay artifacts expire after 10 days; final-result artifacts after 60 days.
-
-The Pod saves final results in the configured bucket under
-`<storage-prefix>rounds/<full-round-name>/<hotkey>/submitted/<prompt-id>`. The empty
-storage prefix preserves the official `404-gen` paths. The JavaScript is
-`<prefix>.js`; white and gray judging views, `grid.png` and `embeddings.npz` are
-stored under `<prefix>/`.
-
-A final save supplies JavaScript or an explicit `None`. For JavaScript, the Pod
-writes the source, renders the 12 canonical judging views and grid, computes
-embeddings, and saves the result. One final save runs at a time per Pod, with up
-to 256 additional saves waiting in arrival order until a slot becomes available.
-A full queue returns HTTP 503 `save_queue_full`. Requests authenticate on arrival;
-Pod selection and fresh round permission are checked before queued work starts.
-The legacy `ArtifactClient` retries full-queue responses within its configured
-retry window, using the same output. `WitnessClient.submit()` makes one request.
-Preview rendering uses the renderer's existing concurrency limit.
-
-The Pod saves original preview PNGs and structured renderer rejections in the
-replay bucket at `<storage-prefix>rounds/<full-round-name>/<hotkey>/renders/v1/`.
-Each filename is a SHA256 of the request body hash, raw path and query, and
-trusted worker image. Identical requests reuse the saved outcome without a prompt
-association. A PNG or rejection is saved before the response is returned;
-infrastructure failures remain retryable errors.
-
-Each miner has an allowance of 10,000 new successful preview renders per round.
-The Pod lists saved PNGs once at startup and keeps the count in memory. Cache hits,
-rejections, failed renders and failed uploads do not consume the allowance. New
-cache misses return HTTP 429 `render_limit_exhausted` when it is exhausted;
-existing cached outcomes remain available. Cache hits read their saved bytes from
-R2. Final judging renders and validation reads do not consume this allowance.
-
-The Pod publishes `<storage-prefix>rounds/<full-round-name>/<hotkey>/submitted.json`, mapping
-official prompt IDs to records containing `js`, `views`, `failure_reason` and `size`;
-`js` and `views` are storage keys. A saved final output cannot be replaced;
-retrying the same output returns its saved result without rendering again.
-Conditional writes merge concurrent index updates without losing other prompts.
-An explicit `None` records `generation_failed`. A renderer rejection records
-`render_rejected` and returns HTTP 422. Storage, rendering and embedding failures
-return an error so the runner can retry saving. An incomplete save has no
-completed result record.
-
-The runner checkpoints returned JavaScript or `None` locally before network
-delivery. Retrying the same output directory resends that result without running
-generation again.
+See the [worker README](../witness-server/worker/README.md#rendering-and-artifact-storage)
+for render caching, the per-round allowance and artifact storage.
 
 Set `DINOV3_REVISION` to the approved embedding-model commit and supply `HF_TOKEN`
 for the gated DINOv3 model. These settings are forwarded to witness Pods.
@@ -162,13 +111,7 @@ under official IDs without changing their artifact pointers, including saved `No
 Set `witness_save_submissions` to `false` in the round schedule to disable final
 storage explicitly. Submission endpoints return `artifact_storage_disabled`;
 provider recordings and accounting remain durable. A round with final saving
-enabled requires a renderer profile and embedding revision. Saved results remain
-readable after admission closes. Retain results and evidence through judging and
-the operator's retention period.
-
-The [collector](../submission-collector/README.md) reads one result index per
-round and hotkey, expands the storage keys with its existing `CDN_URL`, and
-writes the per-miner result index to Git.
+enabled requires a renderer profile and embedding revision.
 
 ## Competition source and admission
 
