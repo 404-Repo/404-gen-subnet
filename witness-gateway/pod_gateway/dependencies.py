@@ -22,6 +22,10 @@ def worker_spec(settings: Settings, inputs: RoundInputs | None = None) -> PodSpe
             "WITNESS_GATEWAY_URL",
         )
     }
+    if settings.r2_replay_bucket is not None:
+        environment["R2_REPLAY_BUCKET"] = settings.r2_replay_bucket
+    if settings.r2_replay_cdn_url is not None:
+        environment["R2_REPLAY_CDN_URL"] = settings.r2_replay_cdn_url
     if inputs is not None:
         environment["WITNESS_ROUND_INPUTS"] = inputs.model_dump_json()
     elif "WITNESS_ROUND_END" in settings.pod_environment:
@@ -79,6 +83,8 @@ def gateway_spec(settings: Settings) -> PodSpec:
         )
     }
     for name in (
+        "R2_REPLAY_BUCKET",
+        "R2_REPLAY_CDN_URL",
         "WITNESS_COMPETITION_REPO",
         "WITNESS_COMPETITION_BRANCH",
         "WITNESS_GITHUB_TOKEN",

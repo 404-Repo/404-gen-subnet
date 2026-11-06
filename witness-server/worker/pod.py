@@ -754,7 +754,11 @@ def main() -> None:
         bucket=os.environ["R2_BUCKET"],
     )
     prices = PricingStore(state, os.environ["WITNESS_DEPLOYMENT"])
-    evidence = R2Store()
+    artifacts = R2Store()
+    evidence = R2Store(
+        bucket=os.environ.get("R2_REPLAY_BUCKET"), fallback_bucket=artifacts.bucket,
+        public_url=os.environ.get("R2_REPLAY_CDN_URL"),
+    )
     inputs = RoundInputs.model_validate_json(os.environ["WITNESS_ROUND_INPUTS"])
     journals = PrefixedState(state, inputs.storage_prefix)
     runtime = PodRuntime(
@@ -797,8 +801,8 @@ def main() -> None:
             raise ValueError("Artifact storage requires the packaged renderer")
         require_artifact_profile(config.profile, Path("/opt/renderer"))
         artifact_store = ArtifactRepository(
-            evidence, runtime.scope,
-            index=R2StateStore(evidence.client, evidence.bucket, max_bytes=MAX_GENERATIONS_BYTES),
+            artifacts, runtime.scope,
+            index=R2StateStore(artifacts.client, artifacts.bucket, max_bytes=MAX_GENERATIONS_BYTES),
             seed=config.seed, submission_commit=config.commits.get(runtime.scope.hotkey),
             prompt_ids=config.prompt_ids,
             storage_prefix=inputs.storage_prefix,
@@ -811,7 +815,9 @@ def main() -> None:
             ResultSaver(artifact_store, "http://127.0.0.1:8002", os.environ["DINOV3_REVISION"], os.environ.get("HF_TOKEN"))
             if artifact_store is not None else None
         )
-        service = Witness(runtime, evidence.url, artifacts=artifact_store, result_saver=result_saver)
+        service = Witness(
+            runtime, evidence.url, artifacts=artifact_store, result_saver=result_saver, prompt_url=artifacts.url,
+        )
         runner = web.AppRunner(service.application(), handler_cancellation=False)
         await runner.setup()
         site = web.TCPSite(runner, "0.0.0.0", int(os.environ.get("WITNESS_PORT", "8000")), ssl_context=tls)

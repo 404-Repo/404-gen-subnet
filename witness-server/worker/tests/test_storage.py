@@ -88,3 +88,58 @@ def test_normal_success_and_access_denial_do_not_read_back(
     else:
         store.put("evidence", b"expected")
     client.get_object.assert_not_called()
+
+
+def test_split_storage_keeps_legacy_reads_and_new_writes_in_their_buckets(
+    r2: tuple[R2Store, MagicMock],
+) -> None:
+    _, client = r2
+    store = R2Store("replays", fallback_bucket="results", public_url="https://public-replays.test")
+    objects = {("results", "legacy"): b"saved evidence"}
+
+    def get_object(*, Bucket: str, Key: str) -> dict[str, object]:
+        if (Bucket, Key) not in objects:
+            raise ClientError({"Error": {"Code": "NoSuchKey"}}, "GetObject")
+        return {"Body": io.BytesIO(objects[Bucket, Key])}
+
+    def put_object(*, Bucket: str, Key: str, Body: bytes, **_kwargs: object) -> None:
+        objects[Bucket, Key] = Body
+
+    def head_object(*, Bucket: str, Key: str) -> dict[str, object]:
+        if (Bucket, Key) not in objects:
+            raise ClientError({"Error": {"Code": "NoSuchKey"}}, "HeadObject")
+        return {}
+
+    def url(_operation: str, *, Params: dict[str, str], ExpiresIn: int) -> str:
+        return f"https://{Params['Bucket']}.test/{Params['Key']}"
+
+    client.get_object.side_effect = get_object
+    client.put_object.side_effect = put_object
+    client.head_object.side_effect = head_object
+    client.generate_presigned_url.side_effect = url
+
+    assert store.read("legacy") == b"saved evidence"
+    assert store.get("missing") is None
+    store.put("new", b"new evidence")
+    assert objects == {("results", "legacy"): b"saved evidence", ("replays", "new"): b"new evidence"}
+    assert store.get("new") == b"new evidence"
+    assert store.url("legacy") == "https://results.test/legacy"
+    assert store.url("new") == "https://public-replays.test/new"
+
+
+def test_legacy_copy_does_not_confirm_an_unacknowledged_replay_write(
+    r2: tuple[R2Store, MagicMock],
+) -> None:
+    _, client = r2
+    store = R2Store("replays", fallback_bucket="results")
+
+    def get_object(*, Bucket: str, Key: str) -> dict[str, object]:
+        if Bucket == "replays":
+            raise ClientError({"Error": {"Code": "NoSuchKey"}}, "GetObject")
+        return {"Body": io.BytesIO(b"saved evidence")}
+
+    client.get_object.side_effect = get_object
+    client.put_object.side_effect = ReadTimeoutError(endpoint_url="https://storage.test")
+    assert store.get("legacy") == b"saved evidence"
+    with pytest.raises(ReadTimeoutError):
+        store.put("legacy", b"saved evidence")

@@ -207,6 +207,16 @@ def test_gateway_image_is_explicit_for_split_and_legacy_deployments(values: dict
             Settings.model_validate({key: value for key, value in values.items() if key != missing})
 
 
+def test_replay_bucket_is_forwarded_to_workers_after_gateway_revival(values: dict[str, object]) -> None:
+    values["R2_REPLAY_BUCKET"] = "fixture-replays"
+    values["R2_REPLAY_CDN_URL"] = "https://replays.test"
+    settings = Settings.model_validate(values)
+    revived = Settings.model_validate({**gateway_spec(settings).env, "WITNESS_DEPLOYMENT": settings.deployment})
+    assert worker_spec(revived).env["R2_REPLAY_BUCKET"] == "fixture-replays"
+    assert worker_spec(revived).env["R2_REPLAY_CDN_URL"] == "https://replays.test"
+    assert worker_spec(revived).env["R2_BUCKET"] == values["R2_BUCKET"]
+
+
 def test_typed_settings_build_equivalent_pod_specs(values: dict[str, object]) -> None:
     values.update({"WITNESS_DATA_CENTERS": "EU-RO-1,EU-CZ-1", "WITNESS_MAX_PODS": "20"})
     strings = Settings.model_validate(values)
@@ -346,8 +356,10 @@ def test_gateway_refresh_error_preserves_cached_round_permission(
 
 
 @pytest.mark.parametrize("commits", [None, {}, {"5" * 48: "c" * 40}])
+@pytest.mark.parametrize("replay_bucket", [None, "fixture-replays"])
 def test_assigned_pod_starts_artifact_storage_without_a_source_commit(
     values: dict[str, object], tmp_path: Path, monkeypatch: pytest.MonkeyPatch, commits: dict[str, str] | None,
+    replay_bucket: str | None,
 ) -> None:
     import pod
     from pod_gateway import certs, direct, renderer, state
@@ -360,6 +372,10 @@ def test_assigned_pod_starts_artifact_storage_without_a_source_commit(
     (tmp_path / "verifying.bin").write_bytes(b"fixture verification key")
     for name, value in values.items():
         monkeypatch.setenv(name, str(value))
+    if replay_bucket is None:
+        monkeypatch.delenv("R2_REPLAY_BUCKET", raising=False)
+    else:
+        monkeypatch.setenv("R2_REPLAY_BUCKET", replay_bucket)
     for name, value in {
         "WITNESS_ROUND": "test-0", "WITNESS_HOTKEY": str(values["WITNESS_GATEWAY_OWNER_HOTKEY"]),
         "WITNESS_START_ID": "00000000-0000-4000-8000-000000000001", "RUNPOD_POD_ID": "fixture-worker",
@@ -391,12 +407,17 @@ def test_assigned_pod_starts_artifact_storage_without_a_source_commit(
     monkeypatch.setattr(certs, "pod_context", Mock(return_value=(None, "fixture-certificate")))
     monkeypatch.setattr(renderer, "require_artifact_profile", Mock())
     monkeypatch.setattr(direct, "Witness", service)
-    monkeypatch.setattr("storage.R2Store", Mock())
+    final_objects = Mock(bucket=str(values["R2_BUCKET"]))
+    replay_objects = Mock(bucket=replay_bucket or str(values["R2_BUCKET"]))
+    monkeypatch.setattr("storage.R2Store", Mock(side_effect=[final_objects, replay_objects]))
     with pytest.raises(Started):
         pod.main()
     store = service.call_args.kwargs["artifacts"]
     assert store.submission_commit is None
     assert store.prefix("d" * 64).endswith("/official-chair")
+    assert store.objects is final_objects
+    assert service.call_args.args[1] is replay_objects.url
+    assert service.call_args.kwargs["prompt_url"] is final_objects.url
 
 
 def test_worker_refuses_a_profile_for_different_packaged_renderer_bytes(tmp_path: Path) -> None:

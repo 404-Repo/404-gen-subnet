@@ -65,8 +65,10 @@ class Witness:
         *,
         artifacts: ArtifactRepository | None = None,
         result_saver: ResultSaver | None = None,
+        prompt_url: Callable[[str], str] | None = None,
     ) -> None:
         self.runtime, self.artifact_url = runtime, artifact_url
+        self.prompt_url = prompt_url or artifact_url
         self.records, self.budget, self.evidence = runtime.records, runtime.budget, runtime.evidence
         self.round, self.round_end, self.proof_hash = runtime.scope.round, runtime.round_end, runtime.proof_hash
         self.auth = Authenticator(AssignedMiner(runtime.scope.hotkey))
@@ -358,7 +360,7 @@ class Witness:
         else:
             context = {"submission_commit": None if self.artifacts is None else self.artifacts.submission_commit,
                        "round_inputs": inputs.model_dump(mode="json"),
-                       "prompts": [{**p.model_dump(), "url": self.artifact_url(p.image_key)} for p in inputs.prompts],
+                       "prompts": [{**p.model_dump(), "url": self.prompt_url(p.image_key)} for p in inputs.prompts],
                        "saving_enabled": self.artifacts is not None}
         return web.json_response(
             context, headers={"Cache-Control": "no-store"}

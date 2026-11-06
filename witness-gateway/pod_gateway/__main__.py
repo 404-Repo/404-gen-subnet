@@ -71,10 +71,15 @@ def main() -> None:
         from .replay import export_bundle, native_verifier
         from .state import PrefixedState
 
+        sys.path.insert(0, str(root / "witness-server/worker"))
+        from storage import R2Store
+
+        evidence = R2Store(bucket=os.environ.get("R2_REPLAY_BUCKET"), fallback_bucket=os.environ["R2_BUCKET"])
+
         RoundSchedule.storage_prefix(args.storage_prefix)
         export_bundle(
             records=CallRecords(PrefixedState(state, args.storage_prefix)),
-            evidence=state,
+            evidence=evidence,
             scope=Scope(args.deployment, args.round, args.hotkey),
             execution=args.execution,
             output=args.output,
