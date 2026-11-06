@@ -410,7 +410,6 @@ def test_assigned_pod_starts_artifact_storage_without_a_source_commit(
     monkeypatch.setattr(state, "R2StateStore", Mock(return_value=saved, connect=Mock(return_value=saved)))
     monkeypatch.setattr(certs, "pod_context", Mock(return_value=(None, "fixture-certificate")))
     monkeypatch.setattr(renderer, "require_artifact_profile", Mock())
-    monkeypatch.setattr(renderer, "renderer_profile_sha256", Mock(return_value="b" * 64))
     monkeypatch.setattr(direct, "Witness", service)
     final_objects = Mock(bucket=str(values["R2_BUCKET"]))
     replay_objects = Mock(bucket=replay_bucket or str(values["R2_BUCKET"]), keys=Mock(return_value=iter(())))

@@ -9,21 +9,22 @@ from pathlib import Path
 import httpx
 import pytest
 from aiohttp import web
-from renderer_client import RenderOptions, RenderRecord
 from support import MemoryState
 from test_artifacts import IMAGE, PNG, SOURCE, client, enable
 from test_service import Harness
 
 from pod_gateway.models import Scope
-from pod_gateway.renderer import MAX_SUCCESSFUL_RENDERS, RenderCache, render_options
+from pod_gateway.renderer import MAX_SUCCESSFUL_RENDERS, RenderCache
 
 
-async def enable_cache(fixture: Harness) -> list[str]:
+async def enable_cache(fixture: Harness, *, queries: list[str] | None = None) -> list[str]:
     calls: list[str] = []
 
     async def backend(request: web.Request) -> web.Response:
         source = (await request.json())["source"]
         calls.append(source)
+        if queries is not None:
+            queries.append(request.query_string)
         if source == "invalid":
             return web.json_response({"error": "validation_failed", "failures": []}, status=422)
         if source == "unavailable":
@@ -45,7 +46,7 @@ async def enable_cache(fixture: Harness) -> list[str]:
 
 def fill(cache: RenderCache, count: int) -> None:
     for index in range(count):
-        assert cache.save(RenderRecord(cache.request(f"saved-{index}", RenderOptions()), png=PNG))
+        assert cache.save(cache.key(f"saved-{index}".encode(), "/v1/render/grid"), PNG, 200)
 
 
 def test_identical_previews_reuse_the_saved_png(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -64,7 +65,28 @@ def test_identical_previews_reuse_the_saved_png(tmp_path: Path, monkeypatch: pyt
     asyncio.run(scenario())
 
 
-def test_hash_reuse_covers_defaults_scalar_phi_and_exact_source(
+@pytest.mark.parametrize("query", ["img_size=64.0", "gap=0.0", "cam_radius=-2"])
+def test_renderer_queries_pass_through_and_reuse_the_saved_png(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, query: str,
+) -> None:
+    async def scenario() -> None:
+        fixture = Harness(tmp_path, monkeypatch)
+        async with fixture.running():
+            with fixture.client() as witness:
+                await asyncio.to_thread(witness._gateway.ensure_pod)
+                queries: list[str] = []
+                calls = await enable_cache(fixture, queries=queries)
+                with httpx.Client(transport=witness.renderer_transport()) as http:
+                    url = "https://witness.internal/v1/render/grid?" + query
+                    for _ in range(2):
+                        reply = await asyncio.to_thread(http.post, url, json={"source": SOURCE})
+                        assert reply.status_code == 200 and reply.content == PNG
+                assert queries == [query] and calls == [SOURCE]
+
+    asyncio.run(scenario())
+
+
+def test_render_source_and_query_are_part_of_the_cache_key(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def scenario() -> None:
@@ -75,16 +97,13 @@ def test_hash_reuse_covers_defaults_scalar_phi_and_exact_source(
                 calls = await enable_cache(fixture)
                 with httpx.Client(transport=witness.renderer_transport()) as http:
                     url = "https://witness.internal/v1/render/grid"
-                    for params in ({}, RenderOptions().query(), {"phis": "-15", "bg_color": "808080"}):
-                        reply = await asyncio.to_thread(http.post, url, params=params, json={"source": SOURCE})
-                        assert reply.content == PNG
-                    for source, params in ((SOURCE + "\n", {}), (SOURCE, {"lighting": "neutral"})):
+                    for source, params in (
+                        (SOURCE, {}), (SOURCE, {}), (SOURCE + "\n", {}),
+                        (SOURCE, {"lighting": "neutral"}), (SOURCE, {"lighting": "neutral"}),
+                    ):
                         reply = await asyncio.to_thread(http.post, url, params=params, json={"source": source})
                         assert reply.content == PNG
-                    for params in ({"thetas": "24,120"}, {"thetas": "24.0,120.0", "phis": "-15,-15"}):
-                        reply = await asyncio.to_thread(http.post, url, params=params, json={"source": SOURCE})
-                        assert reply.content == PNG
-                assert calls == [SOURCE, SOURCE + "\n", SOURCE, SOURCE]
+                assert calls == [SOURCE, SOURCE + "\n", SOURCE]
 
     asyncio.run(scenario())
 
@@ -161,45 +180,16 @@ def test_saved_renders_are_scoped_to_the_round_miner_and_renderer() -> None:
     objects = MemoryState()
     scope = Scope("test", "round-0", "5" * 48)
     cache = RenderCache(objects, scope, IMAGE, storage_prefix="experiments/run/")
-    request = cache.request(SOURCE, RenderOptions())
-    assert cache.save(RenderRecord(request, png=PNG))
+    key = cache.key(SOURCE.encode(), "/v1/render/grid")
+    assert cache.save(key, PNG, 200)
     restarted = RenderCache(objects, scope, IMAGE, storage_prefix="experiments/run/")
-    assert restarted.get(request) == RenderRecord(request, png=PNG)
+    assert restarted.get(key) == (PNG, 200)
     for changed_scope, renderer_id in (
         (replace(scope, round="round-1"), IMAGE), (replace(scope, hotkey="6" * 48), IMAGE),
-        (scope, IMAGE + "/another-profile"),
+        (scope, "sha256:" + "b" * 64),
     ):
         changed = RenderCache(objects, changed_scope, renderer_id, storage_prefix="experiments/run/")
-        assert changed.get(changed.request(SOURCE, RenderOptions())) is None
-
-
-def test_source_urls_reuse_the_resolved_source_and_follow_source_changes(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    async def scenario() -> None:
-        fixture = Harness(tmp_path, monkeypatch)
-        source = SOURCE
-
-        async def download(_request: web.Request) -> web.Response:
-            return web.Response(text=source)
-
-        async with fixture.running():
-            app = web.Application()
-            app.router.add_get("/scene.js", download)
-            origin = await fixture.listen(app, None)
-            with fixture.client() as witness:
-                await asyncio.to_thread(witness._gateway.ensure_pod)
-                calls = await enable_cache(fixture)
-                with httpx.Client(transport=witness.renderer_transport()) as http:
-                    url = "https://witness.internal/v1/render/grid"
-                    for payload in ({"source": SOURCE}, {"url": origin + "/scene.js"}):
-                        assert (await asyncio.to_thread(http.post, url, json=payload)).content == PNG
-                    source = SOURCE + "\n"
-                    reply = await asyncio.to_thread(http.post, url, json={"url": origin + "/scene.js"})
-                    assert reply.content == PNG
-                assert calls == [SOURCE, source]
-
-    asyncio.run(scenario())
+        assert changed.get(changed.key(SOURCE.encode(), "/v1/render/grid")) is None
 
 
 def test_final_saving_does_not_consume_the_preview_allowance(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -217,8 +207,3 @@ def test_final_saving_does_not_consume_the_preview_allowance(tmp_path: Path, mon
                     assert saved["failure_reason"] is None
 
     asyncio.run(scenario())
-
-
-@pytest.mark.parametrize("query", [{}, {"img_size": "0", "cam_radius": "0", "cam_fov_deg": "0"}])
-def test_grid_defaults_match_the_packaged_renderer(query: dict[str, str]) -> None:
-    assert render_options(query) == RenderOptions()

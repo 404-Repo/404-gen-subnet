@@ -111,10 +111,10 @@ Preview rendering uses the renderer's existing concurrency limit.
 
 The Pod saves original preview PNGs and structured renderer rejections in the
 replay bucket at `<storage-prefix>rounds/<full-round-name>/<hotkey>/renders/v1/`.
-Each filename is a SHA256 of the exact source hash, normalized render options,
-and trusted worker image and renderer profile. Identical requests reuse the saved
-outcome without a prompt association. A PNG or rejection is saved before the
-response is returned; infrastructure failures remain retryable errors.
+Each filename is a SHA256 of the request body hash, raw path and query, and
+trusted worker image. Identical requests reuse the saved outcome without a prompt
+association. A PNG or rejection is saved before the response is returned;
+infrastructure failures remain retryable errors.
 
 Each miner has an allowance of 10,000 new successful preview renders per round.
 The Pod lists saved PNGs once at startup and keeps the count in memory. Cache hits,

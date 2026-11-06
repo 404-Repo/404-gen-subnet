@@ -8,14 +8,14 @@ import hashlib
 import json
 import queue
 import time
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable
 from contextlib import nullcontext
 from typing import TYPE_CHECKING
 
 import httpx
 from aiohttp import WSMsgType, web
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
-from renderer_client import RenderRecord, RenderRejected, RenderRequest, RenderUnavailable
+from renderer_client import RenderRejected, RenderUnavailable
 from renderer_client.client import MAX_ERROR_BYTES, MAX_RESPONSE_BYTES, PNG_SIGNATURE
 from subnet_common.competition.generations import GenerationsAdapter
 from witness_client.calls import RequestKey
@@ -23,10 +23,10 @@ from witness_client.request import PROVIDERS
 
 from .artifacts import ArtifactRepository, SubmissionContext
 from .auth import Authenticator, AuthRejected, Membership
-from .models import Scope, identifier, json_bytes, object_dict
+from .models import Scope, identifier
 from .records import Call, RecordingConflict
 from .recovery import recover_issued
-from .renderer import RenderCache, render_options
+from .renderer import RenderCache
 from .results import ResultSaver
 from .security import verify_miner_access
 
@@ -83,7 +83,7 @@ class Witness:
         if render_cache is not None and render_cache.scope != runtime.scope:
             raise ValueError("Render cache belongs to another miner")
         self.render_cache = render_cache
-        self._render_locks: dict[RenderRequest, asyncio.Lock] = {}
+        self._render_locks: dict[str, asyncio.Lock] = {}
         self._save_lock = asyncio.Lock()
         self._pending_saves = 0
 
@@ -317,37 +317,24 @@ class Witness:
         try:
             async with httpx.AsyncClient(timeout=150, trust_env=False) as client:
                 content = await request.read()
-                params: Mapping[str, str] = request.query
-                cache, cached_request = self.render_cache, None
-                if cache is not None:
-                    payload = object_dict(json.loads(content))
-                    source = payload.get("source")
-                    if not source and isinstance(payload.get("url"), str):
-                        fetched = await client.get(str(payload["url"]), timeout=30, follow_redirects=True)
-                        fetched.raise_for_status()
-                        source = fetched.text
-                    if not isinstance(source, str) or not source:
-                        raise ValueError("Provide source or url")
-                    options = render_options(request.query)
-                    cached_request = cache.request(source, options)
-                    content, params = json_bytes({"source": source}), options.query()
+                cache = self.render_cache
+                key = cache.key(content, request.raw_path) if cache is not None else None
                 async with (
-                    self._render_locks.setdefault(cached_request, asyncio.Lock())
-                    if cached_request is not None else nullcontext()
+                    self._render_locks.setdefault(key, asyncio.Lock()) if key is not None else nullcontext()
                 ):
-                    if cache is not None and cached_request is not None:
-                        saved = await asyncio.to_thread(cache.get, cached_request)
+                    if cache is not None and key is not None:
+                        saved = await asyncio.to_thread(cache.get, key)
                         if saved is not None:
-                            if saved.png is not None:
-                                return web.Response(body=saved.png, content_type="image/png",
-                                                    headers={"Cache-Control": "no-store"})
-                            assert saved.rejection_json is not None
-                            return web.Response(text=saved.rejection_json, status=422, content_type="application/json",
-                                                headers={"Cache-Control": "no-store"})
+                            data, status = saved
+                            return web.Response(
+                                body=data, status=status,
+                                content_type="image/png" if status == 200 else "application/json",
+                                headers={"Cache-Control": "no-store"},
+                            )
                         if cache.full:
                             raise AuthRejected("render_limit_exhausted", 429)
                     async with client.stream(
-                        "POST", self.renderer_url, params=params, content=content,
+                        "POST", self.renderer_url, params=request.query, content=content,
                         headers={"Content-Type": "application/json"},
                     ) as response:
                         body = bytearray()
@@ -360,7 +347,7 @@ class Witness:
                                 raise RenderUnavailable("Renderer response exceeds limit")
                         data = bytes(body)
                         content_type = response.headers.get("Content-Type", "application/octet-stream")
-                        if cache is not None and cached_request is not None and response.status_code in (200, 422):
+                        if cache is not None and key is not None and response.status_code in (200, 422):
                             try:
                                 if response.status_code == 200:
                                     if (
@@ -368,12 +355,11 @@ class Witness:
                                         or not data.startswith(PNG_SIGNATURE)
                                     ):
                                         raise ValueError("Expected a PNG")
-                                    record = RenderRecord(cached_request, png=data)
                                 else:
-                                    record = RenderRecord(cached_request, rejection_json=data.decode())
+                                    RenderRejected(data.decode())
                             except ValueError as error:
                                 raise RenderUnavailable("Invalid renderer outcome") from error
-                            if not await asyncio.to_thread(cache.save, record):
+                            if not await asyncio.to_thread(cache.save, key, data, response.status_code):
                                 raise AuthRejected("render_limit_exhausted", 429)
                         return web.Response(
                             body=data, status=response.status_code,

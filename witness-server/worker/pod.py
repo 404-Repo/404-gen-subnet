@@ -810,10 +810,11 @@ def main() -> None:
 
     render_cache = None
     if os.environ.get("WITNESS_RENDERER_ENABLED") == "1":
-        from pod_gateway.renderer import RenderCache, renderer_profile_sha256
+        from pod_gateway.renderer import RenderCache
 
-        renderer_id = os.environ["WITNESS_IMAGE"] + "/" + renderer_profile_sha256(Path("/opt/renderer"))
-        render_cache = RenderCache(evidence, runtime.scope, renderer_id, storage_prefix=inputs.storage_prefix)
+        render_cache = RenderCache(
+            evidence, runtime.scope, os.environ["WITNESS_IMAGE"], storage_prefix=inputs.storage_prefix,
+        )
 
     async def serve() -> None:
         from pod_gateway.results import ResultSaver
