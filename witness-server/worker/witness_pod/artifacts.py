@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
-from pydantic import Field
+from pydantic import BaseModel, ConfigDict, Field
 from subnet_common.competition.generations import GenerationResult, GenerationsAdapter, GenerationsMap
-from subnet_common.witness.artifacts import Frozen, Objects
+from subnet_common.witness.artifacts import Objects
 from subnet_common.witness.models import Scope
 from subnet_common.witness.state import Snapshot, StateConflict, StateStore
 
 
-class SubmissionContext(Frozen):
+class SubmissionContext(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
     prompt_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     seed: int = Field(ge=0, lt=2**64)
 

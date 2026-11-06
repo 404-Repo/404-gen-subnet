@@ -8,17 +8,15 @@ from typing import Protocol
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
-class Frozen(BaseModel):
+class ArtifactProfile(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
-
-class ArtifactProfile(Frozen):
     image_digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     validation_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     bootstrap_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 
 
-class ArtifactConfig(Frozen):
+class ArtifactConfig(BaseModel):
     model_config = ConfigDict(extra="ignore", frozen=True, strict=True)
 
     profile: ArtifactProfile

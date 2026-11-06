@@ -5,12 +5,11 @@ from __future__ import annotations
 import hashlib
 import re
 
-from pydantic import Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from subnet_common.competition.schedule import RoundSchedule
 from subnet_common.competition.state import RoundStage
 
-from .artifacts import Frozen
 from .auth import AuthRejected
 from .models import json_bytes
 
@@ -25,14 +24,18 @@ def repository(value: str) -> str:
     return value.lower()
 
 
-class PromptImage(Frozen):
+class PromptImage(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
     id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,254}$")
     source_url: str
     sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     image_key: str
 
 
-class RoundInputs(Frozen):
+class RoundInputs(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
     repository: str
     branch: str
     revision: str = Field(pattern=r"^[0-9a-f]{40}$")
@@ -68,7 +71,9 @@ class RoundInputs(Frozen):
         return {prompt.sha256: prompt.id for prompt in self.prompts}
 
 
-class RoundPolicy(Frozen):
+class RoundPolicy(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
     repository: str
     branch: str
     revision: str = Field(pattern=r"^[0-9a-f]{40}$")
