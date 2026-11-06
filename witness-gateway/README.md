@@ -80,12 +80,9 @@ rebuilding images.
 ## Artifact storage
 
 `R2_BUCKET` holds final results, frozen prompt images and operational state.
-Set `R2_REPLAY_BUCKET` to a separate bucket for provider evidence, intermediate
-renders and replay artifacts. When omitted, evidence uses `R2_BUCKET`. Reads also check `R2_BUCKET`
-for retained evidence that is absent from the replay bucket. Public final-result
-URLs continue to use the collector's `CDN_URL`. Set `R2_REPLAY_CDN_URL` to the
-replay bucket's public HTTPS origin to publish replay links through that CDN.
-Without it, replay links use signed R2 URLs.
+`R2_REPLAY_BUCKET` holds provider evidence, intermediate renders and replay
+artifacts. `R2_REPLAY_CDN_URL` is that bucket's public HTTPS origin. Both replay
+settings are required.
 
 The production replay bucket is `404-replays`, publicly available through
 `https://replays.subnet404.xyz`, with a 10-day expiration policy. Final results

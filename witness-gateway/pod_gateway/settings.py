@@ -67,8 +67,8 @@ class Settings(BaseSettings):
     r2_access_key_id: SecretStr = Field(..., alias="R2_ACCESS_KEY_ID")
     r2_secret_access_key: SecretStr = Field(..., alias="R2_SECRET_ACCESS_KEY")
     r2_bucket: str = Field(..., alias="R2_BUCKET")
-    r2_replay_bucket: str | None = Field(default=None, alias="R2_REPLAY_BUCKET", min_length=3)
-    r2_replay_cdn_url: str | None = Field(default=None, alias="R2_REPLAY_CDN_URL")
+    r2_replay_bucket: str = Field(..., alias="R2_REPLAY_BUCKET", min_length=3)
+    r2_replay_cdn_url: str = Field(..., alias="R2_REPLAY_CDN_URL")
     subtensor_rpc_url: str = Field(..., alias="SUBTENSOR_RPC_URL")
     netuid: int = Field(default=17, alias="WITNESS_NETUID")
     test_hotkey: str | None = Field(default=None, alias="WITNESS_TEST_HOTKEY")
@@ -164,12 +164,11 @@ class Settings(BaseSettings):
 
     @field_validator("r2_replay_cdn_url")
     @classmethod
-    def validate_replay_cdn_url(cls, value: str | None) -> str | None:
-        if value is not None:
-            origin = urlsplit(value)
-            if (origin.scheme != "https" or not origin.hostname or origin.path not in ("", "/")
-                    or origin.query or origin.fragment or origin.username):
-                raise ValueError("Replay CDN origin must be HTTPS")
+    def validate_replay_cdn_url(cls, value: str) -> str:
+        origin = urlsplit(value)
+        if (origin.scheme != "https" or not origin.hostname or origin.path not in ("", "/")
+                or origin.query or origin.fragment or origin.username):
+            raise ValueError("Replay CDN origin must be HTTPS")
         return value
 
     @property

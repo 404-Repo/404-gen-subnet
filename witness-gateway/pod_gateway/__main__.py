@@ -74,7 +74,7 @@ def main() -> None:
         sys.path.insert(0, str(root / "witness-server/worker"))
         from storage import R2Store
 
-        evidence = R2Store(bucket=os.environ.get("R2_REPLAY_BUCKET"), fallback_bucket=os.environ["R2_BUCKET"])
+        evidence = R2Store(bucket=os.environ["R2_REPLAY_BUCKET"])
 
         RoundSchedule.storage_prefix(args.storage_prefix)
         export_bundle(

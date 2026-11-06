@@ -756,8 +756,7 @@ def main() -> None:
     prices = PricingStore(state, os.environ["WITNESS_DEPLOYMENT"])
     artifacts = R2Store()
     evidence = R2Store(
-        bucket=os.environ.get("R2_REPLAY_BUCKET"), fallback_bucket=artifacts.bucket,
-        public_url=os.environ.get("R2_REPLAY_CDN_URL"),
+        bucket=os.environ["R2_REPLAY_BUCKET"], public_url=os.environ["R2_REPLAY_CDN_URL"],
     )
     inputs = RoundInputs.model_validate_json(os.environ["WITNESS_ROUND_INPUTS"])
     journals = PrefixedState(state, inputs.storage_prefix)
