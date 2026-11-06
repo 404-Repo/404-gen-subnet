@@ -23,7 +23,6 @@ from aiohttp.test_utils import make_mocked_request
 from renderer_client import ArtifactClient, ArtifactUnavailable, RenderRejected, RenderUnavailable
 from subnet_common.competition.generations import GenerationResult, GenerationsAdapter
 from subnet_common.render import GRAY_BG, GRAY_VIEWS, WHITE_BG, WHITE_VIEWS
-from subnet_common.witness.artifacts import ArtifactConfig
 from subnet_common.witness.auth import AuthRejected
 from subnet_common.witness.models import Scope
 from subnet_common.witness.selection import Selection
@@ -40,7 +39,7 @@ COMMIT = "c" * 40
 
 
 async def enable(
-    fixture: Harness, *, fail_first_render: bool = False, commit: str | None = COMMIT,
+    fixture: Harness, *, fail_first_render: bool = False,
     prompt_ids: dict[str, str] | None = None,
 ) -> list[str]:
     rendered: list[str] = []
@@ -69,7 +68,6 @@ async def enable(
         runtime.scope,
         index=fixture.state,
         seed=42,
-        submission_commit=commit,
         prompt_ids=({hashlib.sha256(fixture.image).hexdigest(): hashlib.sha256(fixture.image).hexdigest()}
                     if prompt_ids is None else prompt_ids),
     )
@@ -184,7 +182,7 @@ def test_result_saver_saves_every_view_when_larger_render_jobs_time_out(monkeypa
     prompt = hashlib.sha256(PNG).hexdigest()
     store = ArtifactRepository(
         state, Scope("test", "test-0", "5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty"),
-        index=state, seed=42, submission_commit=COMMIT, prompt_ids={prompt: prompt},
+        index=state, seed=42, prompt_ids={prompt: prompt},
     )
     expected = {
         f"{background}/{view.name}.png": PNG + f"neutral:{color}:{view.theta}:{view.phi}".encode()
@@ -225,9 +223,8 @@ def test_result_saver_saves_every_view_when_larger_render_jobs_time_out(monkeypa
     assert {name: state.get(f"{result.views}/{name}") for name in expected} == expected
 
 
-@pytest.mark.parametrize("commit", [COMMIT, None])
 def test_runner_saves_returned_source_and_all_result_files(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, commit: str | None,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from miner_reference.submissions import run_and_save
 
@@ -236,7 +233,7 @@ def test_runner_saves_returned_source_and_all_result_files(
         async with fixture.running():
             with fixture.client() as witness:
                 await asyncio.to_thread(witness._gateway.ensure_pod)
-                await enable(fixture, commit=commit)
+                await enable(fixture)
                 with client(fixture, witness.renderer_transport()) as renderer:
 
                     def generate() -> str:
@@ -297,43 +294,6 @@ def test_final_checkpoint_resumes_after_round_change(
                 assert fixture.state.get(str(saved["js"])) == SOURCE.encode() and fixture.paid == 0
                 assert first_renders == next_renders == [SOURCE]
                 assert generated == [SOURCE]
-
-    asyncio.run(scenario())
-
-
-def test_final_checkpoint_rejects_changed_source_commit(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from miner_reference.submissions import run_and_save
-
-    generated: list[str] = []
-
-    def generate() -> str:
-        generated.append(SOURCE)
-        return SOURCE
-
-    async def scenario() -> None:
-        fixture = Harness(tmp_path, monkeypatch)
-        async with fixture.running():
-            with fixture.client() as witness:
-                await asyncio.to_thread(witness._gateway.ensure_pod)
-                first_renders = await enable(fixture)
-                first_store = fixture.services[-1].artifacts
-                assert first_store is not None
-
-                with client(fixture, witness.renderer_transport()) as renderer:
-                    def save() -> None:
-                        run_and_save(generate, renderer, tmp_path / "final.json")
-
-                    await asyncio.to_thread(save)
-                    next_renders = await enable(fixture, commit="d" * 40)
-                    with pytest.raises(ValueError, match="checkpoint context differs"):
-                        await asyncio.to_thread(save)
-                    prompt = hashlib.sha256(fixture.image).hexdigest()
-                    result = first_store.result(prompt)
-                    assert result is not None and fixture.state.get(str(result.js)) == SOURCE.encode()
-                    assert generated == first_renders == [SOURCE] and next_renders == []
-                    assert fixture.paid == 0
 
     asyncio.run(scenario())
 
@@ -633,7 +593,7 @@ def test_concurrent_result_index_updates_preserve_each_prompt(monkeypatch: pytes
 
     def repository() -> ArtifactRepository:
         return ArtifactRepository(
-            state, scope, index=state, seed=42, submission_commit=COMMIT,
+            state, scope, index=state, seed=42,
             prompt_ids={prompt: prompt for prompt in prompts},
         )
 
@@ -1107,29 +1067,24 @@ def test_managed_batch_recovers_final_save_on_replacement_without_generation(
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize("commits", [None, {}, {"5" * 48: COMMIT}])
-def test_assigned_miner_without_a_commit_submits_and_recovers_official_results(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, commits: dict[str, str] | None,
+def test_assigned_miner_saves_and_recovers_official_results(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def scenario() -> None:
         fixture = Harness(tmp_path, monkeypatch)
         empty_image = b"frozen empty prompt"
         digest, empty_digest = (hashlib.sha256(image).hexdigest() for image in (fixture.image, empty_image))
-        config = ArtifactConfig.model_validate({
-            "profile": {"image_digest": IMAGE, "validation_sha256": "b" * 64},
-            "seed": 987654321,
-            "prompt_ids": {digest: "official-chair", empty_digest: "official-empty"},
-            **({} if commits is None else {"commits": commits}),
-        })
+        seed = 987654321
+        prompt_ids = {digest: "official-chair", empty_digest: "official-empty"}
         async with fixture.running():
             with fixture.client() as witness:
                 await asyncio.to_thread(witness._gateway.ensure_pod)
                 rendered = await enable(
-                    fixture, commit=config.commits.get(fixture.scope.hotkey), prompt_ids=config.prompt_ids,
+                    fixture, prompt_ids=prompt_ids,
                 )
                 store = fixture.services[-1].artifacts
                 assert store is not None
-                store.seed = config.seed
+                store.seed = seed
                 with client(fixture, witness.renderer_transport()) as legacy:
                     assert await asyncio.to_thread(legacy.load_context) == {"submission_commit": None}
                 with httpx.Client(base_url="https://witness.internal", transport=witness.renderer_transport()) as http:
@@ -1149,8 +1104,8 @@ def test_assigned_miner_without_a_commit_submits_and_recovers_official_results(
                     Scope(store.scope.deployment, "another-round", store.scope.hotkey),
                     Scope(store.scope.deployment, store.scope.round, "5" * 48),
                 ):
-                    foreign = ArtifactRepository(fixture.state, scope, index=fixture.state, seed=config.seed,
-                                                 prompt_ids=config.prompt_ids)
+                    foreign = ArtifactRepository(fixture.state, scope, index=fixture.state, seed=seed,
+                                                 prompt_ids=prompt_ids)
                     foreign.update_result(digest, GenerationResult(failure_reason="generation_failed"))
             shutil.rmtree(tmp_path / "client", ignore_errors=True)
             fixture.services[-1].round_end = 0
@@ -1172,7 +1127,7 @@ def test_hash_keyed_results_recover_official_ids_and_keep_artifact_pointers(
             with fixture.client() as witness:
                 await asyncio.to_thread(witness._gateway.ensure_pod)
                 digest = hashlib.sha256(fixture.image).hexdigest()
-                rendered = await enable(fixture, commit=None, prompt_ids={digest: "official-chair"})
+                rendered = await enable(fixture, prompt_ids={digest: "official-chair"})
                 store = fixture.services[-1].artifacts
                 assert store is not None
                 previous = GenerationResult(failure_reason="generation_failed")

@@ -12,16 +12,13 @@ import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager, suppress
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol
+from typing import Protocol
 
 import httpx
 from renderer_client import RenderUnavailable
 from renderer_client.client import MAX_ERROR_BYTES, MAX_RESPONSE_BYTES
-from subnet_common.witness.artifacts import Objects
 from subnet_common.witness.models import Scope, json_bytes
-
-if TYPE_CHECKING:
-    from subnet_common.witness.artifacts import ArtifactProfile
+from subnet_common.witness.state import Objects
 
 READY_SECONDS = 60
 MAX_SUCCESSFUL_RENDERS = 10_000
@@ -80,21 +77,6 @@ class RenderCache:
                 self.objects.put(key + ".rejection.json", data, "application/json")
                 self._rejections.add(key + ".rejection.json")
         return True
-
-
-def renderer_profile_sha256(root: Path) -> str:
-    """Identify the packaged JavaScript renderer and its locked dependencies."""
-    paths = sorted(path for path in (root / "src").rglob("*") if path.suffix in {".js", ".html"})
-    if not paths:
-        raise ValueError("Packaged renderer sources are missing")
-    paths.append(root / "package-lock.json")
-    manifest = {str(path.relative_to(root)): hashlib.sha256(path.read_bytes()).hexdigest() for path in paths}
-    return hashlib.sha256(json_bytes(manifest)).hexdigest()
-
-
-def require_artifact_profile(profile: ArtifactProfile, root: Path) -> None:
-    if profile.bootstrap_sha256 is not None or profile.validation_sha256 != renderer_profile_sha256(root):
-        raise ValueError("Artifact profile differs from the packaged renderer")
 
 
 @contextmanager

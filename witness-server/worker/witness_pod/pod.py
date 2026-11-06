@@ -741,7 +741,6 @@ class PodRuntime:
 
 def main() -> None:
     from aiohttp import web
-    from subnet_common.witness.artifacts import ArtifactConfig
     from subnet_common.witness.certs import pod_context
     from subnet_common.witness.pricing import PricingStore
     from subnet_common.witness.state import PrefixedState, R2StateStore
@@ -790,25 +789,18 @@ def main() -> None:
     signal.signal(signal.SIGINT, lambda *_: runtime.drain())
     tls, runtime.certificate = pod_context(runtime.spool.parent / "tls")
     artifact_store = None
-    if inputs.save_submissions and not os.environ.get("WITNESS_ARTIFACTS"):
-        raise ValueError("Final saving requires the frozen artifact configuration")
-    if artifact_config := os.environ.get("WITNESS_ARTIFACTS"):
+    embedding_revision = os.environ.get("DINOV3_REVISION", "")
+    if inputs.save_submissions:
         from subnet_common.competition.generations import MAX_GENERATIONS_BYTES
 
-        from .renderer import require_artifact_profile
-
-        config = ArtifactConfig.model_validate_json(artifact_config)
-        if (not inputs.save_submissions or config.seed != inputs.seed or config.prompt_ids != inputs.prompt_ids):
-            raise ValueError("Artifact configuration differs from frozen round inputs")
         if os.environ.get("WITNESS_RENDERER_ENABLED") != "1":
             raise ValueError("Artifact storage requires the packaged renderer")
-        require_artifact_profile(config.profile, Path("/opt/renderer"))
+        if not embedding_revision:
+            raise ValueError("Final saving requires DINOV3_REVISION")
         artifact_store = ArtifactRepository(
             artifacts, runtime.scope,
             index=R2StateStore(artifacts.client, artifacts.bucket, max_bytes=MAX_GENERATIONS_BYTES),
-            seed=config.seed, submission_commit=config.commits.get(runtime.scope.hotkey),
-            prompt_ids=config.prompt_ids,
-            storage_prefix=inputs.storage_prefix,
+            seed=inputs.seed, prompt_ids=inputs.prompt_ids, storage_prefix=inputs.storage_prefix,
         )
 
     render_cache = None
@@ -823,7 +815,7 @@ def main() -> None:
         from .results import ResultSaver
 
         result_saver = (
-            ResultSaver(artifact_store, "http://127.0.0.1:8002", os.environ["DINOV3_REVISION"], os.environ.get("HF_TOKEN"))
+            ResultSaver(artifact_store, "http://127.0.0.1:8002", embedding_revision, os.environ.get("HF_TOKEN"))
             if artifact_store is not None else None
         )
         service = Witness(

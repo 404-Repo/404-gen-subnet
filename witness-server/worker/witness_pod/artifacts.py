@@ -4,9 +4,8 @@ from __future__ import annotations
 
 from pydantic import BaseModel, ConfigDict, Field
 from subnet_common.competition.generations import GenerationResult, GenerationsAdapter, GenerationsMap
-from subnet_common.witness.artifacts import Objects
 from subnet_common.witness.models import Scope
-from subnet_common.witness.state import Snapshot, StateConflict, StateStore
+from subnet_common.witness.state import Objects, Snapshot, StateConflict, StateStore
 
 
 class SubmissionContext(BaseModel):
@@ -25,11 +24,10 @@ class ArtifactRepository:
         index: StateStore,
         seed: int,
         prompt_ids: dict[str, str],
-        submission_commit: str | None = None,
         storage_prefix: str = "",
     ) -> None:
         self.objects, self.scope, self.index = objects, scope, index
-        self.seed, self.submission_commit, self.prompt_ids = seed, submission_commit, prompt_ids
+        self.seed, self.prompt_ids = seed, prompt_ids
         self.storage_prefix = storage_prefix
         self.index_key = f"{storage_prefix}rounds/{scope.round}/{scope.hotkey}/submitted.json"
         self._saved: Snapshot | None = None

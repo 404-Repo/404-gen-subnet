@@ -16,7 +16,6 @@ from pydantic import (
     model_validator,
 )
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
-from subnet_common.witness.artifacts import ArtifactConfig, ArtifactProfile
 from subnet_common.witness.auth import public_key
 from subnet_common.witness.models import Scope
 from subnet_common.witness.rounds import repository
@@ -49,8 +48,6 @@ class Settings(BaseSettings):
     max_queue: int = Field(default=1024, alias="GATEWAY_MAX_QUEUE", ge=1, le=4096)
 
     image: str = Field(..., alias="WITNESS_IMAGE")
-    artifacts: str | None = Field(default=None, alias="WITNESS_ARTIFACTS")
-    renderer_profile: str | None = Field(default=None, alias="WITNESS_RENDERER_PROFILE")
     embedding_revision: str | None = Field(default=None, alias="DINOV3_REVISION", min_length=1)
     hf_token: SecretStr | None = Field(default=None, alias="HF_TOKEN")
     registry: str | None = Field(default=None, alias="WITNESS_REGISTRY")
@@ -154,11 +151,6 @@ class Settings(BaseSettings):
             raise ValueError("Automatic competition admission requires Finney membership; WITNESS_TEST_HOTKEY is unsupported")
         if self.round_refresh_seconds >= self.round_policy_seconds:
             raise ValueError("Round refresh must be shorter than the admission policy lifetime")
-        if self.artifacts is not None or self.renderer_profile is not None:
-            if not self.embedding_revision:
-                raise ValueError("Artifact saving requires DINOV3_REVISION")
-            if self.image.rsplit("@", 1)[-1] != self.profile.image_digest:  # type: ignore[union-attr]
-                raise ValueError("Artifact renderer profile must match the pinned worker image")
         return self
 
     @field_validator("r2_replay_cdn_url")
@@ -169,12 +161,6 @@ class Settings(BaseSettings):
                 or origin.query or origin.fragment or origin.username):
             raise ValueError("Replay CDN origin must be HTTPS")
         return value
-
-    @property
-    def profile(self) -> ArtifactProfile | None:
-        if self.renderer_profile is not None:
-            return ArtifactProfile.model_validate_json(self.renderer_profile)
-        return None if self.artifacts is None else ArtifactConfig.model_validate_json(self.artifacts).profile
 
     @cached_property
     def secret(self) -> bytes:

@@ -19,11 +19,10 @@ from subnet_common.competition.schedule import require_schedule
 from subnet_common.competition.seed import require_seed_from_git
 from subnet_common.competition.state import RoundStage, require_state
 from subnet_common.github import GitHubClient
-from subnet_common.witness.artifacts import Objects
 from subnet_common.witness.auth import AuthRejected
 from subnet_common.witness.models import json_bytes
 from subnet_common.witness.rounds import PromptImage, RoundInputs, RoundPolicy, repository
-from subnet_common.witness.state import R2StateStore, StateConflict, StateStore
+from subnet_common.witness.state import Objects, R2StateStore, StateConflict, StateStore
 
 
 class RoundImages:

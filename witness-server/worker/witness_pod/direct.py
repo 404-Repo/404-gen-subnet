@@ -389,14 +389,15 @@ class Witness:
 
     async def artifact_context(self, request: web.Request) -> web.Response:
         inputs = self.runtime.round_inputs
+        context: dict[str, object] = {"submission_commit": None}
         if inputs is None:
-            store = self._artifacts()
-            context: dict[str, object] = {"submission_commit": store.submission_commit}
+            self._artifacts()
         else:
-            context = {"submission_commit": None if self.artifacts is None else self.artifacts.submission_commit,
-                       "round_inputs": inputs.model_dump(mode="json"),
-                       "prompts": [{**p.model_dump(), "url": self.prompt_url(p.image_key)} for p in inputs.prompts],
-                       "saving_enabled": self.artifacts is not None}
+            context.update(
+                round_inputs=inputs.model_dump(mode="json"),
+                prompts=[{**p.model_dump(), "url": self.prompt_url(p.image_key)} for p in inputs.prompts],
+                saving_enabled=self.artifacts is not None,
+            )
         return web.json_response(
             context, headers={"Cache-Control": "no-store"}
         )

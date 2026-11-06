@@ -93,7 +93,7 @@ def test_get_submitted_resumes_only_this_miners_round_after_client_restart(
                 ):
                     foreign = ArtifactRepository(
                         fixture.state, scope, index=fixture.state, seed=store.seed,
-                        submission_commit=store.submission_commit, prompt_ids={"f" * 64: "f" * 64},
+prompt_ids={"f" * 64: "f" * 64},
                     )
                     foreign.update_result("f" * 64, GenerationResult(failure_reason="generation_failed"))
             fixture.services[-1].round_end = 0

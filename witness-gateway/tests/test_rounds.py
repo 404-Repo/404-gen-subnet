@@ -19,7 +19,6 @@ from pod_gateway.revivor import Revivor
 from pod_gateway.rounds import RoundController
 from pod_gateway.settings import Settings
 from subnet_common.github import GitHubClient
-from subnet_common.witness.artifacts import ArtifactConfig
 from subnet_common.witness.auth import AuthRejected
 from subnet_common.witness.rounds import RoundInputs, RoundPolicy
 from subnet_common.witness.state import PrefixedState
@@ -395,9 +394,6 @@ def test_resolved_worker_spec_needs_no_manual_round_data_and_keeps_github_creden
         values.pop("WITNESS_ROUND_END")
         values["WITNESS_GITHUB_TOKEN"] = "fixture-read-only-token"
         values["WITNESS_COMPETITION_BRANCH"] = "persistent/witness"
-        values["WITNESS_RENDERER_PROFILE"] = json.dumps({
-            "image_digest": "sha256:" + "a" * 64, "validation_sha256": "b" * 64,
-        })
         values["DINOV3_REVISION"] = "fixture-model"
         settings = Settings.model_validate(values)
         competition = Competition()
@@ -405,9 +401,8 @@ def test_resolved_worker_spec_needs_no_manual_round_data_and_keeps_github_creden
         inputs = competition.controller.require()
         spec = worker_spec(settings, inputs)
         frozen = RoundInputs.model_validate_json(spec.env["WITNESS_ROUND_INPUTS"])
-        artifacts = ArtifactConfig.model_validate_json(spec.env["WITNESS_ARTIFACTS"])
-        assert frozen == inputs and artifacts.seed == inputs.seed and artifacts.prompt_ids == inputs.prompt_ids
-        assert artifacts.commits == {}
+        assert frozen == inputs
+        assert spec.env["DINOV3_REVISION"] == "fixture-model"
         assert "WITNESS_GITHUB_TOKEN" not in spec.env
         assert gateway_spec(settings).env["WITNESS_GITHUB_TOKEN"] == "fixture-read-only-token"
         competition.source.publish(publication(number=1, seed=99, prompt="lamp"))

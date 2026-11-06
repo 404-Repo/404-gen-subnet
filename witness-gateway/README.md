@@ -82,37 +82,13 @@ for render caching, the per-round allowance and artifact storage.
 
 Set `DINOV3_REVISION` to the approved embedding-model commit and supply `HF_TOKEN`
 for the gated DINOv3 model. These settings are forwarded to witness Pods.
-Set `WITNESS_RENDERER_PROFILE` to JSON in the gateway/revivor environment:
-
-```json
-{
-  "image_digest": "sha256:REPLACE_WITH_WORKER_IMAGE_DIGEST",
-  "validation_sha256": "REPLACE_WITH_RENDERER_PROFILE_SHA256",
-  "bootstrap_sha256": null
-}
-```
-
-Use the immutable `WITNESS_IMAGE` digest. The gateway resolves the seed and prompt
-mapping from the competition snapshot. Only the packaged renderer is supported;
-`bootstrap_sha256` must be null. Compute its profile hash from the exact build
-context, from the repository root:
-
-```sh
-PYTHONPATH=witness-server/worker:shared python -c 'from pathlib import Path; from witness_pod.renderer import renderer_profile_sha256; print(renderer_profile_sha256(Path("render-service-js")))'
-```
-
-The optional legacy `WITNESS_ARTIFACTS` JSON can supply the renderer profile and
-`commits` metadata. Its seed and prompt mapping are replaced by the resolved
-round inputs at allocation. A configured commit is optional checkpoint metadata;
-it does not restrict authenticated, assigned miners from saving. The async and
-sync SDKs accept `submit(image, source)` without a seed or source commit. Explicit
-legacy seeds must still match the frozen seed. Retained hash-keyed indexes recover
-under official IDs without changing their artifact pointers, including saved `None` outcomes.
+The gateway passes the frozen seed, official prompt IDs and saving flag through
+`WITNESS_ROUND_INPUTS`. The immutable `WITNESS_IMAGE` digest identifies the Pod
+and its packaged renderer.
 
 Set `witness_save_submissions` to `false` in the round schedule to disable final
-storage explicitly. Submission endpoints return `artifact_storage_disabled`;
-provider recordings and accounting remain durable. A round with final saving
-enabled requires a renderer profile and embedding revision.
+storage. Submission endpoints then return `artifact_storage_disabled`; provider
+recordings and accounting remain available.
 
 ## Competition source and admission
 

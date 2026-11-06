@@ -665,8 +665,8 @@ immutable digests in [deploy/revivor.env.example](deploy/revivor.env.example):
 `WITNESS_GATEWAY_IMAGE` selects the gateway for creation and revival;
 `WITNESS_IMAGE` selects miner witness Pods. Both pins are required and are
 forwarded to replacement gateways. There is no fallback between image roles.
-`WITNESS_RENDERER_PROFILE.image_digest` must match the witness Pod digest;
-retain the approved model revision and renderer profile hash.
+`WITNESS_IMAGE` pins the Pod and its packaged renderer. Retain the approved
+embedding-model revision for final-result saving.
 
 For an existing shared-image deployment, prepare the revivor source, dependencies
 and private candidate configuration offline. Set both image variables to the
@@ -690,7 +690,7 @@ Perform these steps only at the approved rollout:
 Building these images does not change running Pods or pins.
 
 Set the actual
-competition repository and branch, renderer profile, canonical operator hotkey, capacity limits, keys and
+competition repository and branch, embedding revision, canonical operator hotkey, capacity limits, keys and
 HTTPS origin. Keep the deployment namespace/master key stable for the round.
 Workers use the deployment's [shared model table](README.md#model-table), which
 must be published before starting them. Model additions do not change Pod image

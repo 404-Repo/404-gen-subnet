@@ -187,7 +187,6 @@ def test_assigned_miner_with_no_legacy_commit_can_submit_and_recover_saved_none(
                 await enable(fixture, prompt_ids=inputs.prompt_ids)
                 store = fixture.services[-1].artifacts
                 assert store is not None
-                store.submission_commit = None
                 with client(fixture, witness.renderer_transport()) as legacy:
                     assert await asyncio.to_thread(legacy.load_context) == {"submission_commit": None}
                     assert await asyncio.to_thread(legacy.save_final, None) == await asyncio.to_thread(
