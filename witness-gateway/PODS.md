@@ -521,8 +521,8 @@ docker build --platform linux/amd64 --target production \
 
 The `gateway` target runs `gateway` by default and also supports `revivor`,
 `certs` and `publish-pricing`. It retains the TLS, membership and storage
-dependencies, matching verification key, native verifier, Node and Python
-clients. Pillow handles competition prompt images;
+dependencies, shared contracts and matching public verification key.
+Pillow handles competition prompt images;
 the image excludes Chromium, the renderer runtime, Torch, torchvision and
 Transformers. The independent revivor still requires access to
 the host's Caddy executable, admin endpoint, CA file and writable configuration.
@@ -668,24 +668,16 @@ forwarded to replacement gateways. There is no fallback between image roles.
 `WITNESS_IMAGE` pins the Pod and its packaged renderer. Retain the approved
 embedding-model revision for final-result saving.
 
-For an existing shared-image deployment, prepare the revivor source, dependencies
-and private candidate configuration offline. Set both image variables to the
-current shared-image digest for the controller upgrade. Activating the upgraded
-revivor replaces the existing gateway even when both digests are unchanged:
-forwarding `WITNESS_GATEWAY_IMAGE` changes the gateway Pod's fingerprint.
-
+Prepare the revivor source, dependencies and private configuration offline.
 Perform these steps only at the approved rollout:
 
-1. Stop the existing revivor. Upgrade its host checkout and virtualenv to this
-   release, using `requirements-gateway.txt` with `constraints-pods.txt`, before
-   selecting the split gateway image. The launcher must forward both image pins;
-   gateway startup requires `WITNESS_GATEWAY_IMAGE` in the Pod environment.
-2. Start the upgraded revivor with both pins still selecting the shared image.
-   Confirm the replacement gateway is healthy and ready for admission before
-   proceeding.
-3. At the split-image cutover, stop the revivor, set each variable to its
-   corresponding split-image digest and update the artifact profile's worker
-   digest as described above. Restart the upgraded revivor with that configuration.
+1. Finish active captures and stop the existing revivor. Upgrade its host
+   checkout and virtualenv to this release using `requirements-gateway.txt`
+   with `constraints-pods.txt`.
+2. Set `WITNESS_GATEWAY_IMAGE` and `WITNESS_IMAGE` to their corresponding
+   images from this release. Set `R2_REPLAY_BUCKET` and `R2_REPLAY_CDN_URL`,
+   then restart the upgraded revivor. Confirm the replacement gateway is
+   healthy and ready before resuming miner traffic.
 
 Building these images does not change running Pods or pins.
 
