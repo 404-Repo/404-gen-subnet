@@ -520,18 +520,18 @@ docker build --platform linux/amd64 --target production \
 ```
 
 The `gateway` target runs `gateway` by default and also supports `revivor`,
-`certs` and offline `export`. It retains the TLS, membership and storage
+`certs` and `publish-pricing`. It retains the TLS, membership and storage
 dependencies, matching verification key, native verifier, Node and Python
-clients needed by those commands. Pillow handles competition prompt images;
+clients. Pillow handles competition prompt images;
 the image excludes Chromium, the renderer runtime, Torch, torchvision and
 Transformers. The independent revivor still requires access to
 the host's Caddy executable, admin endpoint, CA file and writable configuration.
 
-The `production` target runs `worker` by default. It contains the matching
-witness client, gateway support modules, worker and verifier,
+The `production` target starts `python -m witness_pod`. It contains the matching
+witness client, shared contracts, Pod package and verifier,
 plus render-service-js 0.4.10 with PMREM caching and bounded diagnostics. Node
 22, Chromium 155, Python 3.14.9 and the base image digests are pinned in the
-Dockerfile. The default entrypoint is `python -m pod_gateway`.
+Dockerfile. The gateway entrypoint is `python -m pod_gateway`.
 
 The worker role starts the renderer before connecting to the gateway. It uses
 UID/GID 1001, an isolated environment without witness credentials, one rendering
@@ -658,7 +658,7 @@ UID 1001 without the Python process's storage credentials. Node and Chromium loa
 a scoped SwiftShader affinity wrapper that preserves the assigned CPU list for
 the driver's default CPU-count mask. The benchmark sets only `ThreadCount` in
 `SwiftShader.ini`; it does not configure an explicit affinity mask. The default
-build continues to start `python -m pod_gateway`.
+build starts `python -m witness_pod`.
 
 Publish both images through the operator's release process and configure their
 immutable digests in [deploy/revivor.env.example](deploy/revivor.env.example):
@@ -720,7 +720,7 @@ Export the trusted execution-host observation file with the operator's retained
 capture store and the deployment's shared model table:
 
 ```sh
-python -m pod_gateway export --deployment competition --round test-0 \
+python -m witness_pod export --deployment competition --round test-0 \
   --hotkey "$MINER_HOTKEY" --execution /private/host/execution.json \
   --output /private/replay/bundle
 ```

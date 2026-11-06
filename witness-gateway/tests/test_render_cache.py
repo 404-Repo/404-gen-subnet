@@ -9,11 +9,11 @@ from pathlib import Path
 import httpx
 import pytest
 from aiohttp import web
-from pod_gateway.renderer import MAX_SUCCESSFUL_RENDERS, RenderCache
 from subnet_common.witness.models import Scope
 from support import MemoryState
 from test_artifacts import IMAGE, PNG, SOURCE, client, enable
 from test_service import Harness
+from witness_pod.renderer import MAX_SUCCESSFUL_RENDERS, RenderCache
 
 
 async def enable_cache(fixture: Harness, *, queries: list[str] | None = None) -> list[str]:

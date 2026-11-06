@@ -14,7 +14,6 @@ import pytest
 from aiohttp import web
 from bittensor_wallet import Keypair
 from pod_gateway.dependencies import gateway_spec, worker_spec
-from pod_gateway.renderer import renderer_profile_sha256, require_artifact_profile
 from pod_gateway.settings import GatewaySettings, Settings
 from pydantic import SecretStr
 from subnet_common.witness.artifacts import ArtifactProfile
@@ -24,6 +23,7 @@ from subnet_common.witness.pricing import PricingStore
 from support import MemoryState
 from test_recording import PRICING
 from witness_client.auth import hotkey_headers
+from witness_pod.renderer import renderer_profile_sha256, require_artifact_profile
 
 
 @pytest.mark.parametrize("round_number", ["test-0", "test-1", "test-2"])
@@ -370,9 +370,8 @@ def test_assigned_pod_starts_artifact_storage_without_a_source_commit(
     values: dict[str, object], tmp_path: Path, monkeypatch: pytest.MonkeyPatch, commits: dict[str, str] | None,
     save_submissions: bool,
 ) -> None:
-    import pod
-    from pod_gateway import direct, renderer
     from subnet_common.witness import certs, state
+    from witness_pod import direct, pod, renderer
 
     class Started(Exception):
         pass
@@ -409,7 +408,7 @@ def test_assigned_pod_starts_artifact_storage_without_a_source_commit(
     service = Mock(side_effect=Started)
     monkeypatch.setattr(pod, "PARAMETERS", tmp_path)
     monkeypatch.setattr(pod, "PodRuntime", Mock(return_value=runtime))
-    monkeypatch.setattr("pod.signal.signal", Mock())
+    monkeypatch.setattr("witness_pod.pod.signal.signal", Mock())
     monkeypatch.setattr(pod, "render_service", lambda _: nullcontext())
     monkeypatch.setattr(state, "R2StateStore", Mock(return_value=saved, connect=Mock(return_value=saved)))
     monkeypatch.setattr(certs, "pod_context", Mock(return_value=(None, "fixture-certificate")))
@@ -417,7 +416,7 @@ def test_assigned_pod_starts_artifact_storage_without_a_source_commit(
     monkeypatch.setattr(direct, "Witness", service)
     final_objects = Mock(bucket=str(values["R2_BUCKET"]))
     replay_objects = Mock(bucket=str(values["R2_REPLAY_BUCKET"]), keys=Mock(return_value=iter(())))
-    monkeypatch.setattr("storage.R2Store", Mock(side_effect=[final_objects, replay_objects]))
+    monkeypatch.setattr("witness_pod.storage.R2Store", Mock(side_effect=[final_objects, replay_objects]))
     with pytest.raises(Started):
         pod.main()
     store = service.call_args.kwargs["artifacts"]
@@ -444,7 +443,7 @@ def test_worker_refuses_a_profile_for_different_packaged_renderer_bytes(tmp_path
         require_artifact_profile(profile, tmp_path)
 
 
-def test_settings_import_with_the_shared_modules_packaged_in_the_pod(tmp_path: Path) -> None:
+def test_settings_import_with_the_shared_modules_packaged_in_the_gateway(tmp_path: Path) -> None:
     root = Path(__file__).resolve().parents[2]
     dockerfile = root / "witness-server/worker/Dockerfile.pods"
     for line in dockerfile.read_text().splitlines():

@@ -12,18 +12,19 @@ from collections.abc import Callable
 from contextlib import suppress
 from pathlib import Path
 
-from channel import Channel
-from diagnostics import FailureFact, failure_fact, verifier_failure
-from identity import Provider, miner_prefix
 from pydantic import TypeAdapter
-from storage import MAX_BYTES, Store, json_bytes
-from timing import emit, identify_exchange, measure, progress, timed, transport
-from timing import exchange_id as _exchange_id
-from timing import forward as _verifier_timings
-from timing import started as timing_started
 from websockets.exceptions import WebSocketException
 
-HERE = Path(__file__).resolve().parent
+from .channel import Channel
+from .diagnostics import FailureFact, failure_fact, verifier_failure
+from .identity import Provider, miner_prefix
+from .storage import MAX_BYTES, Store, json_bytes
+from .timing import emit, identify_exchange, measure, progress, timed, transport
+from .timing import exchange_id as _exchange_id
+from .timing import forward as _verifier_timings
+from .timing import started as timing_started
+
+HERE = Path(__file__).resolve().parents[1]
 WITNESS = HERE.parent / "verifier"
 PARAMETERS = Path(os.environ.get("WITNESS_PARAMETERS", str(WITNESS / "params")))
 CLIENT_HELLO_TIMEOUT = 60

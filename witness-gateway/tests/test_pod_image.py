@@ -25,14 +25,14 @@ def run(script: str) -> None:
     assert result.returncode == 0, result.stdout.decode(errors="replace") + result.stderr.decode(errors="replace")
 
 
-def test_pod_contains_current_client_gateway_worker_and_renderer() -> None:
+def test_pod_contains_current_client_worker_and_renderer() -> None:
     expected = {}
     for source, target, pattern in (
         ("witness-client/src/witness_client", "/app/witness-client/src/witness_client", "*.py"),
         ("miner-runtime/src/miner_runtime", "/app/miner-runtime/src/miner_runtime", "*.py"),
         ("renderer-client/src/renderer_client", "/app/renderer-client/src/renderer_client", "*.py"),
-        ("witness-gateway/pod_gateway", "/app/witness-gateway/pod_gateway", "*.py"),
-        ("witness-server/worker", "/app/witness-server/worker", "*.py"),
+        ("shared/subnet_common/witness", "/app/shared/subnet_common/witness", "*.py"),
+        ("witness-server/worker/witness_pod", "/app/witness-server/worker/witness_pod", "*.py"),
         ("witness-server/verifier", "/app/witness-server/verifier", "*.mjs"),
         ("render-service-js/src", "/opt/renderer/src", "*.js"),
     ):
@@ -44,9 +44,8 @@ def test_pod_contains_current_client_gateway_worker_and_renderer() -> None:
     run(f"""
 import hashlib
 from pathlib import Path
-import pod_gateway.settings
-import pod_gateway.direct
-import pod
+import witness_pod.direct
+from witness_pod import pod
 for name, digest in {expected!r}.items():
     assert hashlib.sha256(Path(name).read_bytes()).hexdigest() == digest, name
 assert Path('/opt/witness-affinity/libwitness-affinity.so').is_file()
@@ -59,7 +58,7 @@ def test_renderer_readiness_determinism_and_worker_drain() -> None:
     run("""
 import os, signal, threading
 import httpx
-from pod_gateway.renderer import render_service
+from witness_pod.renderer import render_service
 
 drained = threading.Event()
 source = 'export default function(THREE) { return new THREE.Mesh(new THREE.BoxGeometry(0.4,0.4,0.4),new THREE.MeshStandardMaterial({color:0x6688aa})); }'
@@ -83,7 +82,7 @@ assert process.poll() is not None
 def test_unready_renderer_startup_is_bounded() -> None:
     run("""
 import time
-from pod_gateway import renderer
+from witness_pod import renderer
 renderer.READY_SECONDS = 0
 started = time.monotonic()
 try:

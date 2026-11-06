@@ -18,8 +18,20 @@ from functools import partial
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from channel import Channel
-from diagnostics import (
+from subnet_common.witness.auth import AuthRejected
+from subnet_common.witness.models import Scope, identifier, json_bytes, object_dict
+from subnet_common.witness.rounds import RoundInputs, RoundPolicy
+from subnet_common.witness.selection import Selection
+from subnet_common.witness.state import WriteUncertain
+from websockets.sync.client import connect
+from websockets.sync.connection import Connection
+from witness_client.calls import RequestKey
+from witness_client.gateway import _GatewayConnection
+from witness_client.state import save
+
+from .budget import Budget, BudgetNotReserved
+from .channel import Channel
+from .diagnostics import (
     DiagnosticRecord,
     ExchangeIdentity,
     FailureFact,
@@ -28,23 +40,12 @@ from diagnostics import (
     RuntimeIdentity,
     failure_fact,
 )
-from pod_gateway.budget import Budget, BudgetNotReserved
-from pod_gateway.records import Call, CallRecords
-from pod_gateway.recovery import recover_issued, response_failure
-from pod_gateway.renderer import render_service
-from storage import Store
-from subnet_common.witness.auth import AuthRejected
-from subnet_common.witness.models import Scope, identifier, json_bytes, object_dict
-from subnet_common.witness.rounds import RoundInputs, RoundPolicy
-from subnet_common.witness.selection import Selection
-from subnet_common.witness.state import WriteUncertain
-from timing import diagnostic_error, identify_exchange, measure, timed
-from websockets.sync.client import connect
-from websockets.sync.connection import Connection
-from witness_client.calls import RequestKey
-from witness_client.gateway import _GatewayConnection
-from witness_client.state import save
-from worker import PARAMETERS, PROVIDERS, relay, verify
+from .records import Call, CallRecords
+from .recovery import recover_issued, response_failure
+from .renderer import render_service
+from .storage import Store
+from .timing import diagnostic_error, identify_exchange, measure, timed
+from .worker import PARAMETERS, PROVIDERS, relay, verify
 
 
 class PodRuntime:
@@ -740,13 +741,14 @@ class PodRuntime:
 
 def main() -> None:
     from aiohttp import web
-    from pod_gateway.artifacts import ArtifactRepository
-    from pod_gateway.direct import Witness
-    from storage import R2Store
     from subnet_common.witness.artifacts import ArtifactConfig
     from subnet_common.witness.certs import pod_context
     from subnet_common.witness.pricing import PricingStore
     from subnet_common.witness.state import PrefixedState, R2StateStore
+
+    from .artifacts import ArtifactRepository
+    from .direct import Witness
+    from .storage import R2Store
 
     state = R2StateStore.connect(
         endpoint=os.environ["R2_ENDPOINT"],
@@ -791,8 +793,9 @@ def main() -> None:
     if inputs.save_submissions and not os.environ.get("WITNESS_ARTIFACTS"):
         raise ValueError("Final saving requires the frozen artifact configuration")
     if artifact_config := os.environ.get("WITNESS_ARTIFACTS"):
-        from pod_gateway.renderer import require_artifact_profile
         from subnet_common.competition.generations import MAX_GENERATIONS_BYTES
+
+        from .renderer import require_artifact_profile
 
         config = ArtifactConfig.model_validate_json(artifact_config)
         if (not inputs.save_submissions or config.seed != inputs.seed or config.prompt_ids != inputs.prompt_ids):
@@ -810,14 +813,14 @@ def main() -> None:
 
     render_cache = None
     if os.environ.get("WITNESS_RENDERER_ENABLED") == "1":
-        from pod_gateway.renderer import RenderCache
+        from .renderer import RenderCache
 
         render_cache = RenderCache(
             evidence, runtime.scope, os.environ["WITNESS_IMAGE"], storage_prefix=inputs.storage_prefix,
         )
 
     async def serve() -> None:
-        from pod_gateway.results import ResultSaver
+        from .results import ResultSaver
 
         result_saver = (
             ResultSaver(artifact_store, "http://127.0.0.1:8002", os.environ["DINOV3_REVISION"], os.environ.get("HF_TOKEN"))

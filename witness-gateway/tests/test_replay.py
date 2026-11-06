@@ -31,11 +31,10 @@ from witness_client import AsyncWitnessClient, WitnessClient, WitnessError
 from witness_client.calls import RequestKey, canonical
 from witness_client.client import CapturedResponse
 from witness_client.pods import PodGatewayClient
-
-from pod_gateway.budget import Budget
-from pod_gateway.records import CallRecords
-from pod_gateway.recovery import response_failure
-from pod_gateway.replay import export_bundle
+from witness_pod.budget import Budget
+from witness_pod.records import CallRecords
+from witness_pod.recovery import response_failure
+from witness_pod.replay import export_bundle
 
 START = "00000000-0000-4000-8000-000000000001"
 

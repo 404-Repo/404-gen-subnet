@@ -1,12 +1,28 @@
+[build-system]
+requires = ["setuptools==80.9.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "404-witness-pod"
+version = "0.1.0"
+description = "Witness Pod capture, rendering and replay"
+requires-python = ">=3.11"
+
+[tool.setuptools.packages.find]
+include = ["witness_pod*"]
+
+[tool.setuptools.package-data]
+witness_pod = ["py.typed"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = [".", "../../witness-client/src", "../../miner-runtime/src"]
+pythonpath = [".", "../../shared", "../../witness-client/src", "../../miner-runtime/src", "../../renderer-client/src"]
 
 [tool.mypy]
 python_version = "3.11"
-files = ["storage.py", "identity.py", "worker.py", "pod.py", "channel.py", "timing.py", "tests"]
+files = ["witness_pod", "tests"]
 strict = true
-mypy_path = ["../../witness-client/src", "../../miner-runtime/src", "../../witness-gateway"]
+mypy_path = ["../../shared", "../../witness-client/src", "../../miner-runtime/src", "../../renderer-client/src"]
 
 [[tool.mypy.overrides]]
 module = ["boto3", "botocore.*"]

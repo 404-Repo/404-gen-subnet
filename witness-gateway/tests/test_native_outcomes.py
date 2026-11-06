@@ -14,20 +14,20 @@ from typing import cast
 
 import openai
 import pytest
-from channel import Channel
 from miner_runtime.observations import ReplayMismatch
 from miner_runtime.runner import run_generation
 from miner_runtime.validator import ReplayWitness, run_replay
 from openai.types.responses import Response
-from pod_gateway.replay import export_bundle
-from storage import Store
 from subnet_common.witness.certs import create
 from test_recording import PRICING
 from test_service import Harness
 from witness_client import WitnessClient
 from witness_client.response import ModelStream
 from witness_client.transport import exchange
-from worker import Verifier, relay
+from witness_pod.channel import Channel
+from witness_pod.replay import export_bundle
+from witness_pod.storage import Store
+from witness_pod.worker import Verifier, relay
 
 
 def outcome_body(outcome: str) -> tuple[int, bytes]:
@@ -180,8 +180,8 @@ def test_native_provider_outcome_is_recorded_and_replays_without_provider_access
 
         async def scenario() -> None:
             fixture = Harness(tmp_path, monkeypatch, native=True)
-            monkeypatch.setattr("pod.relay", direct_relay)
-            monkeypatch.setattr("pod.verify", verify)
+            monkeypatch.setattr("witness_pod.pod.relay", direct_relay)
+            monkeypatch.setattr("witness_pod.pod.verify", verify)
             monkeypatch.setitem(
                 __import__("witness_client.request", fromlist=["PROVIDERS"]).PROVIDERS,
                 "api",

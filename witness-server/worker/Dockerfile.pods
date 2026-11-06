@@ -29,7 +29,9 @@ COPY witness-server/worker/verify.mjs /app/witness-server/worker/
 COPY witness-client/src/witness_client/ /app/witness-client/src/witness_client/
 COPY miner-runtime/src/miner_runtime/ /app/miner-runtime/src/miner_runtime/
 COPY renderer-client/src/renderer_client/ /app/renderer-client/src/renderer_client/
-COPY witness-gateway/pod_gateway/ /app/witness-gateway/pod_gateway/
+COPY witness-gateway/pyproject.toml /tmp/witness-gateway/
+COPY witness-gateway/pod_gateway/ /tmp/witness-gateway/pod_gateway/
+RUN pip install --no-cache-dir --no-deps --target /app/witness-gateway /tmp/witness-gateway && rm -rf /tmp/witness-gateway
 COPY shared/subnet_common/__init__.py shared/subnet_common/github.py shared/subnet_common/git_batcher.py /app/shared/subnet_common/
 COPY shared/subnet_common/competition/__init__.py shared/subnet_common/competition/generations.py shared/subnet_common/competition/config.py shared/subnet_common/competition/state.py shared/subnet_common/competition/schedule.py shared/subnet_common/competition/seed.py shared/subnet_common/competition/prompts.py /app/shared/subnet_common/competition/
 COPY shared/subnet_common/witness/ /app/shared/subnet_common/witness/
@@ -50,19 +52,21 @@ COPY witness-client/LICENSE witness-client/THIRD_PARTY_NOTICES.md /app/licenses/
 COPY witness-server/verifier/THIRD_PARTY_NOTICES.md /app/licenses/VERIFIER_THIRD_PARTY_NOTICES.md
 COPY witness-server/verifier/*.mjs /app/witness-server/verifier/
 COPY witness-server/verifier/params/verifying.bin /app/witness-server/verifier/params/verifying.bin
-COPY witness-server/worker/*.py witness-server/worker/verify.mjs /app/witness-server/worker/
+COPY witness-server/worker/verify.mjs /app/witness-server/worker/
+COPY witness-server/worker/pyproject.toml /tmp/witness-pod/
+COPY witness-server/worker/witness_pod/ /tmp/witness-pod/witness_pod/
+RUN pip install --no-cache-dir --no-deps --target /app/witness-server/worker /tmp/witness-pod && rm -rf /tmp/witness-pod
 COPY witness-client/src/witness_client/ /app/witness-client/src/witness_client/
 COPY miner-runtime/src/miner_runtime/ /app/miner-runtime/src/miner_runtime/
 COPY renderer-client/src/renderer_client/ /app/renderer-client/src/renderer_client/
-COPY witness-gateway/pod_gateway/ /app/witness-gateway/pod_gateway/
 COPY shared/subnet_common/__init__.py shared/subnet_common/embeddings.py shared/subnet_common/render.py shared/subnet_common/github.py shared/subnet_common/git_batcher.py /app/shared/subnet_common/
 COPY shared/subnet_common/competition/__init__.py shared/subnet_common/competition/generations.py shared/subnet_common/competition/config.py shared/subnet_common/competition/state.py shared/subnet_common/competition/schedule.py shared/subnet_common/competition/seed.py shared/subnet_common/competition/prompts.py /app/shared/subnet_common/competition/
 COPY shared/subnet_common/witness/ /app/shared/subnet_common/witness/
 COPY NOTICE.md /app/licenses/NOTICE.md
-ENV PYTHONPATH=/app/shared:/app/witness-client/src:/app/miner-runtime/src:/app/renderer-client/src:/app/witness-gateway:/app/witness-server/worker \
+ENV PYTHONPATH=/app/shared:/app/witness-client/src:/app/miner-runtime/src:/app/renderer-client/src:/app/witness-server/worker \
     PYTHONUNBUFFERED=1 WITNESS_TIMINGS=1
 EXPOSE 8000 8443
-ENTRYPOINT ["python", "-m", "pod_gateway"]
+ENTRYPOINT ["python", "-m", "witness_pod"]
 
 FROM proof AS renderer-affinity-build
 WORKDIR /affinity-build
@@ -93,6 +97,10 @@ COPY render-service-js/src /opt/renderer/src
 ENV WITNESS_RENDERER_ENABLED=1
 
 FROM renderer-runtime AS render-benchmark
+COPY witness-gateway/pyproject.toml /tmp/witness-gateway/
+COPY witness-gateway/pod_gateway/ /tmp/witness-gateway/pod_gateway/
+RUN pip install --no-cache-dir --no-deps --target /app/witness-gateway /tmp/witness-gateway && rm -rf /tmp/witness-gateway
+ENV PYTHONPATH=/app/shared:/app/witness-client/src:/app/miner-runtime/src:/app/renderer-client/src:/app/witness-server/worker:/app/witness-gateway
 COPY render-service-js/test /opt/renderer/test
 COPY miner-reference/miner_reference/normalize.js /opt/miner-reference/miner_reference/normalize.js
 COPY miner-reference/examples/generated /opt/fixtures

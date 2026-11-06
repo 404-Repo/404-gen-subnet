@@ -6,12 +6,12 @@ from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
-from pod_gateway.budget import Budget
 from subnet_common.witness.pricing import PricingStore
 from subnet_common.witness.state import R2StateStore
 from support import MemoryState
 from test_recording import BODY, PRICING, SCOPE, invocation
 from witness_client.calls import RequestKey, canonical
+from witness_pod.budget import Budget
 
 
 def extended_pricing() -> bytes:

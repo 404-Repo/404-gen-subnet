@@ -17,13 +17,6 @@ import pytest
 from aiohttp import web
 from bittensor_wallet import Keypair
 from botocore.exceptions import EndpointConnectionError
-from channel import WorkerChannel
-from diagnostics import failure_fact
-from pod import PodRuntime
-from pod_gateway.budget import Budget
-from pod_gateway.direct import Witness
-from pod_gateway.records import Call, CallRecord, CallRecords, RecordingConflict
-from pod_gateway.recovery import recover_issued
 from subnet_common.witness.models import Scope
 from subnet_common.witness.rounds import PromptImage, RoundInputs
 from subnet_common.witness.state import R2StateStore, Snapshot, StateConflict, WriteUncertain
@@ -31,6 +24,13 @@ from support import MemoryState
 from test_recording import BODY, PRICING, SCOPE, invocation
 from test_state import FakeS3, s3_error
 from witness_client.calls import RequestKey, canonical
+from witness_pod.budget import Budget
+from witness_pod.channel import WorkerChannel
+from witness_pod.diagnostics import failure_fact
+from witness_pod.direct import Witness
+from witness_pod.pod import PodRuntime
+from witness_pod.records import Call, CallRecord, CallRecords, RecordingConflict
+from witness_pod.recovery import recover_issued
 
 START = "00000000-0000-4000-8000-000000000001"
 PROOF = "c" * 64
@@ -122,8 +122,8 @@ def test_prefixed_capture_reaches_provider_and_records_its_connection_failure(
     def unavailable(*args: object, **kwargs: object) -> None:
         raise ConnectionRefusedError("Fixture provider is unavailable")
 
-    monkeypatch.setattr("worker.socket.create_connection", unavailable)
-    monkeypatch.setattr("pod.connect", lambda *args, **kwargs: MagicMock())
+    monkeypatch.setattr("witness_pod.worker.socket.create_connection", unavailable)
+    monkeypatch.setattr("witness_pod.pod.connect", lambda *args, **kwargs: MagicMock())
     try:
         worker._capture(item, call, MagicMock())
         saved = records.load(scope, item.id)
@@ -170,7 +170,7 @@ def test_failure_diagnostics_survive_r2_outage_and_pod_restart(
     def unavailable(*args: object, **kwargs: object) -> None:
         raise ConnectionRefusedError(secret)
 
-    monkeypatch.setattr("worker.socket.create_connection", unavailable)
+    monkeypatch.setattr("witness_pod.worker.socket.create_connection", unavailable)
     monkeypatch.setattr(worker, "_retry_upload", lambda operation: operation())
     try:
         with pytest.raises(EndpointConnectionError):
@@ -242,12 +242,12 @@ def test_unresolved_verifier_failure_uploads_diagnostics_without_failing_the_cal
     worker = runtime(state, records, budget, tmp_path / "spool")
     directory = worker.spool / call.exchange_id
     directory.mkdir(mode=0o700)
-    monkeypatch.setattr("worker.subprocess.run", MagicMock(
+    monkeypatch.setattr("witness_pod.worker.subprocess.run", MagicMock(
         return_value=subprocess.CompletedProcess([], 1, b"", b"private verifier failure"),
     ))
     monkeypatch.setattr(worker, "_retry_upload", lambda operation: operation())
     events: list[object] = []
-    monkeypatch.setattr("timing._output.write", events.append)
+    monkeypatch.setattr("witness_pod.timing._output.write", events.append)
     try:
         with pytest.raises(RuntimeError, match="verifier did not complete"):
             worker._recover(call.exchange_id)
@@ -305,7 +305,7 @@ def test_capture_preserves_the_reason_for_a_rejected_reservation(
         before_release(body)
         raise AssertionError("A rejected reservation reached provider dispatch")
 
-    monkeypatch.setattr("pod.relay", relay)
+    monkeypatch.setattr("witness_pod.pod.relay", relay)
     try:
         worker._capture(item, call, MagicMock())
         saved = json.loads(state.get(prefix(call) + "failure.json") or b"{}")
@@ -344,7 +344,7 @@ def test_full_spool_does_not_leave_a_failed_capture_running(
         raise ConnectionRefusedError("fixture provider unavailable")
 
     monkeypatch.setattr(tempfile, "mkstemp", disk_full)
-    monkeypatch.setattr("worker.socket.create_connection", unavailable)
+    monkeypatch.setattr("witness_pod.worker.socket.create_connection", unavailable)
     try:
         worker._capture(item, call, MagicMock())
         failed = records.load(scope, item.id)
@@ -445,8 +445,8 @@ def capture_io(
     provider = MagicMock()
     connection = provider.__enter__.return_value
     connection.recv.side_effect = [record, record, record, b""]
-    monkeypatch.setattr("worker.socket.create_connection", lambda *args, **kwargs: provider)
-    monkeypatch.setattr("worker.select.select", lambda *args: ([connection], [], []))
+    monkeypatch.setattr("witness_pod.worker.socket.create_connection", lambda *args, **kwargs: provider)
+    monkeypatch.setattr("witness_pod.worker.select.select", lambda *args: ([connection], [], []))
     errors = iter(finish_errors)
 
     def process(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
@@ -463,7 +463,7 @@ def capture_io(
             result = metadata if mode == "finish" else {}
         return subprocess.CompletedProcess(args, 0, canonical(result), b"")
 
-    monkeypatch.setattr("worker.subprocess.run", process)
+    monkeypatch.setattr("witness_pod.worker.subprocess.run", process)
     channel = MagicMock()
     channel.recv.return_value = record
     channel.claim.side_effect = lambda phase: canonical({"client_bytes": len(record) * (2 if phase == "handshake" else 3)})
@@ -949,8 +949,8 @@ def test_permanently_drained_worker_reconnects_until_retirement_is_confirmed(
         connections.append(socket)
         return socket
 
-    monkeypatch.setattr("pod.connect", connect)
-    monkeypatch.setattr("pod.time.sleep", lambda _: None)
+    monkeypatch.setattr("witness_pod.pod.connect", connect)
+    monkeypatch.setattr("witness_pod.pod.time.sleep", lambda _: None)
     worker.run()
     assert len(connections) == 2
     for socket in sockets:
@@ -1105,7 +1105,7 @@ def test_restarted_worker_retains_pending_upload_until_durable(
         assert mode == "finish" and path == directory
         return json.loads(files["manifest.json"])  # type: ignore[no-any-return]
 
-    monkeypatch.setattr("pod.verify", finish)
+    monkeypatch.setattr("witness_pod.pod.verify", finish)
     restarted = runtime(state, records, budget, directory.parent)
     try:
         assert blocked.wait(timeout=5)
@@ -1312,8 +1312,8 @@ def test_failed_capture_releases_its_charge_before_a_retry(
         before_release(BODY)
         raise TimeoutError("Fixture failed after authorization")
 
-    monkeypatch.setattr("pod.connect", lambda *args, **kwargs: MagicMock())
-    monkeypatch.setattr("pod.relay", relay)
+    monkeypatch.setattr("witness_pod.pod.connect", lambda *args, **kwargs: MagicMock())
+    monkeypatch.setattr("witness_pod.pod.relay", relay)
     try:
         worker._capture(item, call, MagicMock())
     finally:
@@ -1366,8 +1366,8 @@ def test_capture_retries_rejected_budget_writes_but_not_uncertain_writes(
         released += 1
         raise TimeoutError("Fixture failed after provider release")
 
-    monkeypatch.setattr("pod.connect", lambda *args, **kwargs: MagicMock())
-    monkeypatch.setattr("pod.relay", relay)
+    monkeypatch.setattr("witness_pod.pod.connect", lambda *args, **kwargs: MagicMock())
+    monkeypatch.setattr("witness_pod.pod.relay", relay)
     try:
         worker._capture(item, call, MagicMock())
     finally:

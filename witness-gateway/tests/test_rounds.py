@@ -13,7 +13,6 @@ from pathlib import Path
 import httpx
 import pytest
 from PIL import Image
-from pod_gateway.artifacts import ArtifactRepository
 from pod_gateway.dependencies import gateway_spec, worker_spec
 from pod_gateway.lifecycle import Allocator
 from pod_gateway.revivor import Revivor
@@ -27,6 +26,7 @@ from subnet_common.witness.state import PrefixedState
 from support import MemoryState, Provider
 from test_lifecycle import FIRST, SCOPE, SECOND, SPEC, Drain
 from test_settings import values as settings_values
+from witness_pod.artifacts import ArtifactRepository
 
 values = settings_values
 
@@ -425,9 +425,9 @@ def test_automatic_round_configuration_does_not_enable_a_test_hotkey_exemption(v
 
 
 def test_storage_namespaces_keep_results_and_call_journals_separate_with_unchanged_official_paths() -> None:
-    from pod_gateway.records import CallRecords
     from subnet_common.competition.generations import GenerationResult
     from test_recording import invocation
+    from witness_pod.records import CallRecords
 
     state = MemoryState()
     digest = "d" * 64

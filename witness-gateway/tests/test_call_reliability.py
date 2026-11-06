@@ -23,9 +23,8 @@ from test_service import Harness, call_key
 from witness_client import WitnessClient
 from witness_client.calls import canonical
 from witness_client.response import ModelStream
-
-from pod_gateway.records import RecordingConflict
-from pod_gateway.recovery import recover_issued
+from witness_pod.records import RecordingConflict
+from witness_pod.recovery import recover_issued
 
 
 @pytest.mark.parametrize(

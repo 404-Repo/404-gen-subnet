@@ -15,18 +15,10 @@ import time
 from decimal import Decimal
 from pathlib import Path
 
-import timing
-import worker
 from aiohttp import ClientSession, ClientTimeout, web
-from pod import PodRuntime
-from pod_gateway.budget import Budget, BudgetRejected
 from pod_gateway.control import DrainControl, Registry
-from pod_gateway.direct import Witness
 from pod_gateway.lifecycle import Allocator
-from pod_gateway.records import CallRecords
-from pod_gateway.replay import export_bundle, native_verifier
 from pod_gateway.server import Gateway
-from storage import R2Store
 from subnet_common.witness.auth import Authenticator, Membership
 from subnet_common.witness.certs import pod_context
 from subnet_common.witness.models import Pod, PodSpec, Scope
@@ -34,6 +26,13 @@ from subnet_common.witness.pricing import PricingStore
 from subnet_common.witness.security import capability
 from subnet_common.witness.selection import Selection
 from subnet_common.witness.state import R2StateStore
+from witness_pod import timing, worker
+from witness_pod.budget import Budget, BudgetRejected
+from witness_pod.direct import Witness
+from witness_pod.pod import PodRuntime
+from witness_pod.records import CallRecords
+from witness_pod.replay import export_bundle, native_verifier
+from witness_pod.storage import R2Store
 
 os.umask(0o077)
 ROUND = os.environ.get('BENCH_ROUND', 'test-0')

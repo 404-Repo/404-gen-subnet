@@ -20,8 +20,6 @@ import httpx
 import pytest
 from aiohttp import web
 from aiohttp.test_utils import make_mocked_request
-from pod_gateway.artifacts import ArtifactRepository, SubmissionContext
-from pod_gateway.results import ResultSaver
 from renderer_client import ArtifactClient, ArtifactUnavailable, RenderRejected, RenderUnavailable
 from subnet_common.competition.generations import GenerationResult, GenerationsAdapter
 from subnet_common.render import GRAY_BG, GRAY_VIEWS, WHITE_BG, WHITE_VIEWS
@@ -32,6 +30,8 @@ from subnet_common.witness.selection import Selection
 from subnet_common.witness.state import Snapshot
 from support import MemoryState
 from test_service import Harness
+from witness_pod.artifacts import ArtifactRepository, SubmissionContext
+from witness_pod.results import ResultSaver
 
 PNG = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aN3sAAAAASUVORK5CYII=")
 SOURCE = "export default function generate(THREE) { return new THREE.Mesh(new THREE.BoxGeometry(.5,.5,.5)); }"
@@ -75,7 +75,7 @@ async def enable(
     )
     service.result_saver = ResultSaver(service.artifacts, origin, "fixture-revision", None)
     fixture.monkeypatch.setattr(
-        "pod_gateway.results.build_embeddings_npz", AsyncMock(return_value=b"fixture embeddings")
+        "witness_pod.results.build_embeddings_npz", AsyncMock(return_value=b"fixture embeddings")
     )
     return rendered
 
@@ -216,8 +216,8 @@ def test_result_saver_saves_every_view_when_larger_render_jobs_time_out(monkeypa
         assert white == {view.name: expected[f"white/{view.name}.png"] for view in WHITE_VIEWS}
         return expected["embeddings.npz"]
 
-    monkeypatch.setattr("pod_gateway.results.httpx.AsyncClient", render_client)
-    monkeypatch.setattr("pod_gateway.results.build_embeddings_npz", embeddings)
+    monkeypatch.setattr("witness_pod.results.httpx.AsyncClient", render_client)
+    monkeypatch.setattr("witness_pod.results.build_embeddings_npz", embeddings)
     result = asyncio.run(ResultSaver(store, "http://renderer", "fixture-revision", None).save(prompt, SOURCE, PNG))
     assert result.failure_reason is None and result.views == store.prefix(prompt)
     assert store.result(prompt) == result
@@ -595,7 +595,7 @@ def test_embedding_failure_is_reported_and_the_miner_can_retry(tmp_path: Path, m
                 await asyncio.to_thread(witness._gateway.ensure_pod)
                 await enable(fixture)
                 embeddings = AsyncMock(side_effect=OSError("Embedding calculation failed"))
-                monkeypatch.setattr("pod_gateway.results.build_embeddings_npz", embeddings)
+                monkeypatch.setattr("witness_pod.results.build_embeddings_npz", embeddings)
                 with client(fixture, witness.renderer_transport()) as renderer:
                     with pytest.raises(ArtifactUnavailable) as error:
                         await asyncio.to_thread(renderer.save_final, SOURCE)
@@ -678,7 +678,7 @@ def test_final_saves_complete_without_generating_again(
         statuses: list[int] = []
         errors: list[str] = []
         if case == "queue_full":
-            monkeypatch.setattr("pod_gateway.direct.SAVE_QUEUE_CAPACITY", 1)
+            monkeypatch.setattr("witness_pod.direct.SAVE_QUEUE_CAPACITY", 1)
 
         async def embeddings(*args: object, **kwargs: object) -> bytes:
             started.set()
@@ -708,7 +708,7 @@ def test_final_saves_complete_without_generating_again(
                         arrived[generation.prompt_sha256].set()
 
                 monkeypatch.setattr(store, "require", require)
-                monkeypatch.setattr("pod_gateway.results.build_embeddings_npz", embeddings)
+                monkeypatch.setattr("witness_pod.results.build_embeddings_npz", embeddings)
                 inner = witness.renderer_transport()
 
                 def deliver(request: httpx.Request) -> httpx.Response:
@@ -833,7 +833,7 @@ def test_save_queue_limits_and_failures_release_the_next_job(
         started, release, arrived = asyncio.Event(), asyncio.Event(), asyncio.Event()
         other_image, other_source = b"another prompt", SOURCE + "\n// other"
         prompt = hashlib.sha256(other_image).hexdigest()
-        monkeypatch.setattr("pod_gateway.direct.SAVE_QUEUE_CAPACITY", 1, raising=False)
+        monkeypatch.setattr("witness_pod.direct.SAVE_QUEUE_CAPACITY", 1, raising=False)
 
         async def embeddings(image: bytes, *args: object, **kwargs: object) -> bytes:
             if image == fixture.image:
@@ -859,7 +859,7 @@ def test_save_queue_limits_and_failures_release_the_next_job(
                         arrived.set()
 
                 monkeypatch.setattr(store, "require", require)
-                monkeypatch.setattr("pod_gateway.results.build_embeddings_npz", embeddings)
+                monkeypatch.setattr("witness_pod.results.build_embeddings_npz", embeddings)
                 with (
                     client(fixture, witness.renderer_transport()) as first,
                     client(

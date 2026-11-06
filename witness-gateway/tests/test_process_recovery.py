@@ -20,15 +20,15 @@ from unittest.mock import MagicMock
 
 import httpx
 import pytest
-from channel import WorkerChannel
-from pod import PodRuntime
-from pod_gateway.budget import Budget
-from pod_gateway.records import CallRecords
-from pod_gateway.recovery import recover_issued
 from subnet_common.witness.state import Snapshot, StateConflict
 from support import MemoryState
 from test_recording import BODY, PRICING, SCOPE, invocation
 from test_recovery import PROOF, RESPONSE, START, evidence, prefix, runtime
+from witness_pod.budget import Budget
+from witness_pod.channel import WorkerChannel
+from witness_pod.pod import PodRuntime
+from witness_pod.records import CallRecords
+from witness_pod.recovery import recover_issued
 
 
 class DiskState(MemoryState):
@@ -141,7 +141,7 @@ def child(directory: Path, mode: str, stage: str, origin: str) -> None:
         return json.loads(files["manifest.json"])  # type: ignore[no-any-return]
 
     patch = pytest.MonkeyPatch()
-    patch.setattr("pod.verify", finish)
+    patch.setattr("witness_pod.pod.verify", finish)
 
     def inspect_pending(worker: PodRuntime) -> None:
         if stage != "verifier_outage":
@@ -188,7 +188,7 @@ def child(directory: Path, mode: str, stage: str, origin: str) -> None:
         pause("response_spooled")
         return finish("finish", spool)
 
-    patch.setattr("pod.relay", relay)
+    patch.setattr("witness_pod.pod.relay", relay)
     worker = runtime(state, records, budget, directory / "spool")
     worker.token = "a" * 64
     worker.accepting = True

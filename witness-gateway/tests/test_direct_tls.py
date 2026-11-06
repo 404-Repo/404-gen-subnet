@@ -14,15 +14,15 @@ from typing import cast
 
 import openai
 import pytest
-from channel import Channel
-from storage import Store
 from subnet_common.witness.certs import create
 from test_service import Harness, exchange_id
 from witness_client import WitnessClient
 from witness_client.calls import RequestKey
 from witness_client.request import serialize_body
 from witness_client.transport import exchange
-from worker import Verifier, relay
+from witness_pod.channel import Channel
+from witness_pod.storage import Store
+from witness_pod.worker import Verifier, relay
 
 
 @pytest.mark.parametrize("leave,status", [(False, 200), (True, 200), (False, 401)])
@@ -133,8 +133,8 @@ def test_native_direct_tls_durable_completion_and_exact_recovery(
 
         async def scenario() -> None:
             fixture = Harness(tmp_path, monkeypatch, native=True)
-            monkeypatch.setattr("pod.relay", direct_relay)
-            monkeypatch.setattr("pod.verify", verify)
+            monkeypatch.setattr("witness_pod.pod.relay", direct_relay)
+            monkeypatch.setattr("witness_pod.pod.verify", verify)
             monkeypatch.setitem(
                 __import__("witness_client.request", fromlist=["PROVIDERS"]).PROVIDERS,
                 "api",

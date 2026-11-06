@@ -83,11 +83,11 @@ Saved results remain readable after admission closes.
 
 ## Reading order
 
-1. [pod.py](pod.py): worker activation, capture ownership, persistence retries and drain.
-2. [identity.py](identity.py): canonical miner identity and round-scoped paths.
-3. [channel.py](channel.py): bounded TLS and proof messages over the WebSocket.
-4. [worker.py](worker.py): verification, provider capture and evidence persistence.
-5. [storage.py](storage.py): R2 evidence access.
+1. [pod.py](witness_pod/pod.py): worker activation, capture ownership, persistence retries and drain.
+2. [identity.py](witness_pod/identity.py): canonical miner identity and round-scoped paths.
+3. [channel.py](witness_pod/channel.py): bounded TLS and proof messages over the WebSocket.
+4. [worker.py](witness_pod/worker.py): verification, provider capture and evidence persistence.
+5. [storage.py](witness_pod/storage.py): R2 evidence access.
 6. [verify.mjs](verify.mjs): entrypoint into the TLS/ZK verifier.
 
 ## Build and deployment
@@ -100,8 +100,8 @@ docker build --platform linux/amd64 -f witness-server/worker/Dockerfile.pods -t 
 
 The image includes the worker, Node, the native verifier, `verifying.bin`,
 Chromium, the renderer and the Python dependencies for embeddings and result
-saving. The `worker` role is started with `python -m pod_gateway worker` and is
-the default. Set `WITNESS_IMAGE` to this image's immutable digest. Build target
+saving. It starts with `python -m witness_pod`. Set `WITNESS_IMAGE` to this image's
+immutable digest. Build target
 `gateway` from the same Dockerfile for gateways and the independent revivor;
 set `WITNESS_GATEWAY_IMAGE` to that image's digest.
 Use the [Pod guide](../../witness-gateway/PODS.md) for operator settings,
@@ -121,3 +121,7 @@ WITNESS_TEST_IMAGE=404-witness-pods:local python -m pytest -q tests/test_contain
 
 See [server checks](../README.md#local-checks) for setup. Local TLS tests use
 WebSockets and native credential proofs with local provider fixtures.
+
+For local use, install with `python -m pip install --no-deps -e .` after the
+runtime dependencies. Offline replay export uses `python -m witness_pod export`;
+see the [replay guide](../../witness-gateway/PODS.md#verified-offline-replay).

@@ -18,10 +18,7 @@ from typing import cast
 import httpx
 import pytest
 from bittensor_wallet import Keypair
-from channel import WorkerChannel
 from conftest import MemoryStore, certificates, connected_channels
-from identity import Provider, miner_prefix
-from storage import json_bytes
 from websockets.exceptions import ConnectionClosedError, ConnectionClosedOK
 from websockets.frames import Close
 from witness_client import WitnessClient, WitnessConfig, WitnessError
@@ -31,7 +28,10 @@ from witness_client.pods import CallView, PodGatewayClient, Snapshot
 from witness_client.response import completed_response, http_body
 from witness_client.transport import exchange
 from witness_client.types import EarlyDisclosure, HandshakeDisclosure, Session
-from worker import PROVIDERS, relay
+from witness_pod.channel import WorkerChannel
+from witness_pod.identity import Provider, miner_prefix
+from witness_pod.storage import json_bytes
+from witness_pod.worker import PROVIDERS, relay
 
 WITNESS = Path(__file__).resolve().parents[2] / "verifier"
 

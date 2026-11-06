@@ -8,8 +8,7 @@ from unittest.mock import MagicMock
 import boto3
 import pytest
 from botocore.exceptions import ClientError, ConnectionClosedError, ReadTimeoutError
-
-from storage import R2Store
+from witness_pod.storage import R2Store
 
 
 @pytest.fixture

@@ -158,7 +158,7 @@ def test_closure_is_checked_immediately_before_releasing_a_provider_request(
                         install(fixture, policy(inputs, stage="paused"))
                         return original_relay(*args, **kwargs)
 
-                    monkeypatch.setattr("pod.relay", close_then_relay)
+                    monkeypatch.setattr("witness_pod.pod.relay", close_then_relay)
                 else:
                     original_reserve = runtime.budget.reserve
 

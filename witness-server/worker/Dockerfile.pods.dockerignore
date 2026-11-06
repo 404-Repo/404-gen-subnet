@@ -33,7 +33,11 @@ witness-server/verifier/params/**
 !witness-server/verifier/params/verifying.bin
 !witness-server/worker/
 witness-server/worker/**
-!witness-server/worker/*.py
+!witness-server/worker/pyproject.toml
+!witness-server/worker/witness_pod/
+witness-server/worker/witness_pod/**
+!witness-server/worker/witness_pod/*.py
+!witness-server/worker/witness_pod/py.typed
 !witness-server/worker/verify.mjs
 !witness-gateway/
 witness-gateway/**
@@ -41,9 +45,11 @@ witness-gateway/**
 !witness-gateway/requirements-gateway.txt
 !witness-gateway/requirements-pods.txt
 !witness-gateway/constraints-pods.txt
+!witness-gateway/pyproject.toml
 !witness-gateway/pod_gateway/
 witness-gateway/pod_gateway/**
 !witness-gateway/pod_gateway/*.py
+!witness-gateway/pod_gateway/py.typed
 
 !witness-gateway/benchmarks/
 witness-gateway/benchmarks/**

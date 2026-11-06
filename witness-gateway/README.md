@@ -9,8 +9,8 @@ See [PODS.md](PODS.md) for configuration, lifecycle, recovery, budgets, replay a
 the immutable runtime manifests. Both images are built from
 [Dockerfile.pods](../witness-server/worker/Dockerfile.pods): target `gateway`
 serves gateways and the independent `revivor`; target `production` serves miner
-witness Pods. Both use `python -m pod_gateway`, defaulting to `gateway` and
-`worker` respectively. Set `WITNESS_GATEWAY_IMAGE` to the gateway digest and
+witness Pods. Their entrypoints are `python -m pod_gateway` and
+`python -m witness_pod`, respectively. Set `WITNESS_GATEWAY_IMAGE` to the gateway digest and
 `WITNESS_IMAGE` to the witness Pod digest. Both pins are required.
 
 The [client](../witness-client/README.md) makes allocation-scoped model calls; the execution host observes each generate() call for replay.
@@ -33,6 +33,7 @@ Install the client development tools and native proof library as described in
 
 ```sh
 python -m pip install -c constraints-pods.txt -r requirements-pods.txt
+python -m pip install --no-deps -e . -e ../witness-server/worker
 python -m mypy
 PYTHONPATH=.:../witness-client/src:../miner-runtime/src:../witness-server/worker:../renderer-client/src:../miner-reference:../shared python -m pytest -q
 ```
@@ -97,7 +98,7 @@ mapping from the competition snapshot. Only the packaged renderer is supported;
 context, from the repository root:
 
 ```sh
-PYTHONPATH=witness-gateway python -c 'from pathlib import Path; from pod_gateway.renderer import renderer_profile_sha256; print(renderer_profile_sha256(Path("render-service-js")))'
+PYTHONPATH=witness-server/worker:shared python -c 'from pathlib import Path; from witness_pod.renderer import renderer_profile_sha256; print(renderer_profile_sha256(Path("render-service-js")))'
 ```
 
 The optional legacy `WITNESS_ARTIFACTS` JSON can supply the renderer profile and

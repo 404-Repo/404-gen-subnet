@@ -6,8 +6,8 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
-from diagnostics import FailureObservation, verifier_failure
-from worker import verify
+from witness_pod.diagnostics import FailureObservation, verifier_failure
+from witness_pod.worker import verify
 
 
 @pytest.mark.parametrize(
@@ -18,7 +18,7 @@ def test_finish_distinguishes_rejection_from_verifier_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, returncode: int, output: bytes, error: type[Exception],
 ) -> None:
     monkeypatch.setattr(
-        "worker.subprocess.run",
+        "witness_pod.worker.subprocess.run",
         MagicMock(return_value=subprocess.CompletedProcess([], returncode, output, b"private verifier error")),
     )
     observation = FailureObservation()
@@ -32,7 +32,7 @@ def test_finish_distinguishes_rejection_from_verifier_failure(
         0: "verifier_invalid_result",
     }[returncode]
     assert diagnostic.stack[0].function == "verify"
-    assert {frame.file for frame in diagnostic.stack} == {"worker/worker.py"}
+    assert {frame.file for frame in diagnostic.stack} == {"witness_pod/worker.py"}
     assert "private verifier error" not in diagnostic.model_dump_json()
 
 
@@ -40,7 +40,7 @@ def test_finish_distinguishes_rejection_from_verifier_failure(
 def test_finish_preserves_verifier_infrastructure_errors(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error: Exception,
 ) -> None:
-    monkeypatch.setattr("worker.subprocess.run", MagicMock(side_effect=error))
+    monkeypatch.setattr("witness_pod.worker.subprocess.run", MagicMock(side_effect=error))
     observation = FailureObservation()
     with pytest.raises(type(error)):
         verify("finish", tmp_path, provider="api", observe_failure=observation.observe)
@@ -55,7 +55,7 @@ def test_verifier_observation_keeps_the_originating_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     process = MagicMock(return_value=subprocess.CompletedProcess([], 2, b"", b"private rejection"))
-    monkeypatch.setattr("worker.subprocess.run", process)
+    monkeypatch.setattr("witness_pod.worker.subprocess.run", process)
     observation = FailureObservation()
     with pytest.raises(ValueError):
         verify("finish", tmp_path, provider="api", observe_failure=observation.observe)
@@ -78,7 +78,7 @@ def test_verifier_failure_keeps_safe_frames_without_stderr_contents(
              "locals": private},
         ],
     }).encode() + b"\n" + private.encode()
-    monkeypatch.setattr("worker.subprocess.run", MagicMock(
+    monkeypatch.setattr("witness_pod.worker.subprocess.run", MagicMock(
         return_value=subprocess.CompletedProcess([], 1, b"", stderr),
     ))
     observation = FailureObservation()

@@ -35,9 +35,10 @@ def test_build_context_excludes_credentials_and_local_state(tmp_path: Path) -> N
         "witness-server/verifier/package.json",
         "witness-server/verifier/package-lock.json",
         "witness-server/verifier/params/verifying.bin",
-        "witness-server/worker/worker.py",
-        "witness-server/worker/channel.py",
-        "witness-server/worker/timing.py",
+        "witness-server/worker/pyproject.toml",
+        "witness-server/worker/witness_pod/worker.py",
+        "witness-server/worker/witness_pod/channel.py",
+        "witness-server/worker/witness_pod/timing.py",
     }
     excluded = {
         ".env",
@@ -95,7 +96,7 @@ def test_worker_image_loads_runtime_and_matching_verification_key() -> None:
 import hashlib
 from pathlib import Path
 import subprocess
-import worker
+from witness_pod import worker
 
 assert worker.HERE == Path('/app/witness-server/worker')
 assert worker.WITNESS == Path('/app/witness-server/verifier')

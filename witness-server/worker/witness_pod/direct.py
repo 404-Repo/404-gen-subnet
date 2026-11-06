@@ -31,7 +31,7 @@ from .renderer import RenderCache
 from .results import ResultSaver
 
 if TYPE_CHECKING:
-    from pod import PodRuntime
+    from .pod import PodRuntime
 
 SAVE_QUEUE_CAPACITY = 256
 
@@ -272,7 +272,7 @@ class Witness:
         return {"manifest": manifest.decode(), "session": self.session(invocation, call), "artifacts": links}
 
     async def miner_exchange(self, request: web.Request) -> web.WebSocketResponse:
-        from channel import WorkerChannel
+        from .channel import WorkerChannel
 
         await asyncio.to_thread(self._require_selected)
         exchange_id = identifier(request.match_info["exchange_id"])

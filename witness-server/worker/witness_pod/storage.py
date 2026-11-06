@@ -11,7 +11,8 @@ from urllib.parse import quote
 import boto3
 from botocore.config import Config
 from botocore.exceptions import ClientError, ConnectionClosedError, ReadTimeoutError
-from timing import timed
+
+from .timing import timed
 
 MAX_BYTES = 16 * 1024 * 1024
 CHUNK_BYTES = 256 * 1024

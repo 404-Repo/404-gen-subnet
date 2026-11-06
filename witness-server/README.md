@@ -27,6 +27,7 @@ From the repository root:
 
 ```sh
 python -m pip install -c witness-gateway/constraints-pods.txt -r witness-gateway/requirements-pods.txt
+python -m pip install --no-deps -e witness-gateway -e witness-server/worker
 npm --prefix witness-server/verifier ci --ignore-scripts
 npm --prefix witness-server/verifier run build:proof
 ```

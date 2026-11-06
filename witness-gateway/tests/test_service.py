@@ -23,7 +23,6 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import make_mocked_request
 from bittensor_wallet import Keypair
-from channel import Channel, WorkerChannel
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
@@ -32,13 +31,8 @@ from miner_runtime.observations import Execution
 from miner_runtime.runner import run_generation
 from miner_runtime.validator import ReplayWitness, run_replay
 from openai.types.responses import ResponseStreamEvent
-from pod import PodRuntime
-from pod_gateway.budget import Budget
 from pod_gateway.control import DrainControl, Registry
-from pod_gateway.direct import Witness
 from pod_gateway.lifecycle import Allocator
-from pod_gateway.records import Call, CallRecord, CallRecords
-from pod_gateway.replay import export_bundle
 from pod_gateway.server import Gateway
 from subnet_common.witness.auth import Authenticator, Membership
 from subnet_common.witness.certs import pod_context
@@ -57,6 +51,12 @@ from witness_client.calls import RequestKey, canonical
 from witness_client.pods import Snapshot
 from witness_client.request import serialize_body
 from witness_client.tunnel import WebSocketTunnel
+from witness_pod.budget import Budget
+from witness_pod.channel import Channel, WorkerChannel
+from witness_pod.direct import Witness
+from witness_pod.pod import PodRuntime
+from witness_pod.records import Call, CallRecord, CallRecords
+from witness_pod.replay import export_bundle
 
 SECRET = b"s" * 32
 PROOF = "c" * 64
@@ -367,7 +367,7 @@ class Harness:
                 "witness_client.client.Prover", lambda _: SimpleNamespace(verifying_key_sha256=self.proof)
             )
             self.monkeypatch.setattr("witness_client.client.exchange", self.exchange)
-            self.monkeypatch.setattr("pod.relay", self.relay)
+            self.monkeypatch.setattr("witness_pod.pod.relay", self.relay)
         self.registry = Registry()
         self.allocator = Allocator(
             self.provider,
@@ -754,7 +754,7 @@ def test_interrupted_capture_allows_an_ordinary_same_id_retry(
             raise PodKilled()
 
         async with fixture.running():
-            monkeypatch.setattr("pod.relay", killed_relay)
+            monkeypatch.setattr("witness_pod.pod.relay", killed_relay)
             with fixture.client() as witness:
                 witness._gateway.delivery_timeout = 5
                 with pytest.raises(openai.APIError):
@@ -773,7 +773,7 @@ def test_interrupted_capture_allows_an_ordinary_same_id_retry(
                     witness._gateway._invalidate_for("pod_not_selected")
                     await asyncio.to_thread(witness._gateway.ensure_pod)
                     assert len(fixture.runtimes) == 2
-                monkeypatch.setattr("pod.relay", fixture.relay)
+                monkeypatch.setattr("witness_pod.pod.relay", fixture.relay)
                 snapshot = await asyncio.to_thread(witness._gateway.snapshot, record.call.exchange_id)
                 assert snapshot.call.phase == "failed" and fixture.paid == 1
                 result = await asyncio.to_thread(witness.create, model="fixture", input="image")
