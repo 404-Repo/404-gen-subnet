@@ -130,6 +130,9 @@ class Gateway:
                 "WITNESS_ROUND_END": "" if self.rounds.round_end is None else str(self.rounds.round_end),
             })
             changed = inputs.round != self.round
+            if not changed and self.allocator.spec == spec:
+                self._wake.set()
+                return
             if changed:
                 await self._write(partial(self.queue.rollover, inputs.round))
             def use_round() -> None:
