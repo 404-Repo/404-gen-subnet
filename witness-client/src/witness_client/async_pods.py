@@ -146,7 +146,6 @@ class AsyncPodGatewayClient:
         self._start_id: str | None = None
         self._allocation = AsyncSignedTransport(http, hotkey, delivery_timeout)
         self._direct: AsyncSignedTransport | None = None
-        self._expires = 0
         self._connections: list[httpx.AsyncClient] = []
         self._snapshots: dict[str, Snapshot] = {}
         self._artifacts = AsyncArtifactClient()
@@ -257,10 +256,7 @@ class AsyncPodGatewayClient:
             or endpoint.get("server_name") != "witness.internal"
             or type(endpoint.get("port")) is not int
             or not 1 <= endpoint["port"] <= 65535
-            or type(endpoint.get("expires")) is not int
-            or not isinstance(endpoint.get("access"), str)
             or not isinstance(endpoint.get("certificate"), str)
-            or endpoint["expires"] <= time.time()
         ):
             raise WitnessError("Invalid direct witness allocation", source="gateway")
         address = str(ipaddress.ip_address(str(endpoint["address"])))
@@ -278,18 +274,17 @@ class AsyncPodGatewayClient:
             http,
             self.hotkey,
             self.delivery_timeout,
-            headers={"Authorization": "Bearer " + endpoint["access"]},
             tls=tls,
             server_name="witness.internal",
         )
         self._connections.append(http)
-        self._direct, self._expires = service, endpoint["expires"]
+        self._direct = service
         self._start_id = str(uuid.UUID(str(session["start_id"])))
         self.round_number = round_number
         return True
 
     async def ensure_pod(
-        self, *, deadline: float | None = None, replace: bool = False, renew: bool = False,
+        self, *, deadline: float | None = None, replace: bool = False, expected_round: str | None = None,
     ) -> str:
         observed = self._start_id
         generation = self._replacement_generation
@@ -306,33 +301,18 @@ class AsyncPodGatewayClient:
                 raise WitnessError(
                     "Pod connection wait timed out", source="gateway", code="capture_timeout"
                 )
-            replace = replace and generation == self._replacement_generation
+            replace = (replace or self._start_id is not None and self._direct is None) and (
+                generation == self._replacement_generation
+            )
             if (
                 not replace and not self._replacement_pending
-                and self._direct is not None and time.time() < self._expires - 30
+                and self._direct is not None
             ):
                 assert self._start_id is not None
                 return self._start_id
-            expected_round = self.round_number if renew else None
-            reply = None
-            if renew and not self._replacement_pending and self._start_id is not None:
-                try:
-                    reply = await self._allocation_json(
-                        "GET", f"/v1/pods/{self._start_id}", deadline=deadline, expected_round=expected_round
-                    )
-                except WitnessError as error:
-                    if error.code != "session_not_found":
-                        raise
-                if reply is not None:
-                    previous = reply.get("session")
-                    if not isinstance(previous, dict) or previous.get("phase") in (
-                        "rejected", "lost", "retired",
-                    ):
-                        reply = None
-            if reply is None:
-                reply = await self._allocation_json(
-                    "GET", "/v1/pods/current", deadline=deadline, expected_round=expected_round
-                )
+            reply = await self._allocation_json(
+                "GET", "/v1/pods/current", deadline=deadline, expected_round=expected_round
+            )
             allocation = self._allocation_request if self._allocation_round == reply.get("round") else None
             current = reply.get("session")
             continuing = self._replacement_pending
@@ -341,7 +321,7 @@ class AsyncPodGatewayClient:
                     raise WitnessError("Gateway round changed before replacement", code="round_mismatch", source="gateway")
                 self._replacement_generation += 1
                 self._replacement_pending = True
-                self._direct, self._expires = None, 0
+                self._direct = None
             if isinstance(current, dict) and current.get("phase") == "allocated" and (
                 replace and not continuing and (observed is None or current.get("start_id") == observed)
                 or continuing and allocation is not None
@@ -352,7 +332,7 @@ class AsyncPodGatewayClient:
                     allocation = self._replacement_intent(str(reply["round"]), old_start)
                     self._allocation_request, self._allocation_round = allocation, str(reply["round"])
                 self._replacement_pod = str(current["pod_id"])
-                self._direct, self._expires = None, 0
+                self._direct = None
                 reply = await self._allocation_json(
                     "POST", "/v1/pods/start", allocation, deadline=deadline, expected_round=expected_round
                 )
@@ -404,7 +384,7 @@ class AsyncPodGatewayClient:
                     self._allocation_request, self._allocation_round = allocation, str(reply["round"])
                 if self._attach(reply):
                     if self._replacement_pod is not None and session.get("pod_id") == self._replacement_pod:
-                        self._direct, self._expires = None, 0
+                        self._direct = None
                         raise WitnessError("Gateway returned the Pod being replaced", code="pod_replacement_unconfirmed", source="gateway")
                     self._replacement_pod = None
                     self._replacement_pending = False
@@ -431,14 +411,14 @@ class AsyncPodGatewayClient:
             self._pod_lock.release()
 
     async def _service(self, *, deadline: float | None = None) -> AsyncSignedTransport:
-        await self.ensure_pod(deadline=deadline, renew=True)
+        await self.ensure_pod(deadline=deadline, expected_round=self.round_number)
         assert self._direct is not None
         return self._direct
 
     def _invalidate_for(self, code: object) -> bool:
-        if code not in ("allocation_access_expired", "pod_not_selected"):
+        if code != "pod_not_selected":
             return False
-        self._expires = 0
+        self._direct = None
         return True
 
     async def _request_once(
@@ -453,8 +433,8 @@ class AsyncPodGatewayClient:
         service = await self._service(deadline=deadline)
         try:
             return await service._request_once(method, path, body, limit=limit, deadline=deadline)
-        except httpx.TransportError:
-            self._expires = 0
+        except (httpx.ConnectError, httpx.ConnectTimeout):
+            self._direct, self._start_id = None, None
             raise
         except WitnessError as error:
             if not self._invalidate_for(error.code):
@@ -480,18 +460,18 @@ class AsyncPodGatewayClient:
         service = await self._service()
         try:
             response = await service.send(request)
-            if response.status_code in (401, 409):
-                try:
-                    error = response.json()
-                except ValueError:
-                    pass
-                else:
-                    if isinstance(error, dict):
-                        self._invalidate_for(error.get("error"))
-            return response
-        except httpx.TransportError:
-            self._expires = 0
+        except (httpx.ConnectError, httpx.ConnectTimeout):
+            self._direct, self._start_id = None, None
             raise
+        if response.status_code in (401, 409):
+            try:
+                error = response.json()
+            except ValueError:
+                pass
+            else:
+                if isinstance(error, dict):
+                    self._invalidate_for(error.get("error"))
+        return response
 
     async def _download(self, link: object, limit: int) -> bytes:
         return await self._artifacts.download(link, limit, delivery_timeout=self.delivery_timeout)

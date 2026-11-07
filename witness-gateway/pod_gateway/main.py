@@ -71,7 +71,6 @@ async def application(settings: GatewaySettings, worker_spec: PodSpec) -> web.Ap
         git=github, repo=settings.competition_repo, branch=settings.competition_branch,
         objects=RoundImages(state), pins=state, download=lambda url: download_image(source_http, url),
         head=head, ttl=settings.round_policy_seconds,
-        on_close=lambda: gateway.publish_policy(),
     )
 
     def fence() -> bool:
@@ -109,7 +108,6 @@ async def application(settings: GatewaySettings, worker_spec: PodSpec) -> web.Ap
                     await gateway.round_changed()
                 except Exception as error:  # noqa: BLE001 - never log privileged diagnostics
                     output.write("round_refresh_failed", error_type=type(error).__name__)
-                    await gateway.publish_policy()
                 await asyncio.sleep(settings.round_refresh_seconds)
 
         async def refresh() -> None:

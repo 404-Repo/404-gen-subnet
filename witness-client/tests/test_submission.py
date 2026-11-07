@@ -6,12 +6,11 @@ import asyncio
 import base64
 import hashlib
 import json
-import time
 import uuid
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Literal, cast
+from typing import Any, Literal, cast
 
 import httpx
 import pytest
@@ -21,6 +20,7 @@ from witness_client import AsyncWitnessClient, WitnessClient, WitnessConfig, Wit
 from witness_client.async_pods import AsyncSignedTransport
 from witness_client.gateway import SignedTransport
 from test_client_api import config as config
+from test_async_transport import tls_context as tls_context
 
 SOURCE = "export default function generate(THREE) { return new THREE.Group(); }"
 IMAGE = b"frozen prompt bytes"
@@ -81,7 +81,6 @@ async def connected(
             server_name="witness.internal",
         )
         live._gateway._connections.append(async_http)
-    live._gateway._expires = int(time.time()) + 3600
     live._gateway._start_id = str(uuid.uuid4())
     live._gateway.round_number = "configured-round"
     try:
@@ -99,6 +98,74 @@ async def submit(
     if isinstance(client, AsyncWitnessClient):
         return await client.submit(image, source)
     return client.submit(image, source)
+
+
+@pytest.mark.parametrize("mode", ["sync", "async"])
+@pytest.mark.parametrize("raw", [False, True])
+@pytest.mark.parametrize("failure", [httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadError, httpx.ReadTimeout])
+@pytest.mark.parametrize("replaced", [False, True])
+def test_transport_failure_recovers_current_pod_without_forcing_replacement(
+    config: WitnessConfig, monkeypatch: pytest.MonkeyPatch, tls_context: tuple[object, Path],
+    mode: Mode, raw: bool, failure: type[httpx.TransportError], replaced: bool,
+) -> None:
+    failed = False
+    old_start = str(uuid.uuid4())
+    current_start = str(uuid.uuid4()) if replaced else old_start
+    allocation_calls: list[tuple[str, str]] = []
+    pod_hosts: list[str] = []
+    reconnect = failure in (httpx.ConnectError, httpx.ConnectTimeout)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal failed
+        if request.url.host == "witness.test":
+            allocation_calls.append((request.method, request.url.path))
+            return httpx.Response(200, json={
+                "round": "configured-round", "retry_after": 0,
+                "session": {"phase": "allocated", "start_id": current_start, "pod_id": "current"},
+                "witness": {"start_id": current_start, "pod_id": "current",
+                            "address": "192.0.2.2" if replaced else "192.0.2.1", "port": 8443,
+                            "server_name": "witness.internal", "certificate": tls_context[1].read_text()},
+            })
+        pod_hosts.append(str(request.url.host))
+        if not failed:
+            failed = True
+            raise failure("Pod connection failed", request=request)
+        return httpx.Response(200, json={"submissions": {}})
+
+    sync_type, async_type = httpx.Client, httpx.AsyncClient
+
+    def sync_http(*args: Any, **kwargs: Any) -> httpx.Client:
+        return sync_type(*args, **{**kwargs, "transport": httpx.MockTransport(handler)})
+
+    def async_http(*args: Any, **kwargs: Any) -> httpx.AsyncClient:
+        return async_type(*args, **{**kwargs, "transport": httpx.MockTransport(handler)})
+
+    monkeypatch.setattr(httpx, "Client", sync_http)
+    monkeypatch.setattr(httpx, "AsyncClient", async_http)
+
+    async def run() -> None:
+        async with connected(config, mode, handler) as live:
+            live._gateway._start_id = old_start
+
+            async def lookup() -> dict[str, object]:
+                if raw:
+                    if isinstance(live, AsyncWitnessClient):
+                        data = await live._gateway._request_once("GET", "/v1/submissions")
+                    else:
+                        data = live._gateway._request_once("GET", "/v1/submissions")
+                    return {"raw": json.loads(data or b"{}")}
+                return {"submitted": await get_submitted(live)}
+
+            with pytest.raises((httpx.TransportError, WitnessError)):
+                await lookup()
+            expected: dict[str, object] = {"raw": {"submissions": {}}} if raw else {"submitted": {}}
+            assert await lookup() == expected
+            assert await lookup() == expected
+        assert allocation_calls == ([("GET", "/v1/pods/current")] if reconnect else [])
+        current_host = "192.0.2.2" if replaced and reconnect else "192.0.2.1"
+        assert pod_hosts == ["192.0.2.1", current_host, current_host]
+
+    asyncio.run(run())
 
 
 @pytest.mark.parametrize("mode", ["sync", "async"])

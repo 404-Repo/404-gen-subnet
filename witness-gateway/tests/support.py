@@ -75,13 +75,15 @@ class Provider:
         with self.lock:
             self.creates += 1
             env = object_dict(body["env"])
+            ports = body["ports"]
+            assert isinstance(ports, list)
             pod = Pod(
                 f"pod-{self.creates}",
                 string(body["name"]),
                 string(body["image"]),
                 "RUNNING",
                 {key: str(env[key]) for key in MARKERS},
-                {8443: ("8.8.8.8", 44000 + self.creates)},
+                {int(str(ports[0]).split("/")[0]): ("8.8.8.8", 44000 + self.creates)},
                 "0.06",
             )
             self.pods[pod.id] = pod

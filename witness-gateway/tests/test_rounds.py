@@ -1,4 +1,4 @@
-"""Offline branch snapshots, admission leases and immutable generation inputs."""
+"""Offline branch snapshots, allocation admission and immutable generation inputs."""
 
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ from pod_gateway.rounds import RoundController
 from pod_gateway.settings import Settings
 from subnet_common.github import GitHubClient
 from subnet_common.witness.auth import AuthRejected
-from subnet_common.witness.rounds import RoundInputs, RoundPolicy
+from subnet_common.witness.rounds import RoundInputs
 from subnet_common.witness.state import PrefixedState
 from support import MemoryState, Provider
 from test_lifecycle import FIRST, SCOPE, SECOND, SPEC, Drain
@@ -99,12 +99,6 @@ class Competition:
         )
 
 
-def policy(inputs: RoundInputs, *, stage: str = "miner_generation", expires: float | None = None) -> RoundPolicy:
-    now = time.time()
-    return RoundPolicy(repository=inputs.repository, branch=inputs.branch, revision=inputs.revision,
-                       round=inputs.round, inputs_sha256=inputs.fingerprint, stage=stage,
-                       observed_at=now, expires_at=now + 30 if expires is None else expires,
-                       generation_deadline_block=inputs.generation_deadline_block, block=10)
 
 
 @pytest.mark.parametrize("branch", ["main", "test", "persistent/witness"])
@@ -212,7 +206,7 @@ def test_new_publication_revokes_the_old_policy_before_prompt_resolution_finishe
         competition = Competition()
         await competition.controller.refresh()
         old = competition.controller.require()
-        started, finish, notified = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        started, finish = asyncio.Event(), asyncio.Event()
         original = competition.controller.download
 
         async def download(url: str) -> bytes:
@@ -220,15 +214,11 @@ def test_new_publication_revokes_the_old_policy_before_prompt_resolution_finishe
             await finish.wait()
             return await original(url)
 
-        async def closed() -> None:
-            notified.set()
-
         competition.controller.download = download
-        competition.controller.on_close = closed
         competition.source.publish(publication(number=1, prompt="lamp"))
         refresh = asyncio.create_task(competition.controller.refresh())
         await asyncio.wait_for(started.wait(), 2)
-        assert notified.is_set() and competition.controller.inputs == old
+        assert competition.controller.inputs == old
         with pytest.raises(AuthRejected):
             competition.controller.require()
         finish.set()
@@ -269,6 +259,37 @@ def test_null_eta_does_not_override_the_collectors_block_deadline() -> None:
         await competition.controller.refresh()
         with pytest.raises(AuthRejected):
             competition.controller.require()
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("deadline", [None, 7210])
+def test_generation_deadline_is_fixed_until_the_published_deadline_changes(deadline: int | None) -> None:
+    async def scenario() -> None:
+        competition = Competition(publication(deadline=deadline))
+        await competition.controller.refresh()
+        frozen = competition.controller.require()
+        original_end = competition.controller.round_end
+        assert original_end == (None if deadline is None else int(competition.now[0]) + 86400)
+        competition.now[0] += 1200
+        competition.block[0] += 99
+        await competition.controller.refresh()
+        assert competition.controller.round_end == original_end
+        assert competition.controller.require() == frozen
+        restarted = RoundController(
+            git=competition.source, repo=frozen.repository, branch=frozen.branch,
+            objects=competition.state, pins=competition.state,
+            download=competition.controller.download, head=competition.controller.head,
+            clock=lambda: competition.now[0],
+        )
+        await restarted.refresh()
+        assert restarted.round_end == original_end
+        competition.source.publish(publication(deadline=14410))
+        await competition.controller.refresh()
+        replacement = competition.controller.require()
+        assert replacement.generation_deadline_block == 14410
+        assert frozen.generation_deadline_block == deadline
+        assert competition.controller.round_end == int(competition.now[0] + (14410 - competition.block[0]) * 12)
+
     asyncio.run(scenario())
 
 

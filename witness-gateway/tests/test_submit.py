@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import time
 from collections.abc import AsyncIterator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack, asynccontextmanager
@@ -18,7 +19,7 @@ import pytest
 from bittensor_wallet import Keypair
 from renderer_client import ArtifactUnavailable, RenderOptions, RenderRejected, RenderUnavailable
 from subnet_common.competition.generations import GenerationResult, GenerationsAdapter
-from subnet_common.witness.models import Scope
+from subnet_common.witness.models import Pod, Scope
 from test_artifacts import PNG, SOURCE, client, enable
 from test_service import Harness
 from witness_client import AsyncWitnessClient, WitnessClient, WitnessError
@@ -262,8 +263,8 @@ def test_submit_propagates_admission_and_judging_failures_without_retrying(
                 expected = 409
             elif failure == "auth":
                 assert witness._gateway._direct is not None
-                witness._gateway._direct.headers["Authorization"] = "Bearer invalid"
-                expected = 401
+                witness._gateway._direct.hotkey = Keypair.create_from_uri("//Bob")
+                expected = 403
             with pytest.raises(WitnessError) as failed:
                 await submit(witness, image, source)
             assert failed.value.status_code == expected
@@ -489,6 +490,71 @@ async def generated_source(witness: WitnessClient | AsyncWitnessClient) -> str:
     if isinstance(witness, AsyncWitnessClient):
         return (await witness.responses.create(model="fixture", input="image", request_id=7)).output_text
     return (await asyncio.to_thread(witness.responses.create, model="fixture", input="image", request_id=7)).output_text
+
+
+@pytest.mark.parametrize("mode", ["sync", "async"])
+def test_allocated_pod_keeps_working_through_the_day_with_the_gateway_offline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: Mode,
+) -> None:
+    from dataclasses import replace
+
+    from test_rounds import Competition, publication
+
+    async def scenario() -> None:
+        fixture = Harness(tmp_path, monkeypatch)
+        competition = Competition(publication(deadline=7210, prefix=""), state=fixture.state)
+        fixture.image = competition.images["chair"]
+        model_transport(fixture)
+        async with fixture.running():
+            inventory = fixture.provider.list
+
+            def listed(*, fresh: bool = False) -> list[Pod]:
+                return [replace(pod, tcp={}) for pod in inventory(fresh=fresh)]
+
+            monkeypatch.setattr(fixture.provider, "list", listed)
+            fixture.gateway.rounds = competition.controller
+            base = fixture.allocator.spec
+            fixture.gateway.spec_for_round = lambda inputs: replace(base, env={
+                "WITNESS_ROUND_INPUTS": inputs.model_dump_json(),
+            })
+            await competition.controller.refresh()
+            await fixture.gateway.round_changed()
+            async with live_client(fixture, mode) as witness:
+                now = [time.time()]
+                inputs = competition.controller.require()
+                deadline = competition.controller.round_end
+                assert deadline is not None and fixture.runtimes[-1].round_end == deadline
+                rendered = await enable(fixture, prompt_ids=inputs.prompt_ids)
+                await fixture.runners[0].cleanup()
+                gateway_paths = list(fixture.gateway_paths)
+                monkeypatch.setattr(time, "time", lambda: now[0])
+                saved: dict[str, object] | None = None
+                for hour in (1, 6, 23):
+                    now[0] = deadline - (24 - hour) * 3600
+                    if isinstance(witness, AsyncWitnessClient):
+                        result = await witness.create(model="fixture", input="image", request_id=hour)
+                        assert result.output_text == f"answer-{fixture.paid}"
+                        assert await witness.render(SOURCE) == PNG
+                    else:
+                        result = await asyncio.to_thread(witness.create, model="fixture", input="image", request_id=hour)
+                        assert result.output_text == f"answer-{fixture.paid}"
+                        assert await asyncio.to_thread(witness.render, SOURCE) == PNG
+                    saved = await submit(witness, fixture.image, SOURCE)
+                    assert await get_submitted(witness) == {"chair": saved}
+                assert saved is not None
+                now[0] = deadline
+                with pytest.raises(openai.APIConnectionError):
+                    if isinstance(witness, AsyncWitnessClient):
+                        await witness.create(model="fixture", input="after-deadline")
+                    else:
+                        await asyncio.to_thread(witness.create, model="fixture", input="after-deadline")
+                assert await get_submitted(witness) == {"chair": saved}
+                assert await submit(witness, fixture.image, SOURCE) == saved
+                assert fixture.gateway_paths == gateway_paths
+                assert fixture.provider.creates == 1 and fixture.paid == 3
+                assert rendered == [SOURCE] * 4
+
+    asyncio.run(scenario())
 
 
 @pytest.mark.parametrize("failure", ["unknown", "http404", "malformed"])

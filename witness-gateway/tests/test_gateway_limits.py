@@ -14,7 +14,7 @@ from types import SimpleNamespace
 from typing import cast
 
 import pytest
-from aiohttp import ClientResponse, WSMsgType, web
+from aiohttp import ClientResponse, WSServerHandshakeError, WSMsgType, web
 from aiohttp.test_utils import TestClient, TestServer, make_mocked_request
 from bittensor_wallet import Keypair
 from pod_gateway.admission import Admission, PendingStart, QueueState
@@ -22,7 +22,7 @@ from pod_gateway.control import DrainControl, Peer, Registry
 from pod_gateway.diagnostics import output
 from pod_gateway.lifecycle import Allocator
 from pod_gateway.membership import Membership
-from pod_gateway.runpod import CreateRejected, CreateUnknown, ProviderUnavailable
+from pod_gateway.runpod import CreateRejected, CreateUnknown, PodProvider, ProviderUnavailable, RunPodClient
 from pod_gateway.server import Gateway
 from subnet_common.witness.auth import Authenticator
 from subnet_common.witness.models import Pod, PodSpec, Scope, json_bytes
@@ -104,7 +104,7 @@ async def request(client: TestClient[web.Request, web.Application], key: Keypair
 
 
 @asynccontextmanager
-async def coordinator(provider: Provider, state: MemoryState, clock: list[float], *,
+async def coordinator(provider: PodProvider, state: MemoryState, clock: list[float], *,
                       keys: tuple[Keypair, ...] = KEYS,
                       membership: Membership | None = None) -> AsyncIterator[Gateway]:
     if membership is None:
@@ -126,6 +126,85 @@ async def coordinator(provider: Provider, state: MemoryState, clock: list[float]
     finally:
         for executor in (gateway._worker, gateway._journal, gateway._verifiers, gateway._fencing):
             await asyncio.to_thread(executor.shutdown, wait=True, cancel_futures=True)
+
+
+def test_allocation_metadata_and_idempotent_replacement_with_paced_runpod_http() -> None:
+    import httpx
+
+    pods: dict[str, dict[str, object]] = {}
+    requests: list[tuple[str, str, float]] = []
+    creates = 0
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        nonlocal creates
+        requests.append((request.method, request.url.path, time.monotonic()))
+        if request.url.path == "/v2/pods":
+            if request.method == "GET":
+                return httpx.Response(200, json={
+                    "pods": [{key: value for key, value in pod.items() if key != "runtime"}
+                             for pod in pods.values()], "pagination": {"hasNextPage": False},
+                })
+            creates += 1
+            pod_id = f"pod-{creates}"
+            pods[pod_id] = {
+                **json.loads(request.content), "id": pod_id, "status": "RUNNING",
+                "runtime": {"ports": [{"type": "tcp", "ip": "8.8.8.8", "private": 8443, "public": 44001}]},
+            }
+            return httpx.Response(201, json=pods[pod_id])
+        pod_id = request.url.path.rsplit("/", 1)[-1]
+        if request.method == "DELETE":
+            pods.pop(pod_id, None)
+            return httpx.Response(204)
+        if pod_id not in pods:
+            return httpx.Response(404)
+        if request.method == "PATCH":
+            pods[pod_id].update(json.loads(request.content))
+        return httpx.Response(200, json=pods[pod_id])
+
+    async def scenario() -> None:
+        state, clock = MemoryState(), [1000.0]
+        with httpx.Client(transport=httpx.MockTransport(handle)) as http:
+            provider = RunPodClient("offline-key", http, min_interval=1.1, cache_seconds=2)
+            async with coordinator(provider, state, clock) as gateway:
+                scope = gateway.scope(KEYS[0].ss58_address)
+                gateway.queue.enqueue(scope, FIRST, None)
+                await gateway._step()
+                gateway._publish(await asyncio.to_thread(provider.list))
+                detail = await asyncio.to_thread(provider.get, "pod-1")
+                assert detail is not None
+                gateway.registry.peers["pod-1"] = Peer(
+                    web.WebSocketResponse(), scope, FIRST, "pod-1", ready=True, certificate="offline-ca",
+                    endpoint=detail.tcp[8443],
+                )
+                count = len(requests)
+                gateway._fence_at = time.monotonic()
+                response = await asyncio.wait_for(gateway._reply(
+                    make_mocked_request("GET", "/v1/pods/current", headers={"Prefer": "wait=20"}),
+                    scope, gateway._cached(scope),
+                ), 0.2)
+                assert json.loads(cast(bytes, response.body))["witness"]["pod_id"] == "pod-1"
+                assert len(requests) == count
+                clock[0] += 31
+                gateway.queue.enqueue(scope, SECOND, FIRST)
+                await gateway._step()
+                gateway._publish(await asyncio.to_thread(provider.list))
+                assert set(pods) == {"pod-2"} and creates == 2
+            async with coordinator(provider, state, clock) as restarted:
+                restarted.queue.load()
+                restarted._publish(await asyncio.to_thread(provider.list))
+                incoming = make_mocked_request("POST", "/v1/pods/start")
+                incoming._read_bytes = json_bytes({"start_id": SECOND, "replaces": FIRST})
+                incoming["hotkey"] = scope.hotkey
+                response = await restarted.start(incoming)
+                assert json.loads(cast(bytes, response.body))["session"]["start_id"] == SECOND
+                current = restarted._cached(scope)
+                assert current is not None and current.pod_id == "pod-2" and creates == 2
+        assert all(second[2] - first[2] >= 1 for first, second in zip(requests, requests[1:]))
+        deletion = next(i for i, request in enumerate(requests) if request[:2] == ("DELETE", "/v2/pods/pod-1"))
+        replacement = next(i for i in range(deletion + 1, len(requests)) if requests[i][:2] == ("POST", "/v2/pods"))
+        assert any(request[:2] == ("GET", "/v2/pods/pod-1") for request in requests[deletion + 1:replacement])
+
+    asyncio.run(scenario())
 
 
 def test_hotkey_rate_limit_covers_fresh_ids_without_blocking_other_miners() -> None:
@@ -345,6 +424,28 @@ def test_cached_status_and_unauthenticated_rejection_survive_a_stalled_provider(
     asyncio.run(scenario())
 
 
+def test_old_start_capability_cannot_connect_as_the_replacement_pod() -> None:
+    async def scenario() -> None:
+        provider = Provider()
+        async with running(provider, MemoryState()) as (gateway, client):
+            scope = gateway.scope(KEYS[0].ss58_address)
+            gateway.queue.enqueue(scope, SECOND, None)
+            session = gateway.allocator.acquire(scope, SECOND)
+            gateway.queue.complete(scope, SECOND, rejected=False)
+            gateway._publish(provider.list())
+            with pytest.raises(WSServerHandshakeError) as rejected:
+                await client.ws_connect(f"/v1/control/{scope.hotkey}/{FIRST}", headers={
+                    "Authorization": "Bearer " + capability(gateway.secret, scope, FIRST),
+                    "x-witness-pod": session.pod_id or "",
+                })
+            assert rejected.value.status == 409
+            assert session.pod_id is not None and provider.get(session.pod_id) is not None
+            assert gateway.allocator.selection is not None
+            assert gateway.allocator.selection.selected(scope, SECOND, session.pod_id)
+
+    asyncio.run(scenario())
+
+
 @pytest.mark.parametrize("phase", ["activation", "heartbeat", "drained", "retirement"])
 def test_gateway_authority_loss_preserves_the_selected_worker(phase: str, monkeypatch: pytest.MonkeyPatch) -> None:
     async def scenario() -> None:
@@ -374,13 +475,13 @@ def test_gateway_authority_loss_preserves_the_selected_worker(phase: str, monkey
                         await asyncio.sleep(0.01)
 
             if phase == "activation":
-                send_policy = gateway._send_policy
+                class Handover(dict[str, Peer]):
+                    def __setitem__(self, key: str, value: Peer) -> None:
+                        super().__setitem__(key, value)
+                        gateway.fence = lambda: False
+                        gateway._fence_ok = False
 
-                async def handover(peer: Peer) -> None:
-                    await send_policy(peer)
-                    await lose_authority()
-
-                monkeypatch.setattr(gateway, "_send_policy", handover)
+                monkeypatch.setattr(gateway.registry, "peers", Handover())
             async with client.ws_connect(f"/v1/control/{scope.hotkey}/{FIRST}", headers={
                 "Authorization": "Bearer " + capability(gateway.secret, scope, FIRST), "x-witness-pod": pod.id,
             }) as socket:
@@ -681,293 +782,19 @@ def test_timed_out_start_wait_resumes_the_same_pod() -> None:
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize("hold_deletion", [False, True])
-def test_never_ready_worker_expires_across_restart_and_allows_replacement(hold_deletion: bool) -> None:
-    class SlowDelete(Provider):
-        hold = hold_deletion
-
-        def delete(self, pod_id: str) -> None:
-            if not self.hold:
-                super().delete(pod_id)
-
-    async def scenario() -> None:
-        provider, state, clock = SlowDelete(), MemoryState(), [1000.0]
-        async with coordinator(provider, state, clock) as gateway:
-            scope = gateway.scope(KEYS[0].ss58_address)
-            gateway.queue.enqueue(scope, FIRST, None)
-            await gateway._step()
-            pod = next(iter(provider.pods.values()))
-            provider.pods[pod.id] = replace(pod, tcp={})
-            clock[0] = 1599
-            gateway._publish(provider.list())
-            await gateway._step()
-            assert provider.get(pod.id) is not None
-
-        clock[0] = 1601
-        async with coordinator(provider, state, clock) as gateway:
-            gateway.queue.load()
-            gateway._publish(provider.list())
-            await gateway._step()
-            assert gateway.allocator.selection is not None
-            assert not gateway.allocator.selection.selected(scope, FIRST, pod.id)
-            assert (provider.get(pod.id) is not None) is hold_deletion
-
-        provider.hold = False
-        clock[0] += 31
-        async with coordinator(provider, state, clock) as gateway:
-            gateway.queue.load()
-            gateway._publish(provider.list())
-            await gateway._step()
-            assert provider.get(pod.id) is None
-            gateway._publish(provider.list())
-            reply = await gateway._reply(make_mocked_request("GET", "/v1/pods/current"), scope,
-                                         gateway._cached(scope))
-            value = json.loads(cast(bytes, reply.body))
-            assert value["ready"] is False and value["witness"] is None
-            assert value["session"]["phase"] == "lost"
-            clock[0] += 31
-            gateway.queue.enqueue(scope, SECOND, FIRST)
-            await gateway._step()
-            assert provider.creates == 2
-            replacement, = provider.list()
-            assert replacement.id != pod.id and replacement.markers["WITNESS_START_ID"] == SECOND
-
-    asyncio.run(scenario())
 
 
-def test_startup_deadline_begins_after_waiting_for_previous_round_to_drain() -> None:
-    from test_lifecycle import Drain
-
-    async def scenario() -> None:
-        provider, state, clock = Provider(), MemoryState(), [1000.0]
-        async with coordinator(provider, state, clock) as gateway:
-            scope = gateway.scope(KEYS[0].ss58_address)
-            drain = Drain(False)
-            gateway.allocator.control = drain
-            previous = Allocator(provider, drain, gateway.allocator.spec,
-                                 clock=lambda: clock[0], selection=gateway.allocator.selection)
-            old = previous.acquire(replace(scope, round="test-0"), FIRST)
-            assert old.pod_id is not None and gateway.allocator.selection is not None
-            assert gateway.allocator.selection.grant(provider.pods[old.pod_id])
-            gateway._publish(provider.list())
-            gateway.queue.enqueue(scope, SECOND, None)
-            await gateway._step()
-            assert provider.creates == 1 and provider.get(old.pod_id) is not None
-
-            clock[0] += 700
-            drain.ready = True
-            gateway._publish(provider.list())
-            await gateway._step()
-            new, = provider.list()
-            assert new.id != old.pod_id
-            gateway._publish(provider.list())
-            await gateway._step()
-            assert provider.get(new.id) is not None
-
-            clock[0] += 599
-            gateway._publish(provider.list())
-            await gateway._step()
-            assert provider.get(new.id) is not None
-            clock[0] += 2
-            gateway._publish(provider.list())
-            await gateway._step()
-            assert provider.get(new.id) is None
-
-    asyncio.run(scenario())
 
 
-def test_startup_lookup_failure_does_not_block_other_workers_grant_renewal(monkeypatch: pytest.MonkeyPatch) -> None:
-    class Unavailable(Provider):
-        broken = ""
-
-        def get(self, pod_id: str) -> Pod | None:
-            if pod_id == self.broken:
-                raise ProviderUnavailable("Fixture lookup unavailable")
-            return super().get(pod_id)
-
-    async def scenario() -> None:
-        provider, clock = Unavailable(), [1000.0]
-        epoch = time.time() - clock[0]
-        monkeypatch.setattr(time, "time", lambda: epoch + clock[0])
-        async with coordinator(provider, MemoryState(), clock) as gateway:
-            bad, good = (gateway.scope(key.ss58_address) for key in KEYS)
-            gateway.queue.enqueue(bad, FIRST, None)
-            await gateway._step()
-            clock[0] += 10
-            gateway._publish(provider.list())
-            gateway.queue.enqueue(good, SECOND, None)
-            await gateway._step()
-            gateway._publish(provider.list())
-            pod = next(item for item in provider.list() if item.scope() == good)
-            gateway.registry.peers[pod.id] = Peer(cast(web.WebSocketResponse, SimpleNamespace(closed=False)),
-                                                 good, SECOND, pod.id, ready=True, certificate="offline-ca")
-            await gateway._step()
-            endpoint = await gateway._endpoint(good, gateway._cached(good))
-            assert endpoint is not None
-            expires = int(str(endpoint["expires"]))
-            provider.broken = next(item.id for item in provider.list() if item.scope() == bad)
-            clock[0] += 700
-            for _ in range(3):
-                gateway._publish(provider.list())
-                await gateway._step()
-                clock[0] += 31
-            renewed = await gateway._endpoint(good, gateway._cached(good))
-            assert renewed is not None and int(str(renewed["expires"])) > expires
-
-    asyncio.run(scenario())
 
 
-@pytest.mark.parametrize("legacy", [False, True])
-def test_access_history_protects_workers_after_control_loss_and_restart(legacy: bool) -> None:
-    async def scenario() -> None:
-        provider, state, clock = Provider(), MemoryState(), [1000.0]
-        async with coordinator(provider, state, clock) as gateway:
-            scope = gateway.scope(KEYS[0].ss58_address)
-            gateway.queue.enqueue(scope, FIRST, None)
-            await gateway._step()
-            gateway._publish(provider.list())
-            pod = next(iter(provider.pods.values()))
-            if legacy:
-                key = Selection.key(scope)
-                saved = state.load(key)
-                assert saved is not None
-                value = json.loads(saved.data)
-                value.pop("access_granted", None)
-                state.save(key, json_bytes(value), saved.etag)
-            else:
-                gateway.registry.peers[pod.id] = Peer(cast(web.WebSocketResponse, SimpleNamespace(closed=False)),
-                                                     scope, FIRST, pod.id, ready=True, certificate="offline-ca")
-                await gateway._step()
-                assert await gateway._endpoint(scope, gateway._cached(scope)) is not None
-                gateway.allocator.reconcile(scope)
-            clock[0] += 10
-            other = gateway.scope(KEYS[1].ss58_address)
-            gateway.queue.enqueue(other, SECOND, None)
-            await gateway._step()
-            unready = next(item for item in provider.list() if item.scope() == other)
-
-        provider.pods[pod.id] = replace(pod, tcp={})
-        clock[0] += 3601
-        async with coordinator(provider, state, clock) as gateway:
-            gateway.queue.load()
-            gateway._publish(provider.list())
-            await gateway._step()
-            assert provider.get(pod.id) is not None and provider.creates == 2
-            assert await gateway._endpoint(scope, gateway._cached(scope)) is None
-            assert gateway.allocator.selection is not None
-            assert gateway.allocator.selection.selected(scope, FIRST, pod.id)
-            clock[0] += 31
-            gateway._publish(provider.list())
-            await gateway._step()
-            assert provider.get(unready.id) is None and provider.get(pod.id) is not None
-            provider.pods[pod.id] = replace(provider.pods[pod.id], status="ERROR")
-            clock[0] += 31
-            gateway._publish(provider.list())
-            await gateway._step()
-            assert provider.get(pod.id) is None
-
-    asyncio.run(scenario())
 
 
-@pytest.mark.parametrize("remaining", [31, 600])
-def test_allocation_poll_reuses_a_valid_grant_without_provider_access(
-    remaining: int, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    class Unavailable(Provider):
-        unavailable = False
-
-        def get(self, pod_id: str) -> Pod | None:
-            if self.unavailable:
-                raise ProviderUnavailable("Fixture lookup unavailable")
-            return super().get(pod_id)
-
-    async def scenario() -> None:
-        provider, clock = Unavailable(), [1000.0]
-        monkeypatch.setattr(time, "time", lambda: clock[0])
-        async with coordinator(provider, MemoryState(), clock) as gateway:
-            scope = gateway.scope(KEYS[0].ss58_address)
-            gateway.queue.enqueue(scope, FIRST, None)
-            await gateway._step()
-            gateway._publish(provider.list())
-            pod = next(iter(provider.pods.values()))
-            gateway.registry.peers[pod.id] = Peer(
-                web.WebSocketResponse(), scope, FIRST, pod.id, ready=True, certificate="offline-ca",
-            )
-            await gateway._step()
-            grant = await gateway._endpoint(scope, gateway._cached(scope))
-            assert grant is not None
-            grant["expires"] = int(clock[0]) + remaining
-            provider.unavailable = True
-
-            incoming = make_mocked_request("GET", "/v1/pods/current", headers={"Prefer": "wait=20"})
-            response = await gateway._reply(incoming, scope, gateway._cached(scope))
-            body = response.text
-            assert body is not None
-            result = json.loads(body)
-            assert result["ready"] is True and result["witness"] == grant
-            assert provider.creates == 1
-
-    asyncio.run(scenario())
 
 
-def test_cached_grant_selection_lookup_respects_the_request_wait() -> None:
-    class SlowSelection(MemoryState):
-        def __init__(self) -> None:
-            super().__init__()
-            self.blocked = False
-            self.entered, self.release = threading.Event(), threading.Event()
-
-        def load(self, key: str) -> Snapshot | None:
-            if self.blocked and key.startswith("pod-selection/"):
-                self.entered.set()
-                assert self.release.wait(3)
-            return super().load(key)
-
-    async def scenario() -> None:
-        provider, state = Provider(), SlowSelection()
-        async with coordinator(provider, state, [1000.0]) as gateway:
-            scope = gateway.scope(KEYS[0].ss58_address)
-            gateway.queue.enqueue(scope, FIRST, None)
-            await gateway._step()
-            gateway._publish(provider.list())
-            pod = next(iter(provider.pods.values()))
-            gateway.registry.peers[pod.id] = Peer(
-                web.WebSocketResponse(), scope, FIRST, pod.id, ready=True, certificate="offline-ca",
-            )
-            await gateway._step()
-
-            def incoming() -> web.Request:
-                headers = hotkey_headers(KEYS[0], b"", method="GET", path="/v1/pods/current")
-                headers["Prefer"] = "wait=1"
-                value = make_mocked_request("GET", "/v1/pods/current", headers=headers)
-                value._read_bytes = b""
-                return value
-
-            state.blocked = True
-            waiting = asyncio.create_task(gateway.middleware(incoming(), gateway.current))
-            try:
-                async with asyncio.timeout(1):
-                    while not state.entered.is_set():
-                        await asyncio.sleep(0.001)
-                response = await asyncio.wait_for(asyncio.shield(waiting), 1.5)
-                assert isinstance(response, web.Response)
-                body = response.text
-                assert body is not None
-                assert response.status == 503 and json.loads(body)["error"] == "control_plane_unavailable"
-            finally:
-                state.blocked = False
-                state.release.set()
-                await waiting
-            response = await gateway.middleware(incoming(), gateway.current)
-            assert isinstance(response, web.Response)
-            body = response.text
-            assert body is not None
-            assert response.status == 200 and json.loads(body)["ready"] is True
-
-    asyncio.run(scenario())
 
 
-def test_concurrent_allocation_and_lease_renewal_preserve_cached_grants(
+def test_concurrent_allocations_and_status_reads_keep_existing_endpoints(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import httpx
@@ -982,7 +809,7 @@ def test_concurrent_allocation_and_lease_renewal_preserve_cached_grants(
     async def scenario() -> None:
         provider, clock = Counted(), [1000.0]
         monkeypatch.setattr(time, "time", lambda: clock[0])
-        keys = tuple(Keypair.create_from_uri(f"//GrantLoadMiner{number}") for number in range(128))
+        keys = tuple(Keypair.create_from_uri(f"//AllocationLoadMiner{number}") for number in range(128))
         async with coordinator(provider, MemoryState(), clock, keys=keys) as gateway:
             gateway.queue.interval = 0
             assert gateway.request_interval == 10
@@ -1051,16 +878,15 @@ def test_concurrent_allocation_and_lease_renewal_preserve_cached_grants(
                             operation for number in range(64)
                             for operation in (current(number), allocate(number + 64))
                         ))
-                        renewed = concurrent[::2] + concurrent[1::2]
-                        assert all(reply["ready"] is True for reply in renewed)
-                        endpoints = [reply["witness"] for reply in renewed]
+                        completed = concurrent[::2] + concurrent[1::2]
+                        assert all(reply["ready"] is True for reply in completed)
+                        endpoints = [reply["witness"] for reply in completed]
                         for number, endpoint in enumerate(endpoints):
                             assert isinstance(endpoint, dict)
-                            assert endpoint["expires"] == int(clock[0]) + 600
                             if number < 64:
                                 previous = allocated[number]["witness"]
                                 assert isinstance(previous, dict)
-                                assert endpoint["pod_id"] == previous["pod_id"]
+                                assert endpoint == previous
                         assert provider.creates == 128 and len(provider.pods) == 128
                         lookups = provider.lookups
                         cached = await asyncio.gather(*(current(number) for number in range(128)))
@@ -1076,31 +902,6 @@ def test_concurrent_allocation_and_lease_renewal_preserve_cached_grants(
     asyncio.run(scenario())
 
 
-def test_connection_does_not_reissue_access_to_a_revoked_pod() -> None:
-    async def scenario() -> None:
-        provider = PausedProvider()
-        async with running(provider, MemoryState(), poll_seconds=30) as (gateway, client):
-            response = await request(client, KEYS[0], "POST", "/v1/pods/start",
-                                     {"start_id": FIRST})
-            assert response.status == 202
-            await response.read()
-            scope = gateway.scope(KEYS[0].ss58_address)
-            async with asyncio.timeout(2):
-                while scope not in gateway._current or not gateway._pods:
-                    await asyncio.sleep(0.01)
-            pod = next(iter(provider.pods.values()))
-            gateway.registry.peers[pod.id] = Peer(cast(web.WebSocketResponse, SimpleNamespace(closed=False)),
-                                                 scope, FIRST, pod.id, ready=True, certificate="offline-ca")
-            response = await request(client, KEYS[0], "GET", "/v1/pods/current", wait=1)
-            assert (await response.json())["witness"]["pod_id"] == pod.id
-            assert gateway.allocator.selection is not None
-            gateway.allocator.selection.update(pod, active=False)
-            response = await asyncio.wait_for(request(client, KEYS[0], "GET", "/v1/pods/current", wait=1), 2)
-            result = await response.json()
-            assert result["ready"] is False and result["witness"] is None
-            assert provider.creates == 1
-
-    asyncio.run(scenario())
 
 
 def test_retries_from_multiple_clients_preserve_fifo_and_create_one_pod_each() -> None:
@@ -1371,7 +1172,7 @@ def test_removed_members_do_not_block_other_miners_or_release_unknown_creates(
     asyncio.run(scenario())
 
 
-def test_backlog_allows_grants_renewal_and_retirement(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_backlog_keeps_endpoints_available_and_allows_retirement(monkeypatch: pytest.MonkeyPatch) -> None:
     async def scenario() -> None:
         provider, clock = Provider(), [1000.0]
         keys = tuple(Keypair.create_from_uri(f"//BacklogMiner{number}") for number in range(64))
@@ -1395,11 +1196,9 @@ def test_backlog_allows_grants_renewal_and_retirement(monkeypatch: pytest.Monkey
             first = gateway.scope(keys[0].ss58_address)
             endpoint = await gateway._endpoint(first, gateway._cached(first))
             assert endpoint is not None and gateway.queue.entries()
-            expires = endpoint["expires"]
             clock[0] += 600
             await gateway._step()
-            renewed = await gateway._endpoint(first, gateway._cached(first))
-            assert renewed is not None and int(str(renewed["expires"])) > int(str(expires))
+            assert await gateway._endpoint(first, gateway._cached(first)) == endpoint
             second = list(provider.pods.values())[1]
             provider.pods[second.id] = replace(second, status="EXITED")
             gateway._publish(provider.list())
@@ -1605,7 +1404,6 @@ def test_cold_gateway_preserves_existing_workers_until_its_round_is_installed(wa
                 pod = provider.get(pending.id)
                 assert pod is not None
                 assert previous.allocator.selection is not None
-                assert previous.allocator.selection.grant(pod)
                 originals.append(pod)
             previous.allocator.spec = base
             cold = Competition(publication(number=1), state=state)

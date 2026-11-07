@@ -8,7 +8,7 @@ import time
 from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import Mock
 
 import pytest
 from aiohttp import web
@@ -282,7 +282,7 @@ def test_final_saving_requires_and_forwards_embedding_settings(values: dict[str,
     asyncio.run(scenario())
 
 
-def test_gateway_refresh_error_preserves_cached_round_permission(
+def test_gateway_refresh_error_preserves_cached_allocation_admission(
     values: dict[str, object], tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from pod_gateway import main
@@ -292,10 +292,9 @@ def test_gateway_refresh_error_preserves_cached_round_permission(
         competition = Competition()
         await competition.controller.refresh()
         frozen = competition.controller.require()
-        published = asyncio.Event()
+        attempted = asyncio.Event()
         gateway = Mock()
         gateway.application.return_value = web.Application()
-        gateway.publish_policy = AsyncMock(side_effect=published.set)
         monkeypatch.setattr(main, "Gateway", Mock(return_value=gateway))
         monkeypatch.setattr(main, "RoundController", Mock(return_value=competition.controller))
         monkeypatch.setattr("pod_gateway.main.R2StateStore.connect", Mock(return_value=MemoryState()))
@@ -304,6 +303,7 @@ def test_gateway_refresh_error_preserves_cached_round_permission(
         monkeypatch.setattr("pod_gateway.main.MembershipRefresher.refresh", lambda _: None)
 
         async def unavailable(ref: str) -> str:
+            attempted.set()
             raise TimeoutError("Competition refresh unavailable")
 
         monkeypatch.setattr(competition.source, "get_ref_sha", unavailable)
@@ -314,7 +314,7 @@ def test_gateway_refresh_error_preserves_cached_round_permission(
         runner = web.AppRunner(app)
         await runner.setup()
         try:
-            await asyncio.wait_for(published.wait(), 2)
+            await asyncio.wait_for(attempted.wait(), 2)
             assert competition.controller.require() == frozen
         finally:
             await runner.cleanup()

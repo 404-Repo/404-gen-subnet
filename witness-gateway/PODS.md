@@ -273,7 +273,7 @@ The verified bundle and its descriptor must remain in trusted validator storage.
 
 | Retained fields | Producer and trust | Storage and consumer | Requirement lost if removed |
 |---|---|---|---|
-| deployment, round, miner/scope key | Authenticated allocator/operator | Scoped R2 keys, grants, session/manifest; gateway, worker, exporter | Cross-miner/round isolation, access deadline and evidence binding |
+| deployment, round, miner/scope key | Authenticated allocator/operator | Scoped R2 keys, allocation, session/manifest; gateway, worker, exporter | Cross-miner/round isolation, generation deadline and evidence binding |
 | provider | Client claim, verified TLS host/path | RequestKey, execution, session; capture/replay | API and subscription requests could match different routes |
 | request_sha256, request_id, optional session_id | Client key; body/header verified before dispatch | Call records, manifest; deduplication/replay | Changed work could reuse a capture; identical fresh requests could not be distinguished |
 | actual request JSON | TLS request verifier | Private request.json and authorized ciphertext; exporter | Cannot check full parameters or derive requested model and canonical hash |
@@ -361,20 +361,11 @@ remains authoritative for identity, capacity and lifecycle.
 
 Allocation requests support `Prefer: wait=N` for a readiness wait of up to twenty
 seconds per HTTP request. The response returns as soon as the selected Pod reports
-ready and its direct TLS access grant is available. A pending response supplies
+ready and its direct TLS endpoint is available. A pending response supplies
 zero in `retry_after`; the client continues waiting for the same allocation
-within its delivery timeout. Renewing access validates the current selection
-before returning an endpoint. Rate-limit errors retain their `Retry-After` header.
+within its delivery timeout. Rate-limit errors retain their `Retry-After` header.
 Requests without this preference return immediately with the configured polling
 interval. Pod startup does not repeat for subsequent model calls or renders.
-
-A newly selected worker has ten minutes from its creation request to obtain its
-first direct access grant. After that deadline, the gateway fences and retires a
-worker recorded as never granted access, without waiting for a control connection
-or drain acknowledgement. A subsequent allocation request can replace it after
-deletion is confirmed. Access history persists across gateway restarts; workers
-with previous grants or unknown access history retain normal drain and replacement
-behavior.
 
 All copies boot dormant. A confirmed active copy wins over a late dormant copy of
 the same connection; newer connection epochs supersede older ones. Cleanup adopts a sole
@@ -395,17 +386,24 @@ The worker listens on `8000/tcp` with its own private CA and certificate for
 `witness.internal`. The gateway returns that CA through authenticated HTTPS,
 along with the provider-reported public IP and mapped external port from an
 exact-ID Pod GET. HTTP and WebSocket clients connect to that address while
-verifying `witness.internal` through SNI. The client receives a ten-minute
-allocation grant bound to deployment, round, miner, start and Pod, and signs
-every direct request with its hotkey. The grant cannot authenticate Pod control.
-Current registration is rechecked when the grant is renewed.
+verifying `witness.internal` through SNI. The Pod verifies every direct request
+against its assigned hotkey, including the signed method, path, body and nonce.
+It does not require a gateway credential or recheck registration. Registration
+is checked when allocating or replacing a Pod.
+
+For older SDKs, allocation replies retain `access: "hotkey"` and
+`expires: 253402300799` (the end of year 9999). These fixed compatibility fields
+are not credentials; the Pod ignores bearer authorization. The gateway derives
+the reply from allocation metadata and the Pod certificate, without storing
+access grants. Older SDKs can attach and keep using that Pod without renewal.
+Deploy the updated worker image before using this allocation protocol; an
+existing worker image that requires grants must be replaced.
 
 Calls and proof messages use the direct Pod port. Outbound control messages carry
-activation, readiness, renewable round permission and drain. A control reconnect
-does not cancel a paid capture. New work requires a fresh policy for the Pod's
-frozen inputs and the current `miner_generation` round. Closing or pausing a round
-does not drain its Pods. Status, saved results and recording recovery remain
-available. See [competition source and admission](README.md#competition-source-and-admission).
+activation, readiness and drain. A control reconnect does not cancel a paid
+capture or stop normal Pod operations. The Pod enforces the fixed generation
+deadline received at allocation, independently of the gateway. Status, saved
+results and recording recovery remain available after that deadline. See [competition source and admission](README.md#competition-source-and-admission).
 
 RunPod's [CPU create contract](https://docs.runpod.io/api-reference-v2/pods/create-a-pod)
 accepts TCP ports with CPU compute; the [port guide](https://docs.runpod.io/pods/configuration/expose-ports)
@@ -469,8 +467,8 @@ intents (default 1024).
 
 Unsubmitted intents are canceled when their hotkeys lose eligibility. Submitted
 creates retain their capacity headroom until reconciled. Each background pass
-bounds allocation, retirement and access-grant work independently, so queued
-starts do not postpone ready workers or access renewal.
+bounds allocation and retirement work independently. Returning an existing
+endpoint does not schedule provider or authorization work.
 
 The R2 journal at `pod-admission/v1/<deployment>.json` records authorization before
 the provider POST. If the POST or authorization write has an uncertain outcome, the
@@ -488,15 +486,14 @@ Read-only selection checks share a two-second in-memory RunPod inventory cache;
 create admission and cleanup explicitly refresh it. Mutable names are updated
 with name-only PATCH requests; worker secrets and container settings are preserved.
 
-Allocation and status requests without a wait preference use cached inventory
-and grants. Readiness waits request access validation from background reconciliation,
-which refreshes inventory and issues access grants. Gateway liveness probes remain
+Allocation and status replies use inventory and reported Pod readiness and TLS
+certificates. Readiness waits are notified by background allocation reconciliation. Gateway liveness probes remain
 responsive during a provider outage; `admission_ready` requires loaded inventory
 and a fresh admission fence.
 Each authenticated hotkey receives two immediate admission POST requests, then one
 per `GATEWAY_REQUEST_INTERVAL_SECONDS` (default 10). An overlapping admission POST
 returns `admission_in_progress`; an exhausted admission allowance returns
-`request_rate_limited`. Allocation/status GETs, including lease renewal, do not
+`request_rate_limited`. Allocation/status GETs do not
 consume that allowance or hold the hotkey's admission slot.
 `GATEWAY_MAX_REQUESTS` bounds active miner requests through response completion,
 including readiness waits (default 64). Signature verification has four slots and
@@ -505,9 +502,9 @@ bounded replay tracking. Bodies are limited to 16 KiB with a five-second read de
 The gateway always writes JSON events to stdout. `gateway_request` records route
 templates, status, fixed error codes, duration, authenticated identity, admission
 limits, fence freshness and allocation readiness. Waiting allocations identify
-the pending stage: allocation, Pod control, Pod readiness, certificate or access
-grant. Background failures record their stage and exception class; Pod control
-connections/readiness and issued grants have separate events. Headers, query
+the pending stage: allocation, Pod control, Pod readiness, certificate or endpoint.
+Background failures record their stage and exception class; Pod control
+connections/readiness have separate events. Headers, query
 strings, request bodies, certificates, access tokens and exception messages are
 excluded. A bounded output queue keeps a blocked log sink off request handlers;
 the next accepted event reports `dropped_logs` after overflow.
@@ -515,7 +512,7 @@ the next accepted event reports `dropped_logs` after overflow.
 Allocation replies without a wait preference advertise `GATEWAY_POLL_SECONDS`
 (default 30). Clients retain the accepted start ID across network failures and
 honor HTTP `Retry-After` on rate-limit and temporary-unavailability errors. Healthy
-direct Pod calls continue independently of gateway polling. Busy workers provide
+direct Pod calls continue without gateway polling. Busy workers provide
 bounded local backpressure. RunPod stock and numeric Pod-count quota are not
 guaranteed. Cleanup drains excess resources, preferring dormant copies over active
 workers, and counts them until confirmed deletion.

@@ -23,6 +23,7 @@ class Peer:
     certificate: str | None = None
     seen: float = field(default_factory=time.monotonic)
     replies: dict[str, asyncio.Future[dict[str, object]]] = field(default_factory=dict)
+    endpoint: tuple[str, int] | None = None
 
 
 class Registry:

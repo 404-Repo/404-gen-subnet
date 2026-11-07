@@ -89,7 +89,6 @@ class AllocationService:
                     self.session["phase"] = "retired"
             return httpx.Response(200, json=self.reply(self.session))
 
-        assert request.headers["authorization"] == "Bearer scoped-access"
         assert request.extensions["sni_hostname"] == "witness.internal"
         assert request.url.host == f"192.0.2.{self.created + 1}"
         assert self.session is not None

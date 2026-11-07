@@ -37,50 +37,6 @@ class Selection:
             )
         )
 
-    def grant(self, pod: Pod) -> bool:
-        scope = pod.scope()
-        if scope is None:
-            raise ValueError("Invalid allocation identity")
-        key = self.key(scope)
-        for _ in range(16):
-            saved = self.store.load(key)
-            if saved is None:
-                return False
-            value = object_dict(json.loads(saved.data))
-            if (value.get("active") is not True or value.get("pod_id") != pod.id or
-                    value.get("start_id") != pod.markers["WITNESS_START_ID"]):
-                return False
-            if value.get("access_granted") is True:
-                return True
-            try:
-                self.store.save(key, json_bytes({**value, "access_granted": True}), saved.etag)
-                return True
-            except StateConflict:
-                continue
-        raise StateConflict("Allocation selection is busy")
-
-    def revoke_unserved(self, pod: Pod) -> bool:
-        scope = pod.scope()
-        if scope is None:
-            raise ValueError("Invalid allocation identity")
-        key = self.key(scope)
-        for _ in range(16):
-            saved = self.store.load(key)
-            if saved is None:
-                return False
-            value = object_dict(json.loads(saved.data))
-            if (value.get("access_granted") is not False or value.get("pod_id") != pod.id or
-                    value.get("start_id") != pod.markers["WITNESS_START_ID"]):
-                return False
-            if value.get("active") is False:
-                return True
-            try:
-                self.store.save(key, json_bytes({**value, "active": False}), saved.etag)
-                return True
-            except StateConflict:
-                continue
-        raise StateConflict("Allocation selection is busy")
-
     def update(self, pod: Pod, *, active: bool) -> None:
         scope = pod.scope()
         if scope is None:
@@ -95,11 +51,6 @@ class Selection:
                 "epoch_ns": pod.epoch_ns,
                 "active": active,
             }
-            if current is not None and current.get("pod_id") == pod.id:
-                if "access_granted" in current:
-                    value["access_granted"] = current["access_granted"]
-            elif active and pod.lifecycle == "pending":
-                value["access_granted"] = False
             if current is not None:
                 if current == value:
                     return

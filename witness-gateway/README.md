@@ -112,29 +112,35 @@ The inputs contain source identity and revision, round, seed, prompt content
 references, hash-to-ID mapping, block deadline or explicit absence, and storage
 scope. `GET /v1/artifacts/context` exposes these inputs and signed prompt URLs to
 the assigned miner. Inputs are durably pinned per repository, branch and round.
-Changing seed, prompt content/IDs, deadline or storage scope for an existing round
-closes admission; publish a new round to use different inputs.
+Changing seed, prompt content/IDs or storage scope for an existing round
+closes admission; publish a new round to use different inputs. Deadline changes
+apply to subsequently allocated Pods.
 
-The gateway refreshes state every `WITNESS_ROUND_REFRESH_SECONDS` (default 60)
-and sends policies over authenticated control sockets. Policies expire after
-`WITNESS_ROUND_POLICY_SECONDS` (default 120, maximum 120). New allocations,
-generation, previews and final saves require a fresh policy for the exact frozen
-inputs and current `miner_generation` round. Finite schedules also require a fresh
-Finney block below `generation_deadline_block`; leases are capped at the estimated
-block boundary. `next_stage_eta` is approximate and is never a generation deadline.
+The gateway refreshes allocation admission every `WITNESS_ROUND_REFRESH_SECONDS`
+(default 60). New allocations require a current `miner_generation` round;
+`WITNESS_ROUND_POLICY_SECONDS` (default 120, maximum 120) bounds the age of the
+gateway's source snapshot. Finite schedules require a fresh Finney block below
+`generation_deadline_block`. The gateway converts that block deadline to a fixed
+Unix timestamp using the observed block timestamp and twelve seconds per block,
+and passes it as `WITNESS_ROUND_END` when creating a Pod. An empty value means
+the schedule explicitly has no generation deadline. The fixed timestamp is saved
+beside the frozen round inputs so a gateway restart preserves the allocation spec.
+The collector's block
+comparison remains authoritative. `next_stage_eta` is never used as a deadline.
 
 Transient refresh errors retain valid permission until its original expiry and
 never extend it. A newly observed source revision invalidates cached permission,
 even when the new publication cannot be read.
 
-A pause, closed stage or expired policy stops new work without draining Pods.
-Captures check permission immediately before provider release;
-queued saves check when execution begins. Already admitted work finishes retaining
-its evidence. Status, saved-result lookup and identical saved submissions remain
-available. A ready new round applies to new allocations; existing Pods retain
-their frozen inputs. Grant renewal for an in-flight call or saved-result lookup
-keeps the existing allocation. Replacing a previous round's Pod waits for its drain report.
-The revivor leaves round selection and draining to the gateway.
+A pause or closed stage stops new generation allocations. Existing Pods retain
+their frozen inputs and fixed deadline; they do not consume gateway policies or
+renew access. Pauses and deadline changes apply to newly allocated or replaced
+Pods. Captures check the local deadline immediately before provider release;
+queued saves check when execution begins. Already admitted work finishes and
+retains its evidence. Status, saved-result lookup and identical saved submissions
+remain available after the deadline. A ready new round applies to new allocations.
+Replacing a previous round's Pod waits for its drain report. The revivor leaves
+round selection and draining to the gateway.
 
 Previously assigned miners can replace a lost Pod in the same current round for
 saved-result lookup and recording recovery after closure. That allocation still

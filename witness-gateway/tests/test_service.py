@@ -32,7 +32,6 @@ from miner_runtime.runner import run_generation
 from miner_runtime.validator import ReplayWitness, run_replay
 from openai.types.responses import ResponseStreamEvent
 from pod_gateway.control import DrainControl, Registry
-from pod_gateway.diagnostics import output
 from pod_gateway.lifecycle import Allocator
 from pod_gateway.membership import Membership
 from pod_gateway.server import Gateway
@@ -53,7 +52,6 @@ from witness_client.calls import RequestKey, canonical
 from witness_client.pods import Snapshot
 from witness_client.request import serialize_body
 from witness_client.tunnel import WebSocketTunnel
-from witness_pod.artifacts import ArtifactRepository
 from witness_pod.budget import Budget
 from witness_pod.channel import Channel, WorkerChannel
 from witness_pod.direct import Witness
@@ -315,7 +313,8 @@ class Harness:
             token=capability(SECRET, scope, pod.markers["WITNESS_START_ID"]),
             origin=self.origin,
             proof_hash=self.proof,
-            round_end=int(time.time()) + 600 if inputs is None else None,
+            round_end=(int(time.time()) + 600 if inputs is None else
+                       int(env["WITNESS_ROUND_END"]) if env.get("WITNESS_ROUND_END") else None),
             spool=spool,
             max_captures=int(env.get("WITNESS_MAX_CAPTURES", "2")),
             selection=self.selection,
@@ -449,49 +448,6 @@ class Harness:
 
 
 
-def test_sdk_submission_lookup_and_concurrent_renewal_with_production_rate_limit(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
-) -> None:
-    secrets: list[str] = []
-
-    async def scenario() -> None:
-        fixture = Harness(tmp_path, monkeypatch)
-        async with fixture.running():
-            fixture.gateway.request_interval = 10
-            with fixture.client() as witness:
-                start_id = await asyncio.to_thread(witness._gateway.ensure_pod)
-                artifacts = ArtifactRepository(
-                    fixture.state, fixture.scope, index=fixture.state, seed=1,
-                    prompt_ids={"a" * 64: "prompt-1"},
-                )
-                fixture.services[0].artifacts = artifacts
-                fixture.state.put(artifacts.index_key, b'{"prompt-1":{"js":"fixture.js","size":10}}')
-                submitted = await asyncio.to_thread(witness.get_submitted)
-                assert submitted["prompt-1"]["js"] == "fixture.js"
-                assert witness._gateway._direct is not None
-                secrets.append(witness._gateway._direct.headers["Authorization"].removeprefix("Bearer "))
-                previous = witness._gateway._expires
-                before = time.time()
-                monkeypatch.setattr(time, "time", lambda: before + 580)
-                with ThreadPoolExecutor(max_workers=16) as clients:
-                    loop = asyncio.get_running_loop()
-                    results = await asyncio.gather(*(loop.run_in_executor(clients, witness.get_submitted)
-                                                     for _ in range(16)))
-                assert results == [submitted] * 16
-                assert witness._gateway._expires > previous + 570
-                assert witness._gateway._start_id == start_id
-                assert fixture.provider.creates == 1 and fixture.paid == 0
-                assert fixture.gateway.request_interval == 10
-        await asyncio.to_thread(output.queue.join)
-
-    asyncio.run(scenario())
-    captured = capsys.readouterr().out
-    rows = [json.loads(line) for line in captured.splitlines()]
-    grants = [row for row in rows if row.get("event") == "gateway_grant_issued"]
-    assert len(grants) == 2 and grants[1]["expires"] > grants[0]["expires"] + 570
-    assert any(row.get("event") == "gateway_pod_readiness" and row["ready"] is True for row in rows)
-    assert any(row.get("route") == "/v1/pods/{start_id}" and row["ready"] is True for row in rows)
-    assert all(secret not in captured for secret in secrets) and "BEGIN CERTIFICATE" not in captured
 
 
 def test_running_generation_accepts_an_added_model(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -737,7 +693,7 @@ def test_replaced_unclaimed_pod_recovers_in_the_same_create(
                         previous = fixture.provider.list()[0]
                         fixture.selection.update(previous, active=False)
                         fixture.provider.delete(previous.id)
-                        gateway._expires = 0
+                        gateway._direct = None
                         gateway.ensure_pod()
                     return snapshot
 
@@ -925,7 +881,6 @@ def test_gateway_handover_preserves_worker_and_inflight_capture(
                 response = fixture.state.get(evidence + "/response.sse")
                 assert response is not None and fixture.state.get(evidence + "/manifest.json") is not None
                 witness._gateway.http.base_url = origin
-                witness._gateway._expires = 0
                 assert await asyncio.to_thread(witness._gateway.ensure_pod) == start_id
                 assert (await asyncio.to_thread(witness.create, model="fixture", input="image")).output_text == "answer-1"
                 assert (await asyncio.to_thread(witness.create, model="fixture", input="next")).output_text == "answer-2"
@@ -955,7 +910,7 @@ def test_client_reconnects_to_gateway_current_round(
                 fixture.scope = Scope(fixture.scope.deployment, "test-1", fixture.scope.hotkey)
                 fixture.gateway.round = fixture.scope.round
                 fixture.services[0].round_end = fixture.runtimes[0].round_end = int(time.time()) - 1
-                gateway._expires = 0
+                gateway._direct = None
                 result = await asyncio.to_thread(witness.create, model="fixture", input="image")
                 new_start = await asyncio.to_thread(gateway.ensure_pod)
                 assert new_start != old_start
@@ -1003,7 +958,6 @@ def test_initial_connection_waits_once_then_reuses_its_pod(
                 for _ in range(5):
                     assert await asyncio.to_thread(gateway.ensure_pod) == start_id
                 assert [path for path in fixture.gateway_paths if path.startswith("/v1/pods/")] == allocations
-                gateway._expires = 0
                 assert await asyncio.wait_for(asyncio.to_thread(gateway.ensure_pod), 3) == start_id
             with fixture.client("restarted") as restarted:
                 assert await asyncio.wait_for(asyncio.to_thread(restarted._gateway.ensure_pod), 3) == start_id
@@ -1051,22 +1005,6 @@ def test_fresh_client_waits_for_retiring_capture_then_reuses_its_result(
     asyncio.run(scenario())
 
 
-def test_connection_keeps_its_pod_when_the_gateway_cache_is_empty(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    async def scenario() -> None:
-        fixture = Harness(tmp_path, monkeypatch)
-        async with fixture.running():
-            with fixture.client() as witness:
-                gateway = witness._gateway
-                start_id = await asyncio.to_thread(gateway.ensure_pod)
-                gateway._expires = 0
-                with monkeypatch.context() as cache:
-                    cache.setattr(fixture.gateway, "_cached", lambda _: None)
-                    assert await asyncio.to_thread(gateway.ensure_pod) == start_id
-                assert fixture.provider.creates == 1
-
-    asyncio.run(scenario())
 
 
 def test_direct_authorization_and_certificate_identity(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1089,7 +1027,12 @@ def test_direct_authorization_and_certificate_identity(tmp_path: Path, monkeypat
                         "Authorization": "Bearer invalid",
                     }
                     response = direct.http.get(path, headers=headers, extensions={"sni_hostname": direct.server_name})
-                    assert response.status_code == 401
+                    assert response.status_code == 404 and response.json()["error"] == "exchange_not_found"
+                    headers = hotkey_headers(fixture.key, b"", method="GET", path=path)
+                    response = direct.http.get(path, headers=headers, extensions={"sni_hostname": direct.server_name})
+                    assert response.status_code == 404 and response.json()["error"] == "exchange_not_found"
+                    response = direct.http.get(path, headers=headers, extensions={"sni_hostname": direct.server_name})
+                    assert response.status_code == 401 and response.json()["error"] == "replayed_hotkey_auth"
                     direct.server_name = "different.internal"
                     direct.http.close()
                     assert direct.tls is not None
@@ -1165,7 +1108,7 @@ def test_failed_dispatch_retries_same_id_after_pod_replacement(tmp_path: Path, m
                 old = fixture.provider.list()[0]
                 fixture.selection.update(old, active=False)
                 fixture.provider.delete(old.id)
-                gateway._expires = 0
+                gateway._direct = None
                 await asyncio.to_thread(gateway.ensure_pod)
                 response = await asyncio.to_thread(witness.create, model="fixture", input="image")
                 assert response.output_text == "answer-2"
@@ -1460,43 +1403,6 @@ def test_direct_upload_waits_for_a_slow_consumer(tmp_path: Path, monkeypatch: py
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize("status,error", [(401, "allocation_access_expired"), (409, "pod_not_selected")])
-def test_next_render_resolves_a_stale_allocation(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, status: int, error: str,
-) -> None:
-    async def scenario() -> None:
-        fixture = Harness(tmp_path, monkeypatch)
-        async with fixture.running():
-            rendered: list[str] = []
-            png = b"\x89PNG\r\n\x1a\nfixture"
-
-            async def backend(request: web.Request) -> web.Response:
-                rendered.append((await request.json())["source"])
-                return web.Response(body=png, content_type="image/png")
-
-            app = web.Application()
-            app.router.add_post("/render/grid", backend)
-            origin = await fixture.listen(app, None)
-            with fixture.client() as witness:
-                gateway = witness._gateway
-                await asyncio.to_thread(gateway.ensure_pod)
-                fixture.services[0].renderer_url = origin + "/render/grid"
-                service = gateway._service()
-                with httpx.Client(base_url=service.http.base_url, transport=httpx.MockTransport(
-                    lambda _: httpx.Response(status, json={"error": error}),
-                )) as stale:
-                    service.http = stale
-
-                    def render_twice() -> None:
-                        with httpx.Client(transport=witness.renderer_transport()) as http:
-                            assert http.post("https://witness.internal/v1/render/grid", json={"source": "first"}).status_code == status
-                            reply = http.post("https://witness.internal/v1/render/grid", json={"source": "second"})
-                            assert reply.status_code == 200 and reply.content == png
-
-                    await asyncio.to_thread(render_twice)
-                assert rendered == ["second"] and fixture.provider.creates == 1
-
-    asyncio.run(scenario())
 
 
 def test_direct_upgrade_during_tls_session_ticket_processing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -20,7 +20,6 @@ from renderer_client.client import MAX_ERROR_BYTES, MAX_RESPONSE_BYTES, PNG_SIGN
 from subnet_common.competition.generations import GenerationsAdapter
 from subnet_common.witness.auth import Authenticator, AuthRejected
 from subnet_common.witness.models import Scope, identifier
-from subnet_common.witness.security import verify_miner_access
 from witness_client.calls import RequestKey
 from witness_client.request import PROVIDERS
 
@@ -102,19 +101,10 @@ class Witness:
                 "x-bittensor-nonce",
                 "x-bittensor-signature",
                 "x-bittensor-receiver",
-                "authorization",
             ):
                 if len(request.headers.getall(name, [])) != 1:
                     raise AuthRejected("invalid_hotkey_auth")
             self.auth.verify(request.method, request.raw_path, body, request.headers)
-            if not verify_miner_access(
-                request.headers.get("Authorization", "").removeprefix("Bearer "),
-                self.runtime.token,
-                self.runtime.scope,
-                self.runtime.start_id,
-                self.runtime.pod_id,
-            ):
-                raise AuthRejected("allocation_access_expired", 401)
             return await handler(request)
         except AuthRejected as error:
             return web.json_response({"error": str(error)}, status=error.status, headers={"Cache-Control": "no-store"})

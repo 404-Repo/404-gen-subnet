@@ -281,7 +281,7 @@ def test_final_checkpoint_resumes_after_round_change(
                     )
                     fixture.scope = Scope(fixture.scope.deployment, "test-1", fixture.scope.hotkey)
                     fixture.gateway.round = fixture.scope.round
-                    witness._gateway._expires = 0
+                    witness._gateway._direct = None
                     await asyncio.to_thread(witness._gateway.ensure_pod)
                     next_renders = await enable(fixture)
                     saved = await asyncio.to_thread(
@@ -624,7 +624,7 @@ def test_concurrent_result_index_updates_preserve_each_prompt(monkeypatch: pytes
     assert second.result(prompts[1]) == results[1]
 
 
-@pytest.mark.parametrize("case", ["queued", "queue_full", "access_expiry"])
+@pytest.mark.parametrize("case", ["queued", "queue_full"])
 def test_final_saves_complete_without_generating_again(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str,
 ) -> None:
@@ -698,10 +698,6 @@ def test_final_saves_complete_without_generating_again(
                             await asyncio.wait_for(retryable.wait(), 2)
                         else:
                             assert rendered == [SOURCE]
-                            if case == "access_expiry":
-                                monkeypatch.setattr(
-                                    "subnet_common.witness.security.time", SimpleNamespace(time=lambda: float("inf")),
-                                )
                     finally:
                         release.set()
                         results = await asyncio.gather(*pending)
@@ -868,16 +864,20 @@ def test_save_queue_limits_and_failures_release_the_next_job(
                             assert store.result(prompt) is None
                         else:
                             assert isinstance(other_result, dict) and other_result["failure_reason"] is None
+                    replacement_rendered: list[str] = []
+                    if failure == "not_selected":
+                        await asyncio.to_thread(witness._gateway.ensure_pod)
+                        replacement_rendered = await enable(fixture, prompt_ids=store.prompt_ids)
                     recovered = await asyncio.to_thread(second.save_final, other_source)
                     assert fixture.state.get(str(recovered["js"])) == other_source.encode()
-                    assert rendered == [SOURCE, other_source] and fixture.paid == 0
+                    assert rendered + replacement_rendered == [SOURCE, other_source] and fixture.paid == 0
 
     asyncio.run(scenario())
 
 
 @pytest.mark.parametrize("status,code,elapsed", [
     (429, "save_in_progress", 2.5), (503, "save_queue_full", 2.5), (503, "save_queue_wait_timeout", 2.5),
-    (429, "rate_limited", 0.25), (401, "allocation_access_expired", 0.25), (403, "round_closed", 0.25),
+    (429, "rate_limited", 0.25), (401, "invalid_signature", 0.25), (403, "round_closed", 0.25),
     (409, "recording_conflict", 0.25), (503, "save_in_progress", 0.25),
 ])
 def test_final_save_transient_retry_is_bounded_and_preserves_the_checkpoint(

@@ -29,7 +29,8 @@ Pass the caller's loaded sr25519 `hotkey`. The private key stays local.
 `openai_api_key` and `subscription="codex"` are mutually exclusive. `codex_home`
 and `codex` select subscription credential storage/refresh. Provider TLS uses
 system certificate verification; direct Pod access uses the authenticated
-allocation's certificate, address, server name and expiring scoped grant.
+allocation's certificate, address and server name. The Pod verifies the assigned
+hotkey's signature without a gateway access credential or periodic renewal.
 
 `responses.create()` accepts `ResponseCreateParamsBase` model arguments and returns
 an SDK `Response` by default or buffered typed events for `stream=True`. Provider
