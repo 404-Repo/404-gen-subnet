@@ -706,27 +706,27 @@ class Gateway:
             request.headers.get("Authorization", ""), "Bearer " + token
         ):
             raise AuthRejected("invalid_pod_capability")
-        expected = self._pods.get(pod_id)
-        pod = await self._run(self._worker, partial(self.allocator.provider.get, pod_id))
-        if (
-            pod is None
-            or expected is None
-            or pod.markers["WITNESS_START_ID"] != start_id
-            or not pod.matches(scope, expected.session())
-        ):
-            raise AuthRejected("pod_identity_changed", 409)
-        if pod.lifecycle == "pending" or (
-            pod.lifecycle == "active" and pod.status != "RUNNING"
-        ):
-            raise AuthRejected("pod_starting", 503)
-        endpoint = pod.tcp.get(self.allocator.spec.port)
-        if endpoint is None and self._selected(scope, start_id, pod_id):
-            raise AuthRejected("pod_starting", 503)
         if pod_id in self.registry.peers or pod_id in self._connecting:
             raise AuthRejected("pod_already_connected", 409)
-        socket = web.WebSocketResponse(max_msg_size=16384, heartbeat=15)
         self._connecting.add(pod_id)
         try:
+            expected = self._pods.get(pod_id)
+            pod = await self._run(self._worker, partial(self.allocator.provider.get, pod_id))
+            if (
+                pod is None
+                or expected is None
+                or pod.markers["WITNESS_START_ID"] != start_id
+                or not pod.matches(scope, expected.session())
+            ):
+                raise AuthRejected("pod_identity_changed", 409)
+            if pod.lifecycle == "pending" or (
+                pod.lifecycle == "active" and pod.status != "RUNNING"
+            ):
+                raise AuthRejected("pod_starting", 503)
+            endpoint = pod.tcp.get(self.allocator.spec.port)
+            if endpoint is None and self._selected(scope, start_id, pod_id):
+                raise AuthRejected("pod_starting", 503)
+            socket = web.WebSocketResponse(max_msg_size=16384, heartbeat=15)
             await socket.prepare(request)
         finally:
             self._connecting.discard(pod_id)
