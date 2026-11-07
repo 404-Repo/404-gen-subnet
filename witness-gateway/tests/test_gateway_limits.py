@@ -1477,3 +1477,42 @@ def test_unchanged_round_refresh_does_not_wait_for_busy_pod_lifecycle() -> None:
                 await work
 
     asyncio.run(scenario())
+
+
+def test_control_reconnect_is_deduplicated_before_slow_provider_lookup(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def scenario() -> None:
+        provider = Provider()
+        async with running(provider, MemoryState()) as (gateway, client):
+            scope = gateway.scope(KEYS[0].ss58_address)
+            gateway.queue.enqueue(scope, FIRST, None)
+            session = gateway.allocator.acquire(scope, FIRST)
+            gateway.queue.complete(scope, FIRST, rejected=False)
+            gateway._publish(provider.list())
+            assert session.pod_id is not None
+            lookup = provider.get
+            entered, release = threading.Event(), threading.Event()
+            lookups: list[str] = []
+
+            def slow(pod_id: str) -> Pod | None:
+                lookups.append(pod_id)
+                entered.set()
+                assert release.wait(5)
+                return lookup(pod_id)
+
+            monkeypatch.setattr(provider, "get", slow)
+            headers = {"Authorization": "Bearer " + capability(gateway.secret, scope, FIRST),
+                       "x-witness-pod": session.pod_id}
+            path = f"/v1/control/{scope.hotkey}/{FIRST}"
+            first = asyncio.ensure_future(client.ws_connect(path, headers=headers))
+            assert await asyncio.to_thread(entered.wait, 2)
+            try:
+                with pytest.raises(WSServerHandshakeError) as duplicate:
+                    await asyncio.wait_for(client.ws_connect(path, headers=headers), 0.5)
+                assert duplicate.value.status == 409
+            finally:
+                release.set()
+                socket = await first
+                await socket.close()
+            assert lookups == [session.pod_id]
+
+    asyncio.run(scenario())
