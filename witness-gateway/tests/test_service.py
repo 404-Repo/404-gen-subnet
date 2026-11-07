@@ -32,6 +32,7 @@ from miner_runtime.runner import run_generation
 from miner_runtime.validator import ReplayWitness, run_replay
 from openai.types.responses import ResponseStreamEvent
 from pod_gateway.control import DrainControl, Registry
+from pod_gateway.diagnostics import output
 from pod_gateway.lifecycle import Allocator
 from pod_gateway.membership import Membership
 from pod_gateway.server import Gateway
@@ -52,6 +53,7 @@ from witness_client.calls import RequestKey, canonical
 from witness_client.pods import Snapshot
 from witness_client.request import serialize_body
 from witness_client.tunnel import WebSocketTunnel
+from witness_pod.artifacts import ArtifactRepository
 from witness_pod.budget import Budget
 from witness_pod.channel import Channel, WorkerChannel
 from witness_pod.direct import Witness
@@ -444,6 +446,52 @@ class Harness:
                 await asyncio.wait_for(asyncio.gather(*self.tasks), 15)
             for runner in reversed(self.runners):
                 await runner.cleanup()
+
+
+
+def test_sdk_submission_lookup_and_concurrent_renewal_with_production_rate_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    secrets: list[str] = []
+
+    async def scenario() -> None:
+        fixture = Harness(tmp_path, monkeypatch)
+        async with fixture.running():
+            fixture.gateway.request_interval = 10
+            with fixture.client() as witness:
+                start_id = await asyncio.to_thread(witness._gateway.ensure_pod)
+                artifacts = ArtifactRepository(
+                    fixture.state, fixture.scope, index=fixture.state, seed=1,
+                    prompt_ids={"a" * 64: "prompt-1"},
+                )
+                fixture.services[0].artifacts = artifacts
+                fixture.state.put(artifacts.index_key, b'{"prompt-1":{"js":"fixture.js","size":10}}')
+                submitted = await asyncio.to_thread(witness.get_submitted)
+                assert submitted["prompt-1"]["js"] == "fixture.js"
+                assert witness._gateway._direct is not None
+                secrets.append(witness._gateway._direct.headers["Authorization"].removeprefix("Bearer "))
+                previous = witness._gateway._expires
+                before = time.time()
+                monkeypatch.setattr(time, "time", lambda: before + 580)
+                with ThreadPoolExecutor(max_workers=16) as clients:
+                    loop = asyncio.get_running_loop()
+                    results = await asyncio.gather(*(loop.run_in_executor(clients, witness.get_submitted)
+                                                     for _ in range(16)))
+                assert results == [submitted] * 16
+                assert witness._gateway._expires > previous + 570
+                assert witness._gateway._start_id == start_id
+                assert fixture.provider.creates == 1 and fixture.paid == 0
+                assert fixture.gateway.request_interval == 10
+        await asyncio.to_thread(output.queue.join)
+
+    asyncio.run(scenario())
+    captured = capsys.readouterr().out
+    rows = [json.loads(line) for line in captured.splitlines()]
+    grants = [row for row in rows if row.get("event") == "gateway_grant_issued"]
+    assert len(grants) == 2 and grants[1]["expires"] > grants[0]["expires"] + 570
+    assert any(row.get("event") == "gateway_pod_readiness" and row["ready"] is True for row in rows)
+    assert any(row.get("route") == "/v1/pods/{start_id}" and row["ready"] is True for row in rows)
+    assert all(secret not in captured for secret in secrets) and "BEGIN CERTIFICATE" not in captured
 
 
 def test_running_generation_accepts_an_added_model(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

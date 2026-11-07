@@ -23,6 +23,7 @@ from subnet_common.witness.state import StateConflict, WriteUncertain
 
 from .admission import CapacityReached, CreateDeferred, PendingStart, StartQueue
 from .control import Peer, Registry
+from .diagnostics import output
 from .lifecycle import AllocationConflict, Allocator, InventoryConflict
 from .rounds import RoundController
 from .runpod import ProviderUnavailable
@@ -176,14 +177,55 @@ class Gateway:
 
     def _retry(self, code: str = "request_rate_limited") -> web.Response:
         return web.json_response({"error": code}, status=429,
-                                 headers={"Retry-After": str(max(1, math.ceil(self.request_interval))),
+                                 headers={"Retry-After": str(1 if code == "admission_in_progress" else
+                                                            max(1, math.ceil(self.request_interval))),
                                           "Cache-Control": "no-store"})
 
-    def _limited(self, hotkey: str) -> bool:
+    def _limited(self, hotkey: str) -> str | None:
         if hotkey in self._busy:
-            return True
+            return "admission_in_progress"
         tokens, at = self._rate.get(hotkey, (2.0, time.monotonic()))
-        return self.request_interval > 0 and tokens + (time.monotonic() - at) / self.request_interval < 1
+        if self.request_interval > 0 and tokens + (time.monotonic() - at) / self.request_interval < 1:
+            return "request_rate_limited"
+        return None
+
+    @web.middleware
+    async def access_log(
+        self, request: web.Request,
+        handler: Callable[[web.Request], Awaitable[web.StreamResponse]],
+    ) -> web.StreamResponse:
+        started = time.monotonic()
+        status = 500
+        response: web.StreamResponse | None = None
+        try:
+            response = await handler(request)
+            status = response.status
+            return response
+        except web.HTTPException as error:
+            status = error.status
+            raise
+        except asyncio.CancelledError:
+            status = 499
+            raise
+        finally:
+            resource = request.match_info.route.resource
+            record: dict[str, object] = {
+                "method": request.method, "route": None if resource is None else resource.canonical,
+                "status": status, "duration_ms": round((time.monotonic() - started) * 1000, 3),
+                "hotkey": request.get("hotkey"), "authenticated": request.get("authenticated", False),
+                "active_requests": self._active, "limit": request.get("gateway_limit"),
+                "fence_ok": self._fence_ok,
+                "fence_age_seconds": None if not self._fence_at else round(time.monotonic() - self._fence_at, 3),
+            }
+            record.update(request.get("gateway_allocation", {}))
+            if isinstance(response, web.Response) and response.content_type == "application/json" and response.text:
+                value = object_dict(json.loads(response.text))
+                code = value.get("error")
+                if isinstance(code, str) and code.isascii() and code.isidentifier() and len(code) <= 64:
+                    record["error"] = code
+                if type(value.get("admission_ready")) is bool:
+                    record["admission_ready"] = value["admission_ready"]
+            output.write("gateway_request", **record)
 
     @web.middleware
     async def middleware(
@@ -210,6 +252,7 @@ class Gateway:
                             request.headers.get("Authorization", ""),
                             "Bearer " + capability(self.secret, scope, start_id))):
                     raise AuthRejected("invalid_pod_capability")
+                request["hotkey"], request["authenticated"] = scope.hotkey, True
                 if not self._live():
                     raise AuthRejected("gateway_fenced", 503)
                 return await handler(request)
@@ -220,12 +263,17 @@ class Gateway:
                 if len(request.headers.getall(name, [])) != 1:
                     raise AuthRejected("invalid_hotkey_auth")
             candidate = request.headers["x-bittensor-hotkey"]
-            if self._limited(candidate):
-                return self._retry()
+            if request.method == "POST" and (limited := self._limited(candidate)) is not None:
+                request["hotkey"] = candidate
+                return self._retry(limited)
             now = time.monotonic()
             self._tokens = min(128, self._tokens + (now - self._token_time) * 64)
             self._token_time = now
-            if self._active >= self.max_requests or self._tokens < 1:
+            if self._active >= self.max_requests:
+                request["gateway_limit"] = "active_requests"
+                return self._retry("authentication_busy")
+            if self._tokens < 1:
+                request["gateway_limit"] = "authentication_rate"
                 return self._retry("authentication_busy")
             self._tokens -= 1
             self._active += 1
@@ -240,6 +288,7 @@ class Gateway:
             if len(body) > 16384 or request.method == "GET" and body:
                 raise ValueError("Invalid body size")
             if self._authenticating >= 4:
+                request["gateway_limit"] = "authentication_slots"
                 return self._retry("authentication_busy")
             self._authenticating += 1
             verified = asyncio.get_running_loop().run_in_executor(
@@ -253,25 +302,24 @@ class Gateway:
 
             verified.add_done_callback(done)
             owner = await asyncio.shield(verified)
-            if self._limited(owner):
-                return self._retry()
-            now = time.monotonic()
-            if len(self._rate) >= 4097:
-                self._rate = {key: value for key, value in self._rate.items()
-                              if now - value[1] < max(60, 2 * self.request_interval)}
-                if owner not in self._rate and len(self._rate) >= 4097:
-                    return self._retry("authentication_busy")
-            tokens, at = self._rate.get(owner, (2.0, now))
-            self._rate[owner] = (min(2, tokens + (now - at) / self.request_interval) - 1
-                                 if self.request_interval > 0 else 2, now)
-            self._busy.add(owner)
-            hotkey = owner
-            request["hotkey"] = owner
+            request["hotkey"], request["authenticated"] = owner, True
+            if request.method == "POST":
+                if (limited := self._limited(owner)) is not None:
+                    return self._retry(limited)
+                now = time.monotonic()
+                if len(self._rate) >= 4097:
+                    self._rate = {key: value for key, value in self._rate.items()
+                                  if now - value[1] < max(60, 2 * self.request_interval)}
+                    if owner not in self._rate and len(self._rate) >= 4097:
+                        request["gateway_limit"] = "admission_hotkeys"
+                        return self._retry("authentication_busy")
+                tokens, at = self._rate.get(owner, (2.0, now))
+                self._rate[owner] = (min(2, tokens + (now - at) / self.request_interval) - 1
+                                     if self.request_interval > 0 else 2, now)
+                self._busy.add(owner)
+                hotkey = owner
             if not self._live():
                 raise AuthRejected("gateway_fenced", 503)
-            # Authentication is complete; the hotkey slot bounds the remaining request.
-            self._active -= 1
-            admitted = False
             return await handler(request)
         except AuthRejected as error:
             return web.json_response(
@@ -287,7 +335,9 @@ class Gateway:
             return web.json_response({"error": type(error).__name__}, status=409)
         except (ValidationError, ValueError, KeyError):
             return web.json_response({"error": "invalid_request"}, status=400)
-        except (StateConflict, WriteUncertain, ProviderUnavailable, TimeoutError, CreateDeferred):
+        except (StateConflict, WriteUncertain, ProviderUnavailable, TimeoutError, CreateDeferred) as error:
+            output.write("gateway_request_failed", error_type=type(error).__name__, hotkey=request.get("hotkey"),
+                         provider_status=error.status if isinstance(error, ProviderUnavailable) else None)
             return web.json_response(
                 {"error": "control_plane_unavailable"},
                 status=503,
@@ -295,8 +345,9 @@ class Gateway:
             )
         except web.HTTPException:
             raise
-        except Exception:  # noqa: BLE001 - never expose provider/SDK diagnostics
+        except Exception as error:  # noqa: BLE001 - never expose provider/SDK diagnostics
             # Do not expose SDK diagnostics, environment variables, or provider errors.
+            output.write("gateway_request_failed", error_type=type(error).__name__, hotkey=request.get("hotkey"))
             return web.json_response({"error": "control_plane_unavailable"}, status=503)
         finally:
             if admitted:
@@ -378,6 +429,18 @@ class Gateway:
             raise AuthRejected("gateway_fenced", 503)
         pending = self.queue.pending(scope)
         retry_after = 0 if wait else self.poll_seconds
+        peer = self.registry.peers.get("" if session is None else session.pod_id or "")
+        waiting_for = None
+        if endpoint is None:
+            waiting_for = ("allocation" if session is None or session.phase != "allocated" else
+                           "pod_control" if peer is None else
+                           "pod_readiness" if not self.registry.ready(peer.pod_id) else
+                           "pod_certificate" if peer.certificate is None else "access_grant")
+        request["gateway_allocation"] = {
+            "phase": None if session is None else session.phase, "ready": endpoint is not None,
+            "pod_id": None if session is None else session.pod_id,
+            "start_id": None if session is None else session.start_id, "waiting_for": waiting_for,
+        }
         return web.json_response(
             {"session": None if session is None else session.to_dict(), "witness": endpoint, "ready": endpoint is not None,
              "round": scope.round, "retry_after": retry_after,
@@ -551,8 +614,10 @@ class Gateway:
             try:
                 self._fence_ok = await self._run(self._fencing, self.fence)
                 self._fence_at = time.monotonic()
-            except Exception:  # noqa: BLE001 - stale fences stop admission, not paid capture
+            except Exception as error:  # noqa: BLE001 - stale fences stop admission, not paid capture
                 self._fence_at = 0
+                output.write("gateway_background_failed", phase="fence", error_type=type(error).__name__,
+                             provider_status=error.status if isinstance(error, ProviderUnavailable) else None)
             await asyncio.sleep(max(0, refresh_at - time.monotonic()))
 
     async def _work(self) -> None:
@@ -571,7 +636,9 @@ class Gateway:
                     refresh_at = time.monotonic() + self.refresh_seconds
                 if self._live():
                     await self._step()
-            except Exception:  # noqa: BLE001 - retain durable intents without request-driven retries
+            except Exception as error:  # noqa: BLE001 - retain durable intents without request-driven retries
+                output.write("gateway_background_failed", phase="reconcile", error_type=type(error).__name__,
+                             provider_status=error.status if isinstance(error, ProviderUnavailable) else None)
                 await asyncio.sleep(max(1, self.poll_seconds))
             self._changed.set()
             self._changed = asyncio.Event()
@@ -655,7 +722,9 @@ class Gateway:
             self._startup_due[scope] = now + self.poll_seconds
             try:
                 expired = await self._run(self._worker, partial(self._expire_unserved, scope, session))
-            except Exception:  # noqa: BLE001 - retry this worker without delaying other workers' access
+            except Exception as error:  # noqa: BLE001 - retry this worker without delaying other workers' access
+                output.write("gateway_background_failed", phase="expire_unserved", hotkey=scope.hotkey,
+                             pod_id=session.pod_id, error_type=type(error).__name__)
                 break
             if expired is not None:
                 self._current[scope] = self._sessions[scope, session.start_id] = expired
@@ -693,6 +762,8 @@ class Gateway:
             result_grant = await self._run(self._worker, partial(self._grant, scope, session, peer.certificate))
             if result_grant is not None:
                 self._grants[scope] = result_grant
+                output.write("gateway_grant_issued", hotkey=scope.hotkey, pod_id=session.pod_id,
+                             start_id=session.start_id, expires=result_grant["expires"])
             return
 
     async def _lifecycle(self, _: web.Application) -> AsyncIterator[None]:
@@ -741,6 +812,8 @@ class Gateway:
             self._connecting.discard(pod_id)
         peer = Peer(socket, scope, start_id, pod_id)
         self.registry.peers[pod_id] = peer
+        output.write("gateway_pod_connected", hotkey=scope.hotkey, pod_id=pod_id, start_id=start_id)
+        reported_ready: bool | None = None
         retirement: asyncio.Task[None] | None = None
 
         def retire_worker() -> Session | None:
@@ -753,7 +826,9 @@ class Gateway:
                 retired = await self._run(self._worker, retire_worker)
                 if retired is not None and retired.phase == "retired" and not socket.closed:
                     await socket.send_json({"type": "retired"})
-            except Exception:  # noqa: BLE001 - retain permanent drain for lifecycle retries
+            except Exception as error:  # noqa: BLE001 - retain permanent drain for lifecycle retries
+                output.write("gateway_background_failed", phase="retire", hotkey=scope.hotkey,
+                             pod_id=pod_id, error_type=type(error).__name__)
                 self._wake.set()
 
         try:
@@ -783,6 +858,11 @@ class Gateway:
                         and data.get("ready") is True
                         and data.get("proof_key_sha256") == self.proof_hash
                     )
+                    if reported_ready is None or reported_ready != peer.ready:
+                        output.write("gateway_pod_readiness", hotkey=scope.hotkey, pod_id=pod_id,
+                                     ready=peer.ready, selected=selected, worker_ready=data.get("ready") is True,
+                                     proof_matches=data.get("proof_key_sha256") == self.proof_hash)
+                        reported_ready = peer.ready
                     self._wake.set()
                     if not selected:
                         await socket.send_json({"type": "drain", "id": "selection"})
@@ -809,10 +889,11 @@ class Gateway:
                 retirement.cancel()
                 await asyncio.gather(retirement, return_exceptions=True)
             await socket.close()
+            output.write("gateway_pod_disconnected", hotkey=scope.hotkey, pod_id=pod_id, start_id=start_id)
         return socket
 
     def application(self) -> web.Application:
-        app = web.Application(middlewares=[self.middleware], client_max_size=16384,
+        app = web.Application(middlewares=[self.access_log, self.middleware], client_max_size=16384,
                               handler_args={"max_headers": 32, "max_field_size": 4096,
                                             "max_line_size": 2048, "keepalive_timeout": 30})
         app.cleanup_ctx.append(self._lifecycle)

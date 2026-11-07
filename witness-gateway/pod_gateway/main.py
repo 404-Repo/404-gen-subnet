@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import json
 import ssl
 from collections.abc import AsyncIterator
 
@@ -22,6 +21,7 @@ from pod_gateway.membership import Membership, MembershipRefresher
 from .admission import Admission
 from .control import DrainControl, Registry
 from .dependencies import worker_spec as resolved_worker_spec
+from .diagnostics import output
 from .lifecycle import Allocator
 from .rounds import RoundController, RoundImages, download_image
 from .runpod import RunPodClient
@@ -108,7 +108,7 @@ async def application(settings: GatewaySettings, worker_spec: PodSpec) -> web.Ap
                     await rounds.refresh()
                     await gateway.round_changed()
                 except Exception as error:  # noqa: BLE001 - never log privileged diagnostics
-                    print(json.dumps({"event": "round_refresh_failed", "error_type": type(error).__name__}), flush=True)
+                    output.write("round_refresh_failed", error_type=type(error).__name__)
                     await gateway.publish_policy()
                 await asyncio.sleep(settings.round_refresh_seconds)
 
@@ -117,15 +117,7 @@ async def application(settings: GatewaySettings, worker_spec: PodSpec) -> web.Ap
                 try:
                     await asyncio.to_thread(refresher.refresh)
                 except Exception as error:  # noqa: BLE001 - retain last complete snapshot
-                    print(
-                        json.dumps(
-                            {
-                                "event": "membership_refresh_failed",
-                                "error_type": type(error).__name__,
-                            }
-                        ),
-                        flush=True,
-                    )
+                    output.write("membership_refresh_failed", error_type=type(error).__name__)
                 await asyncio.sleep(600)
 
         tasks = [asyncio.create_task(refresh()), asyncio.create_task(refresh_round())]

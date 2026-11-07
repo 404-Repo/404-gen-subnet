@@ -19,6 +19,7 @@ from aiohttp.test_utils import TestClient, TestServer, make_mocked_request
 from bittensor_wallet import Keypair
 from pod_gateway.admission import Admission, PendingStart, QueueState
 from pod_gateway.control import DrainControl, Peer, Registry
+from pod_gateway.diagnostics import output
 from pod_gateway.lifecycle import Allocator
 from pod_gateway.membership import Membership
 from pod_gateway.runpod import CreateRejected, CreateUnknown, ProviderUnavailable
@@ -129,11 +130,14 @@ async def coordinator(provider: Provider, state: MemoryState, clock: list[float]
 
 def test_hotkey_rate_limit_covers_fresh_ids_without_blocking_other_miners() -> None:
     async def scenario() -> None:
-        provider = Provider()
+        provider = PausedProvider()
+        provider.pause = "create"
+        provider.release.clear()
         async with running(provider, MemoryState(), interval=60) as (_, client):
             for _ in range(2):
-                response = await request(client, KEYS[0], "GET", "/v1/pods/current")
-                assert response.status == 200
+                response = await request(client, KEYS[0], "POST", "/v1/pods/start",
+                                         {"start_id": str(uuid.uuid4())})
+                assert response.status == 202
                 await response.read()
             for _ in range(20):
                 response = await request(client, KEYS[0], "POST", "/v1/pods/start",
@@ -141,6 +145,7 @@ def test_hotkey_rate_limit_covers_fresh_ids_without_blocking_other_miners() -> N
                 assert response.status == 429 and response.headers["Retry-After"] == "60"
                 await response.read()
             assert (await request(client, KEYS[1], "GET", "/v1/pods/current")).status == 200
+            assert (await request(client, KEYS[0], "GET", "/v1/pods/current")).status == 200
             assert (await client.get("/health")).status == 200
             assert provider.creates == 0
 
@@ -150,17 +155,151 @@ def test_hotkey_rate_limit_covers_fresh_ids_without_blocking_other_miners() -> N
 def test_invalid_signatures_cannot_spend_another_hotkeys_allowance() -> None:
     async def scenario() -> None:
         async with running(Provider(), MemoryState(), interval=60) as (_, client):
+            body = json_bytes({"start_id": FIRST})
             for _ in range(3):
-                headers = hotkey_headers(KEYS[0], b"", method="GET", path="/v1/pods/current")
+                headers = hotkey_headers(KEYS[0], body, method="POST", path="/v1/pods/start")
                 headers["x-bittensor-signature"] = "0x" + "00" * 64
-                response = await client.get("/v1/pods/current", headers=headers)
+                response = await client.post("/v1/pods/start", data=body, headers=headers)
                 assert response.status == 401
                 await response.read()
             for _ in range(2):
-                assert (await request(client, KEYS[0], "GET", "/v1/pods/current")).status == 200
-            assert (await request(client, KEYS[0], "GET", "/v1/pods/current")).status == 429
+                assert (await request(client, KEYS[0], "POST", "/v1/pods/start", {"start_id": FIRST})).status in (200, 202)
+            assert (await request(client, KEYS[0], "POST", "/v1/pods/start", {"start_id": FIRST})).status == 429
 
     asyncio.run(scenario())
+
+
+def test_status_reads_do_not_spend_admission_tokens() -> None:
+    async def scenario() -> None:
+        async with running(Provider(), MemoryState(), interval=10) as (_, client):
+            for _ in range(5):
+                response = await request(client, KEYS[0], "GET", "/v1/pods/current")
+                assert response.status == 200
+                await response.read()
+            for _ in range(2):
+                response = await request(client, KEYS[0], "POST", "/v1/pods/start", {"start_id": FIRST})
+                assert response.status in (200, 202)
+                await response.read()
+
+    asyncio.run(scenario())
+
+
+def test_status_lookup_during_pending_admission_keeps_admission_exclusive(capsys: pytest.CaptureFixture[str]) -> None:
+    async def scenario() -> None:
+        provider = PausedProvider()
+        provider.pause = "create"
+        provider.release.clear()
+        async with running(provider, MemoryState(), interval=10) as (_, client):
+            posting = asyncio.create_task(request(client, KEYS[0], "POST", "/v1/pods/start",
+                                                 {"start_id": FIRST}, wait=1))
+            try:
+                assert await asyncio.to_thread(provider.entered.wait, 1)
+                response = await request(client, KEYS[0], "GET", "/v1/pods/current")
+                assert response.status == 200
+                await response.read()
+                response = await request(client, KEYS[0], "POST", "/v1/pods/start", {"start_id": SECOND})
+                assert response.status == 429 and response.headers["Retry-After"] == "1"
+                assert (await response.json())["error"] == "admission_in_progress"
+                assert provider.creates == 0
+            finally:
+                provider.release.set()
+                await (await posting).read()
+        await asyncio.to_thread(output.queue.join)
+
+    asyncio.run(scenario())
+    rows = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert any(row.get("error") == "admission_in_progress" and row["status"] == 429 for row in rows)
+
+
+def test_concurrent_status_waits_remain_globally_bounded() -> None:
+    async def scenario() -> None:
+        async with running(Provider(), MemoryState(), interval=10) as (gateway, client):
+            response = await request(client, KEYS[0], "POST", "/v1/pods/start", {"start_id": FIRST})
+            await response.read()
+            gateway.max_requests = 2
+            waiting = [asyncio.create_task(request(client, KEYS[0], "GET", "/v1/pods/current", wait=1))
+                       for _ in range(2)]
+            try:
+                async with asyncio.timeout(1):
+                    while gateway._active != 2 or gateway._authenticating:
+                        await asyncio.sleep(0.001)
+                response = await request(client, KEYS[0], "GET", "/v1/pods/current")
+                assert response.status == 429 and (await response.json())["error"] == "authentication_busy"
+                assert gateway._active == 2
+            finally:
+                for response in await asyncio.gather(*waiting):
+                    assert response.status == 200
+                    await response.read()
+            assert gateway._active == 0
+            assert (await request(client, KEYS[0], "GET", "/v1/pods/current")).status == 200
+
+    asyncio.run(scenario())
+
+
+def test_gateway_request_logs_report_outcomes_without_request_contents(capsys: pytest.CaptureFixture[str]) -> None:
+    async def scenario() -> None:
+        async with running(Provider(), MemoryState(), interval=10) as (gateway, client):
+            response = await request(client, KEYS[0], "GET", "/v1/pods/current")
+            assert response.status == 200
+            await response.read()
+            response = await request(client, KEYS[0], "POST", "/v1/pods/start",
+                                     {"start_id": FIRST, "sensitive": "secret-body"})
+            assert response.status == 400
+            await response.read()
+            response = await request(client, KEYS[0], "POST", "/v1/pods/start", {"start_id": FIRST})
+            await response.read()
+            response = await request(client, KEYS[0], "POST", "/v1/pods/start", {"start_id": SECOND})
+            assert response.status == 429
+            await response.read()
+            gateway.fence = lambda: False
+            gateway._fence_ok = False
+            gateway._fence_at = 0
+            response = await request(client, KEYS[0], "GET", "/v1/pods/current")
+            assert response.status == 503
+            await response.read()
+            response = await client.get("/health?secret-query", headers={"Authorization": "Bearer secret-header"})
+            assert response.status == 404
+            await response.read()
+        await asyncio.to_thread(output.queue.join)
+
+    asyncio.run(scenario())
+    captured = capsys.readouterr().out
+    rows = [json.loads(line) for line in captured.splitlines()]
+    success = next(row for row in rows if row.get("hotkey") == KEYS[0].ss58_address and row.get("status") == 200)
+    assert success["authenticated"] is True and success["ready"] is False
+    assert success["waiting_for"] == "allocation" and success["duration_ms"] >= 0
+    fenced = next(row for row in rows if row.get("status") == 503)
+    assert fenced["error"] == "gateway_fenced" and fenced["fence_ok"] is False
+    assert any(row.get("error") == "unknown_route" and row["status"] == 404 for row in rows)
+    assert any(row.get("error") == "request_rate_limited" and row["status"] == 429 for row in rows)
+    assert all(secret not in captured for secret in ("secret-query", "secret-header", "secret-body"))
+
+
+def test_background_provider_failures_are_logged_without_exception_messages(capsys: pytest.CaptureFixture[str]) -> None:
+    class Unavailable(Provider):
+        unavailable = False
+        failed = threading.Event()
+
+        def list(self, *, fresh: bool = False) -> list[Pod]:
+            if self.unavailable:
+                self.failed.set()
+                raise ProviderUnavailable("secret-provider-response", status=429)
+            return super().list(fresh=fresh)
+
+    async def scenario() -> None:
+        provider = Unavailable()
+        async with running(provider, MemoryState(), interval=10):
+            provider.unavailable = True
+            assert await asyncio.to_thread(provider.failed.wait, 1)
+            await asyncio.sleep(0.01)
+        await asyncio.to_thread(output.queue.join)
+
+    asyncio.run(scenario())
+    captured = capsys.readouterr().out
+    rows = [json.loads(line) for line in captured.splitlines()]
+    assert any(row.get("event") == "gateway_background_failed" and row.get("phase") == "reconcile"
+               and row["error_type"] == "ProviderUnavailable" and row["provider_status"] == 429 for row in rows)
+    assert "secret-provider-response" not in captured
 
 
 def test_cached_status_and_unauthenticated_rejection_survive_a_stalled_provider() -> None:
@@ -486,7 +625,7 @@ def test_start_waits_for_worker_readiness_without_blocking_other_miners() -> Non
     async def scenario() -> None:
         provider = PausedProvider()
         async with running(provider, MemoryState(), poll_seconds=30) as (gateway, client):
-            gateway.max_requests = 1
+            gateway.max_requests = 2
             allocation = asyncio.create_task(request(client, KEYS[0], "POST", "/v1/pods/start",
                                                      {"start_id": FIRST}, wait=20))
             scope = gateway.scope(KEYS[0].ss58_address)
@@ -845,7 +984,8 @@ def test_concurrent_allocation_and_lease_renewal_preserve_cached_grants(
         monkeypatch.setattr(time, "time", lambda: clock[0])
         keys = tuple(Keypair.create_from_uri(f"//GrantLoadMiner{number}") for number in range(128))
         async with coordinator(provider, MemoryState(), clock, keys=keys) as gateway:
-            gateway.queue.interval = gateway.request_interval = 0
+            gateway.queue.interval = 0
+            assert gateway.request_interval == 10
             gateway.poll_seconds = gateway.refresh_seconds = 0.01
 
             async def workers() -> None:
@@ -866,9 +1006,13 @@ def test_concurrent_allocation_and_lease_renewal_preserve_cached_grants(
                 clients: list[AsyncPodGatewayClient] = []
                 try:
                     statuses: list[int] = []
+                    rejections: list[str] = []
 
                     async def observed(response: httpx.Response) -> None:
                         statuses.append(response.status_code)
+                        if response.status_code == 429:
+                            await response.aread()
+                            rejections.append(response.json()["error"])
 
                     async with httpx.AsyncClient(
                         base_url=str(server.make_url("/")), trust_env=False, event_hooks={"response": [observed]},
@@ -923,6 +1067,7 @@ def test_concurrent_allocation_and_lease_renewal_preserve_cached_grants(
                         assert [reply["witness"] for reply in cached] == endpoints
                         assert provider.lookups == lookups
                         assert set(statuses) <= {200, 429}
+                        assert set(rejections) <= {"authentication_busy"}
                 finally:
                     ready.cancel()
                     await asyncio.gather(ready, return_exceptions=True)

@@ -493,12 +493,24 @@ and grants. Readiness waits request access validation from background reconcilia
 which refreshes inventory and issues access grants. Gateway liveness probes remain
 responsive during a provider outage; `admission_ready` requires loaded inventory
 and a fresh admission fence.
-Each authenticated hotkey receives two immediate requests, then one request per
-`GATEWAY_REQUEST_INTERVAL_SECONDS` (default 10). `GATEWAY_MAX_REQUESTS` bounds active
-body reads and authentication work (default 64); signature verification has four
-slots and bounded replay tracking. Each hotkey has at most one active request;
-readiness waits retain that slot after authentication. Bodies are limited to
-16 KiB with a five-second read deadline.
+Each authenticated hotkey receives two immediate admission POST requests, then one
+per `GATEWAY_REQUEST_INTERVAL_SECONDS` (default 10). An overlapping admission POST
+returns `admission_in_progress`; an exhausted admission allowance returns
+`request_rate_limited`. Allocation/status GETs, including lease renewal, do not
+consume that allowance or hold the hotkey's admission slot.
+`GATEWAY_MAX_REQUESTS` bounds active miner requests through response completion,
+including readiness waits (default 64). Signature verification has four slots and
+bounded replay tracking. Bodies are limited to 16 KiB with a five-second read deadline.
+
+The gateway always writes JSON events to stdout. `gateway_request` records route
+templates, status, fixed error codes, duration, authenticated identity, admission
+limits, fence freshness and allocation readiness. Waiting allocations identify
+the pending stage: allocation, Pod control, Pod readiness, certificate or access
+grant. Background failures record their stage and exception class; Pod control
+connections/readiness and issued grants have separate events. Headers, query
+strings, request bodies, certificates, access tokens and exception messages are
+excluded. A bounded output queue keeps a blocked log sink off request handlers;
+the next accepted event reports `dropped_logs` after overflow.
 
 Allocation replies without a wait preference advertise `GATEWAY_POLL_SECONDS`
 (default 30). Clients retain the accepted start ID across network failures and
