@@ -771,6 +771,63 @@ def test_allocation_poll_reuses_a_valid_grant_without_provider_access(
     asyncio.run(scenario())
 
 
+def test_cached_grant_selection_lookup_respects_the_request_wait() -> None:
+    class SlowSelection(MemoryState):
+        def __init__(self) -> None:
+            super().__init__()
+            self.blocked = False
+            self.entered, self.release = threading.Event(), threading.Event()
+
+        def load(self, key: str) -> Snapshot | None:
+            if self.blocked and key.startswith("pod-selection/"):
+                self.entered.set()
+                assert self.release.wait(3)
+            return super().load(key)
+
+    async def scenario() -> None:
+        provider, state = Provider(), SlowSelection()
+        async with coordinator(provider, state, [1000.0]) as gateway:
+            scope = gateway.scope(KEYS[0].ss58_address)
+            gateway.queue.enqueue(scope, FIRST, None)
+            await gateway._step()
+            gateway._publish(provider.list())
+            pod = next(iter(provider.pods.values()))
+            gateway.registry.peers[pod.id] = Peer(
+                web.WebSocketResponse(), scope, FIRST, pod.id, ready=True, certificate="offline-ca",
+            )
+            await gateway._step()
+
+            def incoming() -> web.Request:
+                headers = hotkey_headers(KEYS[0], b"", method="GET", path="/v1/pods/current")
+                headers["Prefer"] = "wait=1"
+                value = make_mocked_request("GET", "/v1/pods/current", headers=headers)
+                value._read_bytes = b""
+                return value
+
+            state.blocked = True
+            waiting = asyncio.create_task(gateway.middleware(incoming(), gateway.current))
+            try:
+                async with asyncio.timeout(1):
+                    while not state.entered.is_set():
+                        await asyncio.sleep(0.001)
+                response = await asyncio.wait_for(asyncio.shield(waiting), 1.5)
+                assert isinstance(response, web.Response)
+                body = response.text
+                assert body is not None
+                assert response.status == 503 and json.loads(body)["error"] == "control_plane_unavailable"
+            finally:
+                state.blocked = False
+                state.release.set()
+                await waiting
+            response = await gateway.middleware(incoming(), gateway.current)
+            assert isinstance(response, web.Response)
+            body = response.text
+            assert body is not None
+            assert response.status == 200 and json.loads(body)["ready"] is True
+
+    asyncio.run(scenario())
+
+
 def test_concurrent_allocation_and_lease_renewal_preserve_cached_grants(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
