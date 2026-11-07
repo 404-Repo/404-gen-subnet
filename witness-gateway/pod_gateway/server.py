@@ -351,9 +351,12 @@ class Gateway:
                 len(preference) <= 7 and preference[5:].isdigit() else 0)
         deadline = time.monotonic() + wait
         if wait and session is not None and session.phase == "allocated":
-            self._grants.pop(scope, None)
-            self._grant_due.pop(scope, None)
-            self._wake.set()
+            selection = self.allocator.selection
+            if (await self._endpoint(scope, session) is None or session.pod_id is None or selection is None or
+                    not await asyncio.to_thread(selection.selected, scope, session.start_id, session.pod_id)):
+                self._grants.pop(scope, None)
+                self._grant_due.pop(scope, None)
+                self._wake.set()
         while True:
             changed = self._changed
             endpoint = await self._endpoint(scope, session)

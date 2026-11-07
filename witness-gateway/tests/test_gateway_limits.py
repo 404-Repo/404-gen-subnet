@@ -9,6 +9,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
 from dataclasses import replace
 from functools import partial
+from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
 
@@ -28,6 +29,7 @@ from subnet_common.witness.security import capability
 from subnet_common.witness.selection import Selection
 from subnet_common.witness.state import Snapshot, WriteUncertain
 from support import MemoryState, Provider
+from witness_client.async_pods import AsyncPodGatewayClient
 from witness_client.auth import hotkey_headers
 
 KEYS = (Keypair.create_from_uri("//Alice"), Keypair.create_from_uri("//Bob"))
@@ -724,6 +726,150 @@ def test_access_history_protects_workers_after_control_loss_and_restart(legacy: 
             gateway._publish(provider.list())
             await gateway._step()
             assert provider.get(pod.id) is None
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("remaining", [31, 600])
+def test_allocation_poll_reuses_a_valid_grant_without_provider_access(
+    remaining: int, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Unavailable(Provider):
+        unavailable = False
+
+        def get(self, pod_id: str) -> Pod | None:
+            if self.unavailable:
+                raise ProviderUnavailable("Fixture lookup unavailable")
+            return super().get(pod_id)
+
+    async def scenario() -> None:
+        provider, clock = Unavailable(), [1000.0]
+        monkeypatch.setattr(time, "time", lambda: clock[0])
+        async with coordinator(provider, MemoryState(), clock) as gateway:
+            scope = gateway.scope(KEYS[0].ss58_address)
+            gateway.queue.enqueue(scope, FIRST, None)
+            await gateway._step()
+            gateway._publish(provider.list())
+            pod = next(iter(provider.pods.values()))
+            gateway.registry.peers[pod.id] = Peer(
+                web.WebSocketResponse(), scope, FIRST, pod.id, ready=True, certificate="offline-ca",
+            )
+            await gateway._step()
+            grant = await gateway._endpoint(scope, gateway._cached(scope))
+            assert grant is not None
+            grant["expires"] = int(clock[0]) + remaining
+            provider.unavailable = True
+
+            incoming = make_mocked_request("GET", "/v1/pods/current", headers={"Prefer": "wait=20"})
+            response = await gateway._reply(incoming, scope, gateway._cached(scope))
+            body = response.text
+            assert body is not None
+            result = json.loads(body)
+            assert result["ready"] is True and result["witness"] == grant
+            assert provider.creates == 1
+
+    asyncio.run(scenario())
+
+
+def test_concurrent_allocation_and_lease_renewal_preserve_cached_grants(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import httpx
+
+    class Counted(Provider):
+        lookups = 0
+
+        def get(self, pod_id: str) -> Pod | None:
+            self.lookups += 1
+            return super().get(pod_id)
+
+    async def scenario() -> None:
+        provider, clock = Counted(), [1000.0]
+        monkeypatch.setattr(time, "time", lambda: clock[0])
+        keys = tuple(Keypair.create_from_uri(f"//GrantLoadMiner{number}") for number in range(128))
+        async with coordinator(provider, MemoryState(), clock, keys=keys) as gateway:
+            gateway.queue.interval = gateway.request_interval = 0
+            gateway.poll_seconds = gateway.refresh_seconds = 0.01
+
+            async def workers() -> None:
+                while True:
+                    for pod in gateway._pods.values():
+                        scope = pod.scope()
+                        assert scope is not None
+                        if pod.id not in gateway.registry.peers:
+                            gateway.registry.peers[pod.id] = Peer(
+                                web.WebSocketResponse(), scope, pod.markers["WITNESS_START_ID"], pod.id,
+                                ready=True, certificate="offline-ca",
+                            )
+                    gateway._wake.set()
+                    await asyncio.sleep(0.005)
+
+            async with TestClient(TestServer(gateway.application())) as server:
+                ready = asyncio.create_task(workers())
+                clients: list[AsyncPodGatewayClient] = []
+                try:
+                    statuses: list[int] = []
+
+                    async def observed(response: httpx.Response) -> None:
+                        statuses.append(response.status_code)
+
+                    async with httpx.AsyncClient(
+                        base_url=str(server.make_url("/")), trust_env=False, event_hooks={"response": [observed]},
+                    ) as http:
+                        clients = [AsyncPodGatewayClient(http, key, tmp_path, 30) for key in keys]
+                        async with asyncio.timeout(2):
+                            while True:
+                                response = await server.get("/health")
+                                if (await response.json())["admission_ready"]:
+                                    break
+                                await asyncio.sleep(0.01)
+                        slots = asyncio.Semaphore(16)
+
+                        async def allocate(number: int) -> dict[str, object]:
+                            async with slots:
+                                return await clients[number]._allocation_json(
+                                    "POST", "/v1/pods/start", {"start_id": str(uuid.uuid4())},
+                                    deadline=time.monotonic() + 30,
+                                )
+
+                        async def current(number: int) -> dict[str, object]:
+                            async with slots:
+                                return await clients[number]._allocation_json(
+                                    "GET", "/v1/pods/current", deadline=time.monotonic() + 30,
+                                )
+
+                        allocated = await asyncio.gather(*(allocate(number) for number in range(64)))
+                        assert all(reply["ready"] is True for reply in allocated)
+                        lookups = provider.lookups
+                        cached = await asyncio.gather(*(current(number) for number in range(64)))
+                        assert [reply["witness"] for reply in cached] == [reply["witness"] for reply in allocated]
+                        assert provider.lookups == lookups and provider.creates == 64
+
+                        clock[0] += 580
+                        concurrent = await asyncio.gather(*(
+                            operation for number in range(64)
+                            for operation in (current(number), allocate(number + 64))
+                        ))
+                        renewed = concurrent[::2] + concurrent[1::2]
+                        assert all(reply["ready"] is True for reply in renewed)
+                        endpoints = [reply["witness"] for reply in renewed]
+                        for number, endpoint in enumerate(endpoints):
+                            assert isinstance(endpoint, dict)
+                            assert endpoint["expires"] == int(clock[0]) + 600
+                            if number < 64:
+                                previous = allocated[number]["witness"]
+                                assert isinstance(previous, dict)
+                                assert endpoint["pod_id"] == previous["pod_id"]
+                        assert provider.creates == 128 and len(provider.pods) == 128
+                        lookups = provider.lookups
+                        cached = await asyncio.gather(*(current(number) for number in range(128)))
+                        assert [reply["witness"] for reply in cached] == endpoints
+                        assert provider.lookups == lookups
+                        assert set(statuses) <= {200, 429}
+                finally:
+                    ready.cancel()
+                    await asyncio.gather(ready, return_exceptions=True)
+                    await asyncio.gather(*(client.aclose() for client in clients))
 
     asyncio.run(scenario())
 
