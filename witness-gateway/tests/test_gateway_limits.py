@@ -1443,3 +1443,37 @@ def test_cold_gateway_preserves_existing_workers_until_its_round_is_installed(wa
                 assert provider.list() == originals and provider.creates == len(originals)
 
     asyncio.run(scenario())
+
+
+def test_unchanged_round_refresh_does_not_wait_for_busy_pod_lifecycle() -> None:
+    from test_rounds import Competition, publication
+
+    async def scenario() -> None:
+        competition = Competition(publication(number=1))
+        await competition.controller.refresh()
+        async with coordinator(Provider(), MemoryState(), [time.time()]) as gateway:
+            base = gateway.allocator.spec
+            gateway.rounds = competition.controller
+            gateway.spec_for_round = lambda frozen: replace(
+                base, env={"WITNESS_ROUND_INPUTS": frozen.model_dump_json()},
+            )
+            await gateway.round_changed()
+            entered, release = threading.Event(), threading.Event()
+
+            def busy() -> None:
+                entered.set()
+                assert release.wait(5)
+
+            work = asyncio.get_running_loop().run_in_executor(gateway._worker, busy)
+            assert await asyncio.to_thread(entered.wait, 2)
+            try:
+                for _ in range(3):
+                    competition.now[0] += 29
+                    await competition.controller.refresh()
+                    await asyncio.wait_for(gateway.round_changed(), 0.5)
+                    gateway._require_round()
+            finally:
+                release.set()
+                await work
+
+    asyncio.run(scenario())
