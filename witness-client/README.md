@@ -61,13 +61,14 @@ a ChatGPT subscription. Submitted results and model recordings belong to the
 assigned miner and round.
 
 The gateway authenticates registration and returns the assigned Pod's public IP,
-mapped TCP port, verified TLS name and scoped access grant. Calls, proofs,
+mapped TCP port and verified TLS name. Calls, proofs,
 call state and rendering use that Pod directly. An active assignment is
 reused across transport reconnects and client restarts. Gateway control traffic
 does not carry generation payloads.
 
 The first operation waits for the assigned Pod to become ready. Subsequent
-operations use that Pod directly; renewing its access grant keeps the same Pod.
+operations use that Pod directly without gateway access renewal. The Pod
+authenticates the signed hotkey assigned at allocation.
 If startup exceeds `delivery_timeout`, reconnecting discovers the current
 allocation through the authenticated gateway. The SDK keeps no allocation,
 job, proof, response, result or receipt files for recovery. A confirmed terminal
@@ -163,7 +164,7 @@ the SDK.
 ### Replacing an async Pod
 
 Call `await client.replace_pod()` from the live runner to replace the assigned
-Pod and wait for its direct connection grant. If no Pod exists, it creates one.
+Pod and wait for its direct connection. If no Pod exists, it creates one.
 If allocation or replacement is already pending, it joins that operation.
 Concurrent calls for the same observed allocation share a replacement intent.
 

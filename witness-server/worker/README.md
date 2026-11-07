@@ -2,7 +2,7 @@
 
 The worker runs on an ordinary CPU Pod with a direct authenticated TLS service on
 `8000/tcp`. The gateway supplies the miner with its public mapped endpoint,
-certificate authority and scoped allocation grant. Outbound gateway connections
+certificate authority. The Pod authenticates its assigned hotkey. Outbound gateway connections
 carry lifecycle control. The Pod owns per-call state and relays the miner's TLS connection to OpenAI. The verifier checks the
 handshake, credential proof, request and response.
 
@@ -49,8 +49,12 @@ Content-addressed completed evidence lives under `evidence/v1/`. The Pod returns
 expected hashes and public evidence URLs through authenticated TLS;
 the miner downloads saved bytes directly from R2. Private journals, pending
 spools, allocation capabilities and TLS keys remain private. The direct listener
-verifies the assigned hotkey and allocation grant, and checks the durable R2
-selection fence before capturing and authorizing new calls.
+verifies signed requests from the assigned hotkey and checks the durable R2
+selection fence before capturing and authorizing new calls. It ignores bearer
+authorization and does not recheck miner registration. `WITNESS_ROUND_END` is
+the fixed generation deadline passed at allocation; an empty value means the
+round explicitly has no deadline. Generation, rendering and saved-result
+operations do not require a running gateway or renewed permission.
 
 ## Rendering and artifact storage
 

@@ -68,7 +68,6 @@ class PodGatewayClient:
         self._start_id: str | None = None
         self._allocation = SignedTransport(http, hotkey, delivery_timeout)
         self._direct: SignedTransport | None = None
-        self._expires = 0
         self._connections: list[httpx.Client] = []
         self._snapshots: dict[str, Snapshot] = {}
         self._artifacts = ArtifactClient()
@@ -147,9 +146,7 @@ class PodGatewayClient:
             return False
         if (endpoint.get("pod_id") != session.get("pod_id") or endpoint.get("start_id") != session.get("start_id")
                 or endpoint.get("server_name") != "witness.internal" or type(endpoint.get("port")) is not int
-                or not 1 <= endpoint["port"] <= 65535 or type(endpoint.get("expires")) is not int
-                or not isinstance(endpoint.get("access"), str) or not isinstance(endpoint.get("certificate"), str)
-                or endpoint["expires"] <= time.time()):
+                or not 1 <= endpoint["port"] <= 65535 or not isinstance(endpoint.get("certificate"), str)):
             raise WitnessError("Invalid direct witness allocation", source="gateway")
         address = str(ipaddress.ip_address(str(endpoint["address"])))
         host = f"[{address}]" if ":" in address else address
@@ -159,16 +156,15 @@ class PodGatewayClient:
                             limits=httpx.Limits(max_connections=None, max_keepalive_connections=20))
         service = SignedTransport(
             http, self.hotkey, self.delivery_timeout,
-            headers={"Authorization": "Bearer " + endpoint["access"]},
             tls=tls, server_name="witness.internal",
         )
         self._connections.append(http)
-        self._direct, self._expires = service, endpoint["expires"]
+        self._direct = service
         self._start_id = str(uuid.UUID(str(session["start_id"])))
         self.round_number = round_number
         return True
 
-    def ensure_pod(self, *, deadline: float | None = None, renew: bool = False) -> str:
+    def ensure_pod(self, *, deadline: float | None = None, expected_round: str | None = None) -> str:
         if deadline is None:
             deadline = time.monotonic() + self.delivery_timeout
         if not self._pod_lock.acquire(timeout=max(0, deadline - time.monotonic())):
@@ -176,27 +172,22 @@ class PodGatewayClient:
         try:
             if time.monotonic() >= deadline:
                 raise WitnessError("Pod connection wait timed out", source="gateway", code="capture_timeout")
-            if self._direct is not None and time.time() < self._expires - 30:
+            if self._direct is not None:
                 assert self._start_id is not None
                 return self._start_id
-            expected_round = self.round_number if renew else None
-            reply = None
-            if renew and self._start_id is not None:
-                try:
-                    reply = self._allocation_json("GET", f"/v1/pods/{self._start_id}",
-                                                  deadline=deadline, expected_round=expected_round)
-                except WitnessError as error:
-                    if error.code != "session_not_found":
-                        raise
-                if reply is not None:
-                    previous = reply.get("session")
-                    if not isinstance(previous, dict) or previous.get("phase") in ("rejected", "lost", "retired"):
-                        reply = None
-            if reply is None:
-                reply = self._allocation_json("GET", "/v1/pods/current", deadline=deadline,
-                                              expected_round=expected_round)
+            reply = self._allocation_json("GET", "/v1/pods/current", deadline=deadline,
+                                          expected_round=expected_round)
             allocation = self._allocation_request if self._allocation_round == reply.get("round") else None
             current = reply.get("session")
+            if (isinstance(current, dict) and current.get("phase") == "allocated"
+                    and current.get("start_id") == self._start_id):
+                identity = (f"witness-pod-replacement/v1/{self.http.base_url}/{reply['round']}/"
+                            f"{self.hotkey.ss58_address}/{self._start_id}")
+                allocation = {"start_id": str(uuid.uuid5(uuid.NAMESPACE_URL, identity)), "replaces": self._start_id}
+                self._allocation_request, self._allocation_round = allocation, str(reply["round"])
+                reply = self._allocation_json("POST", "/v1/pods/start", allocation,
+                                              deadline=deadline, expected_round=expected_round)
+                current = reply.get("session")
             while isinstance(current, dict) and current.get("phase") == "retiring":
                 if allocation is not None and allocation["start_id"] == current.get("start_id"):
                     allocation = None
@@ -260,14 +251,14 @@ class PodGatewayClient:
             self._pod_lock.release()
 
     def _service(self, *, deadline: float | None = None) -> SignedTransport:
-        self.ensure_pod(deadline=deadline, renew=True)
+        self.ensure_pod(deadline=deadline, expected_round=self.round_number)
         assert self._direct is not None
         return self._direct
 
     def _invalidate_for(self, code: object) -> bool:
-        if code not in ("allocation_access_expired", "pod_not_selected"):
+        if code != "pod_not_selected":
             return False
-        self._expires = 0
+        self._direct = None
         return True
 
     def _request_once(
@@ -277,8 +268,8 @@ class PodGatewayClient:
         service = self._service(deadline=deadline)
         try:
             return service._request_once(method, path, body, limit=limit, deadline=deadline)
-        except httpx.TransportError:
-            self._expires = 0
+        except (httpx.ConnectError, httpx.ConnectTimeout):
+            self._direct, self._start_id = None, None
             raise
         except WitnessError as error:
             if not self._invalidate_for(error.code):
@@ -299,18 +290,18 @@ class PodGatewayClient:
         service = self._service()
         try:
             response = service.send(request)
-            if response.status_code in (401, 409):
-                try:
-                    error = response.json()
-                except ValueError:
-                    pass
-                else:
-                    if isinstance(error, dict):
-                        self._invalidate_for(error.get("error"))
-            return response
-        except httpx.TransportError:
-            self._expires = 0
+        except (httpx.ConnectError, httpx.ConnectTimeout):
+            self._direct, self._start_id = None, None
             raise
+        if response.status_code in (401, 409):
+            try:
+                error = response.json()
+            except ValueError:
+                pass
+            else:
+                if isinstance(error, dict):
+                    self._invalidate_for(error.get("error"))
+        return response
 
     def _download(self, link: object, limit: int) -> bytes:
         return self._artifacts.download(link, limit, delivery_timeout=self.delivery_timeout)

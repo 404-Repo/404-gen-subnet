@@ -122,7 +122,6 @@ class PodService:
             return httpx.Response(
                 200, content=self.body if request.url.path == "/request.json" else self.response
             )
-        assert request.headers["authorization"] == "Bearer pod-access"
         path = request.url.raw_path.decode()
         payload = "\n".join(
             [
@@ -197,7 +196,6 @@ class PodService:
             headers={"Authorization": "Bearer pod-access"},
             server_name="witness.internal",
         )
-        client._gateway._expires = int(time.time()) + 3600
         client._gateway._start_id = str(uuid.uuid4())
         client._gateway.round_number = "test-0"
         client._gateway._artifacts.http = httpx.AsyncClient(
@@ -319,7 +317,6 @@ def test_async_create_stream_request_ids_and_sync_restart_reuse_saved_evidence(
                 headers={"Authorization": "Bearer pod-access"},
                 server_name="witness.internal",
             )
-            sync._gateway._expires = int(time.time()) + 3600
             sync._gateway._start_id = str(uuid.uuid4())
             sync._gateway._artifacts.http.close()
             sync._gateway._artifacts.http = httpx.Client(
@@ -590,7 +587,7 @@ def test_async_stream_detects_truncation_and_close() -> None:
     asyncio.run(run())
 
 
-def test_cancelled_pod_startup_recovers_the_remote_allocation_and_renderer_grant(
+def test_cancelled_pod_startup_recovers_the_remote_allocation_and_renderer_connection(
     config: WitnessConfig,
     monkeypatch: pytest.MonkeyPatch,
     tls_context: tuple[object, Path],
@@ -607,7 +604,6 @@ def test_cancelled_pod_startup_recovers_the_remote_allocation_and_renderer_grant
         starts: list[str] = []
         session: dict[str, object] | None = None
         block_poll = True
-        expired_render = True
         connections: list[httpx.AsyncClient] = []
         http_type = httpx.AsyncClient
 
@@ -627,7 +623,7 @@ def test_cancelled_pod_startup_recovers_the_remote_allocation_and_renderer_grant
             return result
 
         async def handler(request: httpx.Request) -> httpx.Response:
-            nonlocal session, expired_render
+            nonlocal session
             assert request.headers["x-bittensor-hotkey"] == key.ss58_address
             if request.url.host == "witness.test":
                 assert "authorization" not in request.headers
@@ -646,7 +642,6 @@ def test_cancelled_pod_startup_recovers_the_remote_allocation_and_renderer_grant
                     session["phase"] = "allocated"
                 return httpx.Response(200, json=reply())
             assert request.url.host == "192.0.2.1"
-            assert request.headers["authorization"] == "Bearer pod-access"
             assert request.extensions["sni_hostname"] == "witness.internal"
             assert request.url.raw_path == b"/v1/render/grid?thetas=30&lighting=neutral"
             assert request.extensions["timeout"] == {
@@ -668,9 +663,6 @@ def test_cancelled_pod_startup_recovers_the_remote_allocation_and_renderer_grant
             assert key.verify(
                 payload.encode(), bytes.fromhex(request.headers["x-bittensor-signature"][2:])
             )
-            if expired_render:
-                expired_render = False
-                return httpx.Response(401, json={"error": "allocation_access_expired"})
             return httpx.Response(200, content=b"fixture PNG")
 
         def http_client(*args: Any, **kwargs: Any) -> httpx.AsyncClient:
@@ -702,11 +694,8 @@ def test_cancelled_pod_startup_recovers_the_remote_allocation_and_renderer_grant
                     url = "https://witness.internal/v1/render/grid?thetas=30&lighting=neutral"
                     assert (
                         await renderer.post(url, json={"source": "fixture source"}, timeout=7)
-                    ).status_code == 401
-                    assert (
-                        await renderer.post(url, json={"source": "fixture source"}, timeout=7)
                     ).content == b"fixture PNG"
-                assert len(restarted._connections) == 2
+                assert len(restarted._connections) == 1
             finally:
                 await restarted.aclose()
         assert len(starts) == 1 and all(http.is_closed for http in connections)

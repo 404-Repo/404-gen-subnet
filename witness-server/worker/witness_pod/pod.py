@@ -20,7 +20,7 @@ from urllib.parse import urlsplit
 
 from subnet_common.witness.auth import AuthRejected
 from subnet_common.witness.models import Scope, identifier, json_bytes, object_dict
-from subnet_common.witness.rounds import RoundInputs, RoundPolicy
+from subnet_common.witness.rounds import RoundInputs
 from subnet_common.witness.selection import Selection
 from subnet_common.witness.state import WriteUncertain
 from websockets.sync.client import connect
@@ -90,9 +90,9 @@ class PodRuntime:
         )
         if round_inputs is not None and round_inputs.round != scope.round:
             raise ValueError("Frozen inputs belong to another round")
+        if round_inputs is not None and round_inputs.generation_deadline_block is not None and round_end is None:
+            raise ValueError("A finite generation schedule requires a fixed round deadline")
         self.round_inputs = round_inputs
-        self.round_policy: RoundPolicy | None = None
-        self.policy_until = 0.0
         self.storage_prefix = "" if round_inputs is None else round_inputs.storage_prefix
         self.spool, self.max_captures, self.idle_seconds = (
             spool,
@@ -147,22 +147,8 @@ class PodRuntime:
 
     def require_generation(self) -> None:
         with self.lock:
-            if self.round_inputs is not None:
-                if self.round_policy is None or self.clock() >= self.policy_until:
-                    raise AuthRejected("round_policy_stale", 503)
-                self.round_policy.require(self.round_inputs, time.time())
             if self.round_end is not None and time.time() >= self.round_end:
                 raise AuthRejected("round_closed", 403)
-
-    def install_policy(self, value: object, pod_id: str, start_id: str) -> None:
-        with self.lock:
-            self.round_policy = None
-            self.policy_until = 0
-            if pod_id != self.pod_id or start_id != self.start_id or value is None:
-                return
-            policy = RoundPolicy.model_validate(value)
-            self.round_policy = policy
-            self.policy_until = self.clock() + max(0, min(120, policy.expires_at - time.time()))
 
     def read_evidence(self, key: str) -> bytes | None:
         return self.evidence.get(self.storage_prefix + key)
@@ -691,8 +677,7 @@ class PodRuntime:
                                     with self.lock:
                                         self.accepting = not self.draining
                                 elif kind == "round_policy":
-                                    self.install_policy(value.get("policy"), str(value.get("pod_id")),
-                                                        str(value.get("start_id")))
+                                    pass  # Older gateways may still send policy messages.
                                 elif kind == "retired" and self.tick():
                                     return
                                 elif kind == "drain":
@@ -778,7 +763,7 @@ def main() -> None:
         proof_hash=hashlib.sha256(
             (PARAMETERS / "verifying.bin").read_bytes()
         ).hexdigest(),
-        round_end=None,
+        round_end=int(os.environ["WITNESS_ROUND_END"]) if os.environ.get("WITNESS_ROUND_END") else None,
         spool=Path(os.environ.get("WITNESS_SPOOL", "/var/lib/witness/spool")),
         max_captures=int(os.environ.get("WITNESS_MAX_CAPTURES", "32")),
         idle_seconds=int(os.environ.get("WITNESS_IDLE_SECONDS", "1800")),

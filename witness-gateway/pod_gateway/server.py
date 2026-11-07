@@ -10,6 +10,7 @@ import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
+from dataclasses import replace
 from functools import partial
 from typing import TypeVar
 
@@ -18,7 +19,7 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 from subnet_common.witness.auth import Authenticator, AuthRejected
 from subnet_common.witness.models import Pod, PodSpec, Scope, Session, identifier, object_dict
 from subnet_common.witness.rounds import RoundInputs
-from subnet_common.witness.security import capability, miner_access
+from subnet_common.witness.security import capability
 from subnet_common.witness.state import StateConflict, WriteUncertain
 
 from .admission import CapacityReached, CreateDeferred, PendingStart, StartQueue
@@ -29,7 +30,8 @@ from .rounds import RoundController
 from .runpod import ProviderUnavailable
 
 T = TypeVar("T")
-STARTUP_SECONDS = 600
+# Older SDKs require these fields to attach. They are not credentials.
+LEGACY_ACCESS_EXPIRES = 253402300799
 
 
 class Start(BaseModel):
@@ -77,10 +79,7 @@ class Gateway:
         self._inventory: list[Pod] = []
         self._current: dict[Scope, Session] = {}
         self._sessions: dict[tuple[Scope, str], Session] = {}
-        self._grants: dict[Scope, dict[str, object]] = {}
         self._due: dict[Scope, float] = {}
-        self._startup_due: dict[Scope, float] = {}
-        self._grant_due: dict[Scope, float] = {}
         self._retiring: set[str] = set()
         self._wake = asyncio.Event()
         self._changed = asyncio.Event()
@@ -126,6 +125,10 @@ class Gateway:
         if inputs is not None:
             assert self.spec_for_round is not None
             spec = self.spec_for_round(inputs)
+            spec = replace(spec, env={
+                **spec.env,
+                "WITNESS_ROUND_END": "" if self.rounds.round_end is None else str(self.rounds.round_end),
+            })
             changed = inputs.round != self.round
             if changed:
                 await self._write(partial(self.queue.rollover, inputs.round))
@@ -134,22 +137,7 @@ class Gateway:
                     self.allocator.spec = spec
                     self.round = inputs.round
             await self._run(self._worker, use_round)
-        await self.publish_policy()
         self._wake.set()
-
-    async def publish_policy(self) -> None:
-        for peer in list(self.registry.peers.values()):
-            if not peer.socket.closed:
-                with suppress(ConnectionError, RuntimeError):
-                    await self._send_policy(peer)
-
-    async def _send_policy(self, peer: Peer) -> None:
-        if self.rounds is not None:
-            policy = self.rounds.policy if self._live() else None
-            await peer.socket.send_json({
-                "type": "round_policy", "pod_id": peer.pod_id, "start_id": peer.start_id,
-                "policy": None if policy is None else policy.model_dump(mode="json"),
-            })
 
     def _control_scope(self, request: web.Request) -> Scope:
         pod = self._pods.get(request.headers.get("x-witness-pod", ""))
@@ -401,16 +389,6 @@ class Gateway:
         wait = (min(20, int(preference[5:])) if preference.startswith("wait=") and
                 len(preference) <= 7 and preference[5:].isdigit() else 0)
         deadline = time.monotonic() + wait
-        if wait and session is not None and session.phase == "allocated":
-            selection = self.allocator.selection
-            if (await self._endpoint(scope, session) is None or session.pod_id is None or selection is None or
-                    not await asyncio.wait_for(
-                        asyncio.to_thread(selection.selected, scope, session.start_id, session.pod_id),
-                        max(0, deadline - time.monotonic()),
-                    )):
-                self._grants.pop(scope, None)
-                self._grant_due.pop(scope, None)
-                self._wake.set()
         while True:
             changed = self._changed
             endpoint = await self._endpoint(scope, session)
@@ -435,7 +413,7 @@ class Gateway:
             waiting_for = ("allocation" if session is None or session.phase != "allocated" else
                            "pod_control" if peer is None else
                            "pod_readiness" if not self.registry.ready(peer.pod_id) else
-                           "pod_certificate" if peer.certificate is None else "access_grant")
+                           "pod_certificate" if peer.certificate is None else "pod_endpoint")
         request["gateway_allocation"] = {
             "phase": None if session is None else session.phase, "ready": endpoint is not None,
             "pod_id": None if session is None else session.pod_id,
@@ -513,12 +491,17 @@ class Gateway:
         peer = self.registry.peers.get(session.pod_id)
         if peer is None or not self.registry.ready(session.pod_id) or peer.certificate is None:
             return None
-        grant = self._grants.get(scope)
-        if (grant is None or grant.get("pod_id") != session.pod_id or grant.get("start_id") != session.start_id or
-                grant.get("certificate") != peer.certificate or not isinstance(grant.get("expires"), int) or
-                int(str(grant["expires"])) <= time.time() + 30):
+        pod = self._pods.get(session.pod_id)
+        if (pod is None or not pod.matches(scope, session) or pod.status != "RUNNING" or
+                pod.lifecycle != "active"):
             return None
-        return grant
+        endpoint = peer.endpoint or pod.tcp.get(self.allocator.spec.port)
+        if endpoint is None:
+            return None
+        address, port = endpoint
+        return {"address": address, "port": port, "server_name": "witness.internal",
+                "certificate": peer.certificate, "pod_id": session.pod_id, "start_id": session.start_id,
+                "access": "hotkey", "expires": LEGACY_ACCESS_EXPIRES}
 
     def _selected(self, scope: Scope, start_id: str, pod_id: str) -> bool:
         session, pod = self._current.get(scope), self._pods.get(pod_id)
@@ -526,7 +509,6 @@ class Gateway:
                 session.pod_id == pod_id and pod is not None and pod.status == "RUNNING" and pod.lifecycle == "active")
 
     def _publish(self, inventory: list[Pod]) -> None:
-        previous = self._current
         grouped: dict[Scope, list[Pod]] = {}
         self._inventory = []
         for pod in inventory:
@@ -540,21 +522,14 @@ class Gateway:
         for scope, pods in grouped.items():
             winner = self.allocator.winner(pods)
             assert winner is not None
-            if scope not in previous or previous[scope].pod_id != winner.id:
-                self._grant_due.pop(scope, None)
-                self._startup_due.pop(scope, None)
             self._current[scope] = winner.session()
             for pod in pods:
                 key = (scope, pod.markers["WITNESS_START_ID"])
                 session = self._sessions.get(key)
                 if session is None or pod.id == winner.id:
                     self._sessions[key] = pod.session()
-        self._grants = {scope: grant for scope, grant in self._grants.items()
-                        if scope in self._current and grant.get("pod_id") == self._current[scope].pod_id}
         retained = set(grouped) | {scope for scope, _ in self.queue.entries()}
         self._due = {scope: at for scope, at in self._due.items() if scope in retained}
-        self._startup_due = {scope: at for scope, at in self._startup_due.items() if scope in grouped}
-        self._grant_due = {scope: at for scope, at in self._grant_due.items() if scope in grouped}
         self._retiring.intersection_update(self._pods)
 
     def _advance(self, scope: Scope, entry: PendingStart) -> Session | None:
@@ -579,34 +554,6 @@ class Gateway:
         if operation is not None and operation.session.start_id == entry.start_id:
             return self.allocator.reconcile(scope)
         return self.allocator.acquire(scope, entry.start_id, replaces=entry.replaces)
-
-    def _grant(self, scope: Scope, session: Session, certificate: str) -> dict[str, object] | None:
-        if session.pod_id is None or not self.fence():
-            return None
-        pod = self.allocator.provider.get(session.pod_id)
-        selection = self.allocator.selection
-        if (pod is None or not pod.matches(scope, session) or pod.lifecycle != "active" or pod.status != "RUNNING" or
-                self.allocator.spec.port not in pod.tcp or
-                not self.allocator.selected(scope, session.start_id, session.pod_id) or selection is None or
-                not selection.grant(pod)):
-            return None
-        address, port = pod.tcp[self.allocator.spec.port]
-        expires = int(time.time()) + 600
-        return {"address": address, "port": port, "server_name": "witness.internal", "certificate": certificate,
-                "pod_id": session.pod_id, "start_id": session.start_id,
-                "access": miner_access(capability(self.secret, scope, session.start_id), scope,
-                                       session.start_id, session.pod_id, expires), "expires": expires}
-
-    def _expire_unserved(self, scope: Scope, session: Session) -> Session | None:
-        selection = self.allocator.selection
-        if session.pod_id is None or selection is None or not self.fence():
-            return None
-        pod = self.allocator.provider.get(session.pod_id)
-        if (pod is None or not pod.matches(scope, session) or
-                self.allocator.clock() - pod.epoch_ns / 1_000_000_000 < STARTUP_SECONDS or
-                not selection.revoke_unserved(pod)):
-            return None
-        return self.allocator.retire(scope, session.start_id, pod.id, drain=False)
 
     async def _fences(self) -> None:
         while True:
@@ -710,25 +657,6 @@ class Gateway:
                                               rejected=result.phase == "rejected"))
                     self._progress.pop(scope, None)
             break
-        for scope, session in sorted(self._current.items(), key=lambda item: self._startup_due.get(item[0], 0)):
-            if not round_ready:
-                break
-            if (scope in self._grants or self.queue.pending(scope) is not None or
-                    self._startup_due.get(scope, 0) > now):
-                continue
-            starting_pod = self._pods.get(session.pod_id or "")
-            if starting_pod is None or now - starting_pod.epoch_ns / 1_000_000_000 < STARTUP_SECONDS:
-                continue
-            self._startup_due[scope] = now + self.poll_seconds
-            try:
-                expired = await self._run(self._worker, partial(self._expire_unserved, scope, session))
-            except Exception as error:  # noqa: BLE001 - retry this worker without delaying other workers' access
-                output.write("gateway_background_failed", phase="expire_unserved", hotkey=scope.hotkey,
-                             pod_id=session.pod_id, error_type=type(error).__name__)
-                break
-            if expired is not None:
-                self._current[scope] = self._sessions[scope, session.start_id] = expired
-            break
         for scope, session in self._current.items():
             if not round_ready:
                 continue
@@ -749,22 +677,6 @@ class Gateway:
                 self._due[scope] = now + self.poll_seconds
                 await self._run(self._worker, partial(self.allocator.reconcile, scope))
                 break
-        for scope, session in self._current.items():
-            peer = self.registry.peers.get(session.pod_id or "")
-            if (peer is None or not self.registry.ready(session.pod_id or "") or peer.certificate is None or
-                    self._grant_due.get(scope, 0) > now):
-                continue
-            grant = self._grants.get(scope)
-            if (grant is not None and grant.get("certificate") == peer.certificate and
-                    int(str(grant["expires"])) > time.time() + 60):
-                continue
-            self._grant_due[scope] = now + self.poll_seconds
-            result_grant = await self._run(self._worker, partial(self._grant, scope, session, peer.certificate))
-            if result_grant is not None:
-                self._grants[scope] = result_grant
-                output.write("gateway_grant_issued", hotkey=scope.hotkey, pod_id=session.pod_id,
-                             start_id=session.start_id, expires=result_grant["expires"])
-            return
 
     async def _lifecycle(self, _: web.Application) -> AsyncIterator[None]:
         await self._run(self._journal, self.queue.load)
@@ -791,16 +703,21 @@ class Gateway:
             request.headers.get("Authorization", ""), "Bearer " + token
         ):
             raise AuthRejected("invalid_pod_capability")
-        pod = self._pods.get(pod_id)
+        expected = self._pods.get(pod_id)
+        pod = await self._run(self._worker, partial(self.allocator.provider.get, pod_id))
         if (
             pod is None
-            or pod.scope() != scope
+            or expected is None
             or pod.markers["WITNESS_START_ID"] != start_id
+            or not pod.matches(scope, expected.session())
         ):
             raise AuthRejected("pod_identity_changed", 409)
         if pod.lifecycle == "pending" or (
             pod.lifecycle == "active" and pod.status != "RUNNING"
         ):
+            raise AuthRejected("pod_starting", 503)
+        endpoint = pod.tcp.get(self.allocator.spec.port)
+        if endpoint is None and self._selected(scope, start_id, pod_id):
             raise AuthRejected("pod_starting", 503)
         if pod_id in self.registry.peers or pod_id in self._connecting:
             raise AuthRejected("pod_already_connected", 409)
@@ -810,7 +727,7 @@ class Gateway:
             await socket.prepare(request)
         finally:
             self._connecting.discard(pod_id)
-        peer = Peer(socket, scope, start_id, pod_id)
+        peer = Peer(socket, scope, start_id, pod_id, endpoint=endpoint)
         self.registry.peers[pod_id] = peer
         output.write("gateway_pod_connected", hotkey=scope.hotkey, pod_id=pod_id, start_id=start_id)
         reported_ready: bool | None = None
@@ -832,7 +749,6 @@ class Gateway:
                 self._wake.set()
 
         try:
-            await self._send_policy(peer)
             if not self._live():
                 return socket
             selected = self._selected(scope, start_id, pod_id)

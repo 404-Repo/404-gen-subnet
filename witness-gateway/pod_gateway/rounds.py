@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import io
+import json
 import re
 import time
 from collections.abc import Awaitable, Callable
@@ -45,7 +46,6 @@ class RoundController:
         self, *, git: GitHubClient, repo: str, branch: str, objects: Objects, pins: StateStore,
         download: Callable[[str], Awaitable[bytes]], head: Callable[[], Awaitable[tuple[int, float]]],
         ttl: float = 30, clock: Callable[[], float] = time.time,
-        on_close: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         if (re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,199}", branch) is None
                 or ".." in branch or not 5 <= ttl <= 120):
@@ -53,7 +53,7 @@ class RoundController:
         self.git, self.repository, self.branch = git, repository(repo), branch
         self.objects, self.pins, self.download, self.head = objects, pins, download, head
         self.ttl, self.clock = ttl, clock
-        self.on_close = on_close
+        self.round_end: int | None = 0
         self.inputs: RoundInputs | None = None
         self.policy: RoundPolicy | None = None
         self._resolved: dict[str, RoundInputs] = {}
@@ -148,8 +148,27 @@ class RoundController:
             raise StateConflict("Frozen round inputs are unavailable")
         retained = RoundInputs.model_validate_json(current.data)
         if retained.fingerprint != inputs.fingerprint:
-            raise ValueError("Published inputs changed for an existing round; publish a new round")
+            unchanged = inputs.model_copy(update={"generation_deadline_block": retained.generation_deadline_block})
+            if retained.fingerprint != unchanged.fingerprint:
+                raise ValueError("Published inputs changed for an existing round; publish a new round")
+            self.pins.save(key, inputs.model_dump_json().encode(), current.etag)
+            return inputs
         return retained
+
+    def _fixed_end(self, inputs: RoundInputs, end: int) -> int:
+        key = self._pin_key(inputs.round).removesuffix(".json") + f"/deadline-{inputs.generation_deadline_block}.json"
+        saved = self.pins.load(key)
+        if saved is None:
+            try:
+                saved = self.pins.save(key, json_bytes(end), None)
+            except StateConflict:
+                saved = self.pins.load(key)
+        if saved is None:
+            raise StateConflict("Fixed round deadline is unavailable")
+        value = json.loads(saved.data)
+        if type(value) is not int:
+            raise ValueError("Invalid fixed round deadline")
+        return value
 
     async def refresh(self) -> None:
         observed = self.clock()
@@ -162,10 +181,10 @@ class RoundController:
                 revision != self.policy.revision or state.stage != RoundStage.MINER_GENERATION
             ):
                 self.policy = None
-                if self.on_close is not None:
-                    await self.on_close()
             inputs = self.inputs
             block = None
+            block_time = observed
+            round_end: int | None = 0
             expires = observed + self.ttl
             if state.stage == RoundStage.MINER_GENERATION:
                 resolved = self._resolved.get(revision)
@@ -178,9 +197,17 @@ class RoundController:
                     block, block_time = await self.head()
                     if not observed - 60 <= block_time <= self.clock() + 5:
                         raise ValueError("Stale generation block")
-                    # A lease never outlives the estimated block boundary. The
-                    # collector's block comparison remains authoritative.
+                    # The collector's block comparison remains authoritative.
                     expires = min(expires, block_time + (inputs.generation_deadline_block - block) * 12)
+                round_end = self.round_end
+                if self.inputs is None or self.inputs.fingerprint != inputs.fingerprint or round_end == 0:
+                    if inputs.generation_deadline_block is None:
+                        round_end = None
+                    else:
+                        assert block is not None
+                        round_end = await asyncio.to_thread(
+                            self._fixed_end, inputs, int(block_time + (inputs.generation_deadline_block - block) * 12),
+                        )
             elif inputs is None or inputs.round != round_name:
                 retained = await asyncio.to_thread(self._retained, round_name)
                 if retained is not None:
@@ -192,7 +219,7 @@ class RoundController:
                 state_expires_at=observed + self.ttl,
                 generation_deadline_block=None if inputs is None else inputs.generation_deadline_block,
             )
-            self.inputs, self.policy = inputs, policy
+            self.inputs, self.policy, self.round_end = inputs, policy, round_end
         except Exception:
             # A newly observed but incomplete publication cannot authorize old work.
             if self.policy is not None and revision != self.policy.revision:
