@@ -353,7 +353,10 @@ class Gateway:
         if wait and session is not None and session.phase == "allocated":
             selection = self.allocator.selection
             if (await self._endpoint(scope, session) is None or session.pod_id is None or selection is None or
-                    not await asyncio.to_thread(selection.selected, scope, session.start_id, session.pod_id)):
+                    not await asyncio.wait_for(
+                        asyncio.to_thread(selection.selected, scope, session.start_id, session.pod_id),
+                        max(0, deadline - time.monotonic()),
+                    )):
                 self._grants.pop(scope, None)
                 self._grant_due.pop(scope, None)
                 self._wake.set()
