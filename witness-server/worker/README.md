@@ -142,6 +142,29 @@ From this directory, check the built image and Docker context filtering:
 WITNESS_TEST_IMAGE=404-witness-pods:local python -m pytest -q tests/test_container.py
 ```
 
+The image check uses the worker's renderer launcher, verifies UID 1001, and
+renders individual views and a grid with Chromium. It also checks the verifier,
+verification key and licences. Renderer assets are readable by UID 1001 even
+when the build context has restrictive directory permissions.
+
+For a production release, archive the pushed `main` revision and use its committed
+Cloud Build configuration. The image is published only after the runtime check
+passes. From the repository root:
+
+```sh
+set -euo pipefail
+git fetch origin main
+release_rev=$(git rev-parse origin/main)
+release_dir=$(mktemp -d)
+git archive "$release_rev" | tar -x -C "$release_dir"
+gcloud builds submit "$release_dir" --project gen-456515 \
+  --config "$release_dir/witness-server/worker/cloudbuild.yaml" \
+  --substitutions "_SOURCE_REV=$release_rev"
+```
+
+The image tag contains the source revision and Cloud Build ID. Configure the
+verified registry digest in `WITNESS_IMAGE` through the operator rollout process.
+
 See [server checks](../README.md#local-checks) for setup. Local TLS tests use
 WebSockets and native credential proofs with local provider fixtures.
 
