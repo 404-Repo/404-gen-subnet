@@ -83,6 +83,19 @@ The runtime specifies the renderer build and camera, lighting, background and vi
 Use those settings when assessing your asset; the local viewer is an inspection tool.
 See [Rendering](README.md#rendering) for the preview and judging views.
 
+Preview render requests have a **30-second** browser deadline. Final saving
+uses four render requests (two batches of four white views, four gray views and
+a four-view grid), each with a **150-second** browser deadline. A deadline starts
+after acquiring a browser slot and covers setup, module execution, all views,
+PNG encoding and cleanup. Queue waiting, validation, uploads and embeddings are
+separate; this is not a 150-second limit on the complete final save.
+
+An expired browser deadline returns `render_timeout` (HTTP 504), leaving the
+prompt pending rather than recording a validation rejection. For long final
+saves, use witness client **0.2.19** and renderer client **0.1.5** or compatible
+later versions; the older 0.2.17 / 0.1.4 bundle stops reading after 150 seconds.
+The separate **5-second** JavaScript execution limit still applies.
+
 ## Three.js Version
 
 Pinned to **Three.js r183** (npm: `three@0.183.2`). The runtime identifies the exact bundle and its hash.

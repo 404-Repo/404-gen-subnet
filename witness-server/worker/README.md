@@ -72,6 +72,19 @@ renders and failed uploads do not count. New misses return HTTP 429 when exhaust
 cached outcomes remain available. Final judging renders and validation reads do
 not consume this allowance.
 
+Preview rendering has a 30-second browser deadline per request. Final saving
+renders eight white views in two batches of four, four gray views and a four-view
+grid; each request has a 150-second browser deadline. The deadline starts after
+acquiring a render slot and includes browser setup, module execution, rendering,
+PNG encoding and context cleanup. Queue waiting, validation, uploads and embeddings
+are separate. Puppeteer's protocol timeout is 180 seconds.
+
+Worker HTTP reads wait for queued renderer work; the browser deadline bounds
+each admitted render. Final submission clients must also allow queue waiting and
+all four requests: witness client 0.2.19 and renderer client 0.1.5 do this.
+The older 0.2.17 / 0.1.4 bundle has a 150-second final-save read timeout.
+The public preview proxy uses only the preview budget.
+
 Paths under `<storage-prefix>rounds/<full-round-name>/<hotkey>/`:
 
 - `renders/v1/`: cached PNGs and rejections, named by request hash.
@@ -84,6 +97,10 @@ Final saves are immutable; retrying the same output returns the saved result.
 (HTTP 422). Storage, render and embedding failures are retryable. One final save
 runs at a time, with 256 queued; overflow returns HTTP 503 `save_queue_full`.
 Saved results remain readable after admission closes.
+
+A browser deadline returns HTTP 504 `render_timeout` and leaves the prompt
+pending. The JavaScript source can already exist in storage; a completed save
+requires every judging view, grid, embeddings and the result index.
 
 ## Reading order
 

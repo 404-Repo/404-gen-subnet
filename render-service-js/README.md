@@ -31,10 +31,18 @@ The development server above listens on `http://localhost:8000`. The default por
 |---|---|---|
 | `PORT` | `80` | HTTP server port |
 | `STATIC_PORT` | `3000` | Internal static file server port (serves Three.js to Chromium) |
-| `RENDER_TIMEOUT_MS` | `30000` | Max time for a single render before timeout |
+| `RENDER_TIMEOUT_MS` | `30000` | Browser deadline for a preview render request |
+| `FINAL_RENDER_TIMEOUT_MS` | `150000` | Browser deadline for a final-save render request |
 | `VALIDATION_POOL_SIZE` | `2` | Number of worker_threads for execution + post-validation |
 | `VALIDATION_TIMEOUT_MS` | `5000` | Wall-clock timeout for miner code execution (spec: 5 s) |
 | `RENDER_POOL_SIZE` | `1` | Max concurrent browser render slots |
+
+The worker marks final-save requests with the internal `X-Render-Purpose: final`
+header. Its public preview proxy does not forward this header. Each deadline
+starts after acquiring a browser slot and covers browser/context setup, module
+execution, all requested views, PNG encoding and context cleanup. Queue waiting,
+the separate validation pass and final-result uploads/embeddings are outside it.
+Puppeteer's protocol timeout is 30 seconds above the larger browser deadline.
 
 ## Docker
 
@@ -134,7 +142,11 @@ Both render endpoints use these responses:
 | 422 | `validation_failed` | Static validation failed |
 | 422 | `post_validation_failed` | Execution or scene validation failed |
 | 503 | `validation_unavailable` | Unexpected validation worker failure or unavailable pool |
+| 504 | `render_timeout` | Browser deadline expired; `timeout_ms` identifies its budget |
 | 500 | Error message | Render or internal error |
+
+The worker preserves `render_timeout` on final saves. The prompt remains pending;
+the timeout does not record a validation rejection.
 
 Generator exceptions, execution timeouts and confirmed V8 heap-limit failures
 are 422 rejections. Validation reports contain at most 50 failures, 2,048 UTF-8

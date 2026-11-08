@@ -136,8 +136,8 @@ if (process.argv[2] === '--serve') {
       await command({ fault: 'stall', delay: 1500 });
       const started = performance.now();
       const response = await post('/render');
-      assert.equal(response.status, 500);
-      assert.deepEqual(await response.json(), { error: 'render timed out after 1000ms' });
+      assert.equal(response.status, 504);
+      assert.deepEqual(await response.json(), { error: 'render_timeout', timeout_ms: 1000 });
       assert.ok(performance.now() - started < 1500, 'setup extended the deadline');
       await new Promise((resolve) => setTimeout(resolve, 1000));
       assert.deepEqual(await command({}), { kills: 0, contexts: 1 });

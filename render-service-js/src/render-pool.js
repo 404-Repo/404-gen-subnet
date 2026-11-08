@@ -9,6 +9,7 @@
  */
 
 import { ensureBrowser, isBrowserHealthy, terminateBrowser } from './browser.js';
+import { renderTimeoutMs } from './render-limits.js';
 import { STATIC_PORT } from './static-server.js';
 import { getCachedPmrem } from './pmrem-cache.js';
 import { SAFE_THREE_BROWSER_BUNDLE } from './safeThree.js';
@@ -29,9 +30,16 @@ const SAFE_THREE_CONFIG = {
   ),
 };
 
-const RENDER_TIMEOUT_MS = parseInt(process.env.RENDER_TIMEOUT_MS || '30000', 10);
+const RENDER_TIMEOUT_MS = renderTimeoutMs();
 const POOL_SIZE = parseInt(process.env.RENDER_POOL_SIZE || '1', 10);
 const PAGE_URL = `http://127.0.0.1:${STATIC_PORT}/render-page.html`;
+
+export class RenderTimeoutError extends Error {
+  constructor(timeoutMs) {
+    super(`render timed out after ${timeoutMs}ms`);
+    this.timeoutMs = timeoutMs;
+  }
+}
 
 class RenderPool {
   constructor() {
@@ -80,7 +88,8 @@ class RenderPool {
   }
 
   async _executeInContext(source, params, mode) {
-    const deadline = performance.now() + RENDER_TIMEOUT_MS;
+    const timeoutMs = params.timeoutMs ?? RENDER_TIMEOUT_MS;
+    const deadline = performance.now() + timeoutMs;
     for (let attempt = 0; attempt < 2; attempt++) {
       let browser;
       let context;
@@ -112,7 +121,7 @@ class RenderPool {
           } finally {
             try { await context?.close(); contextClosed = true; } catch {}
           }
-        })(), Math.max(0, deadline - performance.now()));
+        })(), Math.max(0, deadline - performance.now()), timeoutMs);
 
         if (result.error) throw new Error(result.error);
         return result.data;
@@ -443,10 +452,10 @@ async function renderInPage(source, params, mode, safeThreeConfig, safeThreeBund
   }
 }
 
-function withTimeout(promise, ms) {
+function withTimeout(promise, ms, timeoutMs) {
   let timer;
   const timeout = new Promise((_, reject) => {
-    timer = setTimeout(() => reject(new Error(`render timed out after ${RENDER_TIMEOUT_MS}ms`)), ms);
+    timer = setTimeout(() => reject(new RenderTimeoutError(timeoutMs)), ms);
   });
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }

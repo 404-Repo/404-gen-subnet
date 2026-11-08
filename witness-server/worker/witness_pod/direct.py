@@ -302,7 +302,7 @@ class Witness:
 
         await asyncio.to_thread(admit)
         try:
-            async with httpx.AsyncClient(timeout=150, trust_env=False) as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(150, read=None), trust_env=False) as client:
                 content = await request.read()
                 cache = self.render_cache
                 key = cache.key(content, request.raw_path) if cache is not None else None
