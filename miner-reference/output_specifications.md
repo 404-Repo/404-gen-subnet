@@ -90,6 +90,10 @@ after acquiring a browser slot and covers setup, module execution, all views,
 PNG encoding and cleanup. Queue waiting, validation, uploads and embeddings are
 separate; this is not a 150-second limit on the complete final save.
 
+The worker's renderer HTTP requests also have a **210-second response-inactivity
+timeout**, including queue waiting and validation. Renderer congestion or stalls
+can therefore return a retryable service failure.
+
 An expired browser deadline returns `render_timeout` (HTTP 504), leaving the
 prompt pending rather than recording a validation rejection. For long final
 saves, use witness client **0.2.19** and renderer client **0.1.5** or compatible

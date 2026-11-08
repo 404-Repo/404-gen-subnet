@@ -26,7 +26,7 @@ from witness_client.request import PROVIDERS
 from .artifacts import ArtifactRepository, SubmissionContext
 from .records import Call, RecordingConflict
 from .recovery import recover_issued
-from .renderer import RenderCache
+from .renderer import RENDER_REQUEST_TIMEOUT_SECONDS, RenderCache
 from .results import ResultSaver
 
 if TYPE_CHECKING:
@@ -302,7 +302,9 @@ class Witness:
 
         await asyncio.to_thread(admit)
         try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(150, read=None), trust_env=False) as client:
+            async with httpx.AsyncClient(
+                timeout=httpx.Timeout(150, read=RENDER_REQUEST_TIMEOUT_SECONDS), trust_env=False,
+            ) as client:
                 content = await request.read()
                 cache = self.render_cache
                 key = cache.key(content, request.raw_path) if cache is not None else None

@@ -19,6 +19,7 @@ from subnet_common.render import (
 from subnet_common.witness.auth import AuthRejected
 
 from .artifacts import ArtifactRepository
+from .renderer import RENDER_REQUEST_TIMEOUT_SECONDS
 
 
 class ResultSaver:
@@ -39,7 +40,7 @@ class ResultSaver:
             result = GenerationResult(js=f"{root}.js", size=len(data))
             try:
                 async with httpx.AsyncClient(
-                    timeout=httpx.Timeout(150, read=None), trust_env=False,
+                    timeout=httpx.Timeout(150, read=RENDER_REQUEST_TIMEOUT_SECONDS), trust_env=False,
                     headers={"X-Render-Purpose": "final"},
                 ) as client:
                     white = await render_views(

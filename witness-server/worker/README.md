@@ -79,9 +79,11 @@ acquiring a render slot and includes browser setup, module execution, rendering,
 PNG encoding and context cleanup. Queue waiting, validation, uploads and embeddings
 are separate. Puppeteer's protocol timeout is 180 seconds.
 
-Worker HTTP reads wait for queued renderer work; the browser deadline bounds
-each admitted render. Final submission clients must also allow queue waiting and
-all four requests: witness client 0.2.19 and renderer client 0.1.5 do this.
+Worker HTTP reads have a 210-second response-inactivity timeout covering queue
+waiting, validation and browser work. A stalled or overloaded renderer returns a
+retryable service failure and releases the active save slot; the browser deadline
+still bounds each admitted render. Final submission clients must allow queue
+waiting and all four requests: witness client 0.2.19 and renderer client 0.1.5 do this.
 The older 0.2.17 / 0.1.4 bundle has a 150-second final-save read timeout.
 The public preview proxy uses only the preview budget.
 

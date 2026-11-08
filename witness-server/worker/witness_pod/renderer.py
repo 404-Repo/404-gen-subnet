@@ -22,6 +22,7 @@ from subnet_common.witness.state import Objects
 
 READY_SECONDS = 60
 MAX_SUCCESSFUL_RENDERS = 10_000
+RENDER_REQUEST_TIMEOUT_SECONDS = 210
 
 
 class RenderObjects(Objects, Protocol):
