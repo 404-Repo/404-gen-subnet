@@ -14,7 +14,7 @@ from types import SimpleNamespace
 from typing import cast
 
 import pytest
-from aiohttp import ClientResponse, WSServerHandshakeError, WSMsgType, web
+from aiohttp import ClientResponse, ClientSession, WSServerHandshakeError, WSMsgType, web
 from aiohttp.test_utils import TestClient, TestServer, make_mocked_request
 from bittensor_wallet import Keypair
 from pod_gateway.admission import Admission, PendingStart, QueueState
@@ -1548,5 +1548,53 @@ def test_control_metadata_read_does_not_wait_for_busy_lifecycle_worker() -> None
             finally:
                 release.set()
                 await work
+
+    asyncio.run(scenario())
+
+
+def test_disconnected_control_handshake_does_not_lookup_provider(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def scenario() -> None:
+        provider = Provider()
+        async with coordinator(provider, MemoryState(), [time.time()]) as gateway:
+            scope = gateway.scope(KEYS[0].ss58_address)
+            gateway.queue.enqueue(scope, FIRST, None)
+            session = gateway.allocator.acquire(scope, FIRST)
+            gateway.queue.complete(scope, FIRST, rejected=False)
+            gateway._publish(provider.list())
+            assert session.pod_id is not None
+            lookup = provider.get
+            lookups: list[str] = []
+
+            def observed(pod_id: str) -> Pod | None:
+                lookups.append(pod_id)
+                return lookup(pod_id)
+
+            monkeypatch.setattr(provider, "get", observed)
+            runner = web.AppRunner(gateway.application(), handler_cancellation=False)
+            await runner.setup()
+            try:
+                await web.TCPSite(runner, "127.0.0.1", 0).start()
+                port = runner.addresses[0][1]
+                async with ClientSession() as client:
+                    async with gateway._control_lookup:
+                        handshake = asyncio.ensure_future(client.ws_connect(
+                            f"http://127.0.0.1:{port}/v1/control/{scope.hotkey}/{FIRST}", headers={
+                                "Authorization": "Bearer " + capability(gateway.secret, scope, FIRST),
+                                "x-witness-pod": session.pod_id,
+                            },
+                        ))
+                        async with asyncio.timeout(1):
+                            while session.pod_id not in gateway._connecting:
+                                await asyncio.sleep(0.001)
+                        handshake.cancel()
+                        with suppress(asyncio.CancelledError):
+                            await handshake
+                        await asyncio.sleep(0.05)
+                    async with asyncio.timeout(1):
+                        while session.pod_id in gateway._connecting:
+                            await asyncio.sleep(0.001)
+                    assert lookups == []
+            finally:
+                await runner.cleanup()
 
     asyncio.run(scenario())
