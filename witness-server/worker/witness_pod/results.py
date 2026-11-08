@@ -8,9 +8,18 @@ import httpx
 from renderer_client import RenderRejected
 from subnet_common.competition.generations import GenerationResult
 from subnet_common.embeddings import build_embeddings_npz
-from subnet_common.render import GRAY_BG, GRAY_VIEWS, WHITE_BG, WHITE_VIEWS, render_grid, render_views
+from subnet_common.render import (
+    GRAY_BG,
+    GRAY_VIEWS,
+    WHITE_BG,
+    WHITE_VIEWS,
+    render_grid,
+    render_views,
+)
+from subnet_common.witness.auth import AuthRejected
 
 from .artifacts import ArtifactRepository
+from .renderer import RENDER_REQUEST_TIMEOUT_SECONDS
 
 
 class ResultSaver:
@@ -30,7 +39,10 @@ class ResultSaver:
             await asyncio.to_thread(objects.put, f"{root}.js", data, "text/javascript")
             result = GenerationResult(js=f"{root}.js", size=len(data))
             try:
-                async with httpx.AsyncClient(timeout=150, trust_env=False) as client:
+                async with httpx.AsyncClient(
+                    timeout=httpx.Timeout(150, read=RENDER_REQUEST_TIMEOUT_SECONDS), trust_env=False,
+                    headers={"X-Render-Purpose": "final"},
+                ) as client:
                     white = await render_views(
                         client, self.endpoint, data, WHITE_VIEWS[:4], WHITE_BG, root, raise_errors=True
                     )
@@ -40,6 +52,8 @@ class ResultSaver:
                     gray = await render_views(client, self.endpoint, data, GRAY_VIEWS, GRAY_BG, root, raise_errors=True)
                     grid = await render_grid(client, self.endpoint, data, root, raise_errors=True)
             except httpx.HTTPStatusError as error:
+                if error.response.status_code == 504:
+                    raise AuthRejected("render_timeout", 504) from error
                 if error.response.status_code != 422:
                     raise
                 rejection = RenderRejected(error.response.text)

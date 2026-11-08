@@ -8,6 +8,7 @@
  */
 
 import puppeteer from 'puppeteer';
+import { renderTimeoutMs } from './render-limits.js';
 
 let browser = null;
 let launching = null;
@@ -41,7 +42,7 @@ export async function ensureBrowser() {
       browser = await puppeteer.launch({
         headless: 'new',
         args: CHROME_ARGS,
-        protocolTimeout: 30_000,
+        protocolTimeout: Math.max(renderTimeoutMs(), renderTimeoutMs(true)) + 30_000,
         signal: controller.signal,
       });
       browserController = controller;

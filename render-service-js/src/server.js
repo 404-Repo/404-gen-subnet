@@ -19,6 +19,8 @@ import { URL, pathToFileURL } from 'node:url';
 import { startStaticServer } from './static-server.js';
 import { ensureBrowser } from './browser.js';
 import { renderViews, renderGrid } from './renderer.js';
+import { RenderTimeoutError } from './render-pool.js';
+import { renderTimeoutMs } from './render-limits.js';
 import { staticValidate } from './validator/index.js';
 import { validationPool, ValidationUnavailableError } from './validation-pool.js';
 import { boundValidationError } from './validation-report.js';
@@ -41,9 +43,9 @@ class InvalidRequestError extends Error {}
 
 let ready = false;
 
-function parseQuery(urlStr) {
+function parseQuery(urlStr, isFinal) {
   const url = new URL(urlStr, 'http://localhost');
-  const params = {};
+  const params = { timeoutMs: renderTimeoutMs(isFinal) };
 
   const thetas = url.searchParams.get('thetas');
   if (thetas) params.thetas = thetas.split(',').map(Number);
@@ -150,7 +152,7 @@ async function handleRender(req, res) {
     return;
   }
 
-  const options = parseQuery(req.url);
+  const options = parseQuery(req.url, req.headers['x-render-purpose'] === 'final');
   const tRender = performance.now();
   const images = await renderViews(source, options, () => res.destroyed);
   const renderMs = (performance.now() - tRender).toFixed(1);
@@ -193,7 +195,7 @@ async function handleRenderGrid(req, res) {
     return;
   }
 
-  const options = parseQuery(req.url);
+  const options = parseQuery(req.url, req.headers['x-render-purpose'] === 'final');
   const tRender = performance.now();
   const gridBuf = await renderGrid(source, options, () => res.destroyed);
   const renderMs = (performance.now() - tRender).toFixed(1);
@@ -231,6 +233,10 @@ export const server = http.createServer(async (req, res) => {
     sendError(res, 404, 'not found');
   } catch (err) {
     if (res.destroyed) return;
+    if (err instanceof RenderTimeoutError) {
+      sendJson(res, 504, { error: 'render_timeout', timeout_ms: err.timeoutMs });
+      return;
+    }
     if (err instanceof ValidationUnavailableError) {
       sendError(res, 503, 'validation_unavailable');
       return;

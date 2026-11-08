@@ -544,8 +544,9 @@ Dockerfile. The gateway entrypoint is `python -m pod_gateway`.
 
 The worker role starts the renderer before connecting to the gateway. It uses
 UID/GID 1001, an isolated environment without witness credentials, one rendering
-slot and one validation slot. The execution budget is five seconds; rendering
-has a thirty-second deadline. SwiftShader respects the CPU quota and assigned
+slot and one validation slot. The execution budget is five seconds; preview
+rendering has a thirty-second deadline and each final-save render request has a
+150-second deadline. SwiftShader respects the CPU quota and assigned
 CPU IDs. The local renderer listens on port 8002. Its validation and rendering
 pools queue waiting requests without a configured length limit. No renderer port
 is published by Pod allocation.

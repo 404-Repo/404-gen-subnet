@@ -22,6 +22,7 @@ from subnet_common.witness.state import Objects
 
 READY_SECONDS = 60
 MAX_SUCCESSFUL_RENDERS = 10_000
+RENDER_REQUEST_TIMEOUT_SECONDS = 210
 
 
 class RenderObjects(Objects, Protocol):
@@ -104,6 +105,7 @@ def render_service(drain: Callable[[], None]) -> Iterator[subprocess.Popen[bytes
             RENDER_POOL_SIZE="1",
             VALIDATION_POOL_SIZE="1",
             RENDER_TIMEOUT_MS="30000",
+            FINAL_RENDER_TIMEOUT_MS="150000",
             VALIDATION_TIMEOUT_MS="5000",
             LD_PRELOAD="/opt/witness-affinity/libwitness-affinity.so",
         )

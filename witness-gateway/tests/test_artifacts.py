@@ -30,6 +30,7 @@ from subnet_common.witness.state import Snapshot
 from support import MemoryState
 from test_service import Harness
 from witness_pod.artifacts import ArtifactRepository, SubmissionContext
+from witness_pod.renderer import RENDER_REQUEST_TIMEOUT_SECONDS
 from witness_pod.results import ResultSaver
 
 PNG = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aN3sAAAAASUVORK5CYII=")
@@ -40,14 +41,20 @@ COMMIT = "c" * 40
 
 async def enable(
     fixture: Harness, *, fail_first_render: bool = False,
+    failure_status: int = 503,
+    render_delay: float = 0,
     prompt_ids: dict[str, str] | None = None,
 ) -> list[str]:
     rendered: list[str] = []
     async def backend(request: web.Request) -> web.Response:
         nonlocal fail_first_render
+        await asyncio.sleep(render_delay)
         if fail_first_render:
             fail_first_render = False
-            return web.json_response({"error": "renderer_unavailable"}, status=503)
+            return web.json_response(
+                {"error": "render_timeout" if failure_status == 504 else "renderer_unavailable"},
+                status=failure_status,
+            )
         source = (await request.json())["source"]
         if source == "invalid":
             return web.json_response({"error": "validation_failed", "failures": []}, status=422)
@@ -91,6 +98,84 @@ def client(
         transport=transport,
         timeout=timeout,
     )
+
+
+@pytest.mark.parametrize("operation", ["preview", "save"])
+def test_worker_waits_for_queued_renderer_responses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str,
+) -> None:
+    async def scenario() -> None:
+        fixture = Harness(tmp_path, monkeypatch)
+        async with fixture.running():
+            with fixture.client() as witness:
+                await asyncio.to_thread(witness._gateway.ensure_pod)
+                await enable(fixture, render_delay=0.08)
+                original_client = httpx.AsyncClient
+
+                def renderer_client(
+                    *, timeout: httpx.Timeout | float, trust_env: bool, headers: dict[str, str] | None = None,
+                ) -> httpx.AsyncClient:
+                    scaled = httpx.Timeout(timeout)
+                    if scaled.read is not None:
+                        scaled.read /= 1000
+                    return original_client(timeout=scaled, trust_env=trust_env, headers=headers)
+
+                monkeypatch.setattr("witness_pod.results.httpx.AsyncClient", renderer_client)
+                with client(fixture, witness.renderer_transport()) as renderer:
+                    if operation == "preview":
+                        assert await asyncio.to_thread(renderer.render, SOURCE) == PNG
+                    else:
+                        saved = await asyncio.to_thread(renderer.save_final, SOURCE)
+                        assert saved["views"] and saved["failure_reason"] is None
+                        assert await asyncio.to_thread(renderer.get_submission) == saved
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("operation", ["preview", "save"])
+def test_worker_recovers_after_renderer_response_stalls(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str,
+) -> None:
+    async def scenario() -> None:
+        fixture = Harness(tmp_path, monkeypatch)
+        async with fixture.running():
+            with fixture.client() as witness:
+                await asyncio.to_thread(witness._gateway.ensure_pod)
+                await enable(fixture, render_delay=0.4)
+                runtime, service = fixture.runtimes[-1], fixture.services[-1]
+                original_client = httpx.AsyncClient
+
+                def renderer_client(
+                    *, timeout: httpx.Timeout | float, trust_env: bool, headers: dict[str, str] | None = None,
+                ) -> httpx.AsyncClient:
+                    scaled = httpx.Timeout(timeout)
+                    if scaled.read is not None:
+                        scaled.read /= 1000
+                    return original_client(timeout=scaled, trust_env=trust_env, headers=headers)
+
+                monkeypatch.setattr("witness_pod.results.httpx.AsyncClient", renderer_client)
+                with client(fixture, witness.renderer_transport()) as renderer:
+                    with pytest.raises(RenderUnavailable):
+                        if operation == "preview":
+                            await asyncio.to_thread(renderer.render, SOURCE)
+                        else:
+                            await asyncio.to_thread(renderer.save_final, SOURCE)
+                    assert runtime.rendering == 0
+                    assert not service._save_lock.locked()
+                    with pytest.raises(ArtifactUnavailable) as pending:
+                        await asyncio.to_thread(renderer.get_submission)
+                    assert pending.value.status == 404
+
+                    await enable(fixture)
+                    if operation == "preview":
+                        assert await asyncio.to_thread(renderer.render, SOURCE) == PNG
+                    else:
+                        saved = await asyncio.to_thread(renderer.save_final, SOURCE)
+                        assert saved["views"] and saved["failure_reason"] is None
+                    runtime.drain()
+                    assert runtime.tick()
+
+    asyncio.run(scenario())
 
 
 @pytest.mark.parametrize("operation", ["preview", "save"])
@@ -191,6 +276,8 @@ def test_result_saver_saves_every_view_when_larger_render_jobs_time_out(monkeypa
     } | {"grid.png": PNG + b"neutral", "embeddings.npz": b"fixture embeddings"}
 
     def backend(request: httpx.Request) -> httpx.Response:
+        assert request.headers["X-Render-Purpose"] == "final"
+        assert request.extensions["timeout"]["read"] == RENDER_REQUEST_TIMEOUT_SECONDS
         query = request.url.params
         lighting = query.get("lighting", "studio")
         if request.url.path == "/render/grid":
@@ -205,8 +292,10 @@ def test_result_saver_saves_every_view_when_larger_render_jobs_time_out(monkeypa
 
     original_client = httpx.AsyncClient
 
-    def render_client(*, timeout: float, trust_env: bool) -> httpx.AsyncClient:
-        return original_client(timeout=timeout, trust_env=trust_env, transport=httpx.MockTransport(backend))
+    def render_client(*, timeout: httpx.Timeout, trust_env: bool, headers: dict[str, str]) -> httpx.AsyncClient:
+        return original_client(
+            timeout=timeout, trust_env=trust_env, headers=headers, transport=httpx.MockTransport(backend),
+        )
 
     async def embeddings(
         image: bytes, white: dict[str, bytes], log_id: str, *, revision: str, hf_token: str | None,
@@ -569,17 +658,24 @@ def test_embedding_failure_is_reported_and_the_miner_can_retry(tmp_path: Path, m
     asyncio.run(scenario())
 
 
-def test_render_failure_is_returned_for_the_miner_to_retry(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("status", [503, 504])
+def test_render_failure_is_returned_for_the_miner_to_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, status: int,
+) -> None:
     async def scenario() -> None:
         fixture = Harness(tmp_path, monkeypatch)
         async with fixture.running():
             with fixture.client() as witness:
                 await asyncio.to_thread(witness._gateway.ensure_pod)
-                await enable(fixture, fail_first_render=True)
+                await enable(fixture, fail_first_render=True, failure_status=status)
                 with client(fixture, witness.renderer_transport()) as renderer:
                     with pytest.raises(ArtifactUnavailable) as failed:
                         await asyncio.to_thread(renderer.save_final, SOURCE)
-                    assert failed.value.status == 503
+                    assert failed.value.status == status
+                    assert failed.value.code == ("render_timeout" if status == 504 else "witness_unavailable")
+                    with pytest.raises(ArtifactUnavailable) as pending:
+                        await asyncio.to_thread(renderer.get_submission)
+                    assert pending.value.status == 404
                     result = await asyncio.to_thread(renderer.save_final, SOURCE)
                     assert result["failure_reason"] is None and result["views"]
 
