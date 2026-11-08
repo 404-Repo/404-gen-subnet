@@ -713,6 +713,8 @@ class Gateway:
         try:
             expected = self._pods.get(pod_id)
             async with self._control_lookup:
+                if request.transport is None or request.transport.is_closing():
+                    raise asyncio.CancelledError
                 pod = await asyncio.to_thread(self.allocator.provider.get, pod_id)
             if (
                 pod is None
