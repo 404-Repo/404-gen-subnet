@@ -1209,7 +1209,8 @@ def test_backlog_keeps_endpoints_available_and_allows_retirement(monkeypatch: py
     asyncio.run(scenario())
 
 
-def test_routine_fence_refresh_keeps_admission_available_but_expired_samples_fail_closed() -> None:
+@pytest.mark.parametrize("unavailable", [False, True])
+def test_delayed_fence_poll_keeps_admission_available(unavailable: bool) -> None:
     async def scenario() -> None:
         entered, release = threading.Event(), threading.Event()
         calls = 0
@@ -1220,6 +1221,9 @@ def test_routine_fence_refresh_keeps_admission_available_but_expired_samples_fai
             if calls > 1:
                 entered.set()
                 assert release.wait(3)
+                if unavailable:
+                    raise ProviderUnavailable("Ownership lookup failed")
+                return False
             return True
 
         async with coordinator(Provider(), MemoryState(), [1000.0]) as gateway:
@@ -1239,6 +1243,11 @@ def test_routine_fence_refresh_keeps_admission_available_but_expired_samples_fai
                 await asyncio.sleep(0.25)
                 assert (await status()).status == 200
                 gateway._fence_at = time.monotonic() - 5
+                assert (await status()).status == 200
+                release.set()
+                async with asyncio.timeout(1):
+                    while gateway._fence_ok:
+                        await asyncio.sleep(0.005)
                 assert (await status()).status == 503
             finally:
                 release.set()
@@ -1596,5 +1605,71 @@ def test_disconnected_control_handshake_does_not_lookup_provider(monkeypatch: py
                     assert lookups == []
             finally:
                 await runner.cleanup()
+
+    asyncio.run(scenario())
+
+
+def test_delayed_fence_poll_keeps_existing_pod_control_connected() -> None:
+    async def scenario() -> None:
+        provider = Provider()
+        async with running(provider, MemoryState()) as (gateway, client):
+            scope = gateway.scope(KEYS[0].ss58_address)
+            gateway.queue.enqueue(scope, FIRST, None)
+            session = gateway.allocator.acquire(scope, FIRST)
+            gateway.queue.complete(scope, FIRST, rejected=False)
+            gateway._publish(provider.list())
+            assert session.pod_id is not None
+            entered, release = threading.Event(), threading.Event()
+
+            def slow_fence() -> bool:
+                entered.set()
+                assert release.wait(5)
+                return True
+
+            async with client.ws_connect(f"/v1/control/{scope.hotkey}/{FIRST}", headers={
+                "Authorization": "Bearer " + capability(gateway.secret, scope, FIRST),
+                "x-witness-pod": session.pod_id,
+            }) as socket:
+                assert (await socket.receive_json())["type"] == "activate"
+                gateway.fence = slow_fence
+                assert await asyncio.to_thread(entered.wait, 2)
+                try:
+                    gateway._fence_at = time.monotonic() - 5
+                    peer = gateway.registry.peers[session.pod_id]
+                    seen = peer.seen
+                    await socket.send_json({
+                        "type": "heartbeat", "ready": True,
+                        "proof_key_sha256": gateway.proof_hash,
+                    })
+                    async with asyncio.timeout(1):
+                        while session.pod_id in gateway.registry.peers and peer.seen == seen:
+                            await asyncio.sleep(0.005)
+                    assert gateway.registry.ready(session.pod_id)
+                    response = await request(client, KEYS[0], "GET", "/v1/pods/current")
+                    assert response.status == 200
+                finally:
+                    release.set()
+
+    asyncio.run(scenario())
+
+
+def test_reconciliation_checks_current_gateway_ownership_before_retiring() -> None:
+    async def scenario() -> None:
+        provider, state = Provider(), MemoryState()
+        async with coordinator(provider, state, [1000.0]) as gateway:
+            scope = gateway.scope(KEYS[0].ss58_address)
+            gateway.queue.enqueue(scope, FIRST, None)
+            session = gateway.allocator.acquire(scope, FIRST)
+            gateway.queue.complete(scope, FIRST, rejected=False)
+            assert session.pod_id is not None
+            pod = provider.pods[session.pod_id]
+            pod = replace(pod, status="EXITED")
+            provider.pods[pod.id] = pod
+            gateway._publish(provider.list())
+            selection = state.load(Selection.key(scope))
+            gateway.fence = lambda: False
+            await gateway._step()
+            assert provider.get(pod.id) == pod
+            assert state.load(Selection.key(scope)) == selection
 
     asyncio.run(scenario())

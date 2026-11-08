@@ -91,7 +91,7 @@ class Gateway:
         return Scope(self.deployment, self.round, hotkey)
 
     def _live(self) -> bool:
-        return self._loaded and self._fence_ok and time.monotonic() - self._fence_at <= max(2, 2 * self.refresh_seconds)
+        return self._loaded and self._fence_ok
 
     def _authorize_create(self, scope: Scope, start_id: str) -> None:
         if scope.round != self.round or not self.fence():
@@ -565,7 +565,8 @@ class Gateway:
             try:
                 self._fence_ok = await self._run(self._fencing, self.fence)
                 self._fence_at = time.monotonic()
-            except Exception as error:  # noqa: BLE001 - stale fences stop admission, not paid capture
+            except Exception as error:  # noqa: BLE001 - failed ownership checks stop admission
+                self._fence_ok = False
                 self._fence_at = 0
                 output.write("gateway_background_failed", phase="fence", error_type=type(error).__name__,
                              provider_status=error.status if isinstance(error, ProviderUnavailable) else None)
@@ -679,7 +680,10 @@ class Gateway:
             if len(pods) > 1 or any(p.lifecycle != "active" or p.status in ("EXITED", "ERROR") or
                                     p.id in self._retiring for p in pods):
                 self._due[scope] = now + self.poll_seconds
-                await self._run(self._worker, partial(self.allocator.reconcile, scope))
+                def reconcile_current(owner: Scope) -> None:
+                    if self.fence():
+                        self.allocator.reconcile(owner)
+                await self._run(self._worker, partial(reconcile_current, scope))
                 break
 
     async def _lifecycle(self, _: web.Application) -> AsyncIterator[None]:
