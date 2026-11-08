@@ -84,6 +84,7 @@ RUN ln -sf /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm
 COPY render-service-js/package*.json /opt/renderer/
 RUN cd /opt/renderer && npm ci --omit=dev --no-audit --no-fund
 COPY render-service-js/src /opt/renderer/src
+RUN chmod -R a+rX /opt/renderer/src
 ENV WITNESS_RENDERER_ENABLED=1
 
 FROM renderer-runtime AS render-benchmark
