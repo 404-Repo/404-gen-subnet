@@ -79,6 +79,7 @@ class Gateway:
         self._inventory: list[Pod] = []
         self._current: dict[Scope, Session] = {}
         self._sessions: dict[tuple[Scope, str], Session] = {}
+        self._control_lookup = asyncio.Lock()
         self._due: dict[Scope, float] = {}
         self._retiring: set[str] = set()
         self._wake = asyncio.Event()
@@ -711,7 +712,8 @@ class Gateway:
         self._connecting.add(pod_id)
         try:
             expected = self._pods.get(pod_id)
-            pod = await self._run(self._worker, partial(self.allocator.provider.get, pod_id))
+            async with self._control_lookup:
+                pod = await asyncio.to_thread(self.allocator.provider.get, pod_id)
             if (
                 pod is None
                 or expected is None

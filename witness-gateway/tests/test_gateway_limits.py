@@ -1516,3 +1516,37 @@ def test_control_reconnect_is_deduplicated_before_slow_provider_lookup(monkeypat
             assert lookups == [session.pod_id]
 
     asyncio.run(scenario())
+
+
+def test_control_metadata_read_does_not_wait_for_busy_lifecycle_worker() -> None:
+    async def scenario() -> None:
+        provider = Provider()
+        async with running(provider, MemoryState()) as (gateway, client):
+            scope = gateway.scope(KEYS[0].ss58_address)
+            gateway.queue.enqueue(scope, FIRST, None)
+            session = gateway.allocator.acquire(scope, FIRST)
+            gateway.queue.complete(scope, FIRST, rejected=False)
+            gateway._publish(provider.list())
+            assert session.pod_id is not None
+            entered, release = threading.Event(), threading.Event()
+
+            def busy() -> None:
+                entered.set()
+                assert release.wait(5)
+
+            work = asyncio.get_running_loop().run_in_executor(gateway._worker, busy)
+            assert await asyncio.to_thread(entered.wait, 2)
+            try:
+                socket = await asyncio.wait_for(client.ws_connect(
+                    f"/v1/control/{scope.hotkey}/{FIRST}", headers={
+                        "Authorization": "Bearer " + capability(gateway.secret, scope, FIRST),
+                        "x-witness-pod": session.pod_id,
+                    },
+                ), 0.5)
+                assert (await socket.receive_json())["type"] == "activate"
+                await socket.close()
+            finally:
+                release.set()
+                await work
+
+    asyncio.run(scenario())
