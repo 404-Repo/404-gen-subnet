@@ -793,7 +793,7 @@ def main() -> None:
         from .renderer import RenderCache
 
         render_cache = RenderCache(
-            evidence, runtime.scope, os.environ["WITNESS_IMAGE"], storage_prefix=inputs.storage_prefix,
+            evidence, runtime.scope, storage_prefix=inputs.storage_prefix,
         )
 
     async def serve() -> None:

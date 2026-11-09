@@ -63,14 +63,20 @@ Required `R2_REPLAY_BUCKET` holds provider evidence, preview renders and replay
 artifacts; `R2_REPLAY_CDN_URL` is its public HTTPS origin. Replay artifacts expire
 after 10 days; final-result artifacts after 60 days.
 
-The Pod caches preview PNGs and structured rejections by exact request and worker
-image. Outcomes are uploaded before responding and reused for identical requests.
+The Pod caches preview PNGs and structured rejections by exact request. Outcomes
+are uploaded before responding and reused for identical requests.
 
 Each miner gets 10,000 new successful previews per round. The Pod counts saved
-PNGs at startup and keeps the count in memory. Cache hits, rejections, failed
-renders and failed uploads do not count. New misses return HTTP 429 when exhausted;
-cached outcomes remain available. Final judging renders and validation reads do
-not consume this allowance.
+PNGs across render storage versions at startup and keeps the count in memory.
+Cache hits, rejections, failed renders and failed uploads do not count. New misses
+return HTTP 429 when exhausted; cached outcomes remain available. Final judging
+renders and validation reads do not consume this allowance.
+
+Preview cache keys use the exact raw HTTP path/query and the SHA256 of the request
+body, within the round, miner and storage prefix. Witness images are not part of
+the key. An exact repeat returns the first saved PNG or rejection, including after
+a replacement or image upgrade. Legacy v1 outcomes retain their image-dependent
+keys and count toward the allowance; they are not migrated or reused by v2 lookups.
 
 Preview rendering has a 30-second browser deadline per request. Final saving
 renders eight white views in two batches of four, four gray views and a four-view
@@ -89,7 +95,8 @@ The public preview proxy uses only the preview budget.
 
 Paths under `<storage-prefix>rounds/<full-round-name>/<hotkey>/`:
 
-- `renders/v1/`: cached PNGs and rejections, named by request hash.
+- `renders/v2/`: cached PNGs and rejections, named by request hash.
+- `renders/v1/`: retained legacy PNGs and rejections.
 - `submitted/<prompt-id>.js` and `submitted/<prompt-id>/`: final source, judging
   views, grid and embeddings.
 - `submitted.json`: result index read by the [collector](../../submission-collector/README.md).
