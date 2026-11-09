@@ -11,7 +11,7 @@ import pytest
 from aiohttp import web
 from subnet_common.witness.models import Scope
 from support import MemoryState
-from test_artifacts import IMAGE, PNG, SOURCE, client, enable
+from test_artifacts import PNG, SOURCE, client, enable
 from test_service import Harness
 from witness_pod.renderer import MAX_SUCCESSFUL_RENDERS, RenderCache
 
@@ -39,7 +39,7 @@ async def enable_cache(fixture: Harness, *, queries: list[str] | None = None) ->
     origin = await fixture.listen(app, None)
     service = fixture.services[-1]
     service.renderer_url = origin + "/render/grid"
-    service.render_cache = RenderCache(fixture.state, fixture.scope, IMAGE)
+    service.render_cache = RenderCache(fixture.state, fixture.scope)
     return calls
 
 
@@ -60,6 +60,42 @@ def test_identical_previews_reuse_the_saved_png(tmp_path: Path, monkeypatch: pyt
                     assert results == [PNG] * 3
                     assert await asyncio.to_thread(renderer.render, SOURCE) == PNG
                 assert rendered == [SOURCE]
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("source,status", [(SOURCE, 200), ("invalid", 422)])
+def test_saved_preview_outcomes_survive_a_witness_image_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, source: str, status: int,
+) -> None:
+    async def scenario() -> None:
+        fixture = Harness(tmp_path, monkeypatch)
+        async with fixture.running():
+            with fixture.client() as witness:
+                await asyncio.to_thread(witness._gateway.ensure_pod)
+                rendered = await enable_cache(fixture)
+                with httpx.Client(transport=witness.renderer_transport()) as http:
+                    url = "https://witness.internal/v1/render/grid"
+                    first = await asyncio.to_thread(http.post, url, json={"source": source})
+                    assert first.status_code == status
+                    current = fixture.provider.list()[0]
+                    fixture.selection.update(current, active=False)
+                    fixture.provider.delete(current.id)
+                    fixture.allocator.spec = replace(
+                        fixture.allocator.spec, image="registry/witness@sha256:" + "b" * 64,
+                    )
+                    witness._gateway._invalidate_for("pod_not_selected")
+                    await asyncio.to_thread(witness._gateway.ensure_pod)
+                    assert len(fixture.runtimes) == 2
+                    assert fixture.provider.list()[0].image != current.image
+                    replacement_rendered = await enable_cache(fixture)
+                    repeated = await asyncio.to_thread(http.post, url, json={"source": source})
+                    assert (repeated.status_code, repeated.content) == (status, first.content)
+                    different = await asyncio.to_thread(http.post, url, json={"source": source + "\n"})
+                    assert different.status_code == 200 and different.content == PNG
+                assert rendered == [source]
+                assert replacement_rendered == [source + "\n"]
+                assert fixture.paid == 0
 
     asyncio.run(scenario())
 
@@ -122,7 +158,7 @@ def test_only_new_saved_pngs_consume_the_allowance_after_restart(
                 # Completed finals and other rounds do not consume this allowance.
                 fixture.state.put(f"rounds/{fixture.scope.round}/{fixture.scope.hotkey}/submitted/grid.png", PNG)
                 fixture.state.put(f"rounds/another-round/{fixture.scope.hotkey}/renders/v1/other.png", PNG)
-                fixture.services[-1].render_cache = RenderCache(fixture.state, fixture.scope, IMAGE)
+                fixture.services[-1].render_cache = RenderCache(fixture.state, fixture.scope)
                 with httpx.Client(transport=witness.renderer_transport()) as http:
                     url = "https://witness.internal/v1/render/grid"
                     for source, status in (
@@ -132,7 +168,7 @@ def test_only_new_saved_pngs_consume_the_allowance_after_restart(
                     ):
                         reply = await asyncio.to_thread(http.post, url, json={"source": source})
                         assert reply.status_code == status, reply.text
-                    fixture.services[-1].render_cache = RenderCache(fixture.state, fixture.scope, IMAGE)
+                    fixture.services[-1].render_cache = RenderCache(fixture.state, fixture.scope)
                     assert (await asyncio.to_thread(http.post, url, json={"source": SOURCE})).content == PNG
                     rejected = await asyncio.to_thread(http.post, url, json={"source": "one-too-many"})
                     assert rejected.status_code == 429 and rejected.json() == {"error": "render_limit_exhausted"}
@@ -175,20 +211,36 @@ def test_failed_upload_is_retryable_and_does_not_spend_the_last_render(
     asyncio.run(scenario())
 
 
-def test_saved_renders_are_scoped_to_the_round_miner_and_renderer() -> None:
+def test_saved_renders_are_scoped_to_the_round_and_miner() -> None:
     objects = MemoryState()
     scope = Scope("test", "round-0", "5" * 48)
-    cache = RenderCache(objects, scope, IMAGE, storage_prefix="experiments/run/")
+    cache = RenderCache(objects, scope, storage_prefix="experiments/run/")
     key = cache.key(SOURCE.encode(), "/v1/render/grid")
     assert cache.save(key, PNG, 200)
-    restarted = RenderCache(objects, scope, IMAGE, storage_prefix="experiments/run/")
+    restarted = RenderCache(objects, scope, storage_prefix="experiments/run/")
     assert restarted.get(key) == (PNG, 200)
-    for changed_scope, renderer_id in (
-        (replace(scope, round="round-1"), IMAGE), (replace(scope, hotkey="6" * 48), IMAGE),
-        (scope, "sha256:" + "b" * 64),
-    ):
-        changed = RenderCache(objects, changed_scope, renderer_id, storage_prefix="experiments/run/")
+    for changed_scope in (replace(scope, round="round-1"), replace(scope, hotkey="6" * 48)):
+        changed = RenderCache(objects, changed_scope, storage_prefix="experiments/run/")
         assert changed.get(changed.key(SOURCE.encode(), "/v1/render/grid")) is None
+
+
+def test_legacy_and_request_keyed_pngs_share_the_allowance(monkeypatch: pytest.MonkeyPatch) -> None:
+    objects = MemoryState()
+    scope = Scope("test", "round-0", "5" * 48)
+    legacy = f"experiments/run/rounds/{scope.round}/{scope.hotkey}/renders/v1/"
+    legacy_png = legacy + "a" * 64 + ".png"
+    objects.put(legacy_png, PNG)
+    objects.put(legacy + "b" * 64 + ".rejection.json", b'{"error":"validation_failed","failures":[]}')
+    monkeypatch.setattr("witness_pod.renderer.MAX_SUCCESSFUL_RENDERS", 2)
+    cache = RenderCache(objects, scope, storage_prefix="experiments/run/")
+    assert not cache.full
+    key = cache.key(b"new", "/v1/render/grid")
+    assert cache.save(key, PNG, 200)
+    restarted = RenderCache(objects, scope, storage_prefix="experiments/run/")
+    assert restarted.full
+    assert restarted.get(key) == (PNG, 200)
+    assert not restarted.save(restarted.key(b"over-limit", "/v1/render/grid"), PNG, 200)
+    assert objects.get(legacy_png) == PNG
 
 
 def test_final_saving_does_not_consume_the_preview_allowance(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -198,7 +250,7 @@ def test_final_saving_does_not_consume_the_preview_allowance(tmp_path: Path, mon
             with fixture.client() as witness:
                 await asyncio.to_thread(witness._gateway.ensure_pod)
                 await enable(fixture)
-                cache = RenderCache(fixture.state, fixture.scope, IMAGE)
+                cache = RenderCache(fixture.state, fixture.scope)
                 fill(cache, MAX_SUCCESSFUL_RENDERS)
                 fixture.services[-1].render_cache = cache
                 with client(fixture, witness.renderer_transport()) as renderer:

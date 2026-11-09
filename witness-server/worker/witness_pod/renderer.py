@@ -32,16 +32,17 @@ class RenderObjects(Objects, Protocol):
 class RenderCache:
     """Original render outcomes and a startup-restored, in-memory success count."""
 
-    def __init__(self, objects: RenderObjects, scope: Scope, renderer_id: str, *, storage_prefix: str = "") -> None:
-        self.objects, self.scope, self.renderer_id = objects, scope, renderer_id
-        self.prefix = f"{storage_prefix}rounds/{scope.round}/{scope.hotkey}/renders/v1/"
-        saved = set(objects.keys(self.prefix))
+    def __init__(self, objects: RenderObjects, scope: Scope, *, storage_prefix: str = "") -> None:
+        self.objects, self.scope = objects, scope
+        prefix = f"{storage_prefix}rounds/{scope.round}/{scope.hotkey}/renders/"
+        self.prefix = prefix + "v2/"
+        saved = set(objects.keys(prefix))
         self._pngs = {key for key in saved if key.endswith(".png")}
         self._rejections = {key for key in saved if key.endswith(".rejection.json")}
         self._save_lock = threading.Lock()
 
     def key(self, body: bytes, path: str) -> str:
-        request = (self.renderer_id, path, hashlib.sha256(body).hexdigest())
+        request = (path, hashlib.sha256(body).hexdigest())
         return self.prefix + hashlib.sha256(json_bytes(request)).hexdigest()
 
     @property
