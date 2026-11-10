@@ -18,7 +18,7 @@ dev = ["build (==1.3.0)", "mypy (==1.18.2)", "pytest (==8.3.5)", "ruff (==0.14.1
 
 [package.source]
 type = "directory"
-url = "../../../../../Users/maximbladyko/.codex/worktrees/validation-service-skeleton/404-subnet/renderer-client"
+url = "../renderer-client"
 
 [[package]]
 name = "404-witness-client"
@@ -45,7 +45,7 @@ dev = ["mypy (>=2.3.1,<3)", "pytest (>=9.0.3,<10)", "types-setuptools (>=84.0.0.
 
 [package.source]
 type = "directory"
-url = "../../../../../Users/maximbladyko/.codex/worktrees/validation-service-skeleton/404-subnet/witness-client"
+url = "../witness-client"
 
 [[package]]
 name = "404-witness-pod"
@@ -59,7 +59,7 @@ develop = true
 
 [package.source]
 type = "directory"
-url = "../../../../../Users/maximbladyko/.codex/worktrees/validation-service-skeleton/404-subnet/witness-server/worker"
+url = "../witness-server/worker"
 
 [[package]]
 name = "aioboto3"
@@ -3469,7 +3469,7 @@ embeddings = ["torch (>=2.10.0,<3.0.0)", "torchvision (>=0.25.0,<0.26.0)", "tran
 
 [package.source]
 type = "directory"
-url = "../../../../../Users/maximbladyko/.codex/worktrees/validation-service-skeleton/404-subnet/shared"
+url = "../shared"
 
 [[package]]
 name = "tenacity"
