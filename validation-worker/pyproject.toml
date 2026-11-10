@@ -16,7 +16,6 @@ boto3 = "1.40.61"
 
 bittensor-wallet = "4.1.0"
 xxhash = "4.0.1"
-404-miner-runtime = {path = "../miner-runtime", develop = true}
 404-witness-client = {path = "../witness-client", develop = true}
 404-renderer-client = {path = "../renderer-client", develop = true}
 404-witness-pod = {path = "../witness-server/worker", develop = true}

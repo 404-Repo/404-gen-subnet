@@ -15,7 +15,6 @@ from typing import Any, Literal
 
 import openai
 import pytest
-from miner_runtime.observations import ReplayMismatch
 from openai.types.responses.easy_input_message_param import EasyInputMessageParam
 from openai.types.responses.response_input_message_content_list_param import ResponseInputMessageContentListParam
 from openai.types.responses.response_input_param import ResponseInputParam
@@ -42,6 +41,7 @@ from validation_worker.request_replay import (
     EvidenceUnavailable,
     PreparedReplay,
     RecordedWitnessClient,
+    ReplayMismatch,
     SavedCapture,
     png_request,
     png_request_tolerance,

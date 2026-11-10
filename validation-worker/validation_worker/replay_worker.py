@@ -21,7 +21,6 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any, TypeVar, cast
 
-from miner_runtime.observations import ReplayMismatch
 from pydantic import TypeAdapter
 from renderer_client import Renderer, RenderOptions, RenderRejected
 from renderer_client.client import DEFAULT_OPTIONS
@@ -34,6 +33,7 @@ from .request_replay import (
     EvidenceUnavailable,
     ImageRequestIndex,
     RecordedWitnessClient,
+    ReplayMismatch,
     SavedCapture,
 )
 

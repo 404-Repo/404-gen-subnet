@@ -14,7 +14,6 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Literal, Self, Unpack, overload
 
-from miner_runtime.observations import ReplayMismatch
 from openai.types.responses import Response, ResponseStreamEvent
 from openai.types.responses.response_create_params import ResponseCreateParamsBase
 from PIL import Image, ImageChops
@@ -237,6 +236,11 @@ def replayable_captures(inventory: RequestInventory) -> dict[str, SavedCapture]:
         elif item.call.phase == "failed" and (item.call.manifest_sha256 is not None or item.call.authorized):
             failed.setdefault(item.call.request.id, []).append(item)
     return {**{key: items[0] for key, items in failed.items() if len(items) == 1}, **issued}
+
+
+class ReplayMismatch(WitnessError):
+    def __init__(self, message: str) -> None:
+        super().__init__(message, code="replay_mismatch")
 
 
 class EvidenceUnavailable(ValueError):

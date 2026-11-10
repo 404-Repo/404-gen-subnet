@@ -12,7 +12,6 @@ from typing import cast
 
 import httpx
 from bittensor_wallet import Keypair
-from miner_runtime.observations import Inputs
 from subnet_common.witness.models import Scope
 from subnet_common.witness.state import Snapshot, StateConflict
 from witness_client import CapturedResponse, WitnessClient, WitnessError
@@ -21,7 +20,6 @@ from witness_client.pods import PodGatewayClient
 from witness_pod.budget import Budget
 from witness_pod.records import CallRecords
 from witness_pod.recovery import response_failure
-from witness_pod.replay import export_bundle
 
 
 SCOPE = Scope("competition", "test-0", "5" * 48)
@@ -223,17 +221,3 @@ class Capture(WitnessClient):
             f"rounds/{SCOPE.round}/{SCOPE.hotkey}/{call.exchange_id}/failure.json",
             canonical({"status": "failed", "error_type": call.failure}),
         )
-
-    def export(self, output: Path, image: bytes = b"PNG", seed: int = 42) -> Path:
-        execution = next(self._state.glob(f"executions/*/{Inputs.supplied(image, seed).id}/execution.json"))
-        export_bundle(
-            records=self.records,
-            evidence=self.state,
-            scope=SCOPE,
-            execution=execution,
-            output=output,
-            proof_hash="c" * 64,
-            pricing=self.pricing,
-            verify=lambda _, path: json.loads((path / "manifest.json").read_bytes()),
-        )
-        return output
