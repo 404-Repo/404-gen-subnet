@@ -70,7 +70,7 @@ remain unchanged.
 
 Gateway readiness checks the selected Pod and proof key. Pricing file hashes in
 retained journals are informational; they do not require old and new tables to
-match. Replay bundles still protect their own embedded pricing bytes by hash.
+match.
 Images contain the pricing reader rather than a baked model table. This runtime
 support must be installed once before model additions can be published without
 rebuilding images.
@@ -186,7 +186,7 @@ The explicit null deadline keeps the collector in `miner_generation` indefinitel
 omitting the deadline is invalid. An unbounded round still needs fresh policies.
 Use a distinct deployment for independently operated gateways and an explicit
 storage prefix for isolated branch results, calls, accounting and recordings.
-The collector uses the same prefix. Offline export accepts `--storage-prefix`.
+The collector uses the same prefix.
 The empty prefix retains all official paths. Repeated runs of the same persistent
 round resume its immutable saved results; use a new round for new submissions.
 

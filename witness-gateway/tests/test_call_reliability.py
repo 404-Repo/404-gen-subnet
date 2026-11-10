@@ -9,16 +9,13 @@ from contextlib import ExitStack
 from pathlib import Path
 from typing import cast
 
-import openai
 import pytest
-from miner_runtime.observations import ReplayMismatch
 from miner_runtime.runner import run_generation
-from miner_runtime.validator import ReplayWitness, run_replay
 from openai.types.responses import Response
 from support import MemoryState
 from test_recording import SCOPE
 from test_recovery import PROOF, capture, evidence, prefix
-from test_replay import Capture
+from test_generation import Capture
 from test_service import Harness, call_key
 from witness_client import WitnessClient
 from witness_client.calls import canonical
@@ -105,36 +102,7 @@ def test_same_key_repeated_results_are_charged_once(
                 outcomes.append(cast(Response, value).output_text)
         return ":".join(outcomes)
 
-    expected = run_generation(generate, b"PNG", 42, live, None)
-    bundle = live.export(tmp_path / "bundle")
-    assert live.paid == 1
-    replay = ReplayWitness(bundle, timeout=0.2)
-    assert run_replay(generate, b"PNG", 42, replay, None) == expected
-    assert live.paid == 1
-
-
-@pytest.mark.parametrize("failure", ["delivery", "timeout"])
-def test_error_dependent_output_remains_a_mismatch(
-    tmp_path: Path,
-    failure: str,
-) -> None:
-    live = Capture(tmp_path)
-    live.failures[0] = failure
-
-    def generate(image: bytes, seed: int, witness: WitnessClient, renderer: None) -> str:
-        outcomes = []
-        for _ in range(2):
-            try:
-                outcomes.append(witness.create(model="fixture", input="image").output_text)
-            except openai.APIConnectionError as error:
-                outcomes.append(type(error).__name__)
-        return ":".join(outcomes)
-
-    expected = run_generation(generate, b"PNG", 42, live, None)
-    assert expected == ("APITimeoutError:0" if failure == "timeout" else "APIConnectionError:0")
-    bundle = live.export(tmp_path / "bundle")
-    with pytest.raises(ReplayMismatch, match="Execution output differs"):
-        run_replay(generate, b"PNG", 42, ReplayWitness(bundle), None)
+    run_generation(generate, b"PNG", 42, live, None)
     assert live.paid == 1
 
 

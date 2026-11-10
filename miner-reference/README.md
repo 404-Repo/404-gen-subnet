@@ -216,13 +216,13 @@ configured and sized for 12 concurrent captures. The Pod default is 32.
 
 Use the pinned `witness_client`, `renderer_client` and `miner_runtime` packages supplied
 by your runtime. The runner in `miner_runtime.runner` owns generation and recovery of
-execution observations; `miner_runtime.validator` owns offline replay and prompt
-budget acceptance. From this checkout, install `miner-runtime` with
+execution observations. From this checkout, install `miner-runtime` with
 `python -m pip install -e miner-runtime` and put `miner-reference` on `PYTHONPATH`. The witness
 configuration includes the public gateway URL and matching proof parameters; see
 the [client configuration](../witness-client/README.md#configure). `state_directory`
 is an optional hint for execution-host observations, not an SDK recovery requirement.
-This reference driver keeps its own private `--output` checkpoints.
+This reference driver keeps its own private `--output` checkpoints. For
+[manual replay](../validation-worker/MANUAL_REPLAY.md), use validation-worker.
 The renderer URL and identity refer to an existing renderer. Authentication uses
 the named local wallet and Codex subscription, or `--api` with `OPENAI_API_KEY`.
 Set `RENDERER_API_KEY` when the renderer requires authentication.

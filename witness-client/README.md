@@ -7,7 +7,7 @@ code using those responses, without another OpenAI generation.
 Use your registered Bittensor hotkey and your own OpenAI API key or ChatGPT
 subscription. Install `404-witness-client` and import it as `witness_client`.
 
-See the [sequence diagrams](SEQUENCE.md) for how requests pass through the
+See the [sequence diagram](SEQUENCE.md) for how requests pass through the
 witness.
 
 ## Install
@@ -400,11 +400,9 @@ UUID does not change `request_id` or make the failure a reusable model response.
 access window using the exchange ID from `WitnessError`, without starting inference.
 The SDK downloads retained request bytes when needed to verify their identity.
 
-The replay helper supplies native-verified successful responses by logical request
-key and compares final output bytes. It does not reproduce transient failures or
-require failed-attempt diagnostics. Missing evidence or an output mismatch remains
-unresolved for investigation. The [Pod guide](../witness-gateway/PODS.md) describes verified offline
-replay, storage layout and lifecycle.
+Candidate validation and [manual replay](../validation-worker/MANUAL_REPLAY.md)
+run in [validation-worker](../validation-worker/README.md). The
+[Pod guide](../witness-gateway/PODS.md) describes capture storage and lifecycle.
 
 ## Usage and evidence
 

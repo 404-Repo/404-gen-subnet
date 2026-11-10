@@ -27,9 +27,9 @@ only after its own checks pass.
 
 Reconcile the client generation API, recovery tests, Pod Dockerfile, Docker context
 and current documentation when combining the branches. Retain the Pod allocation
-and recording paths. The client wheel, miner runner, recording exporter and
-replay code must agree on the same API and generation identity. Verify old saved
-recordings with the intended compatible replay path before cutover.
+and recording paths. The client wheel, miner runner and replay code must agree on
+the same API and generation identity. Verify old saved recordings with the intended
+compatible replay path before cutover.
 
 ## Release gates
 

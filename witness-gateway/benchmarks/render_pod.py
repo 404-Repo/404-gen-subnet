@@ -32,7 +32,6 @@ from witness_pod.budget import Budget, BudgetRejected
 from witness_pod.direct import Witness
 from witness_pod.pod import PodRuntime
 from witness_pod.records import CallRecords
-from witness_pod.replay import export_bundle, native_verifier
 from witness_pod.storage import R2Store
 
 os.umask(0o077)
@@ -236,7 +235,7 @@ async def main():
         service=Witness(RUNTIME,STORE.url)
         WITNESS_RUNNER=web.AppRunner(service.application(),access_log=None);await WITNESS_RUNNER.setup()
         await web.TCPSite(WITNESS_RUNNER,'0.0.0.0',8000,ssl_context=witness_tls).start()
-        app['records'],app['budget'],app['scope']=records,budget,scope
+        app['budget']=budget
         threading.Thread(target=RUNTIME.run,daemon=True).start();PHASE=body['phase']
         event('ready',python=os.sys.version.split()[0],node=subprocess.check_output(['node','--version'],text=True).strip(),
             chromium=subprocess.check_output(['/usr/bin/chromium','--version'],text=True).strip(),proof_hash=PROOF)
@@ -268,20 +267,6 @@ async def main():
             os.killpg(RENDERER.pid,signal.SIGKILL);RENDERER.wait();renderer_start();count=1
         else:raise web.HTTPBadRequest()
         event('fault',kind=kind,count=count);return web.json_response({'count':count})
-    async def export(request):
-        from miner_runtime.observations import Execution
-        execution=Execution.model_validate((await request.json())['execution'])
-        key=execution.inputs.id
-        path=ROOT/'executions'/f'{key}.json';path.parent.mkdir(exist_ok=True)
-        raw=execution.model_dump_json().encode()
-        if path.exists() and path.read_bytes()!=raw:raise web.HTTPConflict()
-        path.write_bytes(raw)
-        output=ROOT/'bundles'/key;output.parent.mkdir(exist_ok=True)
-        if output.exists():return web.json_response({'verified':True,'saved':True})
-        await asyncio.to_thread(export_bundle,records=app['records'],evidence=STORE,scope=app['scope'],execution=path,
-            output=output,proof_hash=PROOF,pricing=PricingStore(STORE.state,DEPLOYMENT).read(),
-            verify=native_verifier(worker.VERIFY_SCRIPT,worker.PARAMETERS))
-        event('bundle_verified',execution=key);return web.json_response({'verified':True})
     async def download(request):
         proc=await asyncio.create_subprocess_exec('tar','czf','-','--exclude=ca.pem','--exclude=cert.pem','--exclude=key.pem',
             '--exclude=pod-tls',
@@ -291,7 +276,7 @@ async def main():
         if await proc.wait():raise RuntimeError('Evidence archive failed')
         await response.write_eof();return response
     app.add_routes([web.post('/boot',boot),web.get('/status',status),web.post('/config',config),
-        web.post('/render/grid',render),web.post('/render',render),web.post('/fault',fault),web.post('/export',export),web.get('/download',download)])
+        web.post('/render/grid',render),web.post('/render',render),web.post('/fault',fault),web.get('/download',download)])
     await admin.setup();await web.TCPSite(admin,'0.0.0.0',8001).start()
     threading.Thread(target=sampler,daemon=True).start()
     while time.time()<END:await asyncio.sleep(1)
