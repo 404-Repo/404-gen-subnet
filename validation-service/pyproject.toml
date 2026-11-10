@@ -18,8 +18,6 @@ bandit = "1.9.2"
 black = "25.11.0"
 mypy = "1.18.2"
 ruff = "0.14.6"
-pytest = "8.3.5"
-pytest-asyncio = "0.25.3"
 
 [build-system]
 requires = ["poetry-core", "setuptools", "wheel"]
@@ -32,7 +30,6 @@ include = '\.pyi?$'
 exclude = '''
 /(
     \.git
-  | \.pytest_cache
   | \.idea
   | \.venv
   | \.vscode
@@ -63,9 +60,6 @@ select = [
 fixable = ["ALL"]
 unfixable = []
 
-[tool.ruff.lint.per-file-ignores]
-"tests/**" = ["S101"]
-
 [tool.ruff.lint.flake8-quotes]
 docstring-quotes = "double"
 
@@ -75,7 +69,7 @@ lines-after-imports = 2
 
 [tool.bandit]
 skips = ["B104"]
-exclude_dirs = ["./.*/**", "./tests/**"]
+exclude_dirs = ["./.*/**"]
 
 [tool.mypy]
 plugins = ["pydantic.mypy"]
@@ -89,12 +83,7 @@ warn_no_return = false
 warn_unreachable = true
 strict_equality = true
 warn_redundant_casts = true
-exclude = ['.venv/.*', 'tests/.*']
-
-[tool.pytest.ini_options]
-asyncio_mode = "auto"
-asyncio_default_fixture_loop_scope = "function"
-testpaths = ["tests"]
+exclude = ['.venv/.*']
 
 [tool.poe]
 poetry_command = ""
@@ -108,7 +97,3 @@ sequence = [
     { cmd = "bandit . -rq -c pyproject.toml" },
     { cmd = "mypy ." },
 ]
-
-[tool.poe.tasks.test]
-help = "Run tests"
-cmd = "pytest"

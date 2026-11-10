@@ -1,0 +1,40 @@
+POLICY miner {
+    ERRNO(38) { clone3 },
+    ALLOW {
+        read, write, readv, writev, pread64, pwrite64, close, close_range, lseek,
+        brk, mmap, mprotect, munmap, mremap, madvise, msync, mincore,
+        rt_sigaction, rt_sigprocmask, rt_sigreturn, sigaltstack,
+        set_tid_address, set_robust_list, rseq, futex,
+        getrandom, clock_gettime, clock_getres, clock_nanosleep, nanosleep,
+        gettimeofday, time ON x86_64, times,
+        getpid, getppid, gettid, getuid, geteuid, getgid, getegid,
+        getresuid, getresgid, getgroups, getpgid, getpgrp ON x86_64, getsid,
+        newuname, sysinfo, getrusage, sched_yield, sched_getaffinity,
+        sched_getparam, sched_getscheduler,
+        openat, open ON x86_64, readlink ON x86_64, readlinkat, getcwd, chdir,
+        fchdir, getdents64, newstat ON x86_64, newlstat ON x86_64, newfstat,
+        newfstatat, statx, access ON x86_64, faccessat, faccessat2,
+        fcntl, dup, dup2 ON x86_64, dup3, pipe ON x86_64, pipe2,
+        mkdir ON x86_64, mkdirat, rmdir ON x86_64, unlink ON x86_64, unlinkat,
+        rename ON x86_64, renameat, renameat2, link ON x86_64, linkat,
+        symlink ON x86_64, symlinkat, chmod ON x86_64, fchmod, fchmodat,
+        umask, truncate, ftruncate, fsync, fdatasync, statfs, fstatfs,
+        utimensat, fadvise64,
+        poll ON x86_64, ppoll, select ON x86_64, pselect6,
+        epoll_create ON x86_64, epoll_create1, epoll_ctl, epoll_wait ON x86_64,
+        epoll_pwait, epoll_pwait2, eventfd2, timerfd_create, timerfd_settime,
+        timerfd_gettime, recvfrom, sendto, recvmsg, sendmsg, shutdown,
+        getsockname, getpeername, getsockopt, setsockopt,
+        wait4, waitid, fork ON x86_64, vfork ON x86_64, execve, exit,
+        exit_group, kill, tgkill, tkill, restart_syscall,
+        getrlimit, setrlimit, capget, arch_prctl ON x86_64,
+        // Block namespace creation, tracing and CLONE_PARENT; retain normal threads/forks.
+        clone { (clone_flags & 0xfffffffffec2b000) == 0 },
+        // asyncio uses a private Unix socket pair; socket() and connect() remain denied.
+        socketpair { family == 1 },
+        prctl { option == 3 || option == 15 || option == 21 || option == 39 },
+        prlimit64 { pid == 0 },
+        ioctl { cmd == 0x5401 || cmd == 0x5421 || cmd == 0x5451 }
+    }
+}
+USE miner DEFAULT ERRNO(1)

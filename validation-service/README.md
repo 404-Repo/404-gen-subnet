@@ -1,9 +1,15 @@
 # Validation service
 
-Validates candidate winners requested by judge-service. Replays each candidate's
-submitted Python source against recorded witness evidence, verifies canonical
-outputs and competition budgets, and publishes a terminal `passed` or `failed`
-result. Runs alongside judge-service; source auditing remains an independent check.
+Coordinates validation of candidate winners requested by judge-service. Schedules
+replays on validation Pods, collects worker results and publishes a terminal
+`passed` or `failed` result. Runs alongside judge-service; source auditing remains
+an independent check.
+
+The coordinator runs on the main server and dispatches candidates to replay Pods.
+Each Pod contains a trusted worker, a miner sandbox and a render service. Multiple
+Pods can validate candidates concurrently. Input preparation, witness verification,
+output comparison and budget checks run outside the miner sandbox.
+See [validation-worker](../validation-worker/README.md) for the Pod runtime.
 
 ## Validation
 
@@ -21,12 +27,12 @@ mean no work. Requests are deduplicated by hotkey within the round. Each request
 whose hotkey has either a `passed` or `failed` result is skipped. Missing results
 leave requests pending.
 
-For each pending candidate, the service uses the submitted source repository and
-commit, published prompts and seed, canonical outputs, and recorded witness
-evidence identified by the pinned competition state. The competition state commit
-and the miner's submitted source commit are separate identities.
+For each pending candidate, the service supplies the round number, hotkey and
+pinned competition commit to the worker. The worker loads the submitted source
+repository and commit, published prompts and seed, canonical outputs and witness
+artifact namespace at that commit.
 
-The service replays the submitted Python source, matching outgoing requests to
+The worker replays the submitted Python source, matching outgoing requests to
 recorded witness requests and returning their recorded responses. It checks the
 replayed outputs against the canonical outputs and verifies competition budgets
 without issuing new provider generations.
@@ -89,6 +95,5 @@ poetry run python main.py
 
 ```bash
 poetry run poe lint
-poetry run poe test
 poetry build
 ```
