@@ -149,7 +149,10 @@ from pathlib import Path
 from PIL import Image
 import io
 from renderer_client import RenderRejected
+print('{{"message":"Python miner log"}}', flush=True)
+os.write(1, b"native import log\\n")
 def generate(image, seed, witness, renderer):
+    os.write(1, b'{{"message":"native JSON miner log"}}\\n')
     scratch = Path("/scratch/previous-prompt")
     if scratch.exists():
         raise RuntimeError("previous prompt scratch survived")

@@ -7,6 +7,7 @@ import base64
 import importlib.util
 import inspect
 import json
+import os
 import sys
 import threading
 from collections.abc import Awaitable, Callable
@@ -23,7 +24,9 @@ from witness_client.calls import RequestKey
 from witness_client.response import AsyncModelStream, ModelStream, model_error, model_result
 
 
-wire = sys.stdout
+# Keep the protocol pipe separate from Python and native miner output.
+wire = os.fdopen(os.dup(sys.stdout.fileno()), "w", buffering=1)
+os.dup2(sys.stderr.fileno(), sys.stdout.fileno())
 sys.stdout = sys.stderr
 lock = threading.Lock()
 
