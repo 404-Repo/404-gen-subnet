@@ -7,8 +7,8 @@ from pathlib import Path
 from typing import Literal
 
 import pytest
-from miner_runtime.accounting import credits as replay_credits
 from subnet_common.witness.models import Scope
+from subnet_common.witness.pricing import credits as replay_credits
 from support import MemoryState
 from witness_client.calls import RequestKey, canonical, request_digest
 from witness_client.request import serialize_body

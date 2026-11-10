@@ -7,13 +7,13 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 import httpx
-from miner_runtime.accounting import BudgetRejected, PromptBudget
 from pydantic import BaseModel
 from renderer_client import RenderRejected
 from renderer_client.client import PNG_SIGNATURE
 from subnet_common.competition.validation import ValidationResult, ValidationVerdict
 from subnet_common.r2_client import R2Client
 from subnet_common.witness.models import Scope, json_bytes, object_dict
+from subnet_common.witness.pricing import BudgetRejected, PromptBudget
 from subnet_common.witness.rounds import PromptImage
 from witness_client.calls import RequestKey, request_digest
 from witness_pod import PROOF_PARAMETERS, VERIFY_SCRIPT

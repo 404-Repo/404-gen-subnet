@@ -7,11 +7,11 @@ import json
 from pathlib import Path
 from typing import TypeVar
 
+from subnet_common.witness.pricing import PromptBudget
 from witness_client.calls import RequestKey
 from witness_client.client import CapturedResponse
 from witness_client.pods import CallView
 
-from .accounting import PromptBudget
 from .observations import (
     Execution,
     Generate,

@@ -15,7 +15,6 @@ from typing import Any, Literal
 
 import openai
 import pytest
-from miner_runtime.accounting import BudgetRejected
 from miner_runtime.observations import ReplayMismatch
 from openai.types.responses.easy_input_message_param import EasyInputMessageParam
 from openai.types.responses.response_input_message_content_list_param import ResponseInputMessageContentListParam
@@ -23,6 +22,7 @@ from openai.types.responses.response_input_param import ResponseInputParam
 from PIL import Image
 from PIL.PngImagePlugin import PngInfo
 from replay_fixtures import PRICING, SCOPE, Capture
+from subnet_common.witness.pricing import BudgetRejected
 from test_manual_replay import Stored
 from witness_client import AsyncWitnessClient, WitnessClient, WitnessError
 from witness_client.calls import RequestKey, canonical

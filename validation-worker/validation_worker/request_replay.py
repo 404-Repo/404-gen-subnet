@@ -14,7 +14,6 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Literal, Self, Unpack, overload
 
-from miner_runtime.accounting import PromptBudget
 from miner_runtime.observations import ReplayMismatch
 from openai.types.responses import Response, ResponseStreamEvent
 from openai.types.responses.response_create_params import ResponseCreateParamsBase
@@ -22,6 +21,7 @@ from PIL import Image, ImageChops
 from pydantic import BaseModel, ConfigDict
 from renderer_client import Renderer, RenderOptions
 from renderer_client.client import DEFAULT_OPTIONS
+from subnet_common.witness.pricing import PromptBudget
 from witness_client import AsyncWitnessClient, CapturedResponse, WitnessClient, WitnessError
 from witness_client.calls import Digest, RequestKey, canonical
 from witness_client.pods import CallView

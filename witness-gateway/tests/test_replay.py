@@ -13,7 +13,6 @@ import httpx
 import openai
 import pytest
 from bittensor_wallet import Keypair
-from miner_runtime.accounting import BudgetRejected
 from miner_runtime.observations import Execution, Inputs, ReplayMismatch
 from miner_runtime.runner import run_generation
 from miner_runtime.validator import ReplayWitness, run_replay
@@ -25,6 +24,7 @@ from renderer_client import (
     RenderRequest,
     ReplayRenderer,
 )
+from subnet_common.witness.pricing import BudgetRejected
 from support import MemoryState
 from test_recording import PRICING, SCOPE
 from witness_client import AsyncWitnessClient, WitnessClient, WitnessError
