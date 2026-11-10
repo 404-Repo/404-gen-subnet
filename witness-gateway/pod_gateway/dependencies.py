@@ -76,6 +76,7 @@ def gateway_spec(settings: Settings) -> PodSpec:
         )
     }
     for name in (
+        "WITNESS_MODE",
         "WITNESS_COMPETITION_REPO",
         "WITNESS_COMPETITION_BRANCH",
         "WITNESS_GITHUB_TOKEN",

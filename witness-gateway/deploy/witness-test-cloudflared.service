@@ -1,0 +1,18 @@
+[Unit]
+Description=Witness test outbound HTTPS tunnel
+After=network-online.target witness-test-caddy.service
+Wants=network-online.target
+Requires=witness-test-caddy.service
+
+[Service]
+Environment=TUNNEL_TOKEN_FILE=/etc/witness-test/tunnel.token
+ExecStart=/usr/local/bin/cloudflared tunnel --no-autoupdate run
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

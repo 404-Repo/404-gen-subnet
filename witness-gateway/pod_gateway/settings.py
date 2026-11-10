@@ -4,7 +4,7 @@ from collections.abc import Mapping
 from functools import cached_property
 from pathlib import Path
 from types import MappingProxyType
-from typing import Annotated, Self
+from typing import Annotated, Literal, Self
 from urllib.parse import urlsplit
 
 from pydantic import (
@@ -17,7 +17,7 @@ from pydantic import (
 )
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 from subnet_common.witness import PROOF_PARAMETERS
-from subnet_common.witness.auth import keypair_from_hotkey
+from subnet_common.witness.auth import AuthRejected, keypair_from_hotkey
 from subnet_common.witness.models import Scope
 from subnet_common.witness.rounds import repository
 
@@ -26,6 +26,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(case_sensitive=True, extra="ignore", frozen=True, hide_input_in_errors=True)
 
     deployment: str = Field(..., alias="WITNESS_DEPLOYMENT")
+    mode: Literal["competition", "test"] = Field(default="competition", alias="WITNESS_MODE")
     round: str = Field(default="unconfigured", alias="WITNESS_ACTIVE_ROUND")
     round_end: int | None = Field(default=None, alias="WITNESS_ROUND_END", gt=0)
     competition_repo: str = Field(default="404-Repo/404-active-competition", alias="WITNESS_COMPETITION_REPO")
@@ -148,7 +149,15 @@ class Settings(BaseSettings):
         if len(self.secret) < 32 or self.round == "gateway":
             raise ValueError("Invalid master key or round deadline")
         repository(self.competition_repo)
-        if self.test_hotkey is not None:
+        if self.mode == "test":
+            if (self.test_hotkey is None or not self.deployment.startswith("witness-test-")
+                    or self.competition_branch == "main"):
+                raise ValueError("Test mode requires a test hotkey, witness-test- deployment and separate source branch")
+            try:
+                keypair_from_hotkey(self.test_hotkey)
+            except AuthRejected as error:
+                raise ValueError("Invalid test hotkey") from error
+        elif self.test_hotkey is not None:
             raise ValueError("Automatic competition admission requires Finney membership; WITNESS_TEST_HOTKEY is unsupported")
         if self.round_refresh_seconds >= self.round_policy_seconds:
             raise ValueError("Round refresh must be shorter than the admission policy lifetime")

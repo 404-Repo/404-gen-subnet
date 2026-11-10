@@ -8,7 +8,7 @@ import time
 from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from aiohttp import web
@@ -136,8 +136,41 @@ def test_round_refresh_requires_a_github_token(values: dict[str, object], token:
 
 def test_round_refresh_defaults_keep_policy_fresh_between_checks(values: dict[str, object]) -> None:
     settings = Settings.model_validate(values)
+    assert settings.mode == "competition"
     assert settings.round_refresh_seconds == 60
     assert settings.round_policy_seconds == 120
+
+
+def test_test_mode_configuration_survives_gateway_revival(values: dict[str, object]) -> None:
+    values.update({
+        "WITNESS_MODE": "test", "WITNESS_DEPLOYMENT": "witness-test-v1",
+        "WITNESS_COMPETITION_BRANCH": "witness-test",
+        "WITNESS_TEST_HOTKEY": Keypair.create_from_uri("//Alice").ss58_address,
+    })
+    settings = Settings.model_validate(values)
+    revived = Settings.model_validate({**gateway_spec(settings).env, "WITNESS_DEPLOYMENT": settings.deployment})
+    assert revived.mode == "test"
+    assert revived.test_hotkey == values["WITNESS_TEST_HOTKEY"]
+    assert revived.competition_branch == "witness-test"
+
+
+@pytest.mark.parametrize("changes", [
+    {"WITNESS_MODE": "competition"},
+    {"WITNESS_TEST_HOTKEY": None},
+    {"WITNESS_TEST_HOTKEY": "invalid"},
+    {"WITNESS_DEPLOYMENT": "witness-public-v3"},
+    {"WITNESS_COMPETITION_BRANCH": "main"},
+])
+def test_test_mode_requires_an_identity_and_separate_deployment(
+    values: dict[str, object], changes: dict[str, object],
+) -> None:
+    values.update({
+        "WITNESS_MODE": "test", "WITNESS_DEPLOYMENT": "witness-test-v1",
+        "WITNESS_COMPETITION_BRANCH": "witness-test",
+        "WITNESS_TEST_HOTKEY": Keypair.create_from_uri("//Alice").ss58_address,
+    })
+    with pytest.raises(ValueError):
+        Settings.model_validate({**values, **changes})
 
 
 @pytest.mark.parametrize("refresh,policy", [(60, 60), (61, 120)])
@@ -316,6 +349,73 @@ def test_gateway_refresh_error_preserves_cached_allocation_admission(
         try:
             await asyncio.wait_for(attempted.wait(), 2)
             assert competition.controller.require() == frozen
+        finally:
+            await runner.cleanup()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("mode", ["competition", "test"])
+def test_gateway_mode_keeps_signed_identity_admission_and_replay_protection(
+    values: dict[str, object], tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str,
+) -> None:
+    from pod_gateway import main
+    from test_rounds import Competition
+
+    async def scenario() -> None:
+        tester, registered = Keypair.create_from_uri("//Alice"), Keypair.create_from_uri("//Bob")
+        competition = Competition()
+        membership = Membership(17, "unconfigured")
+        now = int(time.time() * 1000)
+        membership.snapshot = {
+            "version": 1, "network": "finney", "netuid": 17, "block": 1,
+            "fetched_at": now, "block_time": now, "hotkeys": [registered.ss58_address],
+        }
+        gateway = Mock()
+        gateway.application.return_value = web.Application()
+        gateway.round_changed = AsyncMock()
+        gateway_factory = Mock(return_value=gateway)
+        refresh = Mock()
+        monkeypatch.setattr(main, "Gateway", gateway_factory)
+        monkeypatch.setattr(main, "Membership", Mock(return_value=membership))
+        monkeypatch.setattr(main, "RoundController", Mock(return_value=competition.controller))
+        monkeypatch.setattr("pod_gateway.main.R2StateStore.connect", Mock(return_value=MemoryState()))
+        monkeypatch.setattr(main, "RoundImages", Mock(return_value=MemoryState()))
+        monkeypatch.setattr("pod_gateway.main.RunPodClient.http_client", Mock())
+        monkeypatch.setattr("pod_gateway.main.MembershipRefresher.refresh", refresh)
+        (tmp_path / "verifying.bin").write_bytes(b"fixture verification key")
+        if mode == "test":
+            values.update({
+                "WITNESS_MODE": "test", "WITNESS_DEPLOYMENT": "witness-test-v1",
+                "WITNESS_COMPETITION_BRANCH": "witness-test", "WITNESS_TEST_HOTKEY": tester.ss58_address,
+            })
+        settings = GatewaySettings.model_validate({
+            **values, "WITNESS_PARAMETERS": tmp_path,
+            "WITNESS_START_ID": "00000000-0000-4000-8000-000000000001", "RUNPOD_POD_ID": "fixture-gateway",
+        })
+        app = await main.application(settings, worker_spec(settings))
+        runner = web.AppRunner(app)
+        await runner.setup()
+        try:
+            auth = gateway_factory.call_args.kwargs["auth"]
+            allowed, denied = (tester, registered) if mode == "test" else (registered, tester)
+            path = "/v1/pods/current"
+            headers = hotkey_headers(allowed, b"", method="GET", path=path)
+            assert auth.verify("GET", path, b"", headers) == allowed.ss58_address
+            with pytest.raises(AuthRejected, match="replayed_hotkey_auth"):
+                auth.verify("GET", path, b"", headers)
+            forged = hotkey_headers(allowed, b"", method="GET", path=path)
+            forged["x-bittensor-signature"] = "0x" + "00" * 64
+            with pytest.raises(AuthRejected, match="invalid_signature"):
+                auth.verify("GET", path, b"", forged)
+            denied_headers = hotkey_headers(denied, b"", method="GET", path=path)
+            with pytest.raises(AuthRejected, match="hotkey_not_admitted" if mode == "test" else "hotkey_not_registered"):
+                auth.verify("GET", path, b"", denied_headers)
+            await asyncio.sleep(0.01)
+            if mode == "test":
+                refresh.assert_not_called()
+            else:
+                refresh.assert_called_once()
         finally:
             await runner.cleanup()
 

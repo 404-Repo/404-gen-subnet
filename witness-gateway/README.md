@@ -97,7 +97,8 @@ and `WITNESS_COMPETITION_BRANCH` with the operator's chosen branch. Both default
 to `404-Repo/404-active-competition` and `main`. Every branch follows the same
 rules. A read-only `WITNESS_GITHUB_TOKEN` is required and is never sent to workers.
 Finney membership, allocation capabilities, selected-Pod fencing and pricing
-remain required. `WITNESS_TEST_HOTKEY` is unsupported. `WITNESS_ACTIVE_ROUND` and `WITNESS_ROUND_END` are not used for
+remain required in the default `WITNESS_MODE=competition`. `WITNESS_TEST_HOTKEY`
+is unsupported in competition mode. `WITNESS_ACTIVE_ROUND` and `WITNESS_ROUND_END` are not used for
 automatic competition admission.
 
 The gateway resolves the branch once per refresh and reads `config.json`,
@@ -188,3 +189,52 @@ storage prefix for isolated branch results, calls, accounting and recordings.
 The collector uses the same prefix. Offline export accepts `--storage-prefix`.
 The empty prefix retains all official paths. Repeated runs of the same persistent
 round resume its immutable saved results; use a new round for new submissions.
+
+## Separate persistent test deployment
+
+Set `WITNESS_MODE=test` for a gateway dedicated to testing. This mode requires
+`WITNESS_TEST_HOTKEY`, a deployment name beginning with `witness-test-`, and a
+competition source branch other than `main`. Only the configured canonical hotkey
+is admitted, without a Finney registration check. Requests still require normal
+`btauth/1` signatures and nonce protection. Assigned-Pod ownership, allocation
+capabilities, selected-Pod fencing and worker limits are unchanged.
+
+Use a dedicated fixture branch with the persistent-round configuration above.
+Its seed, prompts, stage and deadline are independent of the official competition.
+The existing production R2 buckets and replay CDN can be reused. Choose a
+globally distinct test round, such as `witness-test-20261110-0`, and retain the
+separate test deployment identity. Allocation journals, selection and pricing
+are scoped by deployment; calls, accounting, saved renders, evidence and final
+results include the round. An empty storage prefix uses the normal round paths;
+an optional prefix can provide another namespace. Never reuse an official round
+name for test inputs. Bucket-scoped credentials can access all objects in the
+shared buckets; separation within them is by the application namespaces.
+
+Use a separate master key and upstream TLS certificates for the test deployment.
+Publish the model table under its deployment name. Advance the test round for
+fresh final submissions; existing results cannot be overwritten.
+
+The gateway/revivor environment selects the test worker with its own immutable
+`WITNESS_IMAGE` digest. Changing that pin replaces only the test gateway; request
+a fresh worker allocation to exercise it. Do not change production image pins or
+restart production services. A test deployment can reuse the stable frontend
+host with separate Caddy, cloudflared and revivor services. The supplied
+`deploy/witness-test-*.service` units use independent configuration under
+`/etc/witness-test`, state under `/var/lib/witness-test`, loopback port `18052`
+and Caddy administration port `2020`. Point the test Tunnel at
+`http://127.0.0.1:18052`; retain the production Tunnel configuration.
+
+A small deployment uses `GATEWAY_VCPU=2`, `WITNESS_VCPU=8`,
+`WITNESS_MAX_PODS=1` and `WITNESS_IDLE_SECONDS=1800`. An idle worker drains after
+30 minutes without work and is deleted only after captures, renders and uploads
+finish. Confirm the owned worker IDs are absent from RunPod when ending a session.
+An active request or unfinished upload can extend the billed lifetime. The count
+limit and accounting are not a dollar spending cap.
+
+To suspend gateway compute between sessions, stop `witness-test-revivor.service`
+and delete the exactly identified test gateway after checking that no test workers
+remain. The public hostname and stored configuration remain. Retained R2 data,
+registry images and any applicable traffic still incur charges. Start
+`witness-test-revivor.service` to recreate the gateway; the next signed client
+allocation creates a worker. Do not stop the shared frontend VM or production
+services. Leaving the test revivor running recreates a stopped or deleted gateway.
