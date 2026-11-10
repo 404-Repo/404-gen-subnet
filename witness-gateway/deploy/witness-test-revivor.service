@@ -1,0 +1,17 @@
+[Unit]
+Description=Witness test gateway recovery and owned worker cleanup
+After=network-online.target docker.service witness-test-caddy.service
+Wants=network-online.target
+Requires=docker.service witness-test-caddy.service
+
+[Service]
+EnvironmentFile=/etc/witness-test/image.env
+ExecStartPre=-/usr/bin/docker rm -f witness-test-revivor
+ExecStart=/usr/bin/docker run --name witness-test-revivor --pull never --network host --read-only --tmpfs /tmp:rw,nosuid,nodev,size=128m --env-file /etc/witness-test/revivor.env --mount type=bind,source=/var/lib/witness-test,target=/var/lib/witness-test --mount type=bind,source=/var/lib/witness-test-tls,target=/var/lib/witness-test-tls,readonly --mount type=bind,source=/usr/local/bin/caddy,target=/usr/local/bin/caddy,readonly ${IMAGE_REF}
+ExecStop=/usr/bin/docker stop --time 30 witness-test-revivor
+Restart=always
+RestartSec=10
+TimeoutStopSec=45
+
+[Install]
+WantedBy=multi-user.target

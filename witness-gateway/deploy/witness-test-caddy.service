@@ -1,0 +1,23 @@
+[Unit]
+Description=Witness test loopback frontend
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=caddy
+Group=caddy
+Environment=CADDY_ADMIN=127.0.0.1:2020
+Environment=XDG_CONFIG_HOME=/var/lib/witness-test/caddy/config
+Environment=XDG_DATA_HOME=/var/lib/witness-test/caddy/data
+ExecStart=/usr/local/bin/caddy run --config /var/lib/witness-test/Caddyfile --adapter caddyfile
+ExecReload=/usr/local/bin/caddy reload --config /var/lib/witness-test/Caddyfile --adapter caddyfile
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/witness-test/caddy
+
+[Install]
+WantedBy=multi-user.target

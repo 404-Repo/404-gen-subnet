@@ -10,7 +10,7 @@ from collections.abc import AsyncIterator
 import httpx
 from aiohttp import web
 from subnet_common.github import GitHubClient
-from subnet_common.witness.auth import Authenticator
+from subnet_common.witness.auth import Authenticator, AuthRejected
 from subnet_common.witness.models import PodSpec
 from subnet_common.witness.rounds import repository
 from subnet_common.witness.selection import Selection
@@ -78,9 +78,16 @@ async def application(settings: GatewaySettings, worker_spec: PodSpec) -> web.Ap
         return (pod is not None and pod.lifecycle == "active" and pod.status == "RUNNING" and
                 pod.id == settings.pod_id and pod.markers["WITNESS_START_ID"] == settings.start_id)
 
+    def authorize(hotkey: str) -> None:
+        if settings.mode == "test":
+            if hotkey != settings.test_hotkey:
+                raise AuthRejected("hotkey_not_admitted", 403)
+        else:
+            membership.require(hotkey)
+
     gateway = Gateway(
         allocator=allocator,
-        auth=Authenticator(membership.require),
+        auth=Authenticator(authorize),
         registry=registry,
         deployment=settings.deployment,
         round_number="unconfigured",
@@ -118,7 +125,10 @@ async def application(settings: GatewaySettings, worker_spec: PodSpec) -> web.Ap
                     output.write("membership_refresh_failed", error_type=type(error).__name__)
                 await asyncio.sleep(600)
 
-        tasks = [asyncio.create_task(refresh()), asyncio.create_task(refresh_round())]
+        tasks = []
+        if settings.mode == "competition":
+            tasks.append(asyncio.create_task(refresh()))
+        tasks.append(asyncio.create_task(refresh_round()))
         try:
             yield
         finally:
