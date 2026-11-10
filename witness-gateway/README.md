@@ -201,14 +201,18 @@ capabilities, selected-Pod fencing and worker limits are unchanged.
 
 Use a dedicated fixture branch with the persistent-round configuration above.
 Its seed, prompts, stage and deadline are independent of the official competition.
-Use a separate private R2 bucket for allocation state, accounting and final
-results, with a separate master key and upstream TLS certificates. The existing
-public replay bucket and its CDN can be reused for test evidence and saved
-renders with a nonempty `witness-tests/` storage prefix. Public replay objects
-are separated by their prefix; bucket-scoped credentials can access the entire
-shared replay bucket. Scope the test credential to its private bucket and the
-replay bucket. Publish the model table under the test deployment name. Advance
-the test round for fresh final submissions; existing results cannot be overwritten.
+The existing production R2 buckets and replay CDN can be reused. Choose a
+globally distinct test round, such as `witness-test-20261110-0`, and retain the
+separate test deployment identity. Allocation journals, selection and pricing
+are scoped by deployment; calls, accounting, saved renders, evidence and final
+results include the round. An empty storage prefix uses the normal round paths;
+an optional prefix can provide another namespace. Never reuse an official round
+name for test inputs. Bucket-scoped credentials can access all objects in the
+shared buckets; separation within them is by the application namespaces.
+
+Use a separate master key and upstream TLS certificates for the test deployment.
+Publish the model table under its deployment name. Advance the test round for
+fresh final submissions; existing results cannot be overwritten.
 
 The gateway/revivor environment selects the test worker with its own immutable
 `WITNESS_IMAGE` digest. Changing that pin replaces only the test gateway; request
