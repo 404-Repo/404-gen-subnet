@@ -1,7 +1,12 @@
 # Validation worker
 
-Validates one candidate on a dedicated replay Pod. The trusted worker reads
-GitHub and R2, verifies captured provider evidence, checks replayed JavaScript and
+Supports automatic validation jobs and [manual replays](MANUAL_REPLAY.md).
+Manual replay runs with `poetry run python replay.py` and keeps its own local
+reports. It uses a local Python subprocess with the operator's filesystem and
+network access; the NsJail isolation below applies to automatic validation.
+
+Automatic validation checks one candidate on a dedicated replay Pod. The trusted
+worker reads GitHub and R2, verifies captured provider evidence, checks replayed JavaScript and
 per-prompt budgets, and checkpoints progress in Git. Submitted imports and
 `generate()` run in a fresh NsJail process for each prompt. The jail filesystem is
 prepared once for the validation job and reused across prompts and operational
@@ -162,6 +167,7 @@ user home directory, credentials or a submitted virtualenv into it.
 ```bash
 poetry run poe lint
 poetry check --lock
+poetry run python -m pytest -q
 ```
 
 The single Linux integration check uses a real sandbox and local HTTP GitHub/S3
@@ -169,5 +175,5 @@ fixtures. It interrupts validation after a committed prompt, fails a Git write
 and an R2 read, resumes with the original input commit, checks saved PNGs and
 rejections, probes synthetic credentials and worker network isolation, and checks
 clean scratch and unwritable inputs across successive prompts. Run
-`poetry run python -m unittest discover -s tests -v` as root on Linux with NsJail
+`poetry run python -m unittest discover -s tests -p test_validation.py -v` as root on Linux with NsJail
 and `SANDBOX_ROOT` prepared. It skips when no sandbox runtime is configured.

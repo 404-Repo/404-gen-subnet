@@ -6,12 +6,13 @@ authors = ["Maxim Bladyko <max@404.xyz>"]
 readme = "README.md"
 
 [tool.poetry.dependencies]
-python = ">=3.11,<=3.13"
+python = ">=3.11,<3.14"
 subnet-common = {path = "../shared", develop = true}
 pydantic-settings = "2.14.0"
 loguru = "0.7.3"
 aiofiles = "25.1.0"
 httpx = "0.28.1"
+boto3 = "1.40.61"
 
 bittensor-wallet = "4.1.0"
 xxhash = "4.0.1"
@@ -29,6 +30,7 @@ mypy = "1.18.2"
 ruff = "0.14.6"
 types-aiofiles = "25.1.*"
 types-aiobotocore = "2.25.*"
+pytest = "9.0.3"
 
 [build-system]
 requires = ["poetry-core", "setuptools", "wheel"]
@@ -71,6 +73,10 @@ select = [
 fixable = ["ALL"]
 unfixable = []
 
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "S603"]
+"validation_worker/manual_replay.py" = ["S101", "S603"]
+
 [tool.ruff.lint.flake8-quotes]
 docstring-quotes = "double"
 
@@ -80,7 +86,10 @@ lines-after-imports = 2
 
 [tool.bandit]
 skips = ["B104"]
-exclude_dirs = ["./.*/**"]
+exclude_dirs = ["./.*/**", "./tests/**"]
+
+[tool.bandit.assert_used]
+skips = ["*/validation_worker/manual_replay.py"]
 
 [tool.mypy]
 plugins = ["pydantic.mypy"]
@@ -95,6 +104,11 @@ warn_unreachable = true
 strict_equality = true
 warn_redundant_casts = true
 exclude = ['.venv/.*']
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+filterwarnings = ["error"]
 
 [tool.poe]
 poetry_command = ""
