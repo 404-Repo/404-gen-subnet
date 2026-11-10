@@ -11,8 +11,7 @@ import struct
 import threading
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
-from pathlib import Path
-from typing import Literal, Self, Unpack, overload
+from typing import Literal, Protocol, Self, Unpack, overload
 
 from openai.types.responses import Response, ResponseStreamEvent
 from openai.types.responses.response_create_params import ResponseCreateParamsBase
@@ -226,6 +225,15 @@ class RequestInventory(BaseModel):
     captures: dict[str, SavedCapture]
 
 
+class ReplaySource(Protocol):
+    """Recorded requests and responses supplied to a prompt replay."""
+
+    def fetch(self, exchange_id: str) -> tuple[SavedCapture, bytes]: ...
+    def lookup(self, request: RequestKey) -> dict[str, SavedCapture]: ...
+    def image_index(self, request_id: int, session_id: str | None) -> dict[str, str | None]: ...
+    def request_body(self, request: RequestKey) -> bytes: ...
+
+
 def replayable_captures(inventory: RequestInventory) -> dict[str, SavedCapture]:
     """Prefer completed responses, otherwise retain an unambiguous recorded failure."""
     issued: dict[str, SavedCapture] = {}
@@ -278,26 +286,20 @@ class RecordedWitnessClient(WitnessClient):
 
     def __init__(
         self,
-        directory: Path,
+        inventory: RequestInventory,
+        pricing: bytes,
+        source: ReplaySource,
         emit: Callable[..., None],
-        fetch: Callable[[str], tuple[SavedCapture, bytes]],
         *,
-        image_index: Callable[[int, str | None], dict[str, str | None]] | None = None,
         reference: bytes | None = None,
-        lookup: Callable[[RequestKey], dict[str, SavedCapture]] | None = None,
-        request_body: Callable[[RequestKey], bytes] | None = None,
     ) -> None:
-        self.emit, self.fetch = emit, fetch
-        self.image_index, self.reference = image_index, reference
-        self.lookup = lookup
-        self.request_body = request_body
+        self.source, self.emit, self.reference = source, emit, reference
         self.looked_up: set[str] = set()
         self.image_aliases: dict[str, RequestKey] = {}
         self.image_indexes: dict[tuple[int, str | None], dict[str, str | None]] = {}
         self.image_tolerance_matches: dict[str, tuple[PngDifference, ...]] = {}
         self.request_matches: dict[str, Literal["exact", "exact_png_pixels", "image_tolerance"]] = {}
-        self.inventory = RequestInventory.model_validate_json((directory / "requests.json").read_bytes())
-        pricing = (directory / "pricing.json").read_bytes()
+        self.inventory = inventory.model_copy(update={"captures": dict(inventory.captures)})
         if hashlib.sha256(pricing).hexdigest() != self.inventory.pricing_sha256:
             raise EvidenceUnavailable("Frozen pricing changed after loading")
         self.budget = PromptBudget(pricing)
@@ -408,10 +410,10 @@ class RecordedWitnessClient(WitnessClient):
                         and (item.call.authorized or item.call.manifest_sha256 is not None)
                         for item in self.inventory.captures.values()
                     )
-            if matched is None and self.image_index is not None:
+            if matched is None:
                 group = key.request_id, key.session_id
                 if group not in self.image_indexes:
-                    self.image_indexes[group] = self.image_index(*group)
+                    self.image_indexes[group] = self.source.image_index(*group)
                 fingerprint = hashlib.sha256(normalized).hexdigest()
                 matches = [
                     candidate
@@ -422,12 +424,12 @@ class RecordedWitnessClient(WitnessClient):
                     raise ReplayMismatch("More than one saved request matches these PNG pixels")
                 if matches:
                     matched = matches[0]
-            if matched is None and allow_tolerance and not unavailable and self.request_body is not None:
+            if matched is None and allow_tolerance and not unavailable:
                 tolerant = []
                 for call_id, candidate in candidates.items():
                     if call_id not in self.by_key:
                         continue
-                    differences = png_request_tolerance(body, self.request_body(candidate), self.reference)
+                    differences = png_request_tolerance(body, self.source.request_body(candidate), self.reference)
                     if differences is not None:
                         tolerant.append((candidate, differences))
                 if len(tolerant) > 1:
@@ -474,11 +476,11 @@ class RecordedWitnessClient(WitnessClient):
                 matches = [(key, body) for key, body in requests if key.id in self.by_key]
                 if not matches:
                     matches = [matched for key, body in requests if (matched := self._png_match(key, body)) is not None]
-                if not matches and self.lookup is not None:
+                if not matches:
                     for key, _ in requests:
                         if key.id in self.looked_up:
                             continue
-                        captures = self.lookup(key)
+                        captures = self.source.lookup(key)
                         if any(
                             item.call.request != key or exchange != item.call.exchange_id
                             for exchange, item in captures.items()
@@ -552,7 +554,7 @@ class RecordedWitnessClient(WitnessClient):
                 raise ReplayMismatch("No saved request matches this model request")
             if item.call.request != key:
                 raise ReplayMismatch("Captured request identity differs")
-            item, response = self.fetch(item.call.exchange_id)
+            item, response = self.source.fetch(item.call.exchange_id)
             if item.call.request != key or item.call.phase not in ("issued", "failed"):
                 raise EvidenceUnavailable("Matched capture has no recorded outcome")
             captured = None

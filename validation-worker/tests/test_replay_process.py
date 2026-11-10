@@ -229,10 +229,6 @@ async def generate(image, seed, witness):
     if case == "caught_corrupt_render":
         previews.values[preview + ".png"] = b"corrupted saved PNG"
 
-    def fetch(exchange_id: str) -> tuple[dict[str, Any], bytes]:
-        capture, body = recording.fetch(exchange_id)
-        return capture.model_dump(mode="json"), body
-
     log = Log(tmp_path)
     renderer = SavedRenderer(
         previews,
@@ -254,12 +250,9 @@ async def generate(image, seed, witness):
             },
             renderer=renderer,
             final_render=lambda source: renderer.final_render("one", source, expected, root + "submitted/one"),
-            fetch=fetch,
+            source=recording.source,
             log=log,
             timeout=1 if case == "timeout" else 30,
-            image_index=recording.image_index,
-            request_body=recording.request_body,
-            lookup=recording.lookup,
         )
     finally:
         log.close()
@@ -373,6 +366,8 @@ sys.stdin.readline()
         assert children[0].stdout.read() == ""
         return {}
 
+    recording = replay_requests(tmp_path)
+    monkeypatch.setattr(recording.source, "image_index", image_index)
     processes = ReplayProcesses()
     log = Log(tmp_path)
     try:
@@ -393,8 +388,7 @@ sys.stdin.readline()
                 plan={"prompt": "one"},
                 renderer=renderer,
                 final_render=lambda source: PNG,
-                fetch=lambda exchange_id: ({}, b""),
-                image_index=image_index,
+                source=recording.source,
                 log=log,
                 timeout=1,
                 processes=processes,

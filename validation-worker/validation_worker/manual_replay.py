@@ -25,7 +25,6 @@ from typing import Any
 from renderer_client import Renderer, RenderOptions, RenderRejected, RenderUnavailable
 from renderer_client.client import MAX_RESPONSE_BYTES
 from witness_client.calls import RequestKey
-from witness_client.state import save
 
 from .render_recovery import (
     MAX_MISSING_RENDER_CALLS,
@@ -36,7 +35,7 @@ from .render_recovery import (
     RenderFailure,
     RenderRecoverySearch,
 )
-from .request_replay import SavedCapture
+from .request_replay import ReplaySource
 
 
 INDEX_CACHE = Path(__file__).resolve().parents[1] / ".reports/replay-indexes"
@@ -214,12 +213,9 @@ def execute_prompt(
     plan: dict[str, Any],
     renderer: Renderer,
     final_render: Callable[[str], bytes],
-    fetch: Callable[[str], tuple[dict[str, Any], bytes]],
+    source: ReplaySource,
     log: Log,
     timeout: float,
-    image_index: Callable[[int, str | None], dict[str, str | None]] | None = None,
-    lookup: Callable[[RequestKey], dict[str, SavedCapture]] | None = None,
-    request_body: Callable[[RequestKey], bytes] | None = None,
     processes: ReplayProcesses | None = None,
 ) -> dict[str, Any]:
     directory = directory.resolve()
@@ -290,15 +286,15 @@ def execute_prompt(
             reply: dict[str, Any]
             try:
                 if message["operation"] == "model":
-                    capture, body = fetch(message["exchange_id"])
-                    reply = {"capture": capture, "body": base64.b64encode(body).decode()}
-                elif message["operation"] == "image_index" and image_index is not None:
-                    reply = {"requests": image_index(message["request_id"], message["session_id"])}
+                    capture, body = source.fetch(message["exchange_id"])
+                    reply = {"capture": capture.model_dump(mode="json"), "body": base64.b64encode(body).decode()}
+                elif message["operation"] == "image_index":
+                    reply = {"requests": source.image_index(message["request_id"], message["session_id"])}
                 elif message["operation"] == "request_lookup":
-                    captures = {} if lookup is None else lookup(RequestKey.model_validate(message["request_key"]))
+                    captures = source.lookup(RequestKey.model_validate(message["request_key"]))
                     reply = {"captures": {key: item.model_dump(mode="json") for key, item in captures.items()}}
-                elif message["operation"] == "request_body" and request_body is not None:
-                    body = request_body(RequestKey.model_validate(message["request_key"]))
+                elif message["operation"] == "request_body":
+                    body = source.request_body(RequestKey.model_validate(message["request_key"]))
                     reply = {"body": base64.b64encode(body).decode()}
                 elif message["operation"] == "render":
                     try:
@@ -650,20 +646,16 @@ def main() -> int:
         from subnet_common.github import GitHubClient
         from subnet_common.witness.models import Scope
         from subnet_common.witness.state import R2StateStore
-        from witness_pod.records import Call
 
         from validation_worker.replay_evidence import (
             R2Evidence,
             SavedRenderer,
+            SavedReplaySource,
             index_cache_path,
-            load_capture,
-            load_image_index,
-            load_image_request,
-            lookup_request,
             prepare,
         )
 
-        from .request_replay import PreparedReplay, RequestInventory, replayable_captures
+        from .request_replay import PreparedReplay, RequestInventory
 
         objects_client = boto3.client(
             "s3",
@@ -711,85 +703,25 @@ def main() -> int:
         scope = Scope(args.deployment, prepared.round, prepared.hotkey)
         # The authoritative prefix is retained with the frozen input metadata.
         schedule_prefix = prepared.storage_prefix
-        cache: dict[str, SavedCapture] = {}
-        image_indexes: dict[tuple[int, str | None], dict[str, str | None]] = {}
-        state_lock = threading.Lock()
-        locks: dict[tuple[object, ...], threading.Lock] = {}
         response_cache = index_cache_directory(os.environ["R2_ENDPOINT"], replay_bucket) / "responses-v1"
-        image_cache = index_cache_directory(os.environ["R2_ENDPOINT"], replay_bucket) / "png-requests-v1"
         pointer = index_cache_path(
             index_cache_directory(os.environ["R2_ENDPOINT"], bucket), scope, inventory.pricing_sha256, schedule_prefix
         )
         previous = Path(json.loads(pointer.read_bytes())) if pointer.is_file() else None
         processes = ReplayProcesses()
 
-        def resource_lock(*key: object) -> threading.Lock:
-            with state_lock:
-                return locks.setdefault(key, threading.Lock())
-
-        def lookup(request: RequestKey) -> dict[str, SavedCapture]:
-            with resource_lock("lookup", request.id):
-                log.emit("request_lookup_started", call_id=request.id, request_key=request.model_dump())
-                captures = lookup_request(objects, scope, request, args.output / "bundle", schedule_prefix)
-                with resource_lock("images", request.request_id, request.session_id):
-                    with state_lock:
-                        inventory.captures.update(captures)
-                        save(
-                            args.output / "bundle/requests.json", (inventory.model_dump_json(indent=2) + "\n").encode()
-                        )
-                    if captures:
-                        image_indexes.pop((request.request_id, request.session_id), None)
-                log.emit("request_lookup_finished", call_id=request.id, captures=len(captures))
-                return captures
-
-        def image_index(request_id: int, session_id: str | None) -> dict[str, str | None]:
-            group = request_id, session_id
-            with resource_lock("images", *group):
-                if group not in image_indexes:
-                    with state_lock:
-                        snapshot = inventory.model_copy(update={"captures": dict(inventory.captures)})
-                    image_indexes[group] = load_image_index(
-                        replay_objects,
-                        scope,
-                        snapshot,
-                        request_id,
-                        session_id,
-                        image_cache,
-                        schedule_prefix,
-                        log.emit,
-                    ).requests
-                return image_indexes[group]
-
-        def request_body(request: RequestKey) -> bytes:
-            with resource_lock("image_body", request.request_sha256):
-                with state_lock:
-                    call = replayable_captures(inventory)[request.id].call
-                return load_image_request(replay_objects, scope, call, image_cache, schedule_prefix)
-
-        def fetch(exchange_id: str) -> tuple[dict[str, Any], bytes]:
-            with resource_lock("capture", exchange_id):
-                capture_dir = args.output / "bundle" / exchange_id
-                if exchange_id not in cache:
-                    log.emit("saved_response_load_started", exchange_id=exchange_id)
-                    with state_lock:
-                        call = Call.model_validate(inventory.captures[exchange_id].call.model_dump())
-                    item = load_capture(
-                        replay_objects,
-                        scope,
-                        call,
-                        capture_dir,
-                        inventory.pricing_sha256,
-                        schedule_prefix,
-                        cache=response_cache,
-                        previous=previous,
-                        emit=log.emit,
-                    )
-                    (capture_dir / "capture.json").write_text(item.model_dump_json(indent=2) + "\n")
-                    cache[exchange_id] = item
-                    log.emit("saved_response_loaded", exchange_id=exchange_id, usage=item.usage, phase=item.call.phase)
-                item = cache[exchange_id]
-                body = (capture_dir / "response.sse").read_bytes() if item.response_sha256 is not None else b""
-                return item.model_dump(mode="json"), body
+        source = SavedReplaySource(
+            objects,
+            replay_objects,
+            scope,
+            args.output / "bundle",
+            inventory,
+            image_cache=index_cache_directory(os.environ["R2_ENDPOINT"], replay_bucket) / "png-requests-v1",
+            response_cache=response_cache,
+            previous=previous,
+            storage_prefix=schedule_prefix,
+            emit=log.emit,
+        )
 
         render_cache = index_cache_directory(os.environ["R2_ENDPOINT"], replay_bucket) / "renders-v1"
         renderer = SavedRenderer(
@@ -835,12 +767,9 @@ def main() -> int:
                     final_render=lambda source: renderer.final_render(
                         prompt["id"], source, expected["output"], expected["saved_result"]["views"]
                     ),
-                    fetch=fetch,
+                    source=source,
                     log=log,
                     timeout=remaining,
-                    image_index=image_index,
-                    request_body=request_body,
-                    lookup=lookup,
                     processes=processes,
                 )
 

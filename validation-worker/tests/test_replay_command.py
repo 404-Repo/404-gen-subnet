@@ -9,7 +9,6 @@ import json
 import subprocess
 import sys
 import threading
-from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Literal
 
@@ -25,16 +24,12 @@ from subnet_common.witness.pricing import BudgetRejected
 from test_manual_replay import Stored
 from witness_client import AsyncWitnessClient, WitnessClient, WitnessError
 from witness_client.calls import RequestKey, canonical
-from witness_pod.records import Call
 
 from validation_worker import manual_replay as local_replay
 from validation_worker.manual_replay import Log, parser, run_prompts
 from validation_worker.replay_evidence import (
+    SavedReplaySource,
     export_requests,
-    load_capture,
-    load_image_index,
-    load_image_request,
-    lookup_request,
 )
 from validation_worker.replay_worker import invoke_generate
 from validation_worker.request_replay import (
@@ -42,10 +37,11 @@ from validation_worker.request_replay import (
     PreparedReplay,
     RecordedWitnessClient,
     ReplayMismatch,
+    ReplaySource,
+    RequestInventory,
     SavedCapture,
     png_request,
     png_request_tolerance,
-    replayable_captures,
 )
 
 
@@ -121,41 +117,16 @@ def replay_requests(
     directory = tmp_path / "bundle"
     inventory = export_requests(objects, SCOPE, directory, PRICING, lambda *a, **k: None)
 
-    def fetch(exchange_id: str) -> tuple[SavedCapture, bytes]:
-        item = inventory.captures[exchange_id]
-        saved = load_capture(
-            objects,
-            SCOPE,
-            Call.model_validate(item.call.model_dump()),
-            directory / exchange_id,
-            inventory.pricing_sha256,
-            "",
-        )
-        response = directory / exchange_id / "response.sse"
-        return saved, response.read_bytes() if response.is_file() else b""
-
-    return RecordedWitnessClient(
+    source = SavedReplaySource(
+        objects,
+        objects,
+        SCOPE,
         directory,
-        lambda *a, **k: None,
-        fetch,
-        image_index=lambda request_id, session_id: (
-            load_image_index(
-                objects,
-                SCOPE,
-                inventory,
-                request_id,
-                session_id,
-                tmp_path / "image-cache",
-                "",
-                lambda *a, **k: None,
-            ).requests
-        ),
-        reference=image,
-        request_body=lambda request: load_image_request(
-            objects, SCOPE, replayable_captures(inventory)[request.id].call, tmp_path / "image-cache", ""
-        ),
-        lookup=lambda request: lookup_request(objects, SCOPE, request, directory, ""),
+        inventory,
+        image_cache=tmp_path / "image-cache",
+        emit=lambda *a, **k: None,
     )
+    return RecordedWitnessClient(inventory, PRICING, source, lambda *a, **k: None, reference=image)
 
 
 @pytest.mark.parametrize("operation", ["next", "close"])
@@ -275,13 +246,13 @@ def test_missing_usage_is_excluded_but_known_usage_still_enforces_call_budget(tm
         witness.budget.accept()
 
 
-def test_unreadable_capture_cannot_become_a_connection_failure(tmp_path: Path) -> None:
+def test_unreadable_capture_cannot_become_a_connection_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     witness = replay_requests(tmp_path)
 
     def missing(exchange_id: str) -> tuple[SavedCapture, bytes]:
         raise FileNotFoundError("Saved response is missing")
 
-    witness.fetch = missing
+    monkeypatch.setattr(witness.source, "fetch", missing)
     with pytest.raises(FileNotFoundError, match="Saved response"):
         witness.responses.create(model="fixture", input="image")
     with pytest.raises(FileNotFoundError):
@@ -298,13 +269,15 @@ def test_cached_index_miss_loads_existing_response_instead_of_assuming_failure(t
     assert not witness.assumed_failures and len(witness.used) == 1
 
 
-def test_journal_lookup_error_cannot_be_caught_as_an_assumed_connection_failure(tmp_path: Path) -> None:
+def test_journal_lookup_error_cannot_be_caught_as_an_assumed_connection_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     witness = replay_requests(tmp_path)
 
     def unavailable(request: object) -> dict[str, SavedCapture]:
         raise EvidenceUnavailable("R2 unavailable")
 
-    witness.lookup = unavailable
+    monkeypatch.setattr(witness.source, "lookup", unavailable)
     with pytest.raises(EvidenceUnavailable, match="R2 unavailable"):
         witness.responses.create(model="fixture", input="uncaptured")
     with pytest.raises(EvidenceUnavailable):
@@ -441,36 +414,17 @@ def test_replay_matches_png_encoding_and_keeps_other_request_fields_exact(
     inventory = export_requests(objects, SCOPE, directory, PRICING, lambda *a, **k: None)
     events: list[str] = []
 
-    def fetch(exchange_id: str) -> tuple[SavedCapture, bytes]:
-        saved = load_capture(
-            objects,
-            SCOPE,
-            Call.model_validate(inventory.captures[exchange_id].call.model_dump()),
-            directory / exchange_id,
-            inventory.pricing_sha256,
-            "",
-        )
-        return saved, (directory / exchange_id / "response.sse").read_bytes()
-
-    witness = RecordedWitnessClient(
+    source = SavedReplaySource(
+        objects,
+        objects,
+        SCOPE,
         directory,
-        lambda event, **fields: events.append(event),
-        fetch,
-        image_index=lambda request_id, session_id: (
-            load_image_index(
-                objects,
-                SCOPE,
-                inventory,
-                request_id,
-                session_id,
-                tmp_path / "image-cache",
-                "",
-                lambda *a, **k: None,
-            ).requests
-        ),
-        request_body=lambda request: load_image_request(
-            objects, SCOPE, replayable_captures(inventory)[request.id].call, tmp_path / "image-cache", ""
-        ),
+        inventory,
+        image_cache=tmp_path / "image-cache",
+        emit=lambda *a, **k: None,
+    )
+    witness = RecordedWitnessClient(
+        inventory, PRICING, source, lambda event, **fields: events.append(event), reference=None
     )
     actual = png_input("pixel" if change.startswith("tolerance") else change, compression=9, size=size)
     model = "changed" if change == "model" else "fixture"
@@ -548,27 +502,18 @@ def test_journal_lookup_updates_png_matches_in_worker_and_host(
         *,
         directory: Path,
         plan: dict[str, Any],
-        fetch: Callable[[str], tuple[dict[str, Any], bytes]],
-        image_index: Callable[[int, str | None], dict[str, str | None]],
-        lookup: Callable[[RequestKey], dict[str, SavedCapture]],
-        request_body: Callable[[RequestKey], bytes],
+        source: ReplaySource,
         log: Log,
         **fields: object,
     ) -> dict[str, Any]:
         Path(plan["output"]).mkdir(parents=True)
 
-        def saved(exchange_id: str) -> tuple[SavedCapture, bytes]:
-            capture, response = fetch(exchange_id)
-            return SavedCapture.model_validate(capture), response
-
         witness = RecordedWitnessClient(
-            directory / "bundle",
+            RequestInventory.model_validate_json((directory / "bundle/requests.json").read_bytes()),
+            (directory / "bundle/pricing.json").read_bytes(),
+            source,
             log.emit,
-            saved,
-            image_index=image_index,
             reference=reference,
-            lookup=lookup,
-            request_body=request_body,
         )
         assert witness.create(model="fixture", input=png_input(compression=0)).output_text == "0"
         if asynchronous:

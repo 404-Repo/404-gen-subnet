@@ -34,6 +34,7 @@ from .request_replay import (
     ImageRequestIndex,
     RecordedWitnessClient,
     ReplayMismatch,
+    RequestInventory,
     SavedCapture,
 )
 
@@ -192,13 +193,11 @@ def replay(plan: dict[str, Any], emit: Callable[..., None]) -> int:
         bridge = Bridge(emit)
         renderer = SavedRenderer(bridge, output, plan["renderer_id"])
         witness = RecordedWitnessClient(
-            directory / "bundle",
+            RequestInventory.model_validate_json((directory / "bundle/requests.json").read_bytes()),
+            (directory / "bundle/pricing.json").read_bytes(),
+            bridge,
             emit,
-            bridge.fetch,
-            image_index=bridge.image_index,
             reference=image,
-            lookup=bridge.lookup,
-            request_body=bridge.request_body,
         )
         sys.path.insert(0, str(source))
         spec = importlib.util.spec_from_file_location("submitted_main", source / "main.py")

@@ -68,10 +68,6 @@ def run_recovery(
         artifact_cache=directory / "final-cache",
     )
 
-    def fetch(exchange_id: str) -> tuple[dict[str, Any], bytes]:
-        item, body = recording.fetch(exchange_id)
-        return item.model_dump(mode="json"), body
-
     log = Log(directory)
 
     def execute(plan: dict[str, Any], remaining: float) -> dict[str, Any]:
@@ -80,12 +76,9 @@ def run_recovery(
             plan=plan,
             renderer=renderer,
             final_render=lambda output: renderer.final_render("one", output, expected, prefix + "submitted/one"),
-            fetch=fetch,
+            source=recording.source,
             log=log,
             timeout=remaining,
-            image_index=recording.image_index,
-            request_body=recording.request_body,
-            lookup=recording.lookup,
         )
 
     try:

@@ -539,6 +539,99 @@ def load_image_index(
     return ImageRequestIndex(requests={item.request_sha256: item.image_request_sha256 for item, _ in entries})
 
 
+class SavedReplaySource:
+    """Load recorded requests and responses through evidence readers and local caches."""
+
+    def __init__(
+        self,
+        objects: Evidence,
+        replay_objects: Evidence,
+        scope: Scope,
+        directory: Path,
+        inventory: RequestInventory,
+        *,
+        image_cache: Path,
+        emit: Callable[..., None],
+        response_cache: Path | None = None,
+        previous: Path | None = None,
+        storage_prefix: str = "",
+    ) -> None:
+        self.objects, self.replay_objects = objects, replay_objects
+        self.scope, self.directory, self.inventory = scope, directory, inventory
+        self.image_cache, self.response_cache = image_cache, response_cache
+        self.previous, self.storage_prefix, self.emit = previous, storage_prefix, emit
+        self.captures: dict[str, SavedCapture] = {}
+        self.image_indexes: dict[tuple[int, str | None], dict[str, str | None]] = {}
+        self.state_lock = threading.Lock()
+        self.locks: dict[tuple[object, ...], threading.Lock] = {}
+
+    def _resource_lock(self, *key: object) -> threading.Lock:
+        with self.state_lock:
+            return self.locks.setdefault(key, threading.Lock())
+
+    def lookup(self, request: RequestKey) -> dict[str, SavedCapture]:
+        with self._resource_lock("lookup", request.id):
+            self.emit("request_lookup_started", call_id=request.id, request_key=request.model_dump())
+            captures = lookup_request(self.objects, self.scope, request, self.directory, self.storage_prefix)
+            with self._resource_lock("images", request.request_id, request.session_id):
+                with self.state_lock:
+                    self.inventory.captures.update(captures)
+                    save(self.directory / "requests.json", (self.inventory.model_dump_json(indent=2) + "\n").encode())
+                if captures:
+                    self.image_indexes.pop((request.request_id, request.session_id), None)
+            self.emit("request_lookup_finished", call_id=request.id, captures=len(captures))
+            return captures
+
+    def image_index(self, request_id: int, session_id: str | None) -> dict[str, str | None]:
+        group = request_id, session_id
+        with self._resource_lock("images", *group):
+            if group not in self.image_indexes:
+                with self.state_lock:
+                    snapshot = self.inventory.model_copy(update={"captures": dict(self.inventory.captures)})
+                self.image_indexes[group] = load_image_index(
+                    self.replay_objects,
+                    self.scope,
+                    snapshot,
+                    request_id,
+                    session_id,
+                    self.image_cache,
+                    self.storage_prefix,
+                    self.emit,
+                ).requests
+            return self.image_indexes[group]
+
+    def request_body(self, request: RequestKey) -> bytes:
+        with self._resource_lock("image_body", request.request_sha256):
+            with self.state_lock:
+                call = replayable_captures(self.inventory)[request.id].call
+            return load_image_request(self.replay_objects, self.scope, call, self.image_cache, self.storage_prefix)
+
+    def fetch(self, exchange_id: str) -> tuple[SavedCapture, bytes]:
+        with self._resource_lock("capture", exchange_id):
+            capture_dir = self.directory / exchange_id
+            if exchange_id not in self.captures:
+                self.emit("saved_response_load_started", exchange_id=exchange_id)
+                with self.state_lock:
+                    call = Call.model_validate(self.inventory.captures[exchange_id].call.model_dump())
+                item = load_capture(
+                    self.replay_objects,
+                    self.scope,
+                    call,
+                    capture_dir,
+                    self.inventory.pricing_sha256,
+                    self.storage_prefix,
+                    cache=self.response_cache,
+                    previous=self.previous,
+                    emit=self.emit,
+                )
+                (capture_dir / "capture.json").write_text(item.model_dump_json(indent=2) + "\n")
+                self.captures[exchange_id] = item
+                self.emit("saved_response_loaded", exchange_id=exchange_id, usage=item.usage, phase=item.call.phase)
+            item = self.captures[exchange_id]
+            body = (capture_dir / "response.sse").read_bytes() if item.response_sha256 is not None else b""
+            return item, body
+
+
 def export_requests(
     objects: Evidence,
     scope: Scope,
