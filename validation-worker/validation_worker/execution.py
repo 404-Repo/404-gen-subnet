@@ -43,7 +43,6 @@ async def model_response(
     r2: R2Client,
     settings: Settings,
     directory: Path,
-    pricing: bytes,
     budget: PromptBudget,
 ) -> tuple[str, int, bytes]:
     body = base64.b64decode(query.body, validate=True)
@@ -86,7 +85,6 @@ async def model_response(
             "hotkey": scope.hotkey,
             "exchange_id": call.exchange_id,
             "proof_key_sha256": proof_hash,
-            "pricing_sha256": hashlib.sha256(pricing).hexdigest(),
         }
         if hashlib.sha256(manifest_bytes).hexdigest() != call.manifest_sha256 or any(
             manifest.get(key) != value for key, value in bindings.items()
@@ -193,9 +191,7 @@ async def validate_prompt(
                     budget.accept()
                     return ValidationResult(verdict=ValidationVerdict.PASSED)
                 if isinstance(message, ModelCall):
-                    exchange, status, body = await model_response(
-                        message, inputs, r2, settings, directory, pricing, budget
-                    )
+                    exchange, status, body = await model_response(message, inputs, r2, settings, directory, budget)
                     await sandbox.reply(exchange_id=exchange, status=status, body=encoded(body))
                 else:
                     rendered = await render_response(message, inputs, r2, settings)

@@ -300,8 +300,6 @@ class RecordedWitnessClient(WitnessClient):
         self.image_tolerance_matches: dict[str, tuple[PngDifference, ...]] = {}
         self.request_matches: dict[str, Literal["exact", "exact_png_pixels", "image_tolerance"]] = {}
         self.inventory = inventory.model_copy(update={"captures": dict(inventory.captures)})
-        if hashlib.sha256(pricing).hexdigest() != self.inventory.pricing_sha256:
-            raise EvidenceUnavailable("Frozen pricing changed after loading")
         self.budget = PromptBudget(pricing)
         self.used: set[str] = set()
         self.unknown_usage: set[str] = set()

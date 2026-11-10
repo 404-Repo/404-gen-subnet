@@ -1,4 +1,4 @@
-"""Linux integration: actual sandbox, GitBatcher, HTTP GitHub and two S3 buckets."""
+"""Automatic capture replay and Linux sandbox/checkpoint integration."""
 
 import asyncio
 import hashlib
@@ -11,19 +11,29 @@ import tarfile
 import tempfile
 import unittest
 from collections.abc import Iterator
+from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import httpx
+import pytest
 from aiohttp import web
 from PIL import Image
 from renderer_client import RenderOptions
+from replay_fixtures import PRICING, SCOPE, Capture
+from subnet_common.competition.submissions import MinerSubmission
 from subnet_common.github import GitHubClient
 from subnet_common.graceful_shutdown import GracefulShutdown
 from subnet_common.r2_client import R2Client
 from subnet_common.witness.models import Scope, json_bytes
+from subnet_common.witness.pricing import PromptBudget
 from subnet_common.witness.rounds import PromptImage, RoundInputs
 from witness_pod.renderer import RenderCache
 
+from validation_worker import execution
+from validation_worker.inputs import ValidationInputs
+from validation_worker.sandbox import ModelCall, encoded
 from validation_worker.settings import Settings
 from validation_worker.validation import ValidationProgress, run_validation
 
@@ -305,3 +315,81 @@ def generate(image, seed, witness, renderer):
         self.assertEqual(self.reads["/r2/main/" + self.frozen.prompts[0].image_key], 1)
         self.assertEqual(self.reads["/canonical/chair.js"], 1)
         self.assertEqual(self.reads["/repos/test/miner/tarball/" + "d" * 40], 2)
+
+
+def test_automatic_replay_uses_selected_pricing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    live = Capture(tmp_path)
+    request, body = live._request(0, None, {"model": "fixture", "input": "image"})
+    response = live._capture(request, body, None)
+    record = live.records.load(SCOPE, request.id)
+    assert record is not None
+    parameters = tmp_path / "parameters"
+    parameters.mkdir()
+    (parameters / "verifying.bin").write_bytes(b"fixture proof parameters")
+    prefix = f"rounds/{SCOPE.round}/{SCOPE.hotkey}/{record.call.exchange_id}/"
+    manifest_bytes = live.state.read(prefix + "manifest.json")
+    assert manifest_bytes is not None
+    manifest = json.loads(manifest_bytes)
+    manifest["proof_key_sha256"] = hashlib.sha256(b"fixture proof parameters").hexdigest()
+    manifest_bytes = json_bytes(manifest)
+    live.state.put(prefix + "manifest.json", manifest_bytes)
+    record.call.manifest_sha256 = hashlib.sha256(manifest_bytes).hexdigest()
+    live.state.put(live.records.key(SCOPE, request.id), record.model_dump_json().encode())
+
+    async def read(r2: R2Client, bucket: str, key: str) -> bytes:
+        data = live.state.read(key)
+        assert data is not None
+        return data
+
+    verified = json_bytes({**manifest, "session_id": request.session_id})
+    verifier = SimpleNamespace(
+        returncode=0, communicate=AsyncMock(return_value=(verified, b"")), wait=AsyncMock(return_value=0)
+    )
+    monkeypatch.setattr(execution, "PROOF_PARAMETERS", parameters)
+    monkeypatch.setattr(execution, "read_object", read)
+    monkeypatch.setattr(execution, "optional_object", read)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", AsyncMock(return_value=verifier))
+    secret = secrets.token_urlsafe(16)
+    settings = Settings(
+        _env_file=None,
+        GITHUB_TOKEN=secret,
+        GITHUB_REPO="fixture/competition",
+        WITNESS_DEPLOYMENT=SCOPE.deployment,
+        WITNESS_PROVIDER="api",
+        R2_ENDPOINT="https://fixture.invalid",
+        R2_BUCKET="main",
+        R2_REPLAY_BUCKET="replay",
+        R2_ACCESS_KEY_ID="synthetic",
+        R2_SECRET_ACCESS_KEY=secret,
+        RENDERER_ID="fixture",
+        SANDBOX_ROOT=tmp_path,
+    )
+    inputs = ValidationInputs(
+        round_num=0,
+        hotkey=SCOPE.hotkey,
+        ref="a" * 40,
+        submission=MinerSubmission(
+            repo="fixture/miner", commit="b" * 40, revealed_at_block=1, tie_breaker="c" * 128, round=SCOPE.round
+        ),
+        prompts=["one"],
+        seed=42,
+        generations={},
+        witness_storage_prefix="",
+    )
+    rates = json.loads(PRICING)
+    rates["models"]["fixture"].update(input_credits_per_token=0.2, output_credits_per_token=1)
+    pricing = json_bytes(rates)
+    budget = PromptBudget(pricing)
+    result = asyncio.run(
+        execution.model_response(
+            ModelCall(operation="model", body=encoded(body)),
+            inputs,
+            R2Client("synthetic", "synthetic", settings.r2_endpoint, bucket="main"),
+            settings,
+            tmp_path,
+            budget,
+        )
+    )
+    assert result == (record.call.exchange_id, 200, response.body)
+    budget.accept()
+    assert budget.charges == {request.id: Decimal("4")}

@@ -410,7 +410,6 @@ def load_capture(
         "hotkey": scope.hotkey,
         "round": scope.round,
         "exchange_id": call.exchange_id,
-        "pricing_sha256": pricing_hash,
     }
     if (
         hashlib.sha256(manifest_bytes).hexdigest() != call.manifest_sha256
@@ -650,14 +649,10 @@ def export_requests(
         snapshot = Path(json.loads(cached.read_bytes()))
         if (snapshot / "requests.json").is_file():
             inventory = RequestInventory.model_validate_json((snapshot / "requests.json").read_bytes())
-            if (
-                inventory.scope_key != scope.key
-                or inventory.pricing_sha256 != pricing_hash
-                or hashlib.sha256((snapshot / "pricing.json").read_bytes()).hexdigest() != pricing_hash
-            ):
-                raise ValueError("Cached request index scope or pricing differs; use --refresh-index")
-            for name in ("requests.json", "pricing.json"):
-                shutil.copyfile(snapshot / name, output / name)
+            if inventory.scope_key != scope.key:
+                raise ValueError("Cached request index scope differs; use --refresh-index")
+            shutil.copyfile(snapshot / "requests.json", output / "requests.json")
+            (output / "pricing.json").write_bytes(pricing)
             if (snapshot / "journals").is_dir():
                 shutil.copytree(snapshot / "journals", output / "journals")
             emit("request_index_reused", captures=len(inventory.captures), source=str(snapshot / "requests.json"))

@@ -162,12 +162,13 @@ output, budget and saved final-grid checks pass. There is no live-render fallbac
 Missing final grids, unreadable storage and corrupt saved records remain
 missing-evidence results.
 
-The pricing file defaults to `validation_worker/pricing.json`. For historical
-runs, select the exact frozen file with `--pricing`. Its hash must match the
-metadata of consumed captures. The round's retained storage prefix is honored.
+The pricing file defaults to `validation_worker/pricing.json`. Use `--pricing`
+to select the table used for budget checks. Replays do not compare its hash with
+capture metadata; the operator manages pricing updates. The round's retained
+storage prefix is honored.
 Only consumed response bodies are downloaded. Failed outcomes still retained in
 the journals remain indexed. Usable response reuse counts once per prompt;
-each prompt has its own frozen budget. Unrelated exchanges need not be consumed.
+each prompt has its own budget. Unrelated exchanges need not be consumed.
 
 Requests match exactly first. If that fails, inline PNG inputs may match by exact
 decoded pixels, dimensions, pixel mode and PNG metadata. Compression and IDAT

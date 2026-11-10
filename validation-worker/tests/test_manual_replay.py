@@ -316,9 +316,11 @@ def test_index_cache_reuses_saved_journals_and_refreshes_updates(tmp_path: Path)
     )
     objects.reads.clear()
     objects.listings.clear()
+    (tmp_path / "first/pricing.json").write_bytes(b"cached pricing was changed")
     second = export_requests(objects, SCOPE, tmp_path / "second", PRICING, lambda *a, **k: None, index_cache=cache)
     assert second == first
     assert not objects.listings and not objects.reads
+    assert (tmp_path / "second/pricing.json").read_bytes() == PRICING
     for journal in (tmp_path / "first/journals").glob("*.json"):
         assert (tmp_path / "second/journals" / journal.name).read_bytes() == journal.read_bytes()
 

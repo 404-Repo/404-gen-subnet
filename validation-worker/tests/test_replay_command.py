@@ -9,6 +9,7 @@ import json
 import subprocess
 import sys
 import threading
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Literal
 
@@ -182,6 +183,33 @@ def test_sync_replay_matches_requests_reuses_response_and_counts_once(tmp_path: 
     assert len(witness.budget.charges) == 1
     assert len(witness.used) == 1
     assert len(witness.inventory.captures) == 2
+
+
+def test_manual_replay_uses_selected_pricing(tmp_path: Path) -> None:
+    live = Capture(tmp_path)
+    key, body = live._request(0, None, {"model": "fixture", "input": "image"})
+    live._capture(key, body, None)
+    objects = Stored({key: value.data for key, value in live.state.objects.items()})
+    rates = json.loads(PRICING)
+    rates["models"]["fixture"].update(input_credits_per_token=0.2, output_credits_per_token=1)
+    pricing = canonical(rates)
+    directory = tmp_path / "bundle"
+    inventory = export_requests(objects, SCOPE, directory, pricing, lambda *a, **k: None)
+    source = SavedReplaySource(
+        objects,
+        objects,
+        SCOPE,
+        directory,
+        inventory,
+        image_cache=tmp_path / "images",
+        emit=lambda *a, **k: None,
+    )
+    for snapshot in (inventory, inventory.model_copy(update={"pricing_sha256": hashlib.sha256(PRICING).hexdigest()})):
+        witness = RecordedWitnessClient(snapshot, pricing, source, lambda *a, **k: None)
+        assert witness.create(model="fixture", input="image").output_text == "0"
+        witness.finish()
+        witness.budget.accept()
+        assert witness.budget.charges == {key.id: Decimal("4")}
 
 
 @pytest.mark.parametrize("provider", ["api", "codex"])

@@ -65,9 +65,11 @@ lookup using the original `RENDERER_ID`. Missing evidence or saved previews leav
 the prompt pending; the worker never issues live provider inference.
 
 The worker requires exact JavaScript correspondence and applies the shared
-`PromptBudget` to the verified model calls consumed by that prompt. Temporary
-source, jail and capture files are kept in private directories beneath `--output`
-and removed when the job exits. Git holds the durable checkpoint.
+`PromptBudget` to the verified model calls consumed by that prompt, using the
+deployment's current pricing table. Pricing updates are managed by the operator;
+capture pricing hashes are informational. Temporary source, jail and capture
+files are kept in private directories beneath `--output` and removed when the job
+exits. Git holds the durable checkpoint.
 
 ## Miner isolation
 
