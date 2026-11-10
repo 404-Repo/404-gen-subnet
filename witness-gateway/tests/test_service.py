@@ -29,7 +29,6 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
 from miner_runtime.observations import Execution
 from miner_runtime.runner import run_generation
-from miner_runtime.validator import ReplayWitness, run_replay
 from openai.types.responses import ResponseStreamEvent
 from pod_gateway.control import DrainControl, Registry
 from pod_gateway.lifecycle import Allocator
@@ -57,7 +56,6 @@ from witness_pod.channel import Channel, WorkerChannel
 from witness_pod.direct import Witness
 from witness_pod.pod import PodRuntime
 from witness_pod.records import Call, CallRecord, CallRecords
-from witness_pod.replay import export_bundle
 
 SECRET = b"s" * 32
 PROOF = "c" * 64
@@ -477,7 +475,7 @@ def test_running_generation_accepts_an_added_model(tmp_path: Path, monkeypatch: 
 
 
 @pytest.mark.parametrize("failure", ["", "before", "lost"])
-def test_direct_call_deduplication_recovery_and_replay(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str) -> None:
+def test_direct_call_deduplication_and_recovery(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str) -> None:
     async def scenario() -> None:
         fixture = Harness(tmp_path, monkeypatch)
         fixture.large, fixture.failures = True, [failure]
@@ -494,17 +492,10 @@ def test_direct_call_deduplication_recovery_and_replay(tmp_path: Path, monkeypat
                     identifier = exchange_id(witness)
                     assert witness.resume(identifier).output_text == expected
                     old_start = witness._gateway.ensure_pod()
-                    execution = next(witness._state.glob("executions/*/*/execution.json"))
                     assert run_generation(generate, fixture.image, 42, witness, None) == expected
                 with fixture.client("restarted") as witness:
                     assert witness.create(model="fixture", input="x" * (1024 * 1024)).output_text == expected
                     assert witness._gateway.ensure_pod() == old_start and fixture.paid == 1
-                output = tmp_path / "bundle"
-                export_bundle(records=fixture.records, evidence=fixture.state, scope=fixture.scope,
-                    execution=execution, output=output, proof_hash=fixture.proof, pricing=PRICING,
-                    verify=lambda _, path: json.loads((path / "manifest.json").read_bytes()))
-                assert run_replay(generate, fixture.image, 42, ReplayWitness(output), None) == expected
-                assert fixture.paid == 1
             await asyncio.wait_for(asyncio.to_thread(run), 45)
             assert fixture.gateway_bytes < 32 * 1024
             assert all(path.startswith(("/v1/pods/", "/v1/control/")) for path in fixture.gateway_paths)
@@ -1159,7 +1150,7 @@ def test_failed_capture_accepts_an_ordinary_same_id_start(
 
 
 @pytest.mark.parametrize("failure", ["unknown", "http404", "malformed"])
-def test_failed_attempt_returns_error_then_same_id_retry_is_saved_and_replayed(
+def test_failed_attempt_returns_error_then_same_id_retry_is_saved(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str,
 ) -> None:
     async def scenario() -> None:
@@ -1195,15 +1186,6 @@ def test_failed_attempt_returns_error_then_same_id_retry_is_saved_and_replayed(
                 }[failure]
                 if failure != "unknown":
                     assert fixture.state.get(prefix + "response.sse") is not None
-                output = tmp_path / "bundle"
-                export_bundle(
-                    records=fixture.records, evidence=fixture.state, scope=fixture.scope,
-                    execution=execution, output=output, proof_hash=fixture.proof, pricing=PRICING,
-                    verify=lambda _, path: json.loads((path / "manifest.json").read_bytes()),
-                )
-                replay = ReplayWitness(output)
-                assert run_replay(generate, fixture.image, 42, replay, None) == expected
-                assert len(replay.budget.charges) == 1 and fixture.paid == 2
 
             await asyncio.wait_for(asyncio.to_thread(run), 20)
 

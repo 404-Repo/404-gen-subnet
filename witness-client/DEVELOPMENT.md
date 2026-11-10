@@ -1,6 +1,6 @@
 # Witness client development
 
-The [sequence diagrams](SEQUENCE.md) trace call start, TLS setup,
+The [sequence diagram](SEQUENCE.md) traces call start, TLS setup,
 credential disclosure and response capture. See [TIMINGS.md](TIMINGS.md) for
 monotonic diagnostics and the [Pod guide](../witness-gateway/PODS.md) for lifecycle,
 recording and recovery contracts.
@@ -8,9 +8,10 @@ recording and recovery contracts.
 Logical requests are allocation-scoped and independent of execution inputs.
 `calls.py` defines canonical identities, `client.py`/`pods.py` handle capture and
 recovery. The separate [miner runtime](../miner-runtime/) owns execution:
-`miner_runtime.runner` invokes the submitted function, `miner_runtime.observations`
-records its model-call boundary, and `miner_runtime.validator` consumes a verified
-bundle without an inference client. See the [full contract](../witness-gateway/PODS.md#execution-and-replay-contract).
+`miner_runtime.runner` invokes the submitted function and
+`miner_runtime.observations` records its model-call boundary. See the
+[full contract](../witness-gateway/PODS.md#execution-and-replay-contract). Candidate replay and validation belong to
+[validation-worker](../validation-worker/README.md).
 
 ## Client reference
 

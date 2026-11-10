@@ -176,5 +176,4 @@ See [server checks](../README.md#local-checks) for setup. Local TLS tests use
 WebSockets and native credential proofs with local provider fixtures.
 
 For local use, install with `python -m pip install --no-deps -e .` after the
-runtime dependencies. Offline replay export uses `python -m witness_pod export`;
-see the [replay guide](../../witness-gateway/PODS.md#verified-offline-replay).
+runtime dependencies. Start the service with `python -m witness_pod`.

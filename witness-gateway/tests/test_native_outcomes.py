@@ -1,4 +1,4 @@
-"""Native proofs, provider TLS and offline validator replay of synthetic outcomes."""
+"""Native proofs, provider TLS and capture of synthetic outcomes."""
 
 from __future__ import annotations
 
@@ -14,21 +14,17 @@ from typing import cast
 
 import openai
 import pytest
-from miner_runtime.observations import ReplayMismatch
 from miner_runtime.runner import run_generation
-from miner_runtime.validator import ReplayWitness, run_replay
 from openai.types.responses import Response
 from subnet_common.witness.certs import create
-from test_recording import PRICING
 from test_service import Harness
 from witness_client import WitnessClient
 from witness_client.response import ModelStream
 from witness_client.transport import exchange
 from witness_pod import VERIFY_SCRIPT
 from witness_pod.channel import Channel
-from witness_pod.replay import export_bundle, native_verifier
 from witness_pod.storage import Store
-from witness_pod.worker import PARAMETERS, Verifier, relay
+from witness_pod.worker import Verifier, relay
 
 
 def outcome_body(outcome: str) -> tuple[int, bytes]:
@@ -82,7 +78,7 @@ def outcome_body(outcome: str) -> tuple[int, bytes]:
         ("truncated-http", False),
     ],
 )
-def test_native_provider_outcome_is_recorded_and_replays_without_provider_access(
+def test_native_provider_outcome_is_recorded(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     outcome: str,
@@ -230,68 +226,9 @@ def test_native_provider_outcome_is_recorded_and_replays_without_provider_access
                             assert not stream_returned.is_set(), "Streaming returned before the provider completed"
                             assert not work.done()
                         release_completion.set()
-                        expected = await asyncio.wait_for(work, 180)
+                        await asyncio.wait_for(work, 180)
                     finally:
                         release_completion.set()
-                    execution = next(witness._state.glob("executions/*/*/execution.json"))
-                bundle = tmp_path / "bundle"
-                await asyncio.to_thread(
-                    export_bundle,
-                    records=fixture.records,
-                    evidence=fixture.state,
-                    scope=fixture.scope,
-                    execution=execution,
-                    output=bundle,
-                    proof_hash=fixture.proof,
-                    pricing=PRICING,
-                    verify=native_verifier(VERIFY_SCRIPT, PARAMETERS),
-                )
-                replay = ReplayWitness(bundle)
-                if outcome in ("http-error", "sse-error", "embedded-error", "truncated-http"):
-                    with pytest.raises(ReplayMismatch, match="Saved successful response is missing"):
-                        run_replay(generate, fixture.image, 42, replay, None)
-                    assert replay.budget.charges == {}
-                else:
-                    assert run_replay(generate, fixture.image, 42, replay, None) == expected
-                if outcome == "structured" and not stream:
-                    evidence_prefix = next(
-                        k.removesuffix("manifest.json")
-                        for k in fixture.state.objects
-                        if k.startswith("rounds/") and k.endswith("manifest.json")
-                    )
-                    for name in (
-                        "request.json",
-                        "response.sse",
-                        "manifest.json",
-                        "client.bin",
-                        "server.bin",
-                        "authorization-server.bin",
-                        "claim.json",
-                    ):
-                        object_key = evidence_prefix + name
-                        original = fixture.state.objects[object_key]
-                        for missing in (True, False):
-                            if missing:
-                                fixture.state.delete(object_key)
-                            else:
-                                fixture.state.put(object_key, b"corrupt synthetic evidence")
-                            rejected = tmp_path / (name + ("-missing" if missing else "-corrupt"))
-                            try:
-                                with pytest.raises((ValueError, OSError)):
-                                    await asyncio.to_thread(
-                                        export_bundle,
-                                        records=fixture.records,
-                                        evidence=fixture.state,
-                                        scope=fixture.scope,
-                                        execution=execution,
-                                        output=rejected,
-                                        proof_hash=fixture.proof,
-                                        pricing=PRICING,
-                                        verify=native_verifier(VERIFY_SCRIPT, PARAMETERS),
-                                    )
-                                assert not rejected.exists()
-                            finally:
-                                fixture.state.objects[object_key] = original
                 assert len(seen) == fixture.provider.creates == 1
                 for key, saved in fixture.state.objects.items():
                     assert ("fixture-" + "a" * 80).encode() not in saved.data, key

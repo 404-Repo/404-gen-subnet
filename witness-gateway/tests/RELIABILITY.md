@@ -17,12 +17,12 @@ Use the normal project dependencies and matching native proof artifacts.
 The gateway fixture forbids external Python socket connections; native container
 runs additionally use `--network none`. Do not substitute an old ignored
 `privateauth` binary: missing certificate-time output can make a valid capture
-impossible to export.
+impossible to replay.
 
 ```sh
 PYTHONPATH=shared:witness-client/src:miner-runtime/src:renderer-client/src:witness-gateway:witness-gateway/tests:witness-server/worker \
   python -m pytest -q witness-gateway/tests/test_call_reliability.py \
-  witness-gateway/tests/test_provider_outcomes.py witness-gateway/tests/test_replay.py
+  witness-gateway/tests/test_provider_outcomes.py witness-gateway/tests/test_generation.py
 
 PYTHONPATH=shared:witness-client/src:miner-runtime/src:renderer-client/src:witness-gateway:witness-gateway/tests:witness-server/worker \
   python -m pytest -q witness-gateway/tests/test_native_outcomes.py
@@ -70,16 +70,15 @@ Production code is unchanged by this testing branch.
 | Safe retry and concurrency | Existing stale-attempt/claim tests; 16 concurrent real-R2 claimants and 16 real-R2 safe retries | One claim and one replacement; delayed old registrations do not replace the newer attempt. These R2 checks count permissions, not actual provider executions. |
 | Authorization writes | Existing rejected/uncertain reservation fault tests; real conditional PUTs with injected acknowledgement/readback loss | Exact readback can confirm a committed write. Missing/different/unavailable readback stays uncertain and cannot justify provider release. |
 | Process death | Existing SIGKILL matrix, nine boundaries with and without the local spool | No repeated possible dispatch. A full spool or durable manifest can recover completion; lost pre-manifest response bytes can remain irrecoverable pending work. |
-| Required evidence | Missing eight objects; twelve altered bindings; native export with seven missing/corrupt required inputs | Missing evidence cannot settle the call; mismatched bindings fail. Native export rejects missing/corrupt request, response, manifest, client/server/authorization ciphertext and claim. |
+| Required evidence | Missing eight objects; twelve altered bindings | Missing evidence cannot settle the call; mismatched bindings fail. |
 | Caller delivery | Recorded failure then success on the same key; live lost HTTP registration reply and dropped authorized capture socket | Each occurrence retains its original observation. The live SDK recovered completion internally, and a fresh process resumed the same result. |
-| Provider values | Native API-mode TLS fixtures: structured output, empty output, refusal, failed/incomplete Responses, HTTP 429, SSE error | Original text/status/output/events/errors/usage survive capture and actual exporter/validator helpers. Each fixture sends two equal logical calls and observes one provider POST. |
+| Provider values | Native API-mode TLS fixtures: structured output, empty output, refusal, failed/incomplete Responses, HTTP 429, SSE error | Original text/status/output/events/errors/usage survive capture. Each fixture sends two equal logical calls and observes one provider POST. |
 | Incomplete outcomes | Native abrupt HTTP/TLS EOF; HTTP-complete but terminal-SSE-missing decoder regressions | Rejected framing must retain uncertainty and forbid another paid request. Missing terminal SSE currently exposes the bug above. |
 | Streaming delivery | Native provider sends its first SSE event and withholds completion | The supplied API's stream must remain unavailable until completion; this is a buffered event iterator. Provider token timings are not reproduced. |
-| Replay and accounting | `run_generation` → `export_bundle` with native re-verification → `ReplayWitness` / `run_replay`, external network disabled | Values, typed event order, repeated occurrences, errors and final output match. Incomplete consumption fails. HTTP/SSE errors with missing usage replay their errors but fail budget acceptance. |
 | HTTP registration and lifecycle | Service tests cover lost registration replies, duplicate clients, stale setup recovery, selected-Pod checks, authorization, capacity and completed retrieval after round end | These use real local HTTPS/WebSockets with simulated provider/proof. The live run covers signed HTTP registration/polling and capture loss; it does not establish every lifecycle, malformed-message or fragmentation boundary. |
 
-The execution helpers are the repository's development host/validator boundary.
-They do not constitute a production sandbox or complete competition validation job.
+The execution helper is the repository's development host boundary.
+It does not constitute a production sandbox or complete competition validation job.
 
 ## Live miner recovery and replay
 
@@ -100,7 +99,7 @@ then resumed the same exchange using retained state.
 
 The API credential returned a quota error. Its recorded failure was reused in
 both public API modes without another release. Both live captures passed native
-re-verification during export. In a fresh container with networking disabled,
+re-verification. In a fresh container with networking disabled,
 the subscription execution reproduced its output, events, usage and finished
 consumption checks. The API failure reproduced its observations, while missing
 usage correctly prevented budget acceptance.
