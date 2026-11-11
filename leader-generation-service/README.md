@@ -21,8 +21,9 @@ exception skips that prompt for the current pass. Transient image, render-servic
 or submission errors leave prompts pending while the others continue. Returning
 `None` saves the terminal `generation_failed` outcome. Final renderer validation
 rejections save the terminal `render_rejected` outcome. Saved terminal outcomes
-count as completed and are never regenerated. The worker reads saved results
-before each pass and checks for any successful saves after a failed request.
+count as completed and are never regenerated. The worker reads CDN
+`submitted.json` before each pass and checks it again for any successful saves
+after a failed request.
 
 When prompts remain pending, the worker waits until at least 20 minutes since
 its previous explicit witness request, requests a replacement through the SDK,
@@ -49,7 +50,7 @@ Settings load from the environment and the local `.env` file.
 | `GITHUB_REPO`, `GITHUB_TOKEN` | Public competition repository and controller token with read access |
 | `GENERATION_IMAGE` | Published generation image reference pinned with `@sha256:<digest>` |
 | `RUNPOD_PROVIDER_API_KEY` | Generation CPU lifecycle credentials; retained on the service |
-| `CDN_URL` | Same artifact CDN origin/prefix used by the collector |
+| `CDN_URL` | Artifact CDN origin/prefix used by the controller, worker, and collector |
 | `LEADER_CODEX_HOME` | Dedicated durable file-backed ChatGPT login directory |
 | `WALLET_PATH` | Dedicated unencrypted sr25519 operator wallet directory |
 

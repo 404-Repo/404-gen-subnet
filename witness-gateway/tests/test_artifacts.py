@@ -20,7 +20,7 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import make_mocked_request
 from renderer_client import ArtifactClient, ArtifactUnavailable, RenderRejected, RenderUnavailable
-from subnet_common.competition.generations import GenerationResult, GenerationsAdapter
+from subnet_common.competition.generations import GenerationResult, GenerationsAdapter, read_completed_prompts
 from subnet_common.render import GRAY_BG, GRAY_VIEWS, WHITE_BG, WHITE_VIEWS
 from subnet_common.witness.auth import AuthRejected
 from subnet_common.witness.models import Scope
@@ -312,11 +312,22 @@ def test_reference_miner_completes_authenticated_flow(
                 ):
                     checkpoint = tmp_path / "private/final.json"
 
+                    async def read_saved(http: httpx.AsyncClient) -> set[str]:
+                        store = fixture.services[-1].artifacts
+                        assert store is not None
+
+                        def cdn_response(request: httpx.Request) -> httpx.Response:
+                            saved = fixture.state.load(request.url.path.lstrip("/"))
+                            return httpx.Response(404) if saved is None else httpx.Response(200, content=saved.data)
+
+                        async with httpx.AsyncClient(transport=httpx.MockTransport(cdn_response)) as cdn:
+                            return await read_completed_prompts(cdn, url=f"https://cdn.test/{store.index_key}")
+
                     async def run() -> object:
                         if entrypoint == "batch":
                             return await batch.run(
                                 generate, {hashlib.sha256(fixture.image).hexdigest(): fixture.image}, 42,
-                                witness_config=config, attempts=1, api=not subscription,
+                                witness_config=config, read_saved=read_saved, attempts=1, api=not subscription,
                             )
                         return await asyncio.to_thread(
                             run_and_save,

@@ -6,6 +6,8 @@ from pydantic import BaseModel, Field, TypeAdapter
 
 
 if TYPE_CHECKING:
+    from httpx import AsyncClient
+
     from subnet_common.git_batcher import GitBatcher
     from subnet_common.github import GitHubClient
 
@@ -55,6 +57,23 @@ GenerationsAdapter = TypeAdapter(GenerationsMap)
 
 def generations_complete(saved: GenerationsMap, expected: set[str]) -> bool:
     return bool(expected) and saved.keys() == expected and all(result.is_terminal() for result in saved.values())
+
+
+def submitted_url(cdn_url: str, round_name: str, storage_prefix: str, hotkey: str) -> str:
+    return f"{cdn_url.rstrip('/')}/{storage_prefix}rounds/{round_name}/{hotkey}/submitted.json"
+
+
+async def read_submitted(http: AsyncClient, url: str) -> GenerationsMap:
+    response = await http.get(url, headers={"Cache-Control": "no-cache"})
+    if response.status_code == 404:
+        return {}
+    response.raise_for_status()
+    return GenerationsAdapter.validate_json(response.content)
+
+
+async def read_completed_prompts(http: AsyncClient, *, url: str) -> set[str]:
+    saved = await read_submitted(http, url)
+    return {prompt_id for prompt_id, result in saved.items() if result.is_terminal()}
 
 
 def generations_path(round_num: int, hotkey: str) -> str:

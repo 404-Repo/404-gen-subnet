@@ -564,6 +564,7 @@ async def test_start_request_passes_the_competition_location_and_round(scenario,
     assert config.hotkey == scenario.deps.hotkey
     assert config.account_id == "abc123"
     assert config.witness_url == settings.witness_url
+    assert provider.bodies[0]["env"]["LEADER_JOB_CDN_URL"] == settings.cdn_url
     assert (config.workers, config.parallel_calls, config.parallel_preparations) == (24, 32, 4)
     assert (config.go_cpus, config.go_memory_mib) == (8, 2048)
     assert provider.bodies[0]["name"] == scenario.controller.pod.name

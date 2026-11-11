@@ -3,6 +3,7 @@ import base64
 import json
 import sys
 from dataclasses import replace
+from functools import partial
 from pathlib import PurePosixPath
 from types import SimpleNamespace
 
@@ -12,6 +13,7 @@ import pytest
 import witness_client
 from conftest import access
 from miner_runtime import batch, pod
+from subnet_common.competition.generations import read_completed_prompts
 from witness_client import WitnessError
 
 
@@ -37,8 +39,10 @@ def generation(scenario, settings, tmp_path, monkeypatch):
     (directory / "source/main.py").write_text(
         "async def generate(image, seed, witness):\n    return image.decode() + ':' + str(seed)\n"
     )
+    index_url = f"{settings.cdn_url}/sandbox/rounds/test-1/{config.hotkey}/submitted.json"
     state = {
         "rows": {},
+        "index_reads": 0,
         "submitted": [],
         "reads": [],
         "failure": False,
@@ -74,9 +78,6 @@ def generation(scenario, settings, tmp_path, monkeypatch):
                 state["replace_failures"] -= 1
                 raise WitnessError("Fixture witness replacement unavailable", status_code=503)
 
-        async def get_submitted(self):
-            return state["rows"]
-
         async def submit(self, image, result):
             name = next(name for name, raw in scenario.images.items() if raw == image)
             if state["failure"]:
@@ -95,6 +96,10 @@ def generation(scenario, settings, tmp_path, monkeypatch):
             return {"saved": True}
 
     async def download(transport, request):
+        if request.url == index_url:
+            assert request.headers["Cache-Control"] == "no-cache"
+            state["index_reads"] += 1
+            return httpx.Response(200, json=state["rows"]) if state["rows"] else httpx.Response(404)
         git = scenario.deps.git
         if request.url.host == "api.github.com":
             repo = f"/repos/{config.competition_repository}"
@@ -131,6 +136,7 @@ def generation(scenario, settings, tmp_path, monkeypatch):
             dict(scenario.prompts),
             42,
             client=witness,
+            read_saved=partial(read_completed_prompts, url=index_url),
             workers=config.workers,
             max_prompt_bytes=batch.MAX_PROMPT_DOWNLOAD_BYTES,
         )
@@ -141,6 +147,7 @@ def generation(scenario, settings, tmp_path, monkeypatch):
             directory,
             hotkey=base64.b64encode(b"fixture hotkey").decode(),
             access_token=access(4_000_000_000).access_token,
+            cdn_url=settings.cdn_url,
         )
 
     state["once"] = once
@@ -170,6 +177,7 @@ async def test_terminal_validation_rejection_and_none_finish_without_retrying(ge
     assert state["rows"]["lamp"]["failure_reason"] == "generation_failed"
     assert sorted(state["reads"]) == ["chair", "lamp"]
     assert state["replacements"] == 1
+    assert state["index_reads"] == 2
     assert state["entered"] == state["closed"] == 1
 
 
@@ -228,7 +236,7 @@ async def test_worker_retries_pending_prompts_with_a_single_client_and_twenty_mi
     async def request(transport, request):
         nonlocal first_download
         response = await download(transport, request)
-        if first_download and request.url.host != "api.github.com":
+        if first_download and request.url.host == "images.test":
             state["clock"][0] += pass_duration
             first_download = False
         return response
@@ -312,7 +320,7 @@ async def test_one_configured_client_and_fresh_witness_pod_per_pass(generation, 
     assert state["clients"][0]["parallel_preparations"] == config.parallel_preparations
     assert len(state["submitted"]) == 2
     assert capsys.readouterr().out.splitlines() == [
-        "Witness pod ready. Reading saved prompt results",
+        "Witness pod ready. Reading saved prompt results from CDN",
         "Generation pass finished. Worker is exiting.",
     ]
 
@@ -355,6 +363,7 @@ async def test_worker_uses_git_leader_and_seed_and_skips_saved_ids(generation, s
     state["rows"]["lamp"] = {"failure_reason": "generation_failed"}
     await state["run"](config)
     assert state["source_fetches"] == [(leader.repo, leader.commit)]
+    assert state["index_reads"] == 1
     assert state["reads"] == ["chair"]
     assert state["submitted"] == ["chair:97"]
 
@@ -362,8 +371,11 @@ async def test_worker_uses_git_leader_and_seed_and_skips_saved_ids(generation, s
 async def test_workers_download_and_submit_without_prefetching_all_images(generation, scenario, monkeypatch):
     config, directory, state = generation
     events = []
+    original_download = httpx.AsyncHTTPTransport.handle_async_request
 
     async def download(transport, request):
+        if request.url.host != "images.test":
+            return await original_download(transport, request)
         prompt = PurePosixPath(request.url.path).stem
         events.append(prompt)
         if prompt == "lamp":
@@ -391,7 +403,7 @@ async def test_worker_pins_competition_prompt_urls_to_the_git_revision(generatio
     original_download = httpx.AsyncHTTPTransport.handle_async_request
 
     async def download(transport, request):
-        if request.url.host != "api.github.com":
+        if request.url.path.endswith(".png"):
             downloads.append(str(request.url))
         return await original_download(transport, request)
 

@@ -4,7 +4,6 @@ import contextlib
 import hashlib
 import importlib.util
 import io
-import json
 from pathlib import Path
 import sys
 import tempfile
@@ -32,7 +31,6 @@ class OperatorCommandTests(unittest.TestCase):
             "async def generate(image, seed, witness):\n"
             "    return image.decode() + ':' + str(seed)\n"
         )
-        self.output = self.root / "leader/generated.json"
         self.rows: dict[str, dict[str, object]] = {}
         self.results: list[str] = []
         self.preparation_limits: list[int] = []
@@ -43,15 +41,16 @@ class OperatorCommandTests(unittest.TestCase):
         self.round_number = 2
         self.seed = 42
         self.branch_reads = 0
+        self.index_reads = 0
         self.argv = [
             "--source", str(self.source), "--proof-parameters", str(self.root / "proof"),
             "--competition-branch", self.branch,
             "--cdn", "https://fixture.test",
             "--wallet-name", "validator", "--wallet-hotkey", "test", "--wallet-path", str(self.root),
-            "--output", str(self.output), "--attempts", "1",
+            "--attempts", "1",
         ]
 
-    def invoke(self, *, incomplete: bool = False, submission_error: bool = False, missing_seed: bool = False) -> None:
+    def invoke(self, *, submission_error: bool = False, missing_seed: bool = False) -> None:
         import httpx
         from miner_runtime import batch
 
@@ -69,7 +68,7 @@ class OperatorCommandTests(unittest.TestCase):
                 pass
 
             async def get_submitted(self):
-                return owner.rows
+                raise httpx.ReadTimeout("Fixture witness submissions lookup timed out")
 
             async def submit(self, image, result):
                 if submission_error:
@@ -119,7 +118,9 @@ class OperatorCommandTests(unittest.TestCase):
             if request.url.host == "fixture.test" and path.endswith(".png"):
                 return httpx.Response(200, content=owner.ids[Path(path).stem])
             if path == f"/pinned/rounds/test-{owner.round_number}/fixture-key/submitted.json":
-                return httpx.Response(200, json={} if incomplete else owner.rows)
+                owner.assertEqual(request.headers["Cache-Control"], "no-cache")
+                owner.index_reads += 1
+                return httpx.Response(200, json=owner.rows) if owner.rows else httpx.Response(404)
             raise AssertionError(f"Unexpected HTTP request: {request.method} {request.url}")
 
         wallet = SimpleNamespace(hotkey=SimpleNamespace(ss58_address="fixture-key"))
@@ -134,64 +135,49 @@ class OperatorCommandTests(unittest.TestCase):
         ):
             command.main(self.argv)
 
-    def test_source_round_export_and_saved_result_resume(self) -> None:
+    def test_source_round_resumes_from_cdn_despite_witness_lookup_timeout(self) -> None:
         self.invoke()
-        original = self.output.read_bytes()
-        rows = json.loads(original)
-        self.assertEqual(set(rows), set(self.ids))
+        self.assertEqual(set(self.rows), set(self.ids))
         self.assertEqual(set(self.results), {"first:42", "second:42"})
         self.assertEqual(self.branch_reads, 1)
-        for key, value in rows.items():
-            self.assertEqual(value["js"], f"https://fixture.test/saved/{key}.js")
-            self.assertEqual(value["views"], f"https://fixture.test/saved/{key}")
+        self.assertEqual(self.index_reads, 1)
         self.invoke()
         self.assertEqual(len(self.results), 2)
-        self.assertEqual(self.output.read_bytes(), original)
+        self.assertEqual(self.index_reads, 2)
 
     def test_branch_selects_one_committed_round_snapshot(self) -> None:
         self.round_number, self.seed = 9, 987
         self.invoke()
         self.assertEqual(set(self.results), {"first:987", "second:987"})
-        self.assertEqual(set(json.loads(self.output.read_bytes())), set(self.ids))
+        self.assertEqual(set(self.rows), set(self.ids))
         self.assertEqual(self.branch_reads, 1)
 
-    def test_missing_seed_preserves_existing_output_without_generating(self) -> None:
-        self.output.parent.mkdir()
-        self.output.write_bytes(b"previous index")
+    def test_missing_seed_prevents_generation(self) -> None:
         with self.assertRaisesRegex(FileNotFoundError, "Seed file not found"):
             self.invoke(missing_seed=True)
         self.assertEqual(self.results, [])
-        self.assertEqual(self.output.read_bytes(), b"previous index")
 
-    def test_incomplete_index_preserves_existing_output(self) -> None:
-        self.output.parent.mkdir()
-        self.output.write_bytes(b"previous index")
-        with self.assertRaisesRegex(RuntimeError, "does not match"):
-            self.invoke(incomplete=True)
-        self.assertEqual(self.output.read_bytes(), b"previous index")
-
-    def test_unfinished_batch_does_not_export(self) -> None:
+    def test_unfinished_batch_rereads_the_cdn_and_reports_pending_prompts(self) -> None:
         with self.assertRaisesRegex(RuntimeError, "2 prompts remain"):
             self.invoke(submission_error=True)
-        self.assertFalse(self.output.exists())
+        self.assertEqual(self.index_reads, 2)
 
     def test_zero_workers_is_rejected_before_startup(self) -> None:
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as error:
             command.main([*self.argv, "--workers", "0"])
         self.assertEqual(error.exception.code, 2)
 
-    def test_four_preparations_preserves_generation_and_export(self) -> None:
+    def test_four_preparations_preserves_generation(self) -> None:
         self.argv.extend(["--parallel-preparations", "4"])
         self.invoke()
         self.assertEqual(self.preparation_limits, [4])
-        self.assertEqual(set(json.loads(self.output.read_bytes())), set(self.ids))
+        self.assertEqual(set(self.rows), set(self.ids))
         self.assertEqual(set(self.results), {"first:42", "second:42"})
 
     def test_zero_preparations_is_rejected_before_startup(self) -> None:
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as error:
             command.main([*self.argv, "--parallel-preparations", "0"])
         self.assertEqual(error.exception.code, 2)
-        self.assertFalse(self.output.exists())
 
     def test_recipe_runs_24_prompts_concurrently(self) -> None:
         images = [f"prompt-{index}".encode() for index in range(24)]
@@ -213,7 +199,7 @@ class OperatorCommandTests(unittest.TestCase):
         self.assertEqual(self.preparation_limits, [4])
         self.assertEqual(len(self.results), 24)
         self.assertEqual(set(self.results), {"24:42"})
-        self.assertEqual(set(json.loads(self.output.read_bytes())), set(self.ids))
+        self.assertEqual(set(self.rows), set(self.ids))
 
     def test_selected_source_overrides_cached_main(self) -> None:
         async def other_generate(image, seed, witness):
@@ -234,7 +220,6 @@ class OperatorCommandTests(unittest.TestCase):
             with self.assertRaises(FileNotFoundError):
                 self.invoke()
         self.assertEqual(self.results, [])
-        self.assertFalse(self.output.exists())
 
 
 if __name__ == "__main__":

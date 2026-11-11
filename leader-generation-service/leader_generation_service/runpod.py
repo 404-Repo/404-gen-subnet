@@ -187,7 +187,9 @@ class RunpodRunner:
         serialized_hotkey = self._hotkey(hotkey)
         if credentials.expires_at < time.time() + min_validity_seconds:
             raise RuntimeError("Access token has insufficient validity for the generation window")
-        body = pod_body(config, hotkey=serialized_hotkey, access_token=credentials.access_token)
+        body = pod_body(
+            config, hotkey=serialized_hotkey, access_token=credentials.access_token, cdn_url=settings.cdn_url
+        )
         if self.shutdown.should_stop:
             return None
         name = body["name"]

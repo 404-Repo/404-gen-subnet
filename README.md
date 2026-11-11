@@ -19,9 +19,10 @@ The competition follows a **winner-stays-in** format with a **proof-of-work mode
 3. **VLM judges**: A vision-language model compares miners' outputs in pairwise tournament duels.
 4. **Validators replay**: The judge requests one validation pass per candidate. A separate validator replays its source against recorded requests/responses and publishes one pass/fail verdict. Independent source audit is also required for eligibility.
 
-Before judging each round, the operator must generate the previous leader's
-results from its pinned Python source and the published prompts/seed, then publish
-`rounds/{n}/leader/generated.json`. See [required producers](shared/README.md#required-producers).
+Before judging each round, the operator generates the previous leader's results
+from its pinned Python source and the published prompts and seed. The submission
+collector publishes `rounds/{n}/leader/generated.json` during collection.
+See [required producers](shared/README.md#required-producers).
 
 All competition state is stored in a public git repository, making every decision auditable and every transition traceable.
 
@@ -42,7 +43,6 @@ WITNESS_PROVER_CONTEXTS=4 GOMAXPROCS=8 GOMEMLIMIT=2048MiB \
   --proof-parameters /path/to/proof-parameters \
   --wallet-name validator --wallet-hotkey default --wallet-path ~/.bittensor/wallets \
   --workers 24 --parallel-calls 32 --parallel-preparations 4 \
-  --output /path/to/competition/rounds/3/leader/generated.json \
   2>&1 | tee /path/to/generation.log
 ```
 
@@ -54,11 +54,10 @@ resolve against the same commit; absolute prompt URLs are used as published.
 
 The wallet authenticates to `--witness-url` (default `https://witness.subnet404.xyz`),
 which must serve the selected competition branch. Its saved artifacts stay under
-that wallet's hotkey. After the batch, the command reads the round's saved index
-from `--cdn` (default `https://subnet404.xyz`) using the schedule's storage prefix.
-It validates the index and writes `--output` with absolute artifact URLs. Recorded
-failures remain recorded failures. Incomplete batches or invalid indexes exit
-with an error before writing the output.
+that wallet's hotkey. Before each pass, the command reads the round's
+`submitted.json` from `--cdn` (default `https://subnet404.xyz`) using the
+schedule's storage prefix. It skips prompts with a saved terminal result.
+The submission collector reads that index to prepare the judge's inputs.
 
 `--workers` controls active prompts; `--parallel-calls` controls active model
 captures across those prompts. Match the call limit to the Pod's configured
@@ -68,16 +67,13 @@ slot, allowing threaded miners and SDK preparation to progress together.
 (default three). Set `WITNESS_PROVER_CONTEXTS=4` before starting Python and use
 `--parallel-preparations 4` to allow four concurrent native proofs. The contexts
 share the `GOMAXPROCS` CPU budget and `GOMEMLIMIT` soft memory budget.
-Retrying the command reuses the batch
-runner's saved-result lookup and skips completed prompts. `--attempts` defaults
-to three passes over unfinished prompts. Authentication uses the local Codex login,
-or `OPENAI_API_KEY` when `--api` is supplied. Logs go to stderr and the completed
-output path is printed to stdout.
+`--attempts` defaults to three passes over unfinished prompts. Authentication
+uses the local Codex login, or `OPENAI_API_KEY` when `--api` is supplied.
 
 For the isolated two-prompt fixture, select `--competition-branch witness-test`,
 `--witness-url https://witness-test.subnet404.xyz`, the admitted test wallet and a
-separate local `--output` path. Test state, seed, prompts and storage scope come
-from that branch.
+CDN that serves the test round's storage prefix. Test state, seed, prompts and
+storage scope come from that branch.
 
 ## Stage Machine
 

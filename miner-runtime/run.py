@@ -1,10 +1,11 @@
-"""Run an async miner through the shared batch runner and export its saved results."""
+"""Run an async miner over the current round's pending prompts."""
 
 from __future__ import annotations
 
 import argparse
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 import importlib.util
 import json
 import os
@@ -22,12 +23,11 @@ def positive_int(value: str) -> int:
 
 
 async def run(args: argparse.Namespace) -> None:
-    import httpx
     from bittensor_wallet import Wallet
     from loguru import logger
     from miner_runtime.batch import run as run_batch
     from subnet_common.competition.config import require_competition_config
-    from subnet_common.competition.generations import GenerationsAdapter
+    from subnet_common.competition.generations import read_completed_prompts, submitted_url
     from subnet_common.competition.prompts import require_prompts
     from subnet_common.competition.schedule import require_schedule
     from subnet_common.competition.seed import require_seed_from_git
@@ -65,6 +65,7 @@ async def run(args: argparse.Namespace) -> None:
         hotkey=args.wallet_hotkey,
         path=str(Path(args.wallet_path).expanduser()),
     ).hotkey
+    index_url = submitted_url(args.cdn, round_name, schedule.witness_storage_prefix, hotkey.ss58_address)
 
     with TemporaryDirectory(prefix="miner-runtime-") as temporary:
         config = Path(temporary) / "witness.json"
@@ -72,49 +73,25 @@ async def run(args: argparse.Namespace) -> None:
             "witness_url": args.witness_url,
             "proof_parameters": str(args.proof_parameters.expanduser().resolve()),
         }))
-        async with httpx.AsyncClient(timeout=30, follow_redirects=True, trust_env=False) as http:
-            await run_batch(
-                generate, prompts, seed,
-                witness_config=config,
-                workers=args.workers,
-                parallel_calls=args.parallel_calls,
-                parallel_preparations=args.parallel_preparations,
-                attempts=args.attempts,
-                wallet_name=args.wallet_name,
-                wallet_hotkey=args.wallet_hotkey,
-                wallet_path=args.wallet_path,
-                api=args.api,
-            )
-
-            cdn = args.cdn.rstrip("/")
-            response = await http.get(
-                f"{cdn}/{schedule.witness_storage_prefix}rounds/{round_name}/{hotkey.ss58_address}/submitted.json",
-                headers={"Cache-Control": "no-cache"},
-            )
-            response.raise_for_status()
-            results = GenerationsAdapter.validate_json(response.content)
-            if set(results) != set(prompts):
-                raise RuntimeError("Saved index does not match the official prompts")
-
-            for result in results.values():
-                if not result.failure_reason and (result.js is None or result.views is None):
-                    raise RuntimeError("Saved index contains an incomplete result")
-                if result.js is not None:
-                    result.js = f"{cdn}/{result.js}"
-                if result.views is not None:
-                    result.views = f"{cdn}/{result.views}"
-
-            output = args.output.expanduser()
-            output.parent.mkdir(parents=True, exist_ok=True)
-            output.write_bytes(GenerationsAdapter.dump_json(results, indent=2))
-            print(f"Prepared {output}")
+        await run_batch(
+            generate, prompts, seed,
+            witness_config=config,
+            read_saved=partial(read_completed_prompts, url=index_url),
+            workers=args.workers,
+            parallel_calls=args.parallel_calls,
+            parallel_preparations=args.parallel_preparations,
+            attempts=args.attempts,
+            wallet_name=args.wallet_name,
+            wallet_hotkey=args.wallet_hotkey,
+            wallet_path=args.wallet_path,
+            api=args.api,
+        )
 
 
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source", type=Path, required=True, help="Checkout containing async generate in main.py")
     parser.add_argument("--competition-branch", default="main", help="404-active-competition branch (default: main)")
-    parser.add_argument("--output", type=Path, required=True, help="Destination for generated.json")
     parser.add_argument("--proof-parameters", type=Path, required=True, help="Directory containing proof parameters")
     parser.add_argument("--witness-url", default="https://witness.subnet404.xyz")
     parser.add_argument("--cdn", default="https://subnet404.xyz")
