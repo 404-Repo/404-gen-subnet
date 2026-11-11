@@ -1,4 +1,5 @@
 import json
+import shutil
 
 import pytest
 
@@ -16,6 +17,12 @@ def source(tmp_path):
     package = tmp_path / "miner-runtime"
     package.mkdir()
     (package / "source.py").write_text("committed source\n")
+    key = tmp_path / "shared/subnet_common/witness/params/verifying.bin"
+    key.parent.mkdir(parents=True)
+    key.write_bytes(b"fixture verification key")
+    params = tmp_path / "witness-server/worker/witness_pod/verifier/params"
+    params.mkdir(parents=True)
+    (params / "verifying.bin").symlink_to("../../../../../shared/subnet_common/witness/params/verifying.bin")
     git("add", ".")
     git(
         "-c",
@@ -74,6 +81,20 @@ def test_image_context_uses_committed_release_or_tracked_development_source(sour
     assert set(metadata["files"]) == {"miner-runtime/source.py"}
     assert metadata["purpose"] == ("development" if development else "release")
     assert json.loads((context / "source.json").read_bytes())["runtime_commit"] == commit
+
+
+def test_release_context_provides_a_self_contained_verification_key(source, tmp_path, monkeypatch):
+    root, commit = source
+    params = "witness-server/worker/witness_pod/verifier/params"
+    monkeypatch.setattr(build_image, "SOURCES", (params, "shared/subnet_common/witness/params"))
+    context = tmp_path / "context"
+    context.mkdir()
+
+    build_image.prepare_context(root, context, commit, development=False)
+    image_params = tmp_path / "image-params"
+    shutil.copytree(context / params, image_params, symlinks=True)
+
+    assert (image_params / "verifying.bin").read_bytes() == b"fixture verification key"
 
 
 def test_offline_development_build_uses_local_bases_and_disables_network(source, tmp_path, monkeypatch):

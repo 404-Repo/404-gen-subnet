@@ -40,6 +40,7 @@ class Settings(BaseSettings):
     go_cpus: int = Field(default=8, ge=1)
     go_memory_mib: int = Field(default=2048, ge=768)
     progress_interval_seconds: int = Field(default=1200, ge=1200)
+    stall_replacement_seconds: int = Field(default=3600, gt=1200)
     credential_check_interval_seconds: int = Field(default=30, ge=1, le=60)
     log_level: str = "INFO"
 

@@ -198,7 +198,7 @@ def scenario(settings, tmp_path):
         go_cpus=2,
         go_memory_mib=2048,
     )
-    controller = RoundRunner(dependencies, settings.github_branch, GracefulShutdown())
+    controller = RoundRunner(dependencies, settings, GracefulShutdown())
     return SimpleNamespace(
         deps=dependencies,
         controller=controller,

@@ -161,7 +161,7 @@ async def test_active_job_preserves_a_manual_baseline(scenario, settings, clock,
     git.files[path] = manual
     if witness_complete:
         scenario.state["saved"] = {name: {"failure_reason": "generation_failed"} for name in scenario.images}
-    clock[0] += 2400
+    clock[0] += settings.stall_replacement_seconds
 
     await generation_iteration(scenario.controller, settings)
 

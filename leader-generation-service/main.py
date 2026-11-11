@@ -31,7 +31,7 @@ async def main() -> None:
         exclusive_lock(settings.codex_home / "leader-service.lock"),
     ):
         async with create_dependencies(settings, shutdown) as dependencies:
-            controller = RoundRunner(dependencies, settings.github_branch, shutdown)
+            controller = RoundRunner(dependencies, settings, shutdown)
             async with serve_credentials(controller, settings):
                 maintenance = asyncio.create_task(maintain_credentials(dependencies, settings, shutdown))
                 try:

@@ -194,8 +194,9 @@ During generation, each iteration reads
 and logs completed, total, newly completed, and pending prompt counts. A pod stays
 running while saved results advance. After 20 minutes without new terminal results,
 the service sends one warning per stall to `DISCORD_WEBHOOK_URL`, if configured.
-After 40 minutes without progress, it confirms deletion of the recorded CPU pod
-and creates a replacement with the same frozen inputs and identity. Startup counts
+After `STALL_REPLACEMENT_SECONDS` without progress (one hour by default), it confirms
+deletion of the recorded CPU pod and creates a replacement with the same frozen inputs
+and identity. The replacement interval must exceed 1200 seconds. Startup counts
 toward the stall window. Progress and warning state survive service restarts.
 Older rounds only clean up their CPU pods; their saved results are no longer read
 or published. CPU disk is not needed to recover progress. Unavailable or regressing
