@@ -74,7 +74,8 @@ The worker reads the candidate's `submissions.json`, `prompts.txt`, `seed.json`,
 the frozen round record and hash-checks each prompt image when that prompt starts.
 Submitted source is fetched at its recorded commit and unpacked as regular files;
 submitted links and unsafe archive paths are rejected. No submitted install hooks
-are executed by the trusted worker.
+are executed by the trusted worker. A GitHub 404 for the submitted source archive
+ends the job with a failed verdict and records the repository and commit.
 
 R2 reads happen on demand:
 

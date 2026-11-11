@@ -15,7 +15,7 @@ from subnet_common.witness.pricing import BudgetRejected, PromptBudget
 
 from validation_worker.execution import validate_prompt
 from validation_worker.inputs import load_validation_inputs
-from validation_worker.preparation import load_round_inputs, prepare_source, read_object
+from validation_worker.preparation import SourceArchiveNotFound, load_round_inputs, prepare_source, read_object
 from validation_worker.sandbox import prepare_sandbox
 from validation_worker.settings import Settings
 
@@ -45,6 +45,7 @@ async def run_validation(
     jail = None
     frozen = None
     batcher = None
+    source_failure = None
     with ExitStack() as cleanup:
         for attempt in range(3):
             stopping = shutdown.should_stop
@@ -62,7 +63,7 @@ async def run_validation(
                 if set(progress.prompts) - inputs.generations.keys():
                     raise ValueError("Validation checkpoint contains foreign prompts")
                 for prompt_id in inputs.generations:
-                    if shutdown.should_stop:
+                    if shutdown.should_stop or source_failure is not None:
                         break
                     state = progress.prompts.setdefault(prompt_id, PromptProgress())
                     deadline = None
@@ -104,6 +105,9 @@ async def run_validation(
                                 )
                                 state.status = result.verdict.value
                                 state.reason = result.reason
+                        except SourceArchiveNotFound as error:
+                            source_failure = str(error)
+                            state.status, state.reason, state.retryable = "failed", source_failure, False
                         except BudgetRejected as error:
                             state.status, state.reason = "failed", str(error)
                         except Exception as error:
@@ -123,6 +127,9 @@ async def run_validation(
                         )
                 if not await batcher.flush():
                     raise RuntimeError("Validation checkpoint has not been committed")
+                if source_failure is not None:
+                    logger.warning(f"Validation failed: round={round_num}, hotkey={hotkey}, reason={source_failure}")
+                    return
                 complete = all(
                     key in progress.prompts and progress.prompts[key].status != "pending" for key in inputs.generations
                 )
