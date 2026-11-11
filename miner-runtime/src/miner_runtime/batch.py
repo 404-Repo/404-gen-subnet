@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 from collections.abc import Awaitable, Callable, Mapping
@@ -43,6 +44,7 @@ async def run_pass(
     seed: int,
     *,
     client: AsyncWitnessClient,
+    read_saved: Callable[[httpx.AsyncClient], Awaitable[set[str]]],
     workers: int = 8,
     max_prompt_bytes: int | None = None,
 ) -> None:
@@ -50,7 +52,7 @@ async def run_pass(
     if not pending:
         return
     async with httpx.AsyncClient(timeout=30, follow_redirects=True, trust_env=False) as http:
-        submitted = await client.get_submitted()
+        submitted = await read_saved(http)
         queue = asyncio.Queue[tuple[str, str | bytes]]()
         for prompt_id, source in pending.copy().items():
             if prompt_id in submitted:
@@ -59,11 +61,20 @@ async def run_pass(
             else:
                 queue.put_nowait((prompt_id, source))
 
+        prompt_hashes: dict[str, str] = {}
+
         async def worker() -> None:
             while not queue.empty():
                 prompt_id, source = queue.get_nowait()
                 try:
                     image = await read_image(source, http, max_bytes=max_prompt_bytes)
+                    # Older indexes used the image hash as the prompt ID.
+                    image_hash = hashlib.sha256(image).hexdigest()
+                    prompt_hashes[prompt_id] = image_hash
+                    if image_hash in submitted:
+                        logger.info("{} | already submitted", prompt_id[:12])
+                        del pending[prompt_id]
+                        continue
                     logger.info("{} | generating", prompt_id[:12])
 
                     result = await generate(image, seed, client)
@@ -78,9 +89,10 @@ async def run_pass(
         await asyncio.gather(*(worker() for _ in range(workers)))
         # A failed submission request may already have saved a terminal outcome.
         if pending:
-            submitted = await client.get_submitted()
-            for prompt_id in submitted:
-                pending.pop(prompt_id, None)
+            submitted = await read_saved(http)
+            for prompt_id in list(pending):
+                if prompt_id in submitted or prompt_hashes.get(prompt_id) in submitted:
+                    del pending[prompt_id]
 
     if pending:
         raise RuntimeError(f"{len(pending)} prompts remain after one pass")
@@ -92,6 +104,7 @@ async def run(
     seed: int,
     *,
     witness_config: Path,
+    read_saved: Callable[[httpx.AsyncClient], Awaitable[set[str]]],
     workers: int = 8,
     parallel_calls: int = 3,
     parallel_preparations: int = 3,
@@ -119,7 +132,7 @@ async def run(
                 parallel_calls=parallel_calls,
                 parallel_preparations=parallel_preparations,
             ) as witness:
-                await run_pass(generate, remaining, seed, client=witness, workers=workers)
+                await run_pass(generate, remaining, seed, client=witness, read_saved=read_saved, workers=workers)
         except Exception:  # noqa: BLE001
             logger.exception("Attempt {}/{} failed", attempt, attempts)
         if not remaining:

@@ -30,8 +30,8 @@ def test_batch_uses_sdk_preparation_limit(
     async def prover(client: AsyncWitnessClient) -> None:
         pass
 
-    async def submitted(client: AsyncWitnessClient) -> dict:
-        return {}
+    async def submitted(http: httpx.AsyncClient) -> set[str]:
+        return set()
 
     async def submit(client: AsyncWitnessClient, image: bytes, source: str | None) -> dict:
         saved.append(image)
@@ -41,10 +41,9 @@ def test_batch_uses_sdk_preparation_limit(
         return "export default {};"
 
     monkeypatch.setattr(AsyncWitnessClient, "_get_prover", prover)
-    monkeypatch.setattr(AsyncWitnessClient, "get_submitted", submitted)
     monkeypatch.setattr(AsyncWitnessClient, "submit", submit)
     operation = batch.run(generate, {"prompt": b"image"}, 0, witness_config=config,
-                          parallel_preparations=preparations, attempts=1, api=True)
+                          read_saved=submitted, parallel_preparations=preparations, attempts=1, api=True)
     if preparations == 0:
         with pytest.raises(RuntimeError, match="1 prompts remain"):
             asyncio.run(operation)
@@ -61,17 +60,17 @@ def test_batch_with_an_initialized_client_needs_no_config_or_wallet(monkeypatch)
         raise AssertionError("The initialized client already owns its identity")
 
     class Witness:
-        async def get_submitted(self):
-            return {}
-
         async def submit(self, image, source):
             saved.append((image, source))
+
+    async def submitted(http):
+        return set()
 
     async def generate(image, seed, witness):
         return image.decode() + str(seed)
 
     monkeypatch.setattr(batch, "Wallet", wallet)
-    asyncio.run(batch.run_pass(generate, {"prompt": b"image"}, 42, client=Witness()))
+    asyncio.run(batch.run_pass(generate, {"prompt": b"image"}, 42, client=Witness(), read_saved=submitted))
     assert saved == [(b"image", "image42")]
 
 

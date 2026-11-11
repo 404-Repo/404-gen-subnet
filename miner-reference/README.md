@@ -49,35 +49,30 @@ login is insufficient. Keep that directory private. See the official
 [authentication guide](https://learn.chatgpt.com/docs/auth). Load/unlock the named
 wallet locally; its private key stays on your machine.
 
-Use the current round's frozen `prompts.txt` URL and published seed from the
+The launcher reads the current round's `prompts.txt` and published seed from the
 [active competition](https://github.com/404-Repo/404-active-competition).
-`prompts.txt` contains one image URL per line. Keep official prompt filenames;
-the launcher derives their IDs from the URL stems. From the repository root:
+It derives prompt IDs from the published URL stems. Run this from the repository root.
 
 ```sh
 python miner-runtime/run.py \
   --source /absolute/path/to/404-subnet/miner-reference \
-  --prompts-url https://example.org/pinned-round/prompts.txt \
-  --seed PUBLISHED_SEED --round gpt-2 \
+  --competition-branch main \
   --proof-parameters /absolute/path/to/404-subnet/witness-server/worker/witness_pod/verifier/params \
   --wallet-name miner --wallet-hotkey default \
-  --workers 8 --parallel-calls 3 --parallel-preparations 3 \
-  --output /absolute/path/to/generated.json
+  --workers 8 --parallel-calls 3 --parallel-preparations 3
 # For API billing, add --api to the same command.
 ```
 
-Supply the actual round name and frozen prompt URL. The runner awaits
-`generate(image, seed, witness)` for each pending image. Inside generation, await
+The runner awaits `generate(image, seed, witness)` for each pending image. Inside generation, await
 `witness.responses.create(...)` and
 `witness.render(source, RenderOptions(lighting="neutral"))`. Outside generation,
 the harness submits `await witness.submit(image, source)`. The Pod stores final
 source, judging views and embeddings for collection. `None` is a submitted
-failure outcome. The launcher reads the saved CDN index, verifies completeness
-and exports `generated.json` with absolute artifact URLs. `--cdn` and
-`--witness-url` select the CDN and witness origins when needed.
+failure outcome. The submission collector reads the saved results during
+collection. `--cdn` and `--witness-url` select the CDN and witness origins.
 
-Each pass calls `await witness.get_submitted()` and skips saved prompt IDs,
-including saved failures. It makes up to three passes by default. Rerun the same
+Each pass reads CDN `submitted.json` and skips terminal outcomes, including
+saved failures. The runner makes up to three passes by default. Rerun the same
 command for remaining work; identical canonical model requests and stable
 request IDs reuse retained Pod recordings. Keep source, images, seed, models,
 hotkey and authentication mode fixed. Preview bytes must reproduce the same
@@ -206,20 +201,26 @@ Each pipeline can offer three simultaneous model calls, subject to the shared
 capture limit. Match `--parallel-calls` to the witness Pod's configured capacity.
 The Pod controls preview and final-save capacity.
 
-Use the launcher above for published prompt URLs and an exported result index.
+Use the launcher above to run the current round's published prompts.
 An async application with its own prompt mapping can call the harness directly:
 
 ```python
+from functools import partial
 from pathlib import Path
 
 from main import generate
 from miner_runtime.batch import run
+from subnet_common.competition.generations import read_completed_prompts
 
 await run(
     generate,
     {"official-prompt-id": "/absolute/path/to/prompt.png"},
     42,
     witness_config=Path("witness.json"),
+    read_saved=partial(
+        read_completed_prompts,
+        url="https://subnet404.xyz/rounds/gpt-2/<hotkey>/submitted.json",
+    ),
     workers=8,
     parallel_calls=3,
     parallel_preparations=3,
@@ -227,7 +228,8 @@ await run(
 ```
 
 The mapping keys must be the official prompt IDs. Values may be PNG bytes,
-local filenames or image URLs. `witness.json` contains `witness_url` and the
+local filenames or image URLs. Set the saved index URL for the round and
+authenticated hotkey, including its storage prefix. `witness.json` contains `witness_url` and the
 absolute `proof_parameters` path; see [client configuration](../witness-client/README.md#configure).
 The harness defaults to the local `miner/default` wallet and Codex subscription;
 pass wallet settings or `api=True` with `OPENAI_API_KEY` as needed.

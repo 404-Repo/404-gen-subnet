@@ -18,12 +18,14 @@ import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
+from functools import partial
 from pathlib import Path
 from types import ModuleType
 from urllib.parse import quote, urlsplit
 
 IMAGE_PATTERN = r"^[a-z0-9][a-z0-9._:/-]*@sha256:[0-9a-f]{64}$"
 POD_NAME_PREFIX = "leader-runner-"
+DEFAULT_CDN_URL = "https://subnet404.xyz"
 IMAGE_ROOT = Path("/opt/leader-image")
 IMAGE_PARAMETERS = IMAGE_ROOT / "params"
 IMAGE_MANIFEST = IMAGE_ROOT / "provenance.json"
@@ -89,7 +91,9 @@ class Config:
             raise ValueError("Invalid workers")
 
 
-def pod_body(config: Config, *, hotkey: str, access_token: str, name: str | None = None) -> dict[str, object]:
+def pod_body(
+    config: Config, *, hotkey: str, access_token: str, cdn_url: str = DEFAULT_CDN_URL, name: str | None = None
+) -> dict[str, object]:
     if not hotkey or not access_token:
         raise ValueError("A job hotkey and access token are required")
     name = name or f"{POD_NAME_PREFIX}{uuid.uuid4()}"
@@ -103,6 +107,7 @@ def pod_body(config: Config, *, hotkey: str, access_token: str, name: str | None
             "LEADER_JOB_CONFIG": json.dumps(asdict(config)),
             "LEADER_JOB_HOTKEY": hotkey,
             "LEADER_JOB_ACCESS_TOKEN": access_token,
+            "LEADER_JOB_CDN_URL": https(cdn_url),
             "LOGURU_DIAGNOSE": "NO",
         },
     }
@@ -260,8 +265,11 @@ def load_miner(source: Path) -> ModuleType:
     return module
 
 
-async def generate_batch(config: Config, directory: Path, pending: dict[str, str | bytes], seed: int) -> None:
+async def generate_batch(
+    config: Config, directory: Path, pending: dict[str, str | bytes], seed: int, *, index_url: str
+) -> None:
     from bittensor_wallet import Wallet
+    from subnet_common.competition.generations import read_completed_prompts
     from witness_client import AsyncWitnessClient, WitnessConfig, WitnessError
 
     from miner_runtime.batch import MAX_PROMPT_DOWNLOAD_BYTES, run_pass
@@ -271,6 +279,7 @@ async def generate_batch(config: Config, directory: Path, pending: dict[str, str
         raise ValueError("Runner hotkey differs from the frozen identity")
     print("Loading pinned leader code", flush=True)
     generate = load_miner(directory / "source").generate
+    read_saved = partial(read_completed_prompts, url=index_url)
     witness_config: WitnessConfig = {"witness_url": config.witness_url,
                                     "proof_parameters": str(IMAGE_PARAMETERS),
                                     "codex_credentials_file": str(directory / "private/subscription.json")}
@@ -292,10 +301,10 @@ async def generate_batch(config: Config, directory: Path, pending: dict[str, str
             try:
                 await witness.replace_pod()
                 operation = "Generation pass"
-                print("Witness pod ready. Reading saved prompt results", flush=True)
+                print("Witness pod ready. Reading saved prompt results from CDN", flush=True)
                 await run_pass(
                     generate, pending, seed, workers=config.workers, client=witness,
-                    max_prompt_bytes=MAX_PROMPT_DOWNLOAD_BYTES,
+                    read_saved=read_saved, max_prompt_bytes=MAX_PROMPT_DOWNLOAD_BYTES,
                 )
             except Exception as error:
                 reason = type(error).__name__
@@ -307,9 +316,12 @@ async def generate_batch(config: Config, directory: Path, pending: dict[str, str
                 return
 
 
-async def run_job(config: Config, directory: Path, *, hotkey: str, access_token: str) -> None:
+async def run_job(config: Config, directory: Path, *, hotkey: str, access_token: str, cdn_url: str) -> None:
+    from subnet_common.competition.config import require_competition_config
+    from subnet_common.competition.generations import submitted_url
     from subnet_common.competition.leader import require_leader_state
     from subnet_common.competition.prompts import prompt_ids, require_prompts
+    from subnet_common.competition.schedule import require_schedule
     from subnet_common.competition.seed import require_seed_from_git
     from subnet_common.competition.state import RoundStage, require_state
     from subnet_common.github import GitHubClient
@@ -324,6 +336,8 @@ async def run_job(config: Config, directory: Path, *, hotkey: str, access_token:
         leader = (await require_leader_state(git, revision)).get_latest()
         if leader is None:
             raise ValueError("Competition has no incumbent leader")
+        competition = await require_competition_config(git, revision)
+        schedule = await require_schedule(git, state.current_round, revision)
         seed = await require_seed_from_git(git, state.current_round, revision)
         urls = await require_prompts(git, state.current_round, revision)
     if not 0 <= seed < 2**64:
@@ -338,7 +352,10 @@ async def run_job(config: Config, directory: Path, *, hotkey: str, access_token:
     print("Installing worker credentials and hotkey", flush=True)
     install_credentials(config, directory, access_token)
     install_identity(config, directory, hotkey)
-    await generate_batch(config, directory, pending, seed)
+    index_url = submitted_url(
+        cdn_url, f"{competition.name}-{state.current_round}", schedule.witness_storage_prefix, config.hotkey,
+    )
+    await generate_batch(config, directory, pending, seed, index_url=index_url)
 
 
 def main() -> None:
@@ -346,6 +363,7 @@ def main() -> None:
     config = Config(**json.loads(os.environ.pop("LEADER_JOB_CONFIG")))
     hotkey = os.environ.pop("LEADER_JOB_HOTKEY")
     access_token = os.environ.pop("LEADER_JOB_ACCESS_TOKEN")
+    cdn_url = https(os.environ.pop("LEADER_JOB_CDN_URL", DEFAULT_CDN_URL))
     os.environ.update(runtime_environment(config))
     source_commit = verify_image()
     print(f"Generation image source commit: {source_commit}", flush=True)
@@ -355,7 +373,7 @@ def main() -> None:
     async def run() -> None:
         asyncio.get_running_loop().set_default_executor(
             ThreadPoolExecutor(max_workers=config.workers + config.parallel_calls))
-        await run_job(config, REMOTE, hotkey=hotkey, access_token=access_token)
+        await run_job(config, REMOTE, hotkey=hotkey, access_token=access_token, cdn_url=cdn_url)
 
     asyncio.run(run())
 

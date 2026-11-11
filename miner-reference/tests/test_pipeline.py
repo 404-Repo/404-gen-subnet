@@ -8,6 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Unpack
 
+import httpx
 import pytest
 from bittensor_wallet import Keypair
 from miner_runtime import batch
@@ -250,8 +251,8 @@ def test_128_prompt_batch_finishes_896_calls_and_640_renders(
     async def prover(self: AsyncWitnessClient) -> None:
         pass
 
-    async def get_submitted(self: AsyncWitnessClient) -> dict[str, dict[str, object]]:
-        return submitted.copy()
+    async def read_saved(http: httpx.AsyncClient) -> set[str]:
+        return set(submitted)
 
     async def submit(self: AsyncWitnessClient, image: bytes, source: str | None) -> dict[str, object]:
         assert source is not None
@@ -262,14 +263,17 @@ def test_128_prompt_batch_finishes_896_calls_and_640_renders(
     monkeypatch.setenv("OPENAI_API_KEY", "synthetic")
     monkeypatch.setattr(batch, "Wallet", lambda **kwargs: SimpleNamespace(hotkey=Keypair.create_from_uri("//Alice")))
     monkeypatch.setattr(AsyncWitnessClient, "_get_prover", prover)
-    monkeypatch.setattr(AsyncWitnessClient, "get_submitted", get_submitted)
     monkeypatch.setattr(AsyncWitnessClient, "submit", submit)
 
     async def scenario() -> None:
-        await batch.run(generate, prompts, 42, witness_config=config, workers=8, attempts=1, api=True)
+        await batch.run(
+            generate, prompts, 42, witness_config=config, read_saved=read_saved, workers=8, attempts=1, api=True
+        )
         assert set(submitted) == set(prompts)
         assert len(calls.requests) == 896 and len(renderer.sources) == 640
-        await batch.run(generate, prompts, 42, witness_config=config, workers=8, attempts=1, api=True)
+        await batch.run(
+            generate, prompts, 42, witness_config=config, read_saved=read_saved, workers=8, attempts=1, api=True
+        )
         assert len(calls.requests) == 896 and len(renderer.sources) == 640
 
     asyncio.run(scenario())

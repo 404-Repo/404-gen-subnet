@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import json
 import os
 import shutil
@@ -12,6 +13,7 @@ import subprocess
 import sys
 import time
 from dataclasses import asdict, replace
+from functools import partial
 from pathlib import Path
 
 import httpx
@@ -120,6 +122,7 @@ def test_image_entrypoint_runs_the_worker_with_private_credentials_and_prover_se
     monkeypatch.setenv("LEADER_JOB_CONFIG", json.dumps(asdict(config)))
     monkeypatch.setenv("LEADER_JOB_HOTKEY", "fixture-hotkey")
     monkeypatch.setenv("LEADER_JOB_ACCESS_TOKEN", expected_token)
+    monkeypatch.setenv("LEADER_JOB_CDN_URL", "https://cdn.test/results")
     monkeypatch.setattr(pod, "REMOTE", tmp_path)
 
     def image():
@@ -129,13 +132,14 @@ def test_image_entrypoint_runs_the_worker_with_private_credentials_and_prover_se
     monkeypatch.setattr(pod, "verify_image", image)
     monkeypatch.setattr(pod, "check_hardware", lambda value: events.append(("hardware", value)))
 
-    async def worker(value, directory, *, hotkey, access_token):
+    async def worker(value, directory, *, hotkey, access_token, cdn_url):
         assert "LEADER_JOB_HOTKEY" not in os.environ
         assert "LEADER_JOB_ACCESS_TOKEN" not in os.environ
         assert value == config
         assert directory == tmp_path
         assert hotkey == "fixture-hotkey"
         assert access_token == expected_token
+        assert cdn_url == "https://cdn.test/results"
         assert {key: os.environ[key] for key in pod.runtime_environment(config)} == pod.runtime_environment(config)
         events.append(("worker", directory))
 
@@ -179,14 +183,13 @@ def test_identity_is_checked_before_installing_or_replacing_it(config, tmp_path)
 @pytest.fixture
 def generation(config, monkeypatch):
     from miner_runtime import batch
+    from subnet_common.competition.generations import read_completed_prompts
 
     state = {"rows": {}, "saved": [], "reads": [], "failure": "table"}
     images = {"chair": b"first", "table": b"second"}
+    index_url = "https://cdn.test/rounds/test-3/operator/submitted.json"
 
     class Witness:
-        async def get_submitted(self):
-            return state["rows"]
-
         async def submit(self, image, result):
             prompt = next(key for key, value in images.items() if image == value)
             if prompt == state["failure"]:
@@ -195,6 +198,9 @@ def generation(config, monkeypatch):
             state["rows"][prompt] = {"js": result, "views": "saved-views"}
 
     async def request(transport, request):
+        if request.url == index_url:
+            assert request.headers["Cache-Control"] == "no-cache"
+            return httpx.Response(200, json=state["rows"])
         prompt = Path(request.url.path).stem
         state["reads"].append(prompt)
         return httpx.Response(200, content=images[prompt])
@@ -203,7 +209,8 @@ def generation(config, monkeypatch):
     async def once(directory):
         prompts = {name: f"https://images.test/{name}.png" for name in images}
         await batch.run_pass(
-            pod.load_miner(directory / "source").generate, prompts, 42, workers=config.workers, client=Witness()
+            pod.load_miner(directory / "source").generate, prompts, 42, workers=config.workers, client=Witness(),
+            read_saved=partial(read_completed_prompts, url=index_url),
         )
 
     state["once"] = once
@@ -232,6 +239,17 @@ def test_new_pod_resumes_saved_generations_after_previous_disk_is_lost(generatio
     assert set(generation["rows"]) == {"chair", "table"}
 
 
+def test_hash_keyed_terminal_result_is_skipped_on_cdn_resume(generation, tmp_path):
+    prepare_worker(tmp_path)
+    generation["failure"] = None
+    generation["rows"][hashlib.sha256(b"first").hexdigest()] = {"failure_reason": "generation_failed"}
+    generation["rows"]["table"] = {}
+
+    asyncio.run(generation["once"](tmp_path))
+
+    assert generation["saved"] == ["table"]
+
+
 def test_bootstrap_installs_private_credentials_before_generation(config, tmp_path, monkeypatch):
     from bittensor_wallet import Keypair, Wallet
 
@@ -250,12 +268,21 @@ def test_bootstrap_installs_private_credentials_before_generation(config, tmp_pa
     revision = "c" * 40
     files = {
         "state.json": json.dumps({"current_round": 3, "stage": "miner_generation"}),
+        "config.json": json.dumps({
+            "name": "fixture", "description": "Test competition",
+            "first_evaluation_date": "2026-01-01", "last_competition_date": "2026-12-31",
+            "generation_stage_minutes": 180, "win_margin": 0.07, "prompts_per_round": 1, "carryover_prompts": 0,
+        }),
         "leader.json": json.dumps([
             {"hotkey": config.hotkey, "repo": "fixture/miner", "commit": "b" * 40,
              "weight": 1, "effective_block": 1}
         ]),
         "rounds/3/prompts.txt": "https://images.test/chair.png",
         "rounds/3/seed.json": '{"seed":42}',
+        "rounds/3/schedule.json": (
+            '{"earliest_reveal_block":1,"latest_reveal_block":2,"generation_deadline_block":null,'
+            '"witness_storage_prefix":"test/"}'
+        ),
     }
 
     async def request(transport, request):
@@ -268,10 +295,11 @@ def test_bootstrap_installs_private_credentials_before_generation(config, tmp_pa
     def fetch(repo, commit, target):
         assert (repo, commit, target) == ("fixture/miner", "b" * 40, directory)
 
-    async def generate(value, target, pending, seed):
+    async def generate(value, target, pending, seed, *, index_url):
         calls.append(value)
         assert pending == {"chair": "https://images.test/chair.png"}
         assert seed == 42
+        assert index_url == f"https://cdn.test/results/test/rounds/fixture-3/{key.ss58_address}/submitted.json"
         credential_file = target / "private/subscription.json"
         assert json.loads(credential_file.read_bytes()) == {"access_token": access_token, "account_id": config.account_id}
         assert credential_file.stat().st_mode & 0o777 == 0o600
@@ -281,7 +309,9 @@ def test_bootstrap_installs_private_credentials_before_generation(config, tmp_pa
     monkeypatch.setattr(pod, "generate_batch", generate)
     monkeypatch.setattr(pod, "fetch_source", fetch)
     monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", request)
-    asyncio.run(pod.run_job(config, directory, hotkey=hotkey, access_token=access_token))
+    asyncio.run(
+        pod.run_job(config, directory, hotkey=hotkey, access_token=access_token, cdn_url="https://cdn.test/results")
+    )
     assert calls == [config]
 
 
