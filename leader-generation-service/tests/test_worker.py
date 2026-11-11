@@ -72,7 +72,7 @@ def generation(scenario, tmp_path, monkeypatch):
                 state["replacement_times"].append(state["clock"][0])
             if state["replace_failures"]:
                 state["replace_failures"] -= 1
-                raise RuntimeError("Fixture witness replacement unavailable")
+                raise WitnessError("Fixture witness replacement unavailable", status_code=503)
 
         async def get_submitted(self):
             return state["rows"]
@@ -173,11 +173,37 @@ async def test_terminal_validation_rejection_and_none_finish_without_retrying(ge
     assert state["entered"] == state["closed"] == 1
 
 
+async def test_worker_logs_the_fetch_before_it_can_block_gateway_requests(generation, monkeypatch, capsys):
+    config, _, state = generation
+
+    def fetch(*args):
+        assert capsys.readouterr().out.splitlines()[-1] == "Fetching pinned leader source from GitHub"
+        raise TimeoutError("Fixture leader fetch timed out")
+
+    monkeypatch.setattr(pod, "fetch_source", fetch)
+    with pytest.raises(TimeoutError, match="leader fetch timed out"):
+        await state["run"](config)
+    assert state["replacements"] == 0
+
+
+async def test_worker_logs_prover_initialization_before_it_can_block_gateway_requests(generation, monkeypatch, capsys):
+    config, _, state = generation
+
+    async def initialize(self):
+        assert capsys.readouterr().out.splitlines()[-1] == "Initializing witness client and native prover"
+        raise RuntimeError("Fixture prover initialization failed")
+
+    monkeypatch.setattr(witness_client.AsyncWitnessClient, "__aenter__", initialize)
+    with pytest.raises(RuntimeError, match="prover initialization failed"):
+        await state["run"](config)
+    assert state["replacements"] == 0
+
+
 @pytest.mark.parametrize("replacement_failures", [0, 3])
 @pytest.mark.parametrize("pass_duration", [0, 1500])
 @pytest.mark.parametrize("terminal_rejection", [False, True])
 async def test_worker_retries_pending_prompts_with_a_single_client_and_twenty_minute_witness_spacing(
-    generation, monkeypatch, replacement_failures, pass_duration, terminal_rejection
+    generation, monkeypatch, capsys, replacement_failures, pass_duration, terminal_rejection
 ):
     config, directory, state = generation
     state["fail_prompt"] = "chair"
@@ -252,17 +278,43 @@ async def test_worker_retries_pending_prompts_with_a_single_client_and_twenty_mi
     )
     assert len(state["replacement_times"]) == 2 + actual_replace
     assert (not waits) is (pass_duration >= 1200 and not replacement_failures)
+    lines = capsys.readouterr().out.splitlines()
+    witness_failure = "Witness pod request failed (HTTP 503). Retry will check pending prompt IDs (2)."
+    assert lines.count(witness_failure) == actual_replace
+    assert "Generation pass failed (RuntimeError). Retry will check pending prompt IDs (1)." in lines
+    assert [line for line in lines if line.startswith("Retrying in ")] == [
+        f"Retrying in {delay:.0f} seconds" for delay in waits
+    ]
 
 
-async def test_one_configured_client_and_fresh_witness_pod_per_pass(generation):
+async def test_one_configured_client_and_fresh_witness_pod_per_pass(generation, monkeypatch, capsys):
     config, _, state = generation
+    replace_pod = witness_client.AsyncWitnessClient.replace_pod
+    before_request = []
+
+    async def request(self):
+        before_request.extend(capsys.readouterr().out.splitlines()[1:])
+        await replace_pod(self)
+
+    monkeypatch.setattr(witness_client.AsyncWitnessClient, "replace_pod", request)
     await state["run"](config)
+    assert before_request == [
+        "Fetching pinned leader source from GitHub",
+        "Installing worker credentials and hotkey",
+        "Loading pinned leader code",
+        "Initializing witness client and native prover",
+        f"Requesting witness pod from {config.witness_url}",
+    ]
     assert len(state["clients"]) == 1
     assert state["entered"] == state["closed"] == 1
     assert state["replacements"] == 1
     assert state["clients"][0]["parallel_calls"] == config.parallel_calls
     assert state["clients"][0]["parallel_preparations"] == config.parallel_preparations
     assert len(state["submitted"]) == 2
+    assert capsys.readouterr().out.splitlines() == [
+        "Witness pod ready. Reading saved prompt results",
+        "Generation pass finished. Worker is exiting.",
+    ]
 
 
 async def test_prompt_exception_is_skipped_for_the_pass_and_retried_on_the_next_pod(generation):

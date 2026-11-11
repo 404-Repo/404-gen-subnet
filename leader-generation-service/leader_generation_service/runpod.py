@@ -101,6 +101,8 @@ class RunpodRunner:
 
     def _price(self, config: Config) -> Decimal:
         settings = self.settings
+        check_failed = "Could not verify RunPod CPU capacity, RAM and price"
+        available = ("HIGH", "MEDIUM", "LOW")
         try:
             response = self.http.get(
                 "https://api.runpod.io/v2/catalog/cpus",
@@ -112,24 +114,62 @@ class RunpodRunner:
             sites = [
                 site for site in cpu["dataCenters"] if config.data_center is None or site["id"] == config.data_center
             ]
-            if cpu["availability"] not in ("HIGH", "MEDIUM", "LOW") or not any(
-                site["availability"] in ("HIGH", "MEDIUM", "LOW") for site in sites
-            ):
-                raise ValueError("No capacity")
+            if cpu["availability"] not in available:
+                logger.error("RunPod CPU {} has no capacity for {} vCPUs", config.cpu_id, config.vcpus)
+                raise RuntimeError(check_failed)
+            if not any(site["availability"] in available for site in sites):
+                location = (
+                    "any eligible data center" if config.data_center is None else f"data center {config.data_center}"
+                )
+                logger.error("RunPod CPU {} has no capacity for {} vCPUs in {}", config.cpu_id, config.vcpus, location)
+                raise RuntimeError(check_failed)
             hourly = Decimal(str(cpu["price"]["securePerVcpu"])) * config.vcpus
-            if (
-                not hourly.is_finite()
-                or hourly <= 0
-                or int(cpu["ramGbPerVcpu"]) * config.vcpus * 1024 < max(8192, config.go_memory_mib + 2048)
-                or not cpu["vcpu"]["min"] <= config.vcpus <= cpu["vcpu"]["max"]
-            ):
-                raise ValueError("Unsupported CPU shape")
+            if not hourly.is_finite() or hourly <= 0:
+                raise decimal.InvalidOperation
+            available_ram = int(cpu["ramGbPerVcpu"]) * config.vcpus * 1024
+            required_ram = max(8192, config.go_memory_mib + 2048)
+            if available_ram < required_ram:
+                logger.error(
+                    "RunPod CPU {} offers {} MiB RAM but the worker needs {} MiB",
+                    config.cpu_id,
+                    available_ram,
+                    required_ram,
+                )
+                raise RuntimeError(check_failed)
+            min_vcpus, max_vcpus = cpu["vcpu"]["min"], cpu["vcpu"]["max"]
+            if not min_vcpus <= config.vcpus <= max_vcpus:
+                logger.error(
+                    "RunPod CPU {} supports {} to {} vCPUs but {} were requested",
+                    config.cpu_id,
+                    min_vcpus,
+                    max_vcpus,
+                    config.vcpus,
+                )
+                raise RuntimeError(check_failed)
             total = hourly + Decimal(config.disk_gb) * Decimal("0.10") / 730
-        except (httpx.HTTPError, KeyError, ValueError, TypeError, StopIteration, decimal.InvalidOperation):
-            raise RuntimeError("Could not verify RunPod CPU capacity, RAM and price") from None
-        if total > settings.max_hourly_cost:
-            raise RuntimeError("CPU allocation exceeds the configured hourly cost ceiling")
-        return total
+        except httpx.HTTPError as error:
+            reason = (
+                f"HTTP {error.response.status_code}"
+                if isinstance(error, httpx.HTTPStatusError)
+                else type(error).__name__
+            )
+            logger.error("RunPod CPU catalog request failed ({})", reason)
+        except StopIteration:
+            logger.error("RunPod CPU catalog does not list {} for {} vCPUs", config.cpu_id, config.vcpus)
+        except decimal.DecimalException:
+            logger.error("RunPod CPU catalog returned an invalid price for {}", config.cpu_id)
+        except (KeyError, ValueError, TypeError, OverflowError) as error:
+            logger.error("RunPod CPU catalog returned invalid data for {} ({})", config.cpu_id, type(error).__name__)
+        else:
+            if total > settings.max_hourly_cost:
+                logger.error(
+                    "RunPod estimated cost of ${}/hour exceeds the ${}/hour cost ceiling",
+                    total,
+                    settings.max_hourly_cost,
+                )
+                raise RuntimeError("CPU allocation exceeds the configured hourly cost ceiling")
+            return total
+        raise RuntimeError(check_failed)
 
     def _prepare_payload(self, job: Job) -> None:
         snapshot = job.snapshot
