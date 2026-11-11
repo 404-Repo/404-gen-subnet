@@ -1,5 +1,6 @@
 import argparse
 import asyncio
+import os
 import re
 import sys
 from pathlib import Path
@@ -28,6 +29,7 @@ def setup_logging(log_level: str) -> None:
 
 async def main(round_num: int, hotkey: str, ref: str, output: Path) -> None:
     settings = Settings()
+    os.environ["AWS_MAX_ATTEMPTS"] = "1"
     setup_logging(settings.log_level)
     shutdown = GracefulShutdown()
     shutdown.setup_signal_handlers()

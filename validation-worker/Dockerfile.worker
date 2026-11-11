@@ -1,0 +1,65 @@
+# Build from the repository root for linux/amd64 with the pinned sandbox image.
+ARG SANDBOX_IMAGE=validation-sandbox:dev
+FROM ${SANDBOX_IMAGE} AS sandbox
+
+FROM debian:bookworm-slim AS jail
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    autoconf bison ca-certificates flex g++ git libnl-route-3-dev \
+    libprotobuf-dev libtool make pkg-config protobuf-compiler
+RUN git clone --branch 3.6 --depth 1 --recurse-submodules --shallow-submodules \
+    https://github.com/google/nsjail.git /src/nsjail \
+    && test "$(git -C /src/nsjail rev-parse HEAD)" = f78475530b46d0186111a9096b30725f816b55fe \
+    && test "$(git -C /src/nsjail/kafel rev-parse HEAD)" = 76d0f41bf3eb5c4008713d64b9767b461a9129a3 \
+    && make -C /src/nsjail -j2
+
+FROM --platform=$BUILDPLATFORM golang:1.27.3-bookworm@sha256:972b4110ba0f47539a975c31e52c64765e1ff19f2d74469ae4a595c6676e80a5 AS proof
+ARG TARGETARCH
+WORKDIR /src
+ENV GOTOOLCHAIN=local
+COPY witness-client/native/go.mod witness-client/native/go.sum ./
+RUN go mod download
+COPY witness-client/native/*.go ./
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=$TARGETARCH go build -trimpath -o /privateauth .
+
+FROM node:22-bookworm-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c AS verifier
+WORKDIR /verifier
+COPY witness-server/worker/witness_pod/verifier/package.json witness-server/worker/witness_pod/verifier/package-lock.json ./
+RUN npm ci --ignore-scripts --omit=dev --no-audit --no-fund
+
+FROM python:3.12-slim-bookworm
+RUN apt-get update && apt-get install -y --no-install-recommends libnl-route-3-200 libprotobuf32 \
+    && rm -rf /var/lib/apt/lists/*
+COPY validation-worker/poetry.lock /tmp/worker.lock
+RUN python - <<'PY'
+import pathlib, subprocess, sys, tomllib
+
+lock = tomllib.loads(pathlib.Path('/tmp/worker.lock').read_text())
+requirements = []
+for package in lock['package']:
+    if 'main' not in package['groups'] or package.get('source', {}).get('type') == 'directory':
+        continue
+    marker = package.get('markers', '')
+    if isinstance(marker, dict):
+        marker = marker.get('main', '')
+    requirement = f"{package['name']}=={package['version']}"
+    requirements.append(f'{requirement}; {marker}' if marker else requirement)
+path = pathlib.Path('/tmp/worker-requirements.txt')
+path.write_text('\n'.join(requirements) + '\n')
+subprocess.run([sys.executable, '-m', 'pip', 'install', '--no-cache-dir', '--only-binary=:all:', '--no-deps', '-r', str(path)], check=True)
+subprocess.run([sys.executable, '-m', 'pip', 'check'], check=True)
+PY
+COPY --from=jail /src/nsjail/nsjail /usr/local/bin/nsjail
+COPY --from=proof /privateauth /usr/local/bin/privateauth
+COPY --from=verifier /usr/local/bin/node /usr/local/bin/node
+COPY --from=sandbox / /opt/miner-root/
+COPY validation-worker/main.py /app/validation-worker/main.py
+COPY validation-worker/validation_worker /app/validation-worker/validation_worker
+COPY shared/subnet_common /app/subnet_common
+COPY renderer-client/src/renderer_client /app/renderer_client
+COPY witness-client/src/witness_client /app/witness_client
+COPY witness-server/worker/witness_pod /app/witness_pod
+COPY --from=verifier /verifier/node_modules /app/witness_pod/verifier/node_modules
+COPY shared/subnet_common/witness/params/verifying.bin /app/witness_pod/verifier/params/verifying.bin
+ENV PYTHONPATH=/app:/app/validation-worker PYTHONDONTWRITEBYTECODE=1 SANDBOX_ROOT=/opt/miner-root
+WORKDIR /app/validation-worker
+ENTRYPOINT ["python", "-u", "main.py"]

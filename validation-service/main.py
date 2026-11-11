@@ -18,6 +18,7 @@ def setup_logging(log_level: str) -> None:
         "| <cyan>{name}</cyan>:<cyan>{function}</cyan> - <level>{message}</level>",
         level=log_level,
         colorize=True,
+        diagnose=False,
     )
 
 

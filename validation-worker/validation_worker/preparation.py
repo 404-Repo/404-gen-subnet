@@ -43,12 +43,13 @@ async def download(client: httpx.AsyncClient, url: str, path: Path) -> None:
 
 async def load_round_inputs(inputs: ValidationInputs, r2: R2Client, settings: Settings) -> RoundInputs:
     repo = repository(settings.github_repo)
-    identity = hashlib.sha256(json_bytes([repo, settings.github_branch])).hexdigest()
+    branch = settings.witness_competition_branch or settings.github_branch
+    identity = hashlib.sha256(json_bytes([repo, branch])).hexdigest()
     key = f"pod-gateway/round-inputs/v1/{identity}/{inputs.submission.round}.json"
     frozen = RoundInputs.model_validate_json(await read_object(r2, r2.bucket, key))
     if (
         frozen.repository != repo
-        or frozen.branch != settings.github_branch
+        or frozen.branch != branch
         or frozen.round != inputs.submission.round
         or frozen.number != inputs.round_num
         or frozen.seed != inputs.seed

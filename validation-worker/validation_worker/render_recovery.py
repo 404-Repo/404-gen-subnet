@@ -23,7 +23,7 @@ MAX_PENDING_PLANS = 256
 class MissingRenderOutcome(RenderUnavailable):
     def __init__(self, request_key: str) -> None:
         self.request_key = request_key
-        super().__init__("No saved render for this request after checking known Witness images: " + request_key)
+        super().__init__("No saved render for this request: " + request_key)
 
 
 class RenderFailure(StrEnum):

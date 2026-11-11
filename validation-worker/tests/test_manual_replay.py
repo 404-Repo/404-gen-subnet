@@ -50,7 +50,6 @@ class Stored:
         self.values = values
         self.reads: list[str] = []
         self.listings: list[str] = []
-        self.writes: list[str] = []
 
     def read(self, key: str, limit: int = 16 * 1024 * 1024) -> bytes | None:
         self.reads.append(key)
@@ -60,12 +59,6 @@ class Stored:
         self.listings.append(prefix)
         return [key for key in self.values if key.startswith(prefix)]
 
-    def save(self, key: str, data: bytes, content_type: str) -> None:
-        if key in self.values and self.values[key] != data:
-            raise AssertionError("Existing render must not be overwritten")
-        self.values.setdefault(key, data)
-        self.writes.append(key)
-
 
 @pytest.fixture
 def saved_renders(tmp_path: Path) -> tuple[SavedRenderer, Stored, Stored]:
@@ -73,10 +66,10 @@ def saved_renders(tmp_path: Path) -> tuple[SavedRenderer, Stored, Stored]:
     png = b"\x89PNG\r\n\x1a\noriginal bytes"
     previews = Stored(
         {
-            prefix + "renders/v1/91cf8613fc8ff82c97ef0240a975b1dbad2ebfcb2ad298be741fb9446b4de30d.png": png,
-            prefix + "renders/v1/98b785f581b472a03d0a5591c16a3e2e2134b53b4377efc4fb8cc05447c1a6d5.png": png,
+            prefix + "renders/v2/34eb735cb4dcc018fc4540df7cf2ea6fbb54e154bc2c3ea5df18eb23545a2296.png": png,
+            prefix + "renders/v2/5eb1cb8946c1073010eb5d96ed5add40b8b6cdb06f8fd06c48caf03ea74eb4db.png": png,
             prefix
-            + "renders/v1/64761425a1408d9238e5701fbcf47e704705bb15061045e304f038957e6d7e5f.rejection.json": (
+            + "renders/v2/2f364701670a2fb78ced36cb333d1c77d6cb69042d94a316a7b1688edaa48164.rejection.json": (
                 b'{"error":"invalid_geometry","failures":[]}'
             ),
         }
@@ -86,7 +79,6 @@ def saved_renders(tmp_path: Path) -> tuple[SavedRenderer, Stored, Stored]:
         previews,
         artifacts,
         SCOPE,
-        "witness@sha256:" + "a" * 64,
         cache=tmp_path / "previews",
         artifact_cache=tmp_path / "finals",
         storage_prefix="isolated/",
@@ -122,107 +114,16 @@ def test_saved_rejection_reaches_the_miner_and_reuses_the_cached_outcome(
     assert previews.reads == reads and not artifacts.reads
 
 
-def test_mixed_witness_images_are_recovered_into_an_image_independent_cache(
-    saved_renders: tuple[SavedRenderer, Stored, Stored], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    previous, previews, artifacts = saved_renders
-    images = ("witness@sha256:" + "a" * 64, "witness@sha256:" + "b" * 64)
-    monkeypatch.setattr("validation_worker.replay_evidence.RECENT_WITNESS_IMAGES", images, raising=False)
-    prefix = f"isolated/rounds/{SCOPE.round}/{SCOPE.hotkey}/renders/v1/"
-    previews.values[prefix + "c58c9c6cefcca85b51d3c6b380d464ea84c244db41f32b0b889dfff17c56c9b6.png"] = (
-        b"\x89PNG\r\n\x1a\nsecond worker"
-    )
-    previews.values[prefix + "863d61ba9cdd2e6533a1ab7f925c1975cfc0718e5c38e3f9f3f307135f298b8f.rejection.json"] = (
-        b'{"error":"second worker rejection"}'
-    )
-    renderer = SavedRenderer(
-        previews,
-        artifacts,
-        SCOPE,
-        images[0],
-        cache=previous.cache,
-        artifact_cache=previous.artifact_cache,
-        storage_prefix="isolated/",
-    )
-    options = RenderOptions(lighting="neutral")
-    assert renderer.render("candidate", options) == b"\x89PNG\r\n\x1a\noriginal bytes"
-    assert renderer.render("second candidate", options) == b"\x89PNG\r\n\x1a\nsecond worker"
-    with pytest.raises(RenderRejected, match="second worker rejection"):
-        renderer.render("second invalid", options)
-    v2 = f"isolated/rounds/{SCOPE.round}/{SCOPE.hotkey}/renders/v2/"
-    assert previews.values[v2 + "34eb735cb4dcc018fc4540df7cf2ea6fbb54e154bc2c3ea5df18eb23545a2296.png"] == (
-        b"\x89PNG\r\n\x1a\noriginal bytes"
-    )
-    assert previews.values[v2 + "3e641e7c4c2afd79a07af37babcac09687315f3f7bb59db4b039029ebb87aa18.png"] == (
-        b"\x89PNG\r\n\x1a\nsecond worker"
-    )
-    writes = list(previews.writes)
-    previews.values = {key: value for key, value in previews.values.items() if "/renders/v2/" in key}
-    remote = SavedRenderer(
-        previews,
-        artifacts,
-        SCOPE,
-        cache=previous.cache / "fresh",
-        artifact_cache=previous.artifact_cache,
-        storage_prefix="isolated/",
-        witness_images=(),
-    )
-    assert remote.render("candidate", options) == b"\x89PNG\r\n\x1a\noriginal bytes"
-    assert remote.render("second candidate", options) == b"\x89PNG\r\n\x1a\nsecond worker"
-    with pytest.raises(RenderRejected, match="second worker rejection"):
-        remote.render("second invalid", options)
-    assert previews.writes == writes
-
-    class Offline:
-        def read(self, key: str, limit: int = 16 * 1024 * 1024) -> bytes | None:
-            raise AssertionError("Cached renders must not read R2")
-
-        def keys(self, prefix: str) -> list[str]:
-            raise AssertionError("Cached renders must not list R2")
-
-        def save(self, key: str, data: bytes, content_type: str) -> None:
-            raise AssertionError("Cached renders must not write R2")
-
-    cached = SavedRenderer(
-        Offline(),
-        artifacts,
-        SCOPE,
-        cache=previous.cache,
-        artifact_cache=previous.artifact_cache,
-        storage_prefix="isolated/",
-        witness_images=(),
-    )
-    assert cached.render("candidate", options) == b"\x89PNG\r\n\x1a\noriginal bytes"
-    assert cached.render("second candidate", options) == b"\x89PNG\r\n\x1a\nsecond worker"
-    with pytest.raises(RenderRejected, match="second worker rejection"):
-        cached.render("second invalid", options)
-
-
-@pytest.mark.parametrize("change", ["source", "options", "image"])
-def test_saved_render_requires_matching_source_options_and_witness_image(
+@pytest.mark.parametrize("change", ["source", "options"])
+def test_saved_render_requires_matching_source_and_options(
     saved_renders: tuple[SavedRenderer, Stored, Stored], change: str
 ) -> None:
     renderer, _, _ = saved_renders
-    if change == "image":
-        renderer.witness_images = ("witness@sha256:" + "b" * 64,)
     with pytest.raises(RenderUnavailable, match="No saved render"):
         renderer.render(
             "candidate\n" if change == "source" else "candidate",
             RenderOptions(lighting="studio" if change == "options" else "neutral"),
         )
-
-
-def test_v2_render_takes_precedence_over_legacy_image_outcomes(
-    saved_renders: tuple[SavedRenderer, Stored, Stored],
-) -> None:
-    renderer, previews, _ = saved_renders
-    key = (
-        f"isolated/rounds/{SCOPE.round}/{SCOPE.hotkey}/renders/v2/"
-        "34eb735cb4dcc018fc4540df7cf2ea6fbb54e154bc2c3ea5df18eb23545a2296.png"
-    )
-    previews.values[key] = b"\x89PNG\r\n\x1a\nexisting v2 outcome"
-    assert renderer.render("candidate", RenderOptions(lighting="neutral")) == previews.values[key]
-    assert not previews.writes
 
 
 def test_saved_final_grid_uses_final_storage_and_requires_the_saved_source(

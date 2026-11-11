@@ -16,13 +16,15 @@ from typing import Literal, Self, Unpack, cast, overload
 
 from openai.types.responses import Response, ResponseStreamEvent
 from openai.types.responses.response_create_params import ResponseCreateParamsBase
-from pydantic import BaseModel
+from pydantic import BaseModel, TypeAdapter
 from renderer_client import RenderOptions, RenderRejected
 from renderer_client.client import DEFAULT_OPTIONS, RenderRequest
 from witness_client import AsyncWitnessClient, CapturedResponse, WitnessError
 from witness_client._core import _ClientState
 from witness_client.calls import RequestKey
 from witness_client.response import AsyncModelStream, ModelStream, model_error, model_result
+
+from validation_worker.render_recovery import RenderFailure, assumed_render_failure
 
 
 # Keep the protocol pipe separate from Python and native miner output.
@@ -45,9 +47,18 @@ class ModelReply(BaseModel):
     body: str
 
 
+class ModelErrorReply(BaseModel):
+    error: Literal["capture_unrecorded"]
+
+
+ModelReplies: TypeAdapter[ModelReply | ModelErrorReply] = TypeAdapter(ModelReply | ModelErrorReply)
+
+
 class RenderReply(BaseModel):
     png: str = ""
     rejection: str | None = None
+    unavailable: str | None = None
+    failure_kind: RenderFailure = RenderFailure.CONNECTION
 
 
 class ReplayMismatch(WitnessError):
@@ -69,7 +80,7 @@ class Witness(_ClientState):
         return self._renderer.render(source, options)
 
     def read(self, key: RequestKey, body: bytes) -> CapturedResponse:
-        reply = ModelReply.model_validate_json(
+        reply = ModelReplies.validate_json(
             exchange(
                 operation="model",
                 body=base64.b64encode(body).decode("ascii"),
@@ -77,6 +88,8 @@ class Witness(_ClientState):
                 session_id=key.session_id,
             )
         )
+        if isinstance(reply, ModelErrorReply):
+            raise WitnessError("No recorded capture for this request", code=reply.error, source="gateway")
         return CapturedResponse(reply.exchange_id, reply.status, base64.b64decode(reply.body, validate=True))
 
     @overload
@@ -227,6 +240,8 @@ class Renderer:
         reply = RenderReply.model_validate_json(exchange(operation="render", source=source, query=options.query()))
         if reply.rejection is not None:
             raise RenderRejected(reply.rejection)
+        if reply.unavailable is not None:
+            assumed_render_failure(reply.failure_kind, reply.unavailable, source, options)
         return base64.b64decode(reply.png, validate=True)
 
 

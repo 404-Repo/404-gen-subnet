@@ -8,7 +8,7 @@ network access; the NsJail isolation below applies to automatic validation.
 Automatic validation checks one candidate on a dedicated replay Pod. The trusted
 worker reads GitHub and R2, verifies captured provider evidence, checks replayed JavaScript and
 per-prompt budgets, and checkpoints progress in Git. Submitted imports and
-`generate()` run in a fresh NsJail process for each prompt. The jail filesystem is
+`generate()` run in a fresh NsJail process for each replay trial. The jail filesystem is
 prepared once for the validation job and reused across prompts and operational
 retries; each process receives a clean scratch directory and the current image.
 [validation-service](../validation-service/README.md) coordinates candidates and
@@ -22,25 +22,50 @@ The checkpoint is `rounds/{n}/{hotkey}/validation.json`:
 {
   "ref": "original_40_character_input_commit",
   "prompts": {
-    "prompt_id": {"verdict": "passed", "reason": ""}
+    "prompt_id": {
+      "status": "pending",
+      "attempts": 1,
+      "deadline": "2026-11-11T12:30:00Z",
+      "retryable": false,
+      "reason": "RenderUnavailable: Missing preview recovery exhausted after 32 trials",
+      "charges": {"logical_call_id": "2000000"},
+      "consumed_calls": 1,
+      "consumed_credits": "2000000"
+    }
   }
 }
 ```
 
-The worker reads an existing checkpoint from the current competition branch and
-continues using its original `ref`. Progress commits advance the branch without
-changing the pinned submission, prompts, seed or canonical output references.
-A new checkpoint records the supplied `--ref` before miner execution.
+The worker resumes at the checkpoint's original `ref`, including its submission,
+prompts, seed and canonical output references. Progress commits advance the
+competition branch without changing these inputs.
 
-Each completed prompt is written through `GitBatcher` and flushed before starting
-the next prompt. If a commit fails, pending progress stays in memory and its flush
-is retried. A replacement worker reads the last committed checkpoint and skips
-those prompts. An interruption during a prompt restarts that prompt.
+Each prompt has up to three recorded attempts, with delays of one second and then
+two seconds. Source preparation, sandbox startup, evidence reads, verification and
+execution share the allowance and the original watchdog deadline. Transient
+failures exhaust into `pending`, with the last error recorded. Invalid evidence or
+configuration stays pending without retries. A confirmed miner or budget failure
+is `failed`.
 
-Operational errors leave the prompt pending. The outer loop logs the error type,
-waits `MIN_CHECK_STATE_INTERVAL` seconds and resumes. A completed validation failure
-is checkpointed with its reason. `SIGTERM` and `SIGINT` stop between prompts or
-interrupt the retry wait; cancellation terminates the active sandbox.
+`charges` records distinct consumed logical calls and their exact decimal credit
+costs. The replay updates this ledger in memory; each completed attempt queues its
+status, attempts, deadline, reason and charges through `GitBatcher`. Repeating a
+logical call counts once. Call and credit totals are derived from the ledger.
+A known budget breach remains a failure even if a later infrastructure operation
+fails.
+
+Writes follow GitBatcher's normal batching interval. Normal completion or a
+graceful stop makes one final save. If it fails, the worker keeps its queued
+results and retries, with up to three job attempts and 1s/2s delays. A replacement
+worker restores the last committed snapshot and reruns unfinished work. A crash
+can lose unsaved attempt counts and charges. Saved exhausted attempts remain pending until
+an operator resets them. Git outages are logged while persistence is unavailable.
+R2 SDK retries are disabled in the automatic entry point so prompt retries have
+one owner.
+
+`SIGTERM` and `SIGINT` stop between prompts or interrupt retry waits; cancellation
+terminates the active sandbox. Operators can explicitly reset a pending prompt's
+retryable flag, attempts and deadline after repairing infrastructure.
 
 ## Inputs and R2 reads
 
@@ -61,8 +86,14 @@ There is no whole-candidate artifact download or evidence listing. Calls are
 matched by their existing request identity. The trusted worker rechecks capture
 bindings and runs the maintained native Witness TLS verifier before returning a
 recorded response. Saved previews use request-keyed `renders/v2/`, with `v1/`
-lookup using the original `RENDERER_ID`. Missing evidence or saved previews leave
-the prompt pending; the worker never issues live provider inference.
+lookup using the original `RENDERER_ID`. For a missing preview, the worker uses
+the manual replay search to try connection errors, timeouts and HTTP failures
+within the prompt's time limit. An absent model-call record gives the miner the
+SDK connection error used by manual replay and consumes zero calls and credits.
+A replay using assumed errors must reproduce the exact output with verified
+recorded calls, the saved final grid when the miner returns JavaScript, and a
+passing trial budget. The checkpoint records the assumptions and the accepted
+trial's charges. An inconclusive replay stays pending.
 
 The worker requires exact JavaScript correspondence and applies the shared
 `PromptBudget` to the verified model calls consumed by that prompt, using the
@@ -91,8 +122,15 @@ The seccomp policy denies networking, namespace and mount operations, tracing,
 process-memory access and process-group/session changes. A private Unix socket
 pair is allowed for asyncio. Every prompt starts a new process group; the worker
 kills the group before reusing the jail or on cancellation. The process uses
-normal CPU priority, a 2 GiB address-space limit, a 16 MiB per-file size limit,
-128 file descriptors, 64 processes/threads and disabled core dumps.
+normal CPU priority, a 4 GiB virtual-address-space limit, a 16 MiB per-file size limit,
+128 file descriptors, 128 processes/threads and disabled core dumps. The address-space
+limit is not a Pod RAM allocation.
+
+Before Python starts, the worker sets `PYTHONHASHSEED=0`,
+`OPENBLAS_NUM_THREADS=1`, `OMP_NUM_THREADS=1` and `MKL_NUM_THREADS=1`.
+Python uses safe-path mode and disables the user site while honoring these trusted
+startup variables. The cleared environment has no submitted `PYTHONPATH` or user
+startup configuration.
 
 The only worker connection is a bounded stdin/stdout replay protocol for recorded
 model responses, saved preview outcomes and the generated output. The worker owns
@@ -142,7 +180,6 @@ R2_SECRET_ACCESS_KEY=your-read-secret-key
 RENDERER_ID=original-witness-image-identity
 SANDBOX_ROOT=/opt/validation-miner-root
 SANDBOX_TIMEOUT=1800
-MIN_CHECK_STATE_INTERVAL=120
 LOG_LEVEL=DEBUG
 ```
 
@@ -150,19 +187,96 @@ GitHub access must allow reading source and writing the competition checkpoint.
 R2 credentials need object reads from both buckets. They remain in the trusted
 worker. `WITNESS_PROVIDER` selects the original `api` or `codex` request
 normalization; its default is `codex`. `SANDBOX_TIMEOUT` is an operational watchdog
-in seconds, not a competition time budget.
+in seconds across all attempts for a prompt, not a competition time budget.
 
 ```bash
 poetry run python main.py --round-num 7 --hotkey MINER_HOTKEY \
   --ref COMPETITION_COMMIT_SHA --output /private/validation/candidate
 ```
 
-Build the pristine development miner runtime from the repository root with
-`docker build -f validation-worker/Dockerfile.sandbox -t validation-miner:dev .`.
-Export that trusted image's filesystem into `SANDBOX_ROOT`, or bake it into the
-validation Pod image. It contains the local SDK sources and common Python
-runtime dependencies. Freeze the runtime for the admitted miner; do not copy a
-user home directory, credentials or a submitted virtualenv into it.
+## Round runtime
+
+`Dockerfile.sandbox` pins Python **3.13.18** and its Linux x86_64 base-image digest.
+[requirements-sandbox.txt](requirements-sandbox.txt) pins every direct and transitive
+package, including NumPy **2.5.4** and Pillow **13.0.0**, from the miner runtime's
+published direct requirements plus the runner's aiofiles/loguru dependencies.
+Installation uses only binary wheels, installs no additional dependencies and runs
+`pip check`. Bundled witness/renderer client versions and source hashes are recorded
+alongside Python's exact build and all installed package versions in `/runtime.json`.
+
+For a local development build from the repository root:
+
+```bash
+docker buildx build --platform linux/amd64 --load \
+  -f validation-worker/Dockerfile.sandbox -t validation-miner:dev .
+```
+
+Publish the image digest and version metadata as `rounds/{n}/runtime.json`
+in the competition repository:
+
+```json
+{
+  "image": "registry.example/validation-miner@sha256:64_hex_manifest_digest",
+  "environment": {"python": "3.13.18", "packages": {}, "clients": {}, "sdk_files": {}}
+}
+```
+
+`environment` is the complete `/runtime.json` from the built image, including its
+Python build, platform and base image. Use the registry manifest digest. The
+metadata records the sandbox used for automatic validation of that round.
+
+Production publication must use clean, committed source integrated into `main` and
+pushed to its remote. From that exact source at the repository root:
+
+```bash
+git fetch origin main
+test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)"
+test -z "$(git status --porcelain)"
+source_sha="$(git rev-parse HEAD)"
+release_context="$(mktemp -d)"
+git archive "$source_sha" | tar -x -C "$release_context"
+sandbox_repository=YOUR_REGISTRY/validation-miner
+sandbox_tag="$sandbox_repository:$source_sha"
+docker buildx build --platform linux/amd64 --provenance=false --push \
+  --label "org.opencontainers.image.revision=$source_sha" \
+  --metadata-file sandbox-build.json \
+  -f "$release_context/validation-worker/Dockerfile.sandbox" \
+  -t "$sandbox_tag" "$release_context"
+rm -r -- "$release_context"
+sandbox_digest="$(python -c 'import json; print(json.load(open("sandbox-build.json"))["containerimage.digest"])')"
+sandbox_image="$sandbox_repository@$sandbox_digest"
+docker run --rm --platform linux/amd64 --network none --read-only \
+  --entrypoint cat "$sandbox_image" /runtime.json > sandbox-environment.json
+python - "$sandbox_image" <<'PY' > round-runtime.json
+import json, sys
+with open("sandbox-environment.json") as stream:
+    environment = json.load(stream)
+print(json.dumps({"image": sys.argv[1], "environment": environment}, indent=2))
+PY
+```
+
+Commit and push `round-runtime.json` as `rounds/{n}/runtime.json` to publish
+that runtime's metadata. Export the published trusted image's filesystem into
+`SANDBOX_ROOT` (or bake it into the Pod). The operator selects the pinned image and
+prepares the filesystem; `/runtime.json` records its versions for inspection.
+Do not copy a home directory, credentials or a submitted virtualenv into it.
+
+## Worker image
+
+Build the worker with the published sandbox image. The worker image contains
+NsJail, the native evidence verifier and the sandbox filesystem. It replays the
+saved preview renders from R2 and compares the generated JavaScript with the
+canonical output.
+
+```bash
+docker buildx build --platform linux/amd64 --load \
+  --build-arg SANDBOX_IMAGE=REGISTRY/validation-miner@sha256:DIGEST \
+  -f validation-worker/Dockerfile.worker -t validation-worker:dev .
+```
+
+For a test competition branch, set `WITNESS_COMPETITION_BRANCH` to the branch that
+owns the frozen R2 inputs. It defaults to `GITHUB_BRANCH`. Git checkpoints still
+use `GITHUB_BRANCH`.
 
 ## Development
 
@@ -172,10 +286,14 @@ poetry check --lock
 poetry run python -m pytest -q
 ```
 
-The single Linux integration check uses a real sandbox and local HTTP GitHub/S3
-fixtures. It interrupts validation after a committed prompt, fails a Git write
+The Linux integration checks use a real sandbox and local HTTP GitHub/S3
+fixtures. The resumption check interrupts validation after a committed prompt, fails a Git write
 and an R2 read, resumes with the original input commit, checks saved PNGs and
 rejections, probes synthetic credentials and worker network isolation, and checks
-clean scratch and unwritable inputs across successive prompts. Run
+startup variables, NumPy imports, resource limits, clean scratch and unwritable
+inputs across successive prompts. A failed final Git save retries the queued results. The retry check exhausts after a verified call,
+checks persisted attempts and credits, and resumes without re-executing the prompt.
+Its native proof-verifier subprocess is replaced with a fixture; the actual jail,
+request/capture binding and budget logic run. Run
 `poetry run python -m unittest discover -s tests -p test_validation.py -v` as root on Linux with NsJail
 and `SANDBOX_ROOT` prepared. It skips when no sandbox runtime is configured.

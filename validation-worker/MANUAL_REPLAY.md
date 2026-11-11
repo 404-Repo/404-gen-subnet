@@ -37,14 +37,13 @@ Set the following operator configuration in the host environment:
 
 | Variable | Purpose |
 | --- | --- |
-| `R2_ENDPOINT`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY` | Read/list access; create access on the replay bucket for v1 recovery |
+| `R2_ENDPOINT`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY` | Read/list access to the primary and replay buckets |
 | `R2_BUCKET` | Primary bucket for journals, frozen prompts and final artifacts; defaults to `404-gen` |
 | `R2_REPLAY_BUCKET` | Required bucket for provider captures and saved preview renders |
 | `WITNESS_DEPLOYMENT` | Deployment namespace that owns the saved calls |
 | `WITNESS_COMPETITION_REPO` | State repository; defaults to `404-Repo/404-active-competition` |
 | `WITNESS_COMPETITION_BRANCH` | State branch; defaults to `main` |
 | `GITHUB_TOKEN` or `WITNESS_GITHUB_TOKEN` | Optional private-repository read access |
-| `REPLAY_RENDERER_ID` or `WITNESS_IMAGE` | Optional additional legacy image to try before the built-in recent releases |
 
 For the closest reproduction, use the approved Python/package versions and the
 miner's permitted libraries. The current competition specifies Python 3.13/Linux
@@ -122,10 +121,7 @@ indexes. Missing or ambiguous prefixes stop preparation; ambiguous errors list
 the matching full hotkeys.
 
 `--round` accepts a round number or the competition's full round name. `--prompt`
-and `--all` are mutually exclusive. No Witness image setting is required.
-`--witness-image` (`--renderer-id` alias) optionally adds a legacy image to try
-before the built-in release list; it defaults to `REPLAY_RENDERER_ID`, then
-`WITNESS_IMAGE`.
+and `--all` are mutually exclusive.
 
 The original provider route is inferred for each prompt from its first matching
 saved request. Unrelated API/subscription records in the same round do not require
@@ -140,16 +136,9 @@ The exact saved PNG bytes are returned; a saved structured rejection raises
 `RenderRejected` so the miner can follow its normal fallback logic. There is no
 live renderer URL, API key or rendering cost.
 
-On a v2 miss, the reader checks v1 keys for the known published Witness Pod images
-from November 1–8, 2026. It lists the miner's render keys once per cold run and
-computes candidate hashes locally. The first matching original PNG or rejection
-is copied unchanged to its request-only v2 key in R2 and cached locally. Original
-v1 objects are retained. Copies use create-if-absent writes; different existing
-v2 bytes are not replaced. This recovery requires write access to
-`R2_REPLAY_BUCKET`. Mixed Witness versions are checked per request, not per round.
-
-Later replays read the v2 copy or local cache directly, without image history or
-another legacy search. Cached requests do not list or read R2 again.
+The reader loads v2 outcomes from R2 or the local cache. Cached requests do not
+list or read R2 again. Missing preview outcomes follow the render-failure handling
+described above.
 
 After a non-`None` output, replay checks the saved final grid in `R2_BUCKET` at
 `<storage-prefix>rounds/<round>/<hotkey>/submitted/<prompt-id>/grid.png`.
@@ -261,8 +250,6 @@ and inputs. `saved_render_loaded` records the original object key, whether a loc
 cache was used, byte count and content hash. `render_request`, `render_response`
 and `render_rejected` retain the miner's render inputs and saved outcomes.
 `final_render_load_started` identifies the saved submission-grid check.
-`saved_render_recovered` records the legacy image, original object key and new v2
-key after a successful copy.
 `assumed_render_failure` records previews without a saved outcome. Their render
 indices appear in each prompt's `assumed_render_failures`; the matching
 `renders/INDEX.failure.json` marks the error as assumed.
@@ -305,9 +292,7 @@ requested R2 journal directly before assuming a model connection failure.
 Unreadable or inconsistent known evidence still stops that prompt. SDK validation
 errors remain catchable. Output comparison and saved final-grid verification
 finish before accounting validation.
-Results are local diagnostics, not terminal candidate validation; the command
-writes recovered preview outcomes to `renders/v2/` in the replay bucket. It does
-not write competition verdicts, call journals, final submissions or Git.
+The command reads remote evidence and saves diagnostic reports and caches locally.
 
 ## Offline checks
 

@@ -30,7 +30,7 @@ from subnet_common.competition.submissions import MinerSubmission, require_submi
 from subnet_common.github import GitHubClient
 from subnet_common.witness.models import Scope, json_bytes
 from subnet_common.witness.rounds import RoundInputs
-from subnet_common.witness.state import R2StateStore, StateConflict
+from subnet_common.witness.state import R2StateStore
 from witness_client.calls import RequestKey, request_digest
 from witness_client.pods import CallView
 from witness_client.state import save
@@ -50,55 +50,11 @@ from .request_replay import (
 
 
 R2_READ_RETRY_DELAYS = (1.0, 2.0, 4.0, 8.0)
-RECENT_WITNESS_IMAGES = tuple(
-    "europe-west3-docker.pkg.dev/gen-456515/witness-runtime/pods@sha256:" + digest
-    for digest in (
-        "09502cdeabd7b301211025c28d1e09f2a7822d8edc94e8b4c15635c4f08cad6e",
-        "4ebe92207527c7b70c7194840d5af847d5f22eadc7c1295d2d0e244c692878bc",
-        "d5dda26946fc87a121327cc5b81c2d10639514e3c25f9979bd7c7ea3eea08329",
-        "b40a0e6efc65bb515303314ef443c8feca6a7e294cbd708db7ae1b888b553d80",
-        "612740a2a2e22d2209c4c01b425031eefef228670b9ef8f10b33ebbd42510101",
-        "f769b92fd585ca1177129474e573ed47c8d0e3524c1617e8e5d18dac22dd8986",
-        "f2f17010ae84c9e7d0b17bbe6bba99420e868e597a183d0880174261c97b015d",
-        "1fe8e02d453212d1e8ffcad2668642658b5a13935013995554e8a9c62fa2307b",
-        "37085c1ec062c9164615bf7fb7d655289cabcd9c3a096c119fea9298566e3fcc",
-        "b476505e8e98504c81ec64fcab3e44f641099b11dac8a1f898c7996273e7c383",
-        "a4a16686bf2b17e2e9b9f019335479d36aa56dc716da8a49df1669fb6853af8f",
-        "a1e2756f6a1223a36931ae98e6c6f0747c6c7771f79fa6425cdf8e0f50cddc22",
-        "817233ac3f5a583370b3d356a27f5ad26fb3a0d18d8bc832465979d091c4d6be",
-        "3922decf750c3f34e057bff8ad357a38910ddff94bd59d402e26b9f0624b94e4",
-        "241861df7aad35ea36d665f0cac55159930b1acca778786eece008ed3b329533",
-        "aa61f7ff431c53fcc78365f9a7e627f144d44f0b9ef2449cfea09b10a3f78203",
-        "fcb5b6dcc9cb10c191ae44f3a3431fc07ed1b2264d038d88671cf544089055bf",
-        "40a10e8a17d81f9dd244dc5d26daddc171d885f3abb1f87d765729e4191f52f7",
-        "130765464b0b49ff71d508799ace81d0bddae7cc916cebff3bc4ad71ace578c0",
-        "db2c1edc2ce7dea25fec26d2d09d30f2e8bcdc26cbc989a053497d7ab0421f4a",
-        "82145df859c71ca5c5c97ab3f8e753b0ccef2d68d24124cdf4f584cb49696807",
-        "a28f675032df5690742a7755903d06a475192534744e7d2d8859bab4dcd92069",
-        "0feae9b9e9e9b90944aab6fad2438c8286b3d834134e386fe57835be76e44729",
-        "265d5e08fd11ffc98cb6580e9f334c2be3d95ccd7e8445809f558f4de0867bd1",
-        "84762df876ad629ba39aa6dc6ae1a5e80cdde4f7a3ba35142e1ef365ddc9fadd",
-        "96295e39c8de9a3c012c1d8fb3e39b57e1b26fe8d8574d9c518ce324da074142",
-        "9775318f0dc7c7e725e7d2f363f80c889997df79a3941a09a649e801fb99301a",
-        "fedd4f6c3386ad13360fb1c8ed9f090dd653dbb384022ea8a4c09f264eeb9dd9",
-        "2f76223cad5cd8a79df4ac18633927fe6b31b72b78ff6dbdbbd772213969cd9e",
-        "d425fd209638b76f75ecb3aa8d4207d18fdd5d6a8a9fb1c18dacd8e84ecd01f6",
-        "0e6689415acbf8e56f76f68da7bef3e0cf4266abbfd3b76a40b417e281a4bc12",
-        "65bb2da088de12f33f751055760fc35d3725c5150d3fe38471e4005672445aa3",
-        "b35199d08b6b735ccc88c29594863d350cf82764505af9fc9abb17fc84cbd028",
-        "4d07e1eacf791485a3290b67966776b9dbd0b5eeb9eae83c15d7ffd0f5b31665",
-        "9983faf4409ba8ed9c9748cad804223482fbc12e573ff97f5ef5e0fe9f6b8d3a",
-    )
-)
 
 
 class Evidence(Protocol):
     def read(self, key: str, limit: int = 16 * 1024 * 1024) -> bytes | None: ...
     def keys(self, prefix: str) -> Iterable[str]: ...
-
-
-class RenderEvidence(Evidence, Protocol):
-    def save(self, key: str, data: bytes, content_type: str) -> None: ...
 
 
 class R2Evidence:
@@ -129,36 +85,23 @@ class R2Evidence:
     def keys(self, prefix: str) -> Iterable[str]:
         return self._keys(prefix)
 
-    def save(self, key: str, data: bytes, content_type: str) -> None:
-        try:
-            self.state.save(key, data, None, content_type=content_type)
-        except StateConflict:
-            if self.read(key, MAX_RESPONSE_BYTES) != data:
-                raise EvidenceUnavailable("Saved render differs during v2 recovery: " + key) from None
-
 
 class SavedRenderer:
-    """Read v2 outcomes and final grids, recovering v1 renders from known releases."""
+    """Read saved v2 preview outcomes and final grids."""
 
     def __init__(
         self,
-        objects: RenderEvidence,
+        objects: Evidence,
         artifacts: Evidence,
         scope: Scope,
-        renderer_id: str | None = None,
         *,
         cache: Path,
         artifact_cache: Path,
-        witness_images: tuple[str, ...] | None = None,
         storage_prefix: str = "",
         emit: Callable[..., None] | None = None,
     ) -> None:
         self.objects, self.artifacts = objects, artifacts
-        self.renderer_id = renderer_id or "saved-renders"
-        images = list(RECENT_WITNESS_IMAGES if witness_images is None else witness_images)
-        if renderer_id:
-            images.insert(0, renderer_id)
-        self.witness_images = tuple(dict.fromkeys(images))
+        self.renderer_id = "saved-renders"
         self._saved_keys: set[str] | None = None
         self._index_lock = threading.Lock()
         self.prefix = f"{storage_prefix}rounds/{scope.round}/{scope.hotkey}/"
@@ -219,7 +162,7 @@ class SavedRenderer:
                     raise RenderRejected(data.decode("utf-8"))
         with self._index_lock:
             if self._saved_keys is None:
-                self._saved_keys = set(self.objects.keys(self.prefix + "renders/"))
+                self._saved_keys = set(self.objects.keys(self.prefix + "renders/v2/"))
             available = self._saved_keys
         for name in names:
             if name in available:
@@ -228,32 +171,6 @@ class SavedRenderer:
                     if name.endswith(".png"):
                         return data
                     raise RenderRejected(data.decode("utf-8"))
-        for image in self.witness_images:
-            legacy_hash = hashlib.sha256(json_bytes((image, path, body_hash))).hexdigest()
-            legacy_key = self.prefix + "renders/v1/" + legacy_hash
-            for suffix in (".png", ".rejection.json"):
-                name = legacy_key + suffix
-                if name not in available and not self._path(self.cache, name).is_file():
-                    continue
-                data = self._read(self.objects, name, self.cache)
-                if data is None:
-                    continue
-                destination = key + suffix
-                self.objects.save(destination, data, "image/png" if suffix == ".png" else "application/json")
-                save(self._path(self.cache, destination), data)
-                with self._index_lock:
-                    available.add(destination)
-                if self.emit is not None:
-                    self.emit(
-                        "saved_render_recovered",
-                        witness_image=image,
-                        source_key=name,
-                        key=destination,
-                        request_sha256=request_hash,
-                    )
-                if suffix == ".png":
-                    return data
-                raise RenderRejected(data.decode("utf-8"))
         raise MissingRenderOutcome(key)
 
     def final_render(self, prompt: str, source: str, expected_source: str | None, views: str | None) -> bytes:

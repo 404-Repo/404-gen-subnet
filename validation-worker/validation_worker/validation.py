@@ -1,27 +1,34 @@
 import asyncio
 from contextlib import ExitStack
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
 import httpx
+from botocore.exceptions import BotoCoreError, ClientError
 from loguru import logger
-from pydantic import BaseModel, Field
-from subnet_common.competition.validation import ValidationResult
+from subnet_common.competition.validation import PromptProgress, ValidationProgress
 from subnet_common.git_batcher import GitBatcher
 from subnet_common.github import GitHubClient
 from subnet_common.graceful_shutdown import GracefulShutdown
 from subnet_common.r2_client import R2Client
+from subnet_common.witness.pricing import BudgetRejected, PromptBudget
 
 from validation_worker.execution import validate_prompt
 from validation_worker.inputs import load_validation_inputs
-from validation_worker.preparation import load_round_inputs, prepare_source
+from validation_worker.preparation import load_round_inputs, prepare_source, read_object
 from validation_worker.sandbox import prepare_sandbox
 from validation_worker.settings import Settings
 
 
-class ValidationProgress(BaseModel):
-    ref: str = Field(pattern=r"^[0-9a-f]{40}$")
-    prompts: dict[str, ValidationResult] = Field(default_factory=dict)
+def transient(error: Exception) -> bool:
+    if isinstance(error, httpx.HTTPStatusError):
+        return error.response.status_code in (408, 429) or error.response.status_code >= 500
+    if isinstance(error, ClientError):
+        return error.response.get("ResponseMetadata", {}).get("HTTPStatusCode", 0) in (404, 408, 429) or (
+            error.response.get("ResponseMetadata", {}).get("HTTPStatusCode", 0) >= 500
+        )
+    return isinstance(error, (httpx.TransportError, BotoCoreError, OSError, RuntimeError))
 
 
 async def run_validation(
@@ -36,11 +43,14 @@ async def run_validation(
     shutdown: GracefulShutdown,
 ) -> None:
     path = f"rounds/{round_num}/{hotkey}/validation.json"
-    batcher = None
     jail = None
-    directory = output
+    frozen = None
+    batcher = None
     with ExitStack() as cleanup:
-        while True:
+        for attempt in range(3):
+            stopping = shutdown.should_stop
+            if stopping:
+                return
             try:
                 await asyncio.to_thread(output.mkdir, parents=True, exist_ok=True, mode=0o700)
                 if batcher is None:
@@ -50,52 +60,76 @@ async def run_validation(
                     ValidationProgress.model_validate_json(raw) if raw is not None else ValidationProgress(ref=ref)
                 )
                 inputs = await load_validation_inputs(git, round_num, hotkey, progress.ref)
-                frozen = await load_round_inputs(inputs, r2, settings)
-                if set(progress.prompts) - {prompt.id for prompt in frozen.prompts}:
+                if set(progress.prompts) - inputs.generations.keys():
                     raise ValueError("Validation checkpoint contains foreign prompts")
-                if raw is None:
-                    await batcher.write(
-                        path, progress.model_dump_json(indent=2), f"Validate round {round_num}, miner {hotkey}"
-                    )
+                for prompt_id in inputs.generations:
+                    if shutdown.should_stop:
+                        break
+                    state = progress.prompts.setdefault(prompt_id, PromptProgress())
+                    while state.status == "pending" and state.retryable and state.attempts < 3:
+                        if shutdown.should_stop or (state.attempts and await shutdown.wait(timeout=state.attempts)):
+                            break
+                        now = datetime.now(UTC)
+                        if state.deadline is None:
+                            state.deadline = now + timedelta(seconds=settings.sandbox_timeout_seconds)
+                        remaining = (state.deadline - now).total_seconds()
+                        if remaining <= 0:
+                            state.retryable = False
+                            state.reason = "Validation deadline exhausted"
+                            await batcher.write(
+                                path, progress.model_dump_json(indent=2), f"Validate round {round_num}, miner {hotkey}"
+                            )
+                            break
+                        state.attempts += 1
+                        budget = None
+                        try:
+                            async with asyncio.timeout(remaining):
+                                if frozen is None:
+                                    frozen = await load_round_inputs(inputs, r2, settings)
+                                if jail is None:
+                                    cleanup.close()
+                                    directory = Path(
+                                        cleanup.enter_context(TemporaryDirectory(prefix=".validation-", dir=output))
+                                    )
+                                    source = await prepare_source(inputs, git, directory)
+                                    jail = await asyncio.to_thread(prepare_sandbox, source, directory, settings)
+                                pricing = await read_object(
+                                    r2, r2.bucket, f"pod-pricing/v1/{settings.witness_deployment}.json"
+                                )
+                                budget = PromptBudget(pricing)
+                                budget.charges = state.charges
+                                budget.accept()
+                                prompt = next(prompt for prompt in frozen.prompts if prompt.id == prompt_id)
+                                result = await validate_prompt(
+                                    inputs, prompt, jail, directory, r2, http, settings, budget
+                                )
+                                state.status = result.verdict.value
+                                state.reason = result.reason
+                        except BudgetRejected as error:
+                            state.status, state.reason = "failed", str(error)
+                        except Exception as error:
+                            state.reason = f"{type(error).__name__}: {error}"[:2048]
+                            state.retryable = transient(error)
+                            if budget is not None:
+                                try:
+                                    budget.accept()
+                                except BudgetRejected as rejected:
+                                    state.status, state.reason = "failed", str(rejected)
+                            logger.warning(
+                                f"Prompt pending: round={round_num}, hotkey={hotkey}, prompt={prompt_id}, "
+                                f"attempt={state.attempts}, error={type(error).__name__}"
+                            )
+                        await batcher.write(
+                            path, progress.model_dump_json(indent=2), f"Validate round {round_num}, miner {hotkey}"
+                        )
                 if not await batcher.flush():
                     raise RuntimeError("Validation checkpoint has not been committed")
-                if len(progress.prompts) == len(frozen.prompts):
-                    logger.info(f"Validation complete: round={round_num}, hotkey={hotkey}")
-                    return
-                if jail is None:
-                    cleanup.close()
-                    directory = Path(cleanup.enter_context(TemporaryDirectory(prefix=".validation-", dir=output)))
-                    source = await prepare_source(inputs, git, directory)
-                    jail = await asyncio.to_thread(prepare_sandbox, source, directory, settings)
-                for prompt in frozen.prompts:
-                    if shutdown.should_stop:
-                        return
-                    if prompt.id in progress.prompts:
-                        continue
-                    progress.prompts[prompt.id] = await validate_prompt(
-                        inputs,
-                        prompt,
-                        jail,
-                        directory,
-                        r2,
-                        http,
-                        settings,
-                    )
-                    await batcher.write(
-                        path,
-                        progress.model_dump_json(indent=2),
-                        f"Validate prompt {prompt.id}, round {round_num}, miner {hotkey}",
-                    )
-                    if not await batcher.flush():
-                        raise RuntimeError("Validation checkpoint has not been committed")
-                logger.info(f"Validation complete: round={round_num}, hotkey={hotkey}")
-                return
-            except asyncio.CancelledError:
-                raise
-            except Exception as error:
-                logger.error(
-                    f"Validation interrupted: round={round_num}, hotkey={hotkey}, error={type(error).__name__}"
+                complete = all(
+                    key in progress.prompts and progress.prompts[key].status != "pending" for key in inputs.generations
                 )
-                await shutdown.wait(timeout=settings.min_check_state_interval_seconds)
-            if shutdown.should_stop:
+                logger.info(f"Validation {'complete' if complete else 'pending'}: round={round_num}, hotkey={hotkey}")
                 return
+            except Exception as error:
+                logger.error(f"Validation interrupted: round={round_num}, hotkey={hotkey}, error={error!r}")
+                if not transient(error) or attempt == 2 or await shutdown.wait(timeout=attempt + 1):
+                    return
