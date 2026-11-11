@@ -30,6 +30,7 @@ class Settings(BaseSettings):
 
     log_level: str = Field(default="DEBUG", alias="LOG_LEVEL", description="Logging level")
 
+    witness_competition_branch: str | None = Field(default=None, alias="WITNESS_COMPETITION_BRANCH")
     witness_deployment: str = Field(..., alias="WITNESS_DEPLOYMENT", description="Witness recording deployment")
     r2_endpoint: str = Field(..., alias="R2_ENDPOINT", description="R2 S3 API endpoint")
     r2_bucket: str = Field(..., alias="R2_BUCKET", description="R2 bucket containing witness artifacts")

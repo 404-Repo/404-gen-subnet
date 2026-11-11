@@ -6,8 +6,8 @@ replays on validation Pods, collects worker results and publishes a terminal
 an independent check.
 
 The coordinator runs on the main server and dispatches candidates to replay Pods.
-Each Pod contains a trusted worker, a miner sandbox and a render service. Multiple
-Pods can validate candidates concurrently. Input preparation, witness verification,
+Each Pod contains the trusted worker and the miner sandbox. The coordinator runs
+one candidate at a time. Input preparation, witness verification,
 output comparison and budget checks run outside the miner sandbox.
 See [validation-worker](../validation-worker/README.md) for the Pod runtime.
 
@@ -43,10 +43,12 @@ round and hotkey, retaining the round's existing results when adding verdicts.
 The judge reads these results together with the independent source-audit verdicts
 to determine candidate eligibility.
 
-Pending work has no entry in the terminal result map. Repeated polls and restarts
-retry unresolved requests and skip candidates with published results. Branch
-changes during a poll cannot mix inputs from different commits; later polls
-resolve the branch again to see new requests, results or rounds.
+Pending work has no entry in the terminal result map. Repeated polls reuse the
+candidate's active Pod. When the Pod exits or disappears, a replacement resumes
+the committed checkpoint. A candidate with exhausted prompt attempts stays
+pending. The coordinator removes its Pods after completion or when the request
+leaves the current round. Each poll reads one commit. Later polls resolve the
+branch again to see new requests, results or rounds.
 
 Missing `state.json`, malformed competition data and infrastructure failures are
 service errors. They are logged and retried on a later poll, leaving affected
@@ -71,6 +73,11 @@ GITHUB_BRANCH=main
 MIN_CHECK_STATE_INTERVAL=120
 MAX_CHECK_STATE_INTERVAL=1800
 LOG_LEVEL=DEBUG
+RUNPOD_API_KEY=your-runpod-key
+VALIDATION_POD_IMAGE=registry.example/validation-worker@sha256:IMMUTABLE_IMAGE_DIGEST
+VALIDATION_POD_REGISTRY_ID=your-runpod-registry-credential-id
+VALIDATION_POD_PREFIX=validation-example
+VALIDATION_WORKER_ENV='{"R2_ENDPOINT":"https://your-account.r2.cloudflarestorage.com","R2_BUCKET":"main","R2_REPLAY_BUCKET":"replay","R2_ACCESS_KEY_ID":"your-read-key","R2_SECRET_ACCESS_KEY":"your-read-secret","WITNESS_DEPLOYMENT":"your-deployment","RENDERER_ID":"original-renderer-image"}'
 ```
 
 | Variable | Default | Meaning |
@@ -81,6 +88,14 @@ LOG_LEVEL=DEBUG
 | `MIN_CHECK_STATE_INTERVAL` | `120` | Minimum delay between polls, in seconds |
 | `MAX_CHECK_STATE_INTERVAL` | `1800` | Maximum delay between polls, in seconds |
 | `LOG_LEVEL` | `DEBUG` | Loguru logging level |
+
+The Pod image must contain the worker and its sandbox. Reserve a distinct
+`VALIDATION_POD_PREFIX` for each coordinator. It tracks its Pods by name and
+uses `VALIDATION_POD_IMAGE` when launching a Pod. Each uses 4 `cpu3c` vCPUs and a
+12 GB container disk. `VALIDATION_WORKER_ENV` supplies the worker's R2 and Witness
+settings. GitHub settings come from the coordinator configuration. Set
+`WITNESS_COMPETITION_BRANCH` in the worker environment when a test branch reuses
+frozen evidence from another branch.
 
 The shared wait-time helper clamps the delay until `state.next_stage_eta` between
 the configured minimum and maximum. With no ETA, or after a failed poll, the
@@ -95,5 +110,6 @@ poetry run python main.py
 
 ```bash
 poetry run poe lint
+poetry run python -m unittest discover -s tests
 poetry build
 ```

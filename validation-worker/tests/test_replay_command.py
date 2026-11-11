@@ -585,8 +585,6 @@ def test_journal_lookup_updates_png_matches_in_worker_and_host(
             "--all",
             "--deployment",
             SCOPE.deployment,
-            "--witness-image",
-            "sha256:" + "f" * 64,
             "--pricing",
             str(pricing),
             "--output",
@@ -871,15 +869,10 @@ def test_miner_js_stays_in_saved_logs_while_replay_progress_and_errors_are_visib
     assert [row["text"] for row in rows if row["event"] == "miner_log"] == miner_output
 
 
-@pytest.mark.parametrize("key_name", ["REPLAY_RENDERER_ID", "WITNESS_IMAGE"])
-def test_cli_uses_original_witness_image_and_defaults_to_stop(monkeypatch: pytest.MonkeyPatch, key_name: str) -> None:
-    monkeypatch.delenv("REPLAY_RENDERER_ID", raising=False)
-    monkeypatch.delenv("WITNESS_IMAGE", raising=False)
-    monkeypatch.setenv(key_name, "witness@sha256:" + "a" * 64)
+def test_cli_defaults_to_stop_with_one_worker() -> None:
     parsed = parser().parse_args(["--hotkey", SCOPE.hotkey, "--round", "test-0", "--all"])
     assert parsed.on_mismatch == "stop"
     assert parsed.jobs == 1
-    assert parsed.renderer_id == "witness@sha256:" + "a" * 64
 
 
 @pytest.mark.parametrize("jobs", ["0", "-1"])
@@ -896,8 +889,6 @@ def test_cli_rejects_nonpositive_concurrency_before_preparing_a_run(
             "--round",
             "test-0",
             "--all",
-            "--renderer-id",
-            "fixture",
             "--deployment",
             SCOPE.deployment,
             "--jobs",
@@ -917,4 +908,4 @@ def test_script_runs_from_another_directory_with_isolated_imports(tmp_path: Path
         [sys.executable, "-I", str(script), "--help"], cwd=tmp_path, capture_output=True, text=True, check=False
     )
     assert result.returncode == 0, result.stderr
-    assert "--hotkey" in result.stdout and "--witness-image" in result.stdout
+    assert "--hotkey" in result.stdout

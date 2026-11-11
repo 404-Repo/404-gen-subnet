@@ -225,7 +225,7 @@ async def generate(image, seed, witness):
     (prompt / "image.png").write_bytes(image)
     (prompt / "expected.json").write_text(json.dumps({"available": True, "output": expected}))
     root = f"rounds/{SCOPE.round}/{SCOPE.hotkey}/"
-    preview = root + "renders/v1/91cf8613fc8ff82c97ef0240a975b1dbad2ebfcb2ad298be741fb9446b4de30d"
+    preview = root + "renders/v2/34eb735cb4dcc018fc4540df7cf2ea6fbb54e154bc2c3ea5df18eb23545a2296"
     previews = Stored({preview + ".png": PNG})
     artifacts = Stored({root + "submitted/one/grid.png": PNG + b"final"})
     if case in ("missing_render", "render_rejection"):
@@ -242,7 +242,6 @@ async def generate(image, seed, witness):
         previews,
         artifacts,
         SCOPE,
-        RID,
         cache=tmp_path / "preview-cache",
         artifact_cache=tmp_path / "final-cache",
     )
@@ -401,7 +400,6 @@ sys.stdin.readline()
             Stored({}),
             Stored({}),
             SCOPE,
-            RID,
             cache=tmp_path / "previews",
             artifact_cache=tmp_path / "finals",
         )
@@ -535,7 +533,7 @@ def test_hotkey_round_script_prepares_and_replays_without_live_services(
     for prompt in prompts:
         objects.values[root + f"submitted/{prompt}.js"] = b"0"
         objects.values[root + f"submitted/{prompt}/grid.png"] = PNG + prompt.encode()
-    replay_values[root + "renders/v1/91cf8613fc8ff82c97ef0240a975b1dbad2ebfcb2ad298be741fb9446b4de30d.png"] = PNG
+    replay_values[root + "renders/v2/34eb735cb4dcc018fc4540df7cf2ea6fbb54e154bc2c3ea5df18eb23545a2296.png"] = PNG
     pricing = tmp_path / "pricing.json"
     pricing.write_bytes(PRICING)
 
@@ -566,7 +564,6 @@ def test_hotkey_round_script_prepares_and_replays_without_live_services(
     final_reads: list[str] = []
     listings: list[str] = []
     render_listings: list[str] = []
-    render_writes: list[str] = []
     r2_attempts: list[str] = []
     r2_delays: list[float] = []
     r2_recovered = False
@@ -585,7 +582,7 @@ def test_hotkey_round_script_prepares_and_replays_without_live_services(
             if key.endswith(("/manifest.json", "/request.json", "/response.sse")):
                 assert kwargs["Bucket"] == "replay-bucket"
                 capture_reads.append(key)
-            if "/renders/v1/" in key:
+            if "/renders/v2/" in key:
                 assert kwargs["Bucket"] == "replay-bucket"
                 preview_reads.append(key)
             if key.endswith("/grid.png"):
@@ -627,27 +624,6 @@ def test_hotkey_round_script_prepares_and_replays_without_live_services(
                 keys = objects.keys(kwargs["Prefix"])
             return [{"Contents": [{"Key": key} for key in keys]}]
 
-        def put_object(self, **kwargs: Any) -> dict[str, Any]:
-            assert kwargs["Bucket"] == "replay-bucket" and "/renders/v2/" in kwargs["Key"]
-            key = kwargs["Key"]
-            if key in replay_values and kwargs.get("IfNoneMatch") == "*":
-                raise ClientError(
-                    {
-                        "Error": {"Code": "PreconditionFailed"},
-                        "ResponseMetadata": {
-                            "HTTPStatusCode": 412,
-                            "RequestId": "fixture",
-                            "HostId": "fixture",
-                            "HTTPHeaders": {},
-                            "RetryAttempts": 0,
-                        },
-                    },
-                    "PutObject",
-                )
-            replay_values[key] = kwargs["Body"]
-            render_writes.append(key)
-            return {"ETag": '"fixture"'}
-
     def storage(*args: Any, **kwargs: Any) -> Storage:
         client = boto_client(*args, **{**kwargs, "endpoint_url": "https://r2.example"})
         request.addfinalizer(client.close)
@@ -656,13 +632,10 @@ def test_hotkey_round_script_prepares_and_replays_without_live_services(
     monkeypatch.setattr("boto3.client", storage)
     monkeypatch.setattr("botocore.endpoint.time.sleep", lambda delay: r2_delays.append(delay))
     monkeypatch.setattr("subnet_common.github.GitHubClient", Git)
-    monkeypatch.setattr("validation_worker.replay_evidence.RECENT_WITNESS_IMAGES", (RID,))
     monkeypatch.setattr(local_replay, "INDEX_CACHE", tmp_path / "indexes")
     for name in ("R2_ENDPOINT", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY"):
         monkeypatch.setenv(name, "fixture-value")
     monkeypatch.setenv("R2_REPLAY_BUCKET", "replay-bucket")
-    monkeypatch.delenv("REPLAY_RENDERER_ID", raising=False)
-    monkeypatch.delenv("WITNESS_IMAGE", raising=False)
     script = Path(__file__).resolve().parents[1] / "replay.py"
     arguments = [
         str(script),
@@ -694,7 +667,6 @@ def test_hotkey_round_script_prepares_and_replays_without_live_services(
         capture_reads.clear()
         listings.clear()
         render_listings.clear()
-        render_writes.clear()
         preview_reads.clear()
         final_reads.clear()
         hotkey = selection["hotkey"][:10] if number % 2 == 0 else selection["hotkey"]
@@ -721,7 +693,6 @@ def test_hotkey_round_script_prepares_and_replays_without_live_services(
         assert len(capture_reads) == expected_capture_reads
         assert len(listings) == (1 if expected_reads else 0)
         assert len(render_listings) == (1 if number in (0, 4) else 0)
-        assert len(render_writes) == (1 if number == 0 else 0)
         assert len(preview_reads) <= jobs if number in (0, 4) else not preview_reads
         assert len(final_reads) == (jobs if number in (0, 3, 4) else 0)
         assert all(row["historical_renders_available"] and row["final_render_available"] for row in summary["results"])

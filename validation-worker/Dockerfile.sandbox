@@ -1,13 +1,31 @@
-# Build from the repository root. This image contains only the miner runtime.
-FROM python:3.13-slim-bookworm
+# Build from the repository root with --platform linux/amd64.
+FROM python:3.13.18-slim-bookworm@sha256:f3dac913ab53b78c64f26d5518fcd7043d5a1a46522d6a493b598c3ed12f62a6
+ENV PYTHONHASHSEED=0 OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 PYTHONDONTWRITEBYTECODE=1
+COPY validation-worker/requirements-sandbox.txt /runtime-requirements.txt
+RUN python -m pip install --no-cache-dir --no-deps --only-binary=:all: -r /runtime-requirements.txt && python -m pip check
 COPY renderer-client/src/renderer_client /sdk/renderer_client
 COPY witness-client/src/witness_client /sdk/witness_client
+COPY renderer-client/pyproject.toml /sdk/renderer-client.toml
 COPY witness-client/pyproject.toml /sdk/witness-client.toml
 RUN python - <<'PY'
-import pathlib, site, subprocess, sys, tomllib
-dependencies = tomllib.loads(pathlib.Path("/sdk/witness-client.toml").read_text())["project"]["dependencies"]
-dependencies = sorted(value for value in dependencies if not value.startswith("404-"))
-subprocess.run([sys.executable, "-m", "pip", "install", "--no-cache-dir", *dependencies, "aiofiles==25.1.0", "loguru==0.7.3", "numpy>=2.2.1", "pillow>=11.1.0"], check=True)
+import hashlib, importlib.metadata, json, pathlib, platform, site, sys, tomllib
+assert platform.python_version() == "3.13.18" and platform.machine() == "x86_64"
 pathlib.Path(site.getsitepackages()[0], "404-sdk.pth").write_text("/sdk\n")
+runtime = {
+    "python": platform.python_version(),
+    "python_build": sys.version,
+    "platform": "linux/amd64",
+    "base_image": "python:3.13.18-slim-bookworm@sha256:f3dac913ab53b78c64f26d5518fcd7043d5a1a46522d6a493b598c3ed12f62a6",
+    "packages": dict(sorted((dist.metadata["Name"], dist.version) for dist in importlib.metadata.distributions())),
+    "clients": {
+        name: tomllib.loads(pathlib.Path(f"/sdk/{name}.toml").read_text())["project"]["version"]
+        for name in ("witness-client", "renderer-client")
+    },
+    "sdk_files": {
+        str(path.relative_to("/sdk")): hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in sorted(pathlib.Path("/sdk").rglob("*")) if path.is_file()
+    },
+}
+pathlib.Path("/runtime.json").write_text(json.dumps(runtime, indent=2, sort_keys=True) + "\n")
 PY
 RUN mkdir -p /source /scratch && touch /prompt.png /runner.py

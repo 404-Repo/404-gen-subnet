@@ -4,13 +4,54 @@ The enclosing round path and hotkey map key identify the validation pass. Absenc
 means validation is pending; infrastructure errors must not be written as failures.
 """
 
+from decimal import Decimal
 from enum import Enum
-from typing import Self
+from typing import Literal, Self
 
-from pydantic import BaseModel, ConfigDict, TypeAdapter, model_validator
+from pydantic import (
+    AliasChoices,
+    BaseModel,
+    ConfigDict,
+    Field,
+    SerializerFunctionWrapHandler,
+    TypeAdapter,
+    model_serializer,
+    model_validator,
+)
 
 from subnet_common.git_batcher import GitBatcher
 from subnet_common.github import GitHubClient
+
+
+class PromptProgress(BaseModel):
+    status: Literal["pending", "passed", "failed"] = Field(
+        default="pending", validation_alias=AliasChoices("status", "verdict")
+    )
+    attempts: int = Field(default=0, ge=0, le=3)
+    retryable: bool = True
+    reason: str = ""
+    charges: dict[str, Decimal | None] = Field(default_factory=dict)
+
+    @property
+    def consumed_calls(self) -> int:
+        return len(self.charges)
+
+    @property
+    def consumed_credits(self) -> Decimal:
+        return sum((value for value in self.charges.values() if value is not None), Decimal(0))
+
+    @model_serializer(mode="wrap")
+    def serialize(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
+        return {
+            **handler(self),
+            "consumed_calls": self.consumed_calls,
+            "consumed_credits": str(self.consumed_credits),
+        }
+
+
+class ValidationProgress(BaseModel):
+    ref: str = Field(pattern=r"^[0-9a-f]{40}$")
+    prompts: dict[str, PromptProgress] = Field(default_factory=dict)
 
 
 class ValidationVerdict(str, Enum):

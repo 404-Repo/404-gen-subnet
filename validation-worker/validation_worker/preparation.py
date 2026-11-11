@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+import json
 import shutil
 import tarfile
 from pathlib import Path, PurePosixPath
@@ -12,6 +13,8 @@ from subnet_common.github import GitHubClient
 from subnet_common.r2_client import R2Client
 from subnet_common.witness.models import json_bytes
 from subnet_common.witness.rounds import RoundInputs, repository
+from witness_client.calls import request_digest
+from witness_pod.records import Call
 
 from validation_worker.inputs import ValidationInputs
 from validation_worker.settings import Settings
@@ -33,6 +36,16 @@ async def optional_object(r2: R2Client, bucket: str, key: str) -> bytes | None:
         raise
 
 
+def verify_recorded_failure(call: Call, request: bytes, status_bytes: bytes) -> None:
+    status = json.loads(status_bytes)
+    if (
+        request_digest(request) != call.request.request_sha256
+        or status.get("status") != "failed"
+        or status.get("error_type") != call.failure
+    ):
+        raise ValueError("Recorded failure binding differs: " + call.exchange_id)
+
+
 async def download(client: httpx.AsyncClient, url: str, path: Path) -> None:
     async with client.stream("GET", url, follow_redirects=True) as response:
         response.raise_for_status()
@@ -43,12 +56,13 @@ async def download(client: httpx.AsyncClient, url: str, path: Path) -> None:
 
 async def load_round_inputs(inputs: ValidationInputs, r2: R2Client, settings: Settings) -> RoundInputs:
     repo = repository(settings.github_repo)
-    identity = hashlib.sha256(json_bytes([repo, settings.github_branch])).hexdigest()
+    branch = settings.witness_competition_branch or settings.github_branch
+    identity = hashlib.sha256(json_bytes([repo, branch])).hexdigest()
     key = f"pod-gateway/round-inputs/v1/{identity}/{inputs.submission.round}.json"
     frozen = RoundInputs.model_validate_json(await read_object(r2, r2.bucket, key))
     if (
         frozen.repository != repo
-        or frozen.branch != settings.github_branch
+        or frozen.branch != branch
         or frozen.round != inputs.submission.round
         or frozen.number != inputs.round_num
         or frozen.seed != inputs.seed

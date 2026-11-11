@@ -22,7 +22,7 @@ url = "../renderer-client"
 
 [[package]]
 name = "404-witness-client"
-version = "0.2.19"
+version = "0.3.0"
 description = "Python client for the subnet 404 TLS witness"
 optional = false
 python-versions = ">=3.11"

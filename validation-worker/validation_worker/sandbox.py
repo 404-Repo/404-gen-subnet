@@ -54,6 +54,10 @@ def prepare_sandbox(source: Path, directory: Path, settings: Settings) -> Path:
     shutil.copytree(template, root, symlinks=True)
     shutil.copytree(source, root / "source", dirs_exist_ok=True)
     shutil.copyfile(Path(__file__).with_name("miner.py"), root / "runner.py")
+    replay = root / "replay" / "validation_worker"
+    replay.mkdir(parents=True)
+    for name in ("__init__.py", "render_recovery.py"):
+        shutil.copyfile(Path(__file__).with_name(name), replay / name)
     (root / "scratch").mkdir(exist_ok=True)
     root.chmod(0o755)
     for entry in root.rglob("*"):
@@ -105,7 +109,7 @@ class Sandbox:
             "--seccomp_policy",
             str(Path(__file__).with_name("sandbox.kafel")),
             "--rlimit_as",
-            "2048",
+            "4096",
             "--rlimit_cpu",
             str(math.ceil(self.settings.sandbox_timeout_seconds)),
             "--rlimit_fsize",
@@ -113,7 +117,7 @@ class Sandbox:
             "--rlimit_nofile",
             "128",
             "--rlimit_nproc",
-            "64",
+            "128",
             "--rlimit_core",
             "0",
             "--time_limit",
@@ -126,9 +130,20 @@ class Sandbox:
             "TMPDIR=/scratch",
             "--env",
             "PYTHONDONTWRITEBYTECODE=1",
+            "--env",
+            "PYTHONPATH=/replay",
+            "--env",
+            "PYTHONHASHSEED=0",
+            "--env",
+            "OPENBLAS_NUM_THREADS=1",
+            "--env",
+            "OMP_NUM_THREADS=1",
+            "--env",
+            "MKL_NUM_THREADS=1",
             "--",
             "/usr/local/bin/python",
-            "-I",
+            "-P",
+            "-s",
             "-u",
             "/runner.py",
             str(self.seed),

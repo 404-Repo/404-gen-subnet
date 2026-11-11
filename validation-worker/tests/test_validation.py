@@ -14,7 +14,8 @@ from collections.abc import Iterator
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from typing import Any
+from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
@@ -23,19 +24,21 @@ from PIL import Image
 from renderer_client import RenderOptions
 from replay_fixtures import PRICING, SCOPE, Capture
 from subnet_common.competition.submissions import MinerSubmission
+from subnet_common.competition.validation import ValidationProgress
 from subnet_common.github import GitHubClient
 from subnet_common.graceful_shutdown import GracefulShutdown
 from subnet_common.r2_client import R2Client
 from subnet_common.witness.models import Scope, json_bytes
 from subnet_common.witness.pricing import PromptBudget
 from subnet_common.witness.rounds import PromptImage, RoundInputs
+from witness_client import WitnessError
 from witness_pod.renderer import RenderCache
 
 from validation_worker import execution
 from validation_worker.inputs import ValidationInputs
 from validation_worker.sandbox import ModelCall, encoded
 from validation_worker.settings import Settings
-from validation_worker.validation import ValidationProgress, run_validation
+from validation_worker.validation import run_validation
 
 
 class MemoryObjects:
@@ -56,7 +59,10 @@ class ValidationIntegration(unittest.IsolatedAsyncioTestCase):
         self.secret = secrets.token_hex(16)
         self.private = tempfile.TemporaryDirectory()
         self.private_path = Path(self.private.name)
-        self.saved_environment = {key: os.environ.get(key) for key in ("GITHUB_TOKEN", "R2_SECRET_ACCESS_KEY")}
+        self.saved_environment = {
+            key: os.environ.get(key) for key in ("GITHUB_TOKEN", "R2_SECRET_ACCESS_KEY", "AWS_MAX_ATTEMPTS")
+        }
+        os.environ["AWS_MAX_ATTEMPTS"] = "1"
         self.path = f"rounds/7/{self.hotkey}/validation.json"
         self.head = self.ref
         self.blobs: dict[str, str] = {}
@@ -66,6 +72,8 @@ class ValidationIntegration(unittest.IsolatedAsyncioTestCase):
         self.failed_write = False
         self.failed_read = False
         self.stop_after_chair = True
+        self.stop_after_lamp_render = False
+        self.unavailable_render: str | None = None
         self.shutdown = GracefulShutdown()
         app = web.Application()
         app.router.add_route("*", "/{path:.*}", self.respond)
@@ -78,6 +86,7 @@ class ValidationIntegration(unittest.IsolatedAsyncioTestCase):
         self.port = addresses[0][1]
         self.objects: dict[str, dict[str, bytes]] = {"main": {}, "replay": {}}
         prompts = []
+        self.render_keys: dict[str, str] = {}
         for name, color in (("chair", "red"), ("lamp", "blue"), ("table", "green")):
             png = io.BytesIO()
             Image.new("RGB", (2, 2), color).save(png, format="PNG")
@@ -92,6 +101,7 @@ class ValidationIntegration(unittest.IsolatedAsyncioTestCase):
             )
             cache = RenderCache(MemoryObjects(), Scope("test", "gpt-7", self.hotkey), storage_prefix="fixture/")
             render_key = cache.key(request.content, request.url.raw_path.decode())
+            self.render_keys[name] = render_key
             if name == "chair":
                 self.objects["replay"][render_key + ".rejection.json"] = b'{"error":"render_rejected"}'
             else:
@@ -135,7 +145,13 @@ class ValidationIntegration(unittest.IsolatedAsyncioTestCase):
                 }
             ),
             f"rounds/7/{self.hotkey}/generated.json": json.dumps(
-                {name: {"js": self.base + f"/canonical/{name}.js"} for name in ("chair", "lamp", "table")}
+                {
+                    name: {
+                        "js": self.base + f"/canonical/{name}.js",
+                        "views": self.base + f"/fixture/rounds/gpt-7/{self.hotkey}/submitted/{name}",
+                    }
+                    for name in ("chair", "lamp", "table")
+                }
             ),
         }
         private_paths = (
@@ -144,14 +160,27 @@ class ValidationIntegration(unittest.IsolatedAsyncioTestCase):
             "/root/.ssh/id_ed25519",
         )
         source = f"""
-import os, socket
+import os, resource, socket, sys
+import numpy as np
 from pathlib import Path
 from PIL import Image
 import io
-from renderer_client import RenderRejected
+from httpx import HTTPStatusError
+from renderer_client import RenderRejected, RenderUnavailable
 print('{{"message":"Python miner log"}}', flush=True)
 os.write(1, b"native import log\\n")
 def generate(image, seed, witness, renderer):
+    expected_env = {{
+        "PYTHONHASHSEED": "0", "OPENBLAS_NUM_THREADS": "1", "OMP_NUM_THREADS": "1", "MKL_NUM_THREADS": "1"
+    }}
+    if any(os.environ.get(key) != value for key, value in expected_env.items()):
+        raise RuntimeError("reproducibility environment missing")
+    if sys.flags.ignore_environment or not sys.flags.safe_path or not sys.flags.no_user_site:
+        raise RuntimeError("Python startup profile differs")
+    if resource.getrlimit(resource.RLIMIT_AS)[0] != 4 * 1024**3 or resource.getrlimit(resource.RLIMIT_NPROC)[0] != 128:
+        raise RuntimeError("sandbox resource profile differs")
+    if np.ones((4, 4)).dot(np.ones((4, 4)))[0, 0] != 4:
+        raise RuntimeError("NumPy calculation failed")
     os.write(1, b'{{"message":"native JSON miner log"}}\\n')
     scratch = Path("/scratch/previous-prompt")
     if scratch.exists():
@@ -196,8 +225,13 @@ def generate(image, seed, witness, renderer):
         renderer.render(name)
     except RenderRejected:
         pass
+    except RenderUnavailable as error:
+        cause = error.__cause__
+        if name != "table" or not isinstance(cause, HTTPStatusError) or cause.response.status_code != 500:
+            raise
     return name
 """.encode()
+        self.source = source
         archive = io.BytesIO()
         with tarfile.open(fileobj=archive, mode="w:gz") as stream:
             member = tarfile.TarInfo("submission/main.py")
@@ -262,13 +296,14 @@ def generate(image, seed, witness, renderer):
         if path == "/repos/test/competition/git/refs/heads/main":
             payload = await request.json()
             progress = ValidationProgress.model_validate_json(self.commits[payload["sha"]][self.path])
-            if "chair" in progress.prompts and not self.failed_write:
+            if (
+                len(progress.prompts) == 3
+                and all(state.status == "passed" for state in progress.prompts.values())
+                and not self.failed_write
+            ):
                 self.failed_write = True
                 return web.Response(status=503)
             self.head = payload["sha"]
-            if set(progress.prompts) == {"chair"} and self.stop_after_chair:
-                self.stop_after_chair = False
-                self.shutdown.request_shutdown()
             return web.json_response({"object": {"sha": self.head}})
         if path.startswith("/repos/test/miner/tarball/"):
             return web.Response(body=self.archive)
@@ -276,6 +311,15 @@ def generate(image, seed, witness, renderer):
             return web.Response(body=self.objects["main"][path.removeprefix("/")])
         if path.startswith("/r2/"):
             bucket, key = path.removeprefix("/r2/").split("/", 1)
+            if bucket == "replay":
+                if self.stop_after_chair and key == self.render_keys["chair"] + ".rejection.json":
+                    self.stop_after_chair = False
+                    self.shutdown.request_shutdown()
+                if self.stop_after_lamp_render and key == self.render_keys["lamp"] + ".png":
+                    self.stop_after_lamp_render = False
+                    self.shutdown.request_shutdown()
+                if key == self.unavailable_render:
+                    return web.Response(status=503, text="<Error><Code>ServiceUnavailable</Code></Error>")
             if key == self.frozen.prompts[1].image_key and not self.failed_read:
                 self.failed_read = True
                 return web.Response(status=503, text="<Error><Code>ServiceUnavailable</Code></Error>")
@@ -286,6 +330,8 @@ def generate(image, seed, witness, renderer):
         return web.Response(status=404)
 
     async def test_resume_after_failed_checkpoint_and_r2_read_with_isolated_miner(self) -> None:
+        final_grid = f"fixture/rounds/gpt-7/{self.hotkey}/submitted/table/grid.png"
+        self.objects["main"][final_grid] = self.objects["replay"].pop(self.render_keys["table"] + ".png")
         token = self.private_path / "token"
         token.write_text(self.secret)
         key = self.private_path / ".ssh/id_ed25519"
@@ -304,26 +350,273 @@ def generate(image, seed, witness, renderer):
                 await run_validation(7, self.hotkey, self.ref, output, git, r2, http, self.settings, self.shutdown)
                 first = ValidationProgress.model_validate_json(self.commits[self.head][self.path])
                 self.assertEqual(set(first.prompts), {"chair"})
-                self.assertEqual(first.prompts["chair"].verdict, "passed", first.prompts["chair"].reason)
-                self.assertTrue(self.failed_write)
+                self.assertEqual(first.prompts["chair"].status, "passed", first.prompts["chair"].reason)
                 self.shutdown = GracefulShutdown()
                 await run_validation(7, self.hotkey, "b" * 40, output, git, r2, http, self.settings, self.shutdown)
         progress = ValidationProgress.model_validate_json(self.commits[self.head][self.path])
         self.assertEqual(progress.ref, self.ref)
         self.assertEqual(
-            {key: item.verdict for key, item in progress.prompts.items()},
+            {key: item.status for key, item in progress.prompts.items()},
             {"chair": "passed", "lamp": "passed", "table": "passed"},
         )
         self.assertTrue(self.failed_read)
+        self.assertTrue(self.failed_write)
+        self.assertEqual(progress.prompts["lamp"].attempts, 2)
+        self.assertEqual(progress.prompts["table"].attempts, 1)
+        self.assertIn("http_500", progress.prompts["table"].reason)
+        self.assertEqual(self.reads["/r2/main/" + final_grid], 1)
+        self.assertEqual(self.reads["/r2/main/" + self.frozen.prompts[2].image_key], 1)
         self.assertEqual(self.reads["/r2/main/" + self.frozen.prompts[0].image_key], 1)
         self.assertEqual(self.reads["/canonical/chair.js"], 1)
         self.assertEqual(self.reads["/repos/test/miner/tarball/" + "d" * 40], 2)
 
+    async def test_missing_submission_stays_pending(self) -> None:
+        self.stop_after_chair = False
+        self.failed_read = True
+        self.commits[self.ref][f"rounds/7/{self.hotkey}/generated.json"] = json.dumps(
+            {
+                "chair": {"failure_reason": "generation_failed"},
+                "lamp": {"failure_reason": "not_submitted"},
+                "table": {"failure_reason": "not_submitted"},
+            }
+        )
+        source = self.source.replace(b"    return name\n", b'    return name if name == "table" else None\n')
+        archive = io.BytesIO()
+        with tarfile.open(fileobj=archive, mode="w:gz") as stream:
+            member = tarfile.TarInfo("submission/main.py")
+            member.size = len(source)
+            stream.addfile(member, io.BytesIO(source))
+        self.archive = archive.getvalue()
 
-def test_automatic_replay_uses_selected_pricing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        async with (
+            GitHubClient("test/competition", token=self.secret, base_url=self.base) as git,
+            R2Client("fixture", "fixture", self.base + "/r2", bucket="main") as r2,
+            httpx.AsyncClient(trust_env=False) as http,
+            asyncio.timeout(45),
+        ):
+            await run_validation(
+                7, self.hotkey, self.ref, self.private_path / "validation", git, r2, http, self.settings, self.shutdown
+            )
+
+        prompts = ValidationProgress.model_validate_json(self.commits[self.head][self.path]).prompts
+        self.assertEqual(
+            {name: prompt.status for name, prompt in prompts.items()},
+            {"chair": "passed", "lamp": "pending", "table": "pending"},
+        )
+        for name in ("lamp", "table"):
+            self.assertIn("not_submitted", prompts[name].reason)
+
+    async def test_witness_failures_allow_miner_fallback(self) -> None:
+        self.stop_after_chair = False
+        self.failed_read = True
+        self.settings.witness_provider = "api"
+        grid = f"fixture/rounds/gpt-7/{self.hotkey}/submitted/lamp/grid.png"
+        self.objects["main"][grid] = self.objects["replay"][self.render_keys["lamp"] + ".png"]
+        scope = Scope("test", "gpt-7", self.hotkey)
+        live = Capture(self.private_path)
+        exchanges = {}
+        for failure, authorized in (("CaptureInterrupted", True), ("BeforeDispatch", False)):
+            request, body = live._request(0, None, {"model": "fixture", "input": failure})
+            call = live.records.assign(scope, request, "start", "pod")
+            self.assertTrue(live.records.claim(scope, request, "pod", call.capture_id or ""))
+            if authorized:
+                live.records.authorize(scope, request, "pod", exchange_id=call.exchange_id)
+            live.records.failed(
+                scope, request, "pod", failure, exchange_id=call.exchange_id, not_dispatched=not authorized
+            )
+            key = live.records.key(scope, request.id)
+            self.objects["main"]["fixture/" + key] = live.state.objects[key].data
+            capture = f"fixture/rounds/{scope.round}/{scope.hotkey}/{call.exchange_id}/"
+            if authorized:
+                self.objects["replay"][capture + "request.json"] = body
+            self.objects["replay"][capture + "failure.json"] = json_bytes({"status": "failed", "error_type": failure})
+            exchanges[failure] = call.exchange_id
+
+        source = self.source.replace(
+            b"    try:\n        renderer.render(name)",
+            f"""    from openai import APIConnectionError
+    from witness_client import WitnessError
+    requests = {exchanges!r} if name == "chair" else {{"unrecorded": None}}
+    for model_input, exchange_id in requests.items():
+        try:
+            witness.responses.create(model="fixture", input=model_input)
+        except APIConnectionError as error:
+            cause = error.__cause__
+            expected = "capture_failed" if exchange_id is not None else "capture_unrecorded"
+            if (
+                not isinstance(cause, WitnessError)
+                or (cause.code, cause.exchange_id, cause.source) != (expected, exchange_id, "gateway")
+            ):
+                raise
+        else:
+            raise AssertionError("Expected a Witness connection error")
+    if name != "chair":
+        return name if name == "lamp" else "different output"
+    try:
+        renderer.render(name)""".encode(),
+        )
+        archive = io.BytesIO()
+        with tarfile.open(fileobj=archive, mode="w:gz") as stream:
+            member = tarfile.TarInfo("submission/main.py")
+            member.size = len(source)
+            stream.addfile(member, io.BytesIO(source))
+        self.archive = archive.getvalue()
+
+        with tempfile.TemporaryDirectory() as temporary:
+            async with (
+                GitHubClient("test/competition", token=self.secret, base_url=self.base) as git,
+                R2Client("fixture", "fixture", self.base + "/r2", bucket="main") as r2,
+                httpx.AsyncClient(trust_env=False) as http,
+                asyncio.timeout(45),
+            ):
+                await run_validation(
+                    7, self.hotkey, self.ref, Path(temporary), git, r2, http, self.settings, self.shutdown
+                )
+
+        prompts = ValidationProgress.model_validate_json(self.commits[self.head][self.path]).prompts
+        recorded = prompts["chair"]
+        self.assertEqual((recorded.status, recorded.attempts, recorded.charges), ("passed", 1, {}), recorded.reason)
+        self.assertEqual(prompts["lamp"].status, "passed", prompts["lamp"].reason)
+        self.assertIn("assumed Witness connection failures", prompts["lamp"].reason)
+        self.assertEqual((prompts["lamp"].consumed_calls, prompts["lamp"].consumed_credits), (0, Decimal(0)))
+        self.assertEqual(self.reads["/r2/main/" + grid], 1)
+        self.assertEqual(prompts["table"].status, "pending", prompts["table"].reason)
+        self.assertIn("unrecorded Witness call", prompts["table"].reason)
+
+    async def test_exhausted_retries_preserve_charges_across_restart(self) -> None:
+        self.stop_after_chair = False
+        self.stop_after_lamp_render = True
+        self.failed_read = True
+        self.settings.witness_provider = "api"
+        self.objects["main"]["pod-pricing/v1/test.json"] = PRICING
+        self.source = self.source.replace(
+            b"    try:\n        renderer.render(name)",
+            b'    if name == "lamp":\n        witness.responses.create(model="fixture", input="image")\n'
+            b"    try:\n        renderer.render(name)",
+        )
+        archive = io.BytesIO()
+        with tarfile.open(fileobj=archive, mode="w:gz") as stream:
+            member = tarfile.TarInfo("submission/main.py")
+            member.size = len(self.source)
+            stream.addfile(member, io.BytesIO(self.source))
+        self.archive = archive.getvalue()
+        # Exhaust infrastructure retries after a successfully verified/charged call.
+        self.unavailable_render = self.render_keys["lamp"] + ".png"
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            live = Capture(directory)
+            request, body = live._request(0, None, {"model": "fixture", "input": "image"})
+            live._capture(request, body, None)
+            record = live.records.load(SCOPE, request.id)
+            self.assertIsNotNone(record)
+            if record is None:
+                self.fail("capture fixture has no recorded call")
+            parameters = directory / "parameters"
+            parameters.mkdir()
+            (parameters / "verifying.bin").write_bytes(b"fixture proof parameters")
+            scope = Scope("test", "gpt-7", self.hotkey)
+            original = f"rounds/{SCOPE.round}/{SCOPE.hotkey}/{record.call.exchange_id}/"
+            destination = f"fixture/rounds/{scope.round}/{scope.hotkey}/{record.call.exchange_id}/"
+            manifest = json.loads(live.state.objects[original + "manifest.json"].data)
+            manifest.update(round=scope.round, hotkey=scope.hotkey)
+            manifest["proof_key_sha256"] = hashlib.sha256(b"fixture proof parameters").hexdigest()
+            manifest_bytes = json_bytes(manifest)
+            live.state.put(original + "manifest.json", manifest_bytes)
+            record.scope_key = scope.key
+            record.call.manifest_sha256 = hashlib.sha256(manifest_bytes).hexdigest()
+            self.objects["main"]["fixture/" + live.records.key(scope, request.id)] = record.model_dump_json().encode()
+            for key, snapshot in live.state.objects.items():
+                if key.startswith(original):
+                    self.objects["replay"][destination + key.removeprefix(original)] = snapshot.data
+            verified = json_bytes({**manifest, "session_id": None})
+            real_start = asyncio.create_subprocess_exec
+
+            async def start(program: str, *args: Any, **kwargs: Any) -> Any:
+                if program == "node":
+                    return SimpleNamespace(
+                        returncode=0,
+                        communicate=AsyncMock(return_value=(verified, b"")),
+                        wait=AsyncMock(return_value=0),
+                    )
+                return await real_start(program, *args, **kwargs)
+
+            async with (
+                GitHubClient(repo="test/competition", token=self.secret, base_url=self.base) as git,
+                R2Client("fixture", "fixture", self.base + "/r2", bucket="main") as r2,
+                httpx.AsyncClient(trust_env=False) as http,
+                asyncio.timeout(90),
+            ):
+                with (
+                    patch.object(execution, "PROOF_PARAMETERS", parameters),
+                    patch.object(asyncio, "create_subprocess_exec", side_effect=start),
+                ):
+                    await run_validation(
+                        7, self.hotkey, self.ref, directory, git, r2, http, self.settings, self.shutdown
+                    )
+                    checkpoint = json.loads(self.commits[self.head][self.path])
+                    first = ValidationProgress.model_validate(checkpoint).prompts["lamp"]
+                    self.assertEqual((first.status, first.attempts, first.consumed_calls), ("pending", 1, 1))
+                    # The previous Pod checkpointed a deadline that expired while it was down.
+                    checkpoint["prompts"]["lamp"]["deadline"] = "2000-01-01T00:00:00Z"
+                    self.commits[self.head][self.path] = json.dumps(checkpoint)
+                    self.shutdown = GracefulShutdown()
+                    await run_validation(
+                        7, self.hotkey, self.ref, directory, git, r2, http, self.settings, self.shutdown
+                    )
+                    progress = ValidationProgress.model_validate_json(self.commits[self.head][self.path])
+                    state = progress.prompts["lamp"]
+                    self.assertEqual((state.status, state.attempts), ("pending", 3))
+                    self.assertIn("ServiceUnavailable", state.reason)
+                    self.assertEqual(state.charges, {request.id: Decimal("2")})
+                    self.assertEqual((state.consumed_calls, state.consumed_credits), (1, Decimal("2")))
+                    reads = self.reads.copy()
+                    await run_validation(
+                        7, self.hotkey, self.ref, directory, git, r2, http, self.settings, self.shutdown
+                    )
+                    resumed = ValidationProgress.model_validate_json(self.commits[self.head][self.path])
+                    self.assertEqual(resumed.prompts["lamp"], state)
+                    self.assertEqual(
+                        self.reads["/r2/main/" + self.frozen.prompts[1].image_key],
+                        reads["/r2/main/" + self.frozen.prompts[1].image_key],
+                    )
+                    committed = [
+                        ValidationProgress.model_validate_json(files[self.path]).prompts.get("lamp")
+                        for files in self.commits.values()
+                        if self.path in files
+                    ]
+                    self.assertTrue(
+                        any(item and item.attempts == 1 and item.charges == state.charges for item in committed)
+                    )
+
+
+def test_existing_checkpoint_keeps_completed_prompts() -> None:
+    saved = {
+        "ref": "a" * 40,
+        "prompts": {"chair": {"verdict": "passed"}, "lamp": {"verdict": "failed", "reason": "Output differs"}},
+    }
+    progress = ValidationProgress.model_validate_json(json.dumps(saved))
+    assert progress.prompts["chair"].status == "passed"
+    assert progress.prompts["lamp"].status == "failed"
+    assert progress.prompts["lamp"].reason == "Output differs"
+
+
+@pytest.mark.parametrize("failed_capture", [False, True], ids=["issued", "failed-http-200"])
+def test_automatic_replay_handles_verified_capture(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failed_capture: bool
+) -> None:
     live = Capture(tmp_path)
     request, body = live._request(0, None, {"model": "fixture", "input": "image"})
-    response = live._capture(request, body, None)
+    if failed_capture:
+        live.outcome = (
+            200,
+            b'data: {"type":"response.completed",'
+            b'"response":{"id":"resp_fixture","status":"completed","output":[]}}\n\n',
+            None,
+        )
+        with pytest.raises(WitnessError, match="Unusable provider response"):
+            live._capture(request, body, None)
+    else:
+        live._capture(request, body, None)
     record = live.records.load(SCOPE, request.id)
     assert record is not None
     parameters = tmp_path / "parameters"
@@ -393,6 +686,16 @@ def test_automatic_replay_uses_selected_pricing(tmp_path: Path, monkeypatch: pyt
             budget,
         )
     )
-    assert result == (record.call.exchange_id, 200, response.body)
     budget.accept()
-    assert budget.charges == {request.id: Decimal("4")}
+    if failed_capture:
+        assert isinstance(result, WitnessError)
+        assert (result.code, result.source, result.exchange_id) == (
+            "capture_failed",
+            "gateway",
+            record.call.exchange_id,
+        )
+        assert budget.charges == {}
+    else:
+        response = live.saved_response(record.call.exchange_id)
+        assert result == (record.call.exchange_id, 200, response.body)
+        assert budget.charges == {request.id: Decimal("4")}

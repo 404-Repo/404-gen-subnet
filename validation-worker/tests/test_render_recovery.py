@@ -57,13 +57,12 @@ def run_recovery(
     (inputs / "image.png").write_bytes(b"PNG")
     (inputs / "expected.json").write_text(json.dumps({"available": True, "output": expected}))
     prefix = f"rounds/{SCOPE.round}/{SCOPE.hotkey}/"
-    key = prefix + "renders/v1/91cf8613fc8ff82c97ef0240a975b1dbad2ebfcb2ad298be741fb9446b4de30d"
+    key = prefix + "renders/v2/34eb735cb4dcc018fc4540df7cf2ea6fbb54e154bc2c3ea5df18eb23545a2296"
     previews = Stored({key + (".rejection.json" if rejection else ".png"): preview})
     renderer = SavedRenderer(
         previews,
         Stored({prefix + "submitted/one/grid.png": PNG + b"final"}),
         SCOPE,
-        RID,
         cache=directory / "preview-cache",
         artifact_cache=directory / "final-cache",
     )

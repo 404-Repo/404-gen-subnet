@@ -129,7 +129,6 @@ class Log:
                 "used_exchanges",
                 "unused_exchanges",
                 "image_tolerance_matches",
-                "witness_images",
                 "request_key",
                 "recorded_request_key",
                 "render_recovery",
@@ -682,13 +681,6 @@ def parser() -> argparse.ArgumentParser:
         help="Maximum concurrent prompt workers; defaults to 1. On stop, already-started prompts finish.",
     )
     command.add_argument(
-        "--witness-image",
-        "--renderer-id",
-        dest="renderer_id",
-        default=os.environ.get("REPLAY_RENDERER_ID") or os.environ.get("WITNESS_IMAGE"),
-        help="Optional additional legacy Witness image to try before the known release images",
-    )
-    command.add_argument(
         "--competition-repo", default=os.environ.get("WITNESS_COMPETITION_REPO", "404-Repo/404-active-competition")
     )
     command.add_argument("--competition-branch", default=os.environ.get("WITNESS_COMPETITION_BRANCH", "main"))
@@ -816,7 +808,6 @@ def main() -> int:
             replay_objects,
             objects,
             scope,
-            args.renderer_id,
             cache=render_cache,
             artifact_cache=index_cache_directory(os.environ["R2_ENDPOINT"], bucket) / "final-renders-v1",
             storage_prefix=schedule_prefix,
@@ -826,7 +817,6 @@ def main() -> int:
             "replay_plan",
             **manifest,
             renderer_id=renderer.renderer_id,
-            witness_images=list(renderer.witness_images),
             render_source="saved",
             replay_bucket=replay_bucket,
             python_executable=sys.executable,
