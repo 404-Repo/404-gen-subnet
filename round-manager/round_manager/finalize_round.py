@@ -201,7 +201,6 @@ def _build_next_schedule(
         earliest_reveal_block=previous_schedule.latest_reveal_block + 1 if previous_schedule else 0,
         latest_reveal_block=next_round_start_block,
         generation_deadline_block=generation_deadline_block,
-        leader_generation_hotkey=previous_schedule.leader_generation_hotkey if previous_schedule else None,
     )
 
 

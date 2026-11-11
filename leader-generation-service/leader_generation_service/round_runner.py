@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Protocol
 from urllib.parse import unquote, urlsplit
 
 from loguru import logger
-from subnet_common.competition.config import require_competition_config
+from subnet_common.competition.config import CompetitionConfig, require_competition_config
 from subnet_common.competition.schedule import require_schedule
 from subnet_common.competition.state import RoundStage, require_state
 from subnet_common.graceful_shutdown import GracefulShutdown
@@ -43,15 +43,16 @@ class RoundRunner:
     ) -> None:
         self.dependencies, self.settings, self.shutdown = dependencies, settings, shutdown
 
-    async def may_generate(self, job: Job) -> bool:
+    async def active_generation_config(self, job: Job) -> CompetitionConfig | None:
         git = self.dependencies.git
         ref = await git.get_ref_sha(self.settings.github_branch)
         state = await require_state(git, ref)
         if state.current_round != job.snapshot.inputs.number or state.stage != RoundStage.MINER_GENERATION:
-            return False
+            return None
+        config = await require_competition_config(git, ref)
+        if config.leader_generation_hotkey != job.snapshot.hotkey:
+            return None
         schedule = await require_schedule(git, state.current_round, ref)
-        if schedule.leader_generation_hotkey != job.snapshot.hotkey:
-            return False
         if (
             schedule.generation_deadline_block != job.snapshot.inputs.generation_deadline_block
             or schedule.witness_storage_prefix != job.snapshot.inputs.storage_prefix
@@ -60,11 +61,11 @@ class RoundRunner:
             raise ValueError("Published round schedule differs from the frozen job")
         deadline = schedule.generation_deadline_block
         if deadline is None:
-            return True
+            return config
         block, observed = await self.dependencies.head()
         if not time.time() - 60 <= observed <= time.time() + 5:
             raise ValueError("Generation block is stale")
-        return block < deadline
+        return config if block < deadline else None
 
     async def run(self, job: Job) -> None:
         if self.shutdown.should_stop:
@@ -82,7 +83,7 @@ class RoundRunner:
         try:
             saved = await self.dependencies.saved.read(job.snapshot)
         except Exception:
-            if not await self.may_generate(job):
+            if await self.active_generation_config(job) is None:
                 await self.dependencies.runner.terminate(job)
             raise
         expected = set(job.snapshot.inputs.prompt_ids.values())
@@ -103,7 +104,8 @@ class RoundRunner:
             self.dependencies.store.save(job)
             await self.dependencies.runner.terminate(job)
             return
-        if not await self.may_generate(job):
+        config = await self.active_generation_config(job)
+        if config is None:
             await self.dependencies.runner.terminate(job)
             return
 
@@ -139,11 +141,10 @@ class RoundRunner:
                 return
             await self.dependencies.runner.terminate(job)
 
-        generation_minutes = (await require_competition_config(git, ref)).generation_stage_minutes
-        min_validity_seconds = max(0, generation_minutes) * 60 + ACCESS_TOKEN_MARGIN_SECONDS
+        min_validity_seconds = max(0, config.generation_stage_minutes) * 60 + ACCESS_TOKEN_MARGIN_SECONDS
         credentials = await self.dependencies.credentials.current(min_validity_seconds=min_validity_seconds)
         if credentials.account_id != job.snapshot.account_id:
             raise ValueError("Provider account differs from the frozen job")
         await self.dependencies.runner.ensure(job)
-        if not self.shutdown.should_stop and await self.may_generate(job):
+        if not self.shutdown.should_stop and await self.active_generation_config(job) is not None:
             await self.dependencies.runner.start(job, credentials, min_validity_seconds=min_validity_seconds)

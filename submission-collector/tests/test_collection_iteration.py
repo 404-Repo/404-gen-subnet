@@ -389,11 +389,11 @@ async def test_collection_waits_for_the_leader_then_publishes_both_indexes(
     git: MockGitHubClient, settings: Settings,
 ) -> None:
     add_state(git, stage=RoundStage.COLLECTING)
-    add_config(git)
+    add_config(git, leader_generation_hotkey=HOTKEY_2)
     add_prompts(git, ["https://prompts.test/chair.png", "https://prompts.test/table.png"], round_num=1)
-    schedule = add_schedule(git).model_dump()
-    schedule.update(witness_storage_prefix="isolated/", leader_generation_hotkey=HOTKEY_2)
-    git.files["rounds/1/schedule.json"] = json.dumps(schedule)
+    schedule = add_schedule(git)
+    schedule.witness_storage_prefix = "isolated/"
+    git.files["rounds/1/schedule.json"] = schedule.model_dump_json()
     submissions_path = "rounds/1/submissions.json"
     git.files[submissions_path] = json.dumps({HOTKEY: dict(
         repo="test/model", commit="c" * 40, revealed_at_block=150, tie_breaker="0" * 128, round="test-comp-1",
@@ -447,6 +447,7 @@ async def test_collection_waits_for_the_leader_then_publishes_both_indexes(
 
 async def test_collection_replaces_previously_collected_results(git: MockGitHubClient, settings: Settings) -> None:
     state = add_state(git, stage=RoundStage.COLLECTING)
+    add_config(git)
     add_prompts(git, ["https://prompts.test/chair.png", "https://prompts.test/table.png"], round_num=1)
     git.files["rounds/1/submissions.json"] = json.dumps(
         {HOTKEY: dict(repo="test/model", commit="c" * 40, revealed_at_block=150, tie_breaker="0" * 128, round="test-1")}
@@ -474,6 +475,7 @@ async def test_collection_uses_the_round_storage_prefix_and_retains_artifact_poi
     git: MockGitHubClient, settings: Settings,
 ) -> None:
     state = add_state(git, stage=RoundStage.COLLECTING)
+    add_config(git)
     add_prompts(git, ["https://prompts.test/chair.png"], round_num=1)
     schedule = add_schedule(git, generation_deadline_block=None)
     schedule.witness_storage_prefix = "isolated/"
@@ -502,6 +504,7 @@ async def test_collection_keeps_saved_results_for_encoded_and_signed_prompt_urls
     git: MockGitHubClient, settings: Settings, url: str, prompt: str,
 ) -> None:
     state = add_state(git, stage=RoundStage.COLLECTING)
+    add_config(git)
     add_prompts(git, [url], round_num=1)
     git.files["rounds/1/submissions.json"] = json.dumps({HOTKEY: dict(
         repo="test/model", commit="c" * 40, revealed_at_block=150, tie_breaker="0" * 128, round="test-1",
@@ -520,6 +523,7 @@ async def test_retry_wait_allows_another_miner_to_be_collected(
     git: MockGitHubClient, settings: Settings, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     state = add_state(git, stage=RoundStage.COLLECTING)
+    add_config(git)
     add_prompts(git, ["https://prompts.test/chair.png"], round_num=1)
     submission = dict(repo="test/model", commit="c" * 40, revealed_at_block=150, tie_breaker="0" * 128, round="test-1")
     git.files["rounds/1/submissions.json"] = json.dumps({HOTKEY: submission, HOTKEY_2: submission})

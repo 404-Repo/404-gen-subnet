@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 from conftest import access
+from loguru import logger
 from pydantic import ValidationError
 from subnet_common.competition.state import CompetitionState, RoundStage
 
@@ -16,10 +17,23 @@ from leader_generation_service.settings import Settings
 from leader_generation_service.store import JobStore, exclusive_lock
 
 
+@pytest.fixture
+def iteration_logs():
+    messages = []
+    sink = logger.add(
+        lambda message: messages.append(message.record["message"]), filter=generation_iteration.__module__
+    )
+    try:
+        yield messages
+    finally:
+        logger.remove(sink)
+
+
 @pytest.mark.parametrize("stage", [s for s in RoundStage if s != RoundStage.MINER_GENERATION])
-async def test_idle_stage_never_starts_work(scenario, settings, stage):
+async def test_idle_stage_never_starts_work(scenario, settings, stage, iteration_logs):
     scenario.deps.git.files["state.json"] = CompetitionState(current_round=1, stage=stage).model_dump_json()
     await generation_iteration(scenario.controller, settings)
+    assert f"Round 1 skipped because stage is {stage.value}" in iteration_logs
     assert scenario.state["input_reads"] == 0
     assert scenario.deps.runner.started == []
     assert scenario.deps.store.jobs() == []
@@ -35,6 +49,7 @@ async def test_new_round_freezes_inputs_and_next_iteration_keeps_the_pod(scenari
 
     scenario.deps.git.get_file = get_file
     await generation_iteration(scenario.controller, settings)
+    assert scenario.deps.runner.started
     job = JobStore(settings.state_directory).load(1)
     assert job.snapshot.leader.repo == "test/incumbent"
     assert job.snapshot.leader.commit == "b" * 40
@@ -66,18 +81,24 @@ async def test_witness_mismatch_stops_before_generation(scenario, settings, prob
     assert scenario.deps.runner.ensured == []
 
 
-async def test_deadline_closes_before_any_allocation(scenario, settings):
+async def test_deadline_closes_before_any_allocation(scenario, settings, iteration_logs):
     scenario.state["block"] = 100
     await generation_iteration(scenario.controller, settings)
+    assert "Round 1 skipped because the generation deadline has been reached" in iteration_logs
     assert scenario.state["input_reads"] == 0
     assert scenario.deps.runner.started == []
 
 
-async def test_stage_is_rechecked_after_runtime_preparation(scenario, settings):
+@pytest.mark.parametrize("change", ["stage", "hotkey"])
+async def test_generation_eligibility_is_rechecked_after_runtime_preparation(scenario, settings, change):
     def close():
-        scenario.deps.git.files["state.json"] = CompetitionState(
-            current_round=1, stage=RoundStage.COLLECTING
-        ).model_dump_json()
+        files = scenario.deps.git.files
+        if change == "stage":
+            files["state.json"] = CompetitionState(current_round=1, stage=RoundStage.COLLECTING).model_dump_json()
+        else:
+            config = json.loads(files["config.json"])
+            del config["leader_generation_hotkey"]
+            files["config.json"] = json.dumps(config)
         scenario.deps.git.ref_sha = "c" * 40
 
     scenario.deps.runner.on_ensure = close
@@ -148,15 +169,18 @@ async def test_saved_manual_results_finish_the_job_before_cpu_allocation(scenari
 
 
 @pytest.mark.parametrize("hotkey", [None, "5" * 48])
-async def test_generation_requires_the_scheduled_operator_wallet(scenario, settings, hotkey):
+async def test_generation_requires_the_configured_operator_wallet(scenario, settings, hotkey, iteration_logs):
     files = scenario.deps.git.files
-    path = "rounds/1/schedule.json"
-    schedule = json.loads(files[path])
-    schedule["leader_generation_hotkey"] = hotkey
-    files[path] = json.dumps(schedule)
+    config = json.loads(files["config.json"])
+    config["leader_generation_hotkey"] = hotkey
+    files["config.json"] = json.dumps(config)
+    schedule = json.loads(files["rounds/1/schedule.json"])
+    schedule["leader_generation_hotkey"] = scenario.deps.hotkey
+    files["rounds/1/schedule.json"] = json.dumps(schedule)
 
     if hotkey is None:
         await generation_iteration(scenario.controller, settings)
+        assert "Round 1 skipped because config.json has no leader_generation_hotkey" in iteration_logs
     else:
         with pytest.raises(ValueError, match="differs from the operator wallet"):
             await generation_iteration(scenario.controller, settings)

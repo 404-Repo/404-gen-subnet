@@ -15,8 +15,9 @@ from typing import TypeVar
 
 import httpx
 from bittensor_wallet import Wallet
+from loguru import logger
 from miner_runtime.pod import Config, pod_body
-from pod_gateway.runpod import CreateRejected, PodProvider
+from pod_gateway.runpod import CreateRejected, CreateUnknown, PodProvider
 from subnet_common.graceful_shutdown import GracefulShutdown
 from subnet_common.witness.models import Pod
 from subnet_common.witness.rounds import repository
@@ -99,6 +100,7 @@ class RunpodRunner:
         job.last_progress_at = allocation.requested_at or time.time()
         job.progress_warning_sent = False
         self.store.save(job)
+        logger.info("Round {} recovered generation pod {} from inventory", job.snapshot.inputs.number, matches[0].id)
         return matches[0]
 
     def _price(self, config: Config) -> Decimal:
@@ -218,14 +220,20 @@ class RunpodRunner:
             allocation.requested_at = previous_requested_at
             self.store.save(job)
             return
+        number = job.snapshot.inputs.number
+        logger.info("Round {} requesting generation pod {}", number, allocation.name)
         try:
             pod = self.provider.create(body)
         except CreateRejected:
             allocation.phase = "intent"
             self.store.save(job)
             raise
+        except CreateUnknown:
+            logger.warning("Round {} creation unconfirmed for generation pod {}", number, allocation.name)
+            raise
         if pod.name != allocation.name or pod.image != job.snapshot.generation_image:
             raise RuntimeError("RunPod create returned a different generation Pod")
+        logger.info("Round {} created generation pod {}", number, pod.id)
         allocation.pod_id = pod.id
         allocation.phase = "active"
         job.last_progress_at = allocation.requested_at
@@ -252,6 +260,7 @@ class RunpodRunner:
             self.provider.delete(pod.id)
             if self.provider.get(pod.id) is not None:
                 raise RuntimeError("Generation Pod termination is not confirmed")
+            logger.info("Round {} deleted generation pod {}", job.snapshot.inputs.number, pod.id)
         if job.allocation is not None and job.allocation.phase != "terminated":
             job.allocation.phase = "terminated"
             self.store.save(job)

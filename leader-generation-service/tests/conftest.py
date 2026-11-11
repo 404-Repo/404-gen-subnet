@@ -144,6 +144,7 @@ def scenario(settings, tmp_path):
                 "win_margin": 0.1,
                 "prompts_per_round": 2,
                 "carryover_prompts": 0,
+                "leader_generation_hotkey": hotkey,
             }
         ),
         "leader.json": json.dumps([leader.model_dump()]),
@@ -155,7 +156,6 @@ def scenario(settings, tmp_path):
                 "latest_reveal_block": 2,
                 "generation_deadline_block": 100,
                 "witness_storage_prefix": "sandbox/",
-                "leader_generation_hotkey": hotkey,
             }
         ),
     }

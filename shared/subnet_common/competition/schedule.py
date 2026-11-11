@@ -13,7 +13,6 @@ class RoundSchedule(BaseModel):
     generation_deadline_block: int | None = Field(..., ge=0)
     witness_storage_prefix: str = ""
     witness_save_submissions: bool = True
-    leader_generation_hotkey: str | None = Field(default=None, pattern=r"^[1-9A-HJ-NP-Za-km-z]{48}$")
 
     @field_validator("witness_storage_prefix")
     @classmethod
