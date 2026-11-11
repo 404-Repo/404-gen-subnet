@@ -36,6 +36,7 @@ from witness_client.pods import CallView
 from witness_client.state import save
 from witness_pod.records import Call, CallRecord
 
+from .preparation import verify_recorded_failure
 from .render_recovery import MissingRenderOutcome
 from .request_replay import (
     CachedImageRequest,
@@ -307,14 +308,7 @@ def load_capture(
 
     if call.manifest_sha256 is None:
         request = (directory / "request.json").read_bytes()
-        status_bytes = (directory / names[-1]).read_bytes()
-        status = json.loads(status_bytes)
-        if (
-            request_digest(request) != call.request.request_sha256
-            or status.get("status") != "failed"
-            or status.get("error_type") != call.failure
-        ):
-            raise ValueError("Recorded failure binding differs: " + call.exchange_id)
+        verify_recorded_failure(call, request, (directory / names[-1]).read_bytes())
         saved = SavedCapture(call=item.call, model=json.loads(request)["model"])
         remember()
         return saved

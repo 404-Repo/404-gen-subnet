@@ -48,7 +48,9 @@ class ModelReply(BaseModel):
 
 
 class ModelErrorReply(BaseModel):
-    error: Literal["capture_unrecorded"]
+    error: Literal["capture_unrecorded", "capture_failed"]
+    message: str
+    exchange_id: str | None = None
 
 
 ModelReplies: TypeAdapter[ModelReply | ModelErrorReply] = TypeAdapter(ModelReply | ModelErrorReply)
@@ -89,7 +91,7 @@ class Witness(_ClientState):
             )
         )
         if isinstance(reply, ModelErrorReply):
-            raise WitnessError("No recorded capture for this request", code=reply.error, source="gateway")
+            raise WitnessError(reply.message, reply.exchange_id, code=reply.error, source="gateway")
         return CapturedResponse(reply.exchange_id, reply.status, base64.b64decode(reply.body, validate=True))
 
     @overload

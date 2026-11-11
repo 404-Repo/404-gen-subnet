@@ -405,27 +405,48 @@ def generate(image, seed, witness, renderer):
         for name in ("lamp", "table"):
             self.assertIn("not_submitted", prompts[name].reason)
 
-    async def test_unrecorded_model_call_allows_miner_fallback(self) -> None:
+    async def test_witness_failures_allow_miner_fallback(self) -> None:
         self.stop_after_chair = False
         self.failed_read = True
         self.settings.witness_provider = "api"
         grid = f"fixture/rounds/gpt-7/{self.hotkey}/submitted/lamp/grid.png"
         self.objects["main"][grid] = self.objects["replay"][self.render_keys["lamp"] + ".png"]
+        scope = Scope("test", "gpt-7", self.hotkey)
+        live = Capture(self.private_path)
+        request, body = live._request(0, None, {"model": "fixture", "input": "recorded"})
+        call = live.records.assign(scope, request, "start", "pod")
+        self.assertTrue(live.records.claim(scope, request, "pod", call.capture_id or ""))
+        live.records.authorize(scope, request, "pod", exchange_id=call.exchange_id)
+        live.records.failed(scope, request, "pod", "CaptureInterrupted", exchange_id=call.exchange_id)
+        key = live.records.key(scope, request.id)
+        self.objects["main"]["fixture/" + key] = live.state.objects[key].data
+        capture = f"fixture/rounds/{scope.round}/{scope.hotkey}/{call.exchange_id}/"
+        self.objects["replay"][capture + "request.json"] = body
+        self.objects["replay"][capture + "failure.json"] = json_bytes(
+            {"status": "failed", "error_type": "CaptureInterrupted"}
+        )
+
         source = self.source.replace(
             b"    try:\n        renderer.render(name)",
-            b"""    if name in ("lamp", "table"):
-        from openai import APIConnectionError
-        from witness_client import WitnessError
-        try:
-            witness.responses.create(model="fixture", input="unrecorded")
-        except APIConnectionError as error:
-            cause = error.__cause__
-            if not isinstance(cause, WitnessError) or cause.code != "capture_unrecorded" or cause.source != "gateway":
-                raise
+            f"""    from openai import APIConnectionError
+    from witness_client import WitnessError
+    try:
+        witness.responses.create(model="fixture", input="recorded" if name == "chair" else "unrecorded")
+    except APIConnectionError as error:
+        cause = error.__cause__
+        expected = ("capture_failed", {call.exchange_id!r}) if name == "chair" else ("capture_unrecorded", None)
+        if (
+            not isinstance(cause, WitnessError)
+            or (cause.code, cause.exchange_id) != expected
+            or cause.source != "gateway"
+        ):
+            raise
+        if name != "chair":
             return name if name == "lamp" else "different output"
+    else:
         raise AssertionError("Expected a Witness connection error")
     try:
-        renderer.render(name)""",
+        renderer.render(name)""".encode(),
         )
         archive = io.BytesIO()
         with tarfile.open(fileobj=archive, mode="w:gz") as stream:
@@ -446,6 +467,8 @@ def generate(image, seed, witness, renderer):
                 )
 
         prompts = ValidationProgress.model_validate_json(self.commits[self.head][self.path]).prompts
+        recorded = prompts["chair"]
+        self.assertEqual((recorded.status, recorded.attempts, recorded.charges), ("passed", 1, {}), recorded.reason)
         self.assertEqual(prompts["lamp"].status, "passed", prompts["lamp"].reason)
         self.assertIn("assumed Witness connection failures", prompts["lamp"].reason)
         self.assertEqual((prompts["lamp"].consumed_calls, prompts["lamp"].consumed_credits), (0, Decimal(0)))

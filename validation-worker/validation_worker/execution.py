@@ -18,12 +18,13 @@ from subnet_common.r2_client import R2Client
 from subnet_common.witness.models import Scope, json_bytes, object_dict
 from subnet_common.witness.pricing import BudgetRejected, PromptBudget
 from subnet_common.witness.rounds import PromptImage
+from witness_client import WitnessError
 from witness_client.calls import RequestKey, request_digest
 from witness_pod import PROOF_PARAMETERS, VERIFY_SCRIPT
 from witness_pod.records import CallRecord, CallRecords
 
 from validation_worker.inputs import ValidationInputs
-from validation_worker.preparation import optional_object, read_object
+from validation_worker.preparation import optional_object, read_object, verify_recorded_failure
 from validation_worker.render_recovery import (
     MAX_MISSING_RENDER_CALLS,
     MAX_MISSING_RENDER_RETRIES,
@@ -55,7 +56,7 @@ async def model_response(
     settings: Settings,
     directory: Path,
     budget: PromptBudget,
-) -> tuple[str, int, bytes] | None:
+) -> tuple[str, int, bytes] | WitnessError | None:
     body = base64.b64decode(query.body, validate=True)
     request = RequestKey.from_body(settings.witness_provider, body, query.request_id, session_id=query.session_id)
     scope = Scope(settings.witness_deployment, inputs.submission.round, inputs.hotkey)
@@ -67,9 +68,18 @@ async def model_response(
     call = record.call
     if record.scope_key != scope.key or call.request != request:
         raise ValueError("Recorded call identity differs")
+    prefix = f"{inputs.witness_storage_prefix}rounds/{scope.round}/{scope.hotkey}/{call.exchange_id}/"
+    if call.phase == "failed" and call.manifest_sha256 is None and call.authorized and call.failure is not None:
+        failure = await optional_object(r2, settings.r2_replay_bucket, prefix + "failure.json")
+        if failure is None:
+            failure = await read_object(r2, settings.r2_replay_bucket, prefix + "status.json")
+        disclosed = await read_object(r2, settings.r2_replay_bucket, prefix + "request.json")
+        verify_recorded_failure(call, disclosed, failure)
+        return WitnessError(
+            "Recorded witness capture failed", call.exchange_id, code="capture_failed", source="gateway"
+        )
     if call.phase not in ("issued", "failed") or call.manifest_sha256 is None:
         raise RuntimeError("Recorded call has no complete capture")
-    prefix = f"{inputs.witness_storage_prefix}rounds/{scope.round}/{scope.hotkey}/{call.exchange_id}/"
     with TemporaryDirectory(prefix="capture-", dir=directory) as temporary:
         capture = Path(temporary)
         for name in (
@@ -214,7 +224,14 @@ async def validate_prompt(
                         captured = await model_response(message, inputs, r2, settings, directory, trial_budget)
                         if captured is None:
                             unrecorded_model_call = True
-                            await sandbox.reply(error="capture_unrecorded")
+                            await sandbox.reply(
+                                error="capture_unrecorded", message="No recorded capture for this request"
+                            )
+                            continue
+                        if isinstance(captured, WitnessError):
+                            await sandbox.reply(
+                                error=captured.code, exchange_id=captured.exchange_id, message=str(captured)
+                            )
                             continue
                         exchange, status, body = captured
                         if not (missing or unrecorded_model_call):

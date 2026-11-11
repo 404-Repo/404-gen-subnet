@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+import json
 import shutil
 import tarfile
 from pathlib import Path, PurePosixPath
@@ -12,6 +13,8 @@ from subnet_common.github import GitHubClient
 from subnet_common.r2_client import R2Client
 from subnet_common.witness.models import json_bytes
 from subnet_common.witness.rounds import RoundInputs, repository
+from witness_client.calls import request_digest
+from witness_pod.records import Call
 
 from validation_worker.inputs import ValidationInputs
 from validation_worker.settings import Settings
@@ -31,6 +34,16 @@ async def optional_object(r2: R2Client, bucket: str, key: str) -> bytes | None:
         if error.response["Error"]["Code"] in ("NoSuchKey", "404"):
             return None
         raise
+
+
+def verify_recorded_failure(call: Call, request: bytes, status_bytes: bytes) -> None:
+    status = json.loads(status_bytes)
+    if (
+        request_digest(request) != call.request.request_sha256
+        or status.get("status") != "failed"
+        or status.get("error_type") != call.failure
+    ):
+        raise ValueError("Recorded failure binding differs: " + call.exchange_id)
 
 
 async def download(client: httpx.AsyncClient, url: str, path: Path) -> None:
