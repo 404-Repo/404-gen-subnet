@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 import time
-from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, Protocol
-from urllib.parse import unquote, urlsplit
 
 from loguru import logger
 from subnet_common.competition.config import CompetitionConfig, require_competition_config
@@ -25,13 +23,6 @@ class Runner(Protocol):
     async def start(self, job: Job, credentials: AccessCredentials, *, min_validity_seconds: int) -> None: ...
     async def terminate(self, job: Job) -> None: ...
     async def status(self, job: Job) -> dict[str, str | None]: ...
-
-
-def prompt_ids(urls: list[str]) -> set[str]:
-    ids = {PurePosixPath(unquote(urlsplit(url).path)).stem for url in urls}
-    if len(ids) != len(urls) or not ids or "" in ids:
-        raise ValueError("Expected distinct official prompt IDs")
-    return ids
 
 
 class RoundRunner:
@@ -86,7 +77,7 @@ class RoundRunner:
             if await self.active_generation_config(job) is None:
                 await self.dependencies.runner.terminate(job)
             raise
-        expected = set(job.snapshot.inputs.prompt_ids.values())
+        expected = set(job.snapshot.inputs.prompt_ids)
         if saved.keys() - expected:
             raise ValueError("Saved result contains an unexpected official prompt ID")
         completed = sum(result.is_terminal() for result in saved.values())

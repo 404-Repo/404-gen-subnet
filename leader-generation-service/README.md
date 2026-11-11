@@ -1,13 +1,16 @@
 # Leader generation service
 
-The service stays running between rounds, maintains one dedicated ChatGPT login,
-and generates the incumbent leader's baseline during `miner_generation`. It reads
-competition state at one Git revision, freezes the latest `leader.json`
-repository/commit and the witness's official prompt IDs, image hashes, seed and
-storage scope, then submits one self-starting RunPod CPU request per attempt through
-`miner_runtime.pod.pod_body`. The pod starts from a digest-pinned generation image,
-verifies its source and proof artifacts, fetches the pinned leader source, and
-runs generation in the foreground.
+The controller stays running between rounds, maintains one dedicated ChatGPT login,
+and manages RunPod CPU pods and saved-result progress during `miner_generation`.
+It reads Git for round eligibility and the prompt IDs it tracks in `submitted.json`.
+Each pod receives the competition repository, branch, and expected round along
+with its credentials and runtime settings.
+
+The worker starts from a digest-pinned generation image and checks its source
+and proof artifacts. It resolves the competition branch to one Git revision
+and checks the round and stage there. It reads `leader.json`, `prompts.txt`,
+and `seed.json` from that revision, then fetches and loads the pinned leader
+commit once.
 
 The worker creates one async witness client with the configured call and
 preparation limits and explicitly requests a fresh witness pod before every pass,
@@ -18,8 +21,8 @@ exception skips that prompt for the current pass. Transient image, render-servic
 or submission errors leave prompts pending while the others continue. Returning
 `None` saves the terminal `generation_failed` outcome. Final renderer validation
 rejections save the terminal `render_rejected` outcome. Saved terminal outcomes
-count as completed and are never regenerated. After a pass, the worker confirms
-saved results before deciding whether to retry.
+count as completed and are never regenerated. The worker reads saved results
+before each pass and checks for any successful saves after a failed request.
 
 When prompts remain pending, the worker waits until at least 20 minutes since
 its previous explicit witness request, requests a replacement through the SDK,
@@ -27,8 +30,8 @@ then retries only pending IDs. Failed explicit requests also consume this interv
 a pass lasting at least 20 minutes needs no extra wait. One configured client
 remains open across passes. The SDK's automatic connection recovery and allocation
 behavior operates independently of this explicit-request interval.
-Each worker downloads its image from the original URL in the frozen competition
-inputs and verifies the image hash before generating it.
+Each worker downloads its prompt image from the URL published in Git.
+Repository prompt paths resolve at the same revision as the prompt list.
 
 When every official prompt has a terminal result in the witness's
 `submitted.json` index, the service records completion and terminates the
@@ -43,7 +46,7 @@ Settings load from the environment and the local `.env` file.
 
 | Required variable | Meaning |
 | --- | --- |
-| `GITHUB_REPO`, `GITHUB_TOKEN` | Competition repository and token with read access |
+| `GITHUB_REPO`, `GITHUB_TOKEN` | Public competition repository and controller token with read access |
 | `GENERATION_IMAGE` | Published generation image reference pinned with `@sha256:<digest>` |
 | `RUNPOD_PROVIDER_API_KEY` | Generation CPU lifecycle credentials; retained on the service |
 | `CDN_URL` | Same artifact CDN origin/prefix used by the collector |
@@ -160,7 +163,7 @@ If renewal requires signing in again, maintenance reports the error type. Repair
 the same dedicated account and let the service retry. A different account or
 operator hotkey cannot take over an existing job.
 
-`STATE_DIRECTORY/rounds/{n}.json` stores frozen inputs, allocation attempts,
+`STATE_DIRECTORY/rounds/{n}.json` stores round progress metadata, allocation attempts,
 the completed-prompt count, last progress time, and whether the current stall was warned.
 `STATE_DIRECTORY/runs/{uuid}/config.json` stores the public worker configuration.
 Allocation lifecycle states are `intent`, `creating`, `active` and `terminated`.
@@ -177,8 +180,8 @@ and logs completed, total, newly completed, and pending prompt counts. A pod sta
 running while saved results advance. After 20 minutes without new terminal results,
 the service sends one warning per stall to `DISCORD_WEBHOOK_URL`, if configured.
 After `STALL_REPLACEMENT_SECONDS` without progress (one hour by default), it confirms
-deletion of the recorded CPU pod and creates a replacement with the same frozen inputs
-and identity. The replacement interval must exceed 1200 seconds. Startup counts
+deletion of the recorded CPU pod and creates a replacement using `GENERATION_IMAGE`
+and the same operator identity. The replacement interval must exceed 1200 seconds. Startup counts
 toward the stall window. Progress and warning state survive service restarts.
 Older rounds only clean up their CPU pods. CPU disk is not needed to recover
 progress. Unavailable or regressing saved results do not trigger stall replacement.

@@ -38,7 +38,8 @@ FROM python AS runtime
 ARG SOURCE_COMMIT
 LABEL org.opencontainers.image.revision=${SOURCE_COMMIT}
 COPY --from=build /opt/leader-image/ /opt/leader-image/
+COPY shared/subnet_common/ /opt/leader-image/shared/subnet_common/
 COPY NOTICE.md /opt/leader-image/licenses/NOTICE.md
 COPY witness-server/worker/witness_pod/verifier/THIRD_PARTY_NOTICES.md /opt/leader-image/licenses/PROOF_THIRD_PARTY_NOTICES.md
-ENV PYTHONUNBUFFERED=1
+ENV PYTHONUNBUFFERED=1 PYTHONPATH=/opt/leader-image/shared
 ENTRYPOINT ["/opt/leader-image/venv/bin/python", "-m", "miner_runtime.pod"]

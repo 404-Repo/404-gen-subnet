@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import json
 import sys
 from dataclasses import replace
 from pathlib import PurePosixPath
@@ -20,10 +21,9 @@ def generation(scenario, tmp_path, monkeypatch):
     directory.mkdir()
     config = pod.Config(
         generation_image=scenario.snapshot.generation_image,
-        source_repository="https://github.com/test/incumbent",
-        source_commit=scenario.snapshot.leader.commit,
-        prompts={prompt.id: prompt.sha256 for prompt in scenario.inputs.prompts},
-        seed=scenario.inputs.seed,
+        competition_repository=scenario.inputs.repository,
+        competition_branch=scenario.inputs.branch,
+        round_number=scenario.inputs.number,
         hotkey=scenario.snapshot.hotkey,
         account_id=scenario.snapshot.account_id,
         witness_url=scenario.snapshot.witness_url,
@@ -32,7 +32,6 @@ def generation(scenario, tmp_path, monkeypatch):
         parallel_preparations=scenario.snapshot.parallel_preparations,
         prover_contexts=scenario.snapshot.prover_contexts,
         go_cpus=scenario.snapshot.go_cpus,
-        round_inputs_fingerprint=scenario.inputs.fingerprint,
     )
     (directory / "source").mkdir()
     (directory / "source/main.py").write_text(
@@ -43,7 +42,8 @@ def generation(scenario, tmp_path, monkeypatch):
         "submitted": [],
         "reads": [],
         "failure": False,
-        "bad_image": None,
+        "git_files": [],
+        "source_fetches": [],
         "clients": [],
         "replacements": 0,
         "entered": 0,
@@ -94,37 +94,57 @@ def generation(scenario, tmp_path, monkeypatch):
             )
             return {"saved": True}
 
-        def renderer_transport(self):
-            context = {
-                "saving_enabled": True,
-                "round_inputs": scenario.inputs.model_dump(mode="json"),
-                "submission_commit": None,
-                "prompts": [
-                    {**prompt.model_dump(), "url": f"https://saved-images.test/{prompt.id}"}
-                    for prompt in scenario.inputs.prompts
-                ],
-            }
-            return httpx.MockTransport(lambda request: httpx.Response(200, json=context))
-
     async def download(transport, request):
+        git = scenario.deps.git
+        if request.url.host == "api.github.com":
+            repo = f"/repos/{config.competition_repository}"
+            if request.url.path == f"{repo}/commits/{config.competition_branch}":
+                return httpx.Response(200, json={"sha": git.ref_sha})
+            assert request.url.path.startswith(f"{repo}/contents/")
+            assert request.url.params["ref"] == git.ref_sha
+            path = request.url.path.removeprefix(f"{repo}/contents/")
+            state["git_files"].append(path)
+            if path not in git.files:
+                return httpx.Response(404)
+            return httpx.Response(200, text=git.files[path])
+        assert request.url.host in ("images.test", "raw.githubusercontent.com")
         name = PurePosixPath(request.url.path).stem
         state["reads"].append(name)
-        return httpx.Response(200, content=b"changed" if name == state["bad_image"] else scenario.images[name])
+        return httpx.Response(200, content=scenario.images[name])
+
+    def fetch_source(repository, commit, target):
+        assert target == directory
+        state["source_fetches"].append((repository, commit))
 
     wallet = SimpleNamespace(hotkey=SimpleNamespace(ss58_address=scenario.snapshot.hotkey))
     monkeypatch.setattr(bittensor_wallet, "Wallet", lambda **kwargs: wallet)
-    monkeypatch.setattr(batch, "Wallet", lambda **kwargs: wallet)
     monkeypatch.setattr(witness_client, "AsyncWitnessClient", Witness)
-    monkeypatch.setattr(batch, "AsyncWitnessClient", Witness)
+    monkeypatch.setattr(pod, "fetch_source", fetch_source)
     monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", download)
 
     async def once(config, directory):
         witness = witness_client.AsyncWitnessClient(
             {"codex_credentials_file": str(directory / "private/subscription.json")}
         )
-        await pod.generate_pass(config, witness, pod.load_miner(directory / "source").generate)
+        await batch.run_pass(
+            pod.load_miner(directory / "source").generate,
+            dict(scenario.prompts),
+            42,
+            client=witness,
+            workers=config.workers,
+            max_prompt_bytes=batch.MAX_PROMPT_DOWNLOAD_BYTES,
+        )
+
+    async def run(config):
+        await pod.run_job(
+            config,
+            directory,
+            hotkey=base64.b64encode(b"fixture hotkey").decode(),
+            access_token=access(4_000_000_000).access_token,
+        )
 
     state["once"] = once
+    state["run"] = run
     return config, directory, state
 
 
@@ -145,7 +165,7 @@ async def test_terminal_validation_rejection_and_none_finish_without_retrying(ge
         sleep = staticmethod(retry)
 
     monkeypatch.setattr(pod, "asyncio", Asyncio())
-    await pod.generate_batch(config, directory)
+    await state["run"](config)
     assert state["rows"]["chair"]["failure_reason"] == "render_rejected"
     assert state["rows"]["lamp"]["failure_reason"] == "generation_failed"
     assert sorted(state["reads"]) == ["chair", "lamp"]
@@ -182,7 +202,7 @@ async def test_worker_retries_pending_prompts_with_a_single_client_and_twenty_mi
     async def request(transport, request):
         nonlocal first_download
         response = await download(transport, request)
-        if first_download:
+        if first_download and request.url.host != "api.github.com":
             state["clock"][0] += pass_duration
             first_download = False
         return response
@@ -217,14 +237,9 @@ async def test_worker_retries_pending_prompts_with_a_single_client_and_twenty_mi
             state["fail_prompt"] = None
 
     monkeypatch.setattr(witness_class, "replace_pod", replace_witness)
-    await pod.run_job(
-        config,
-        directory,
-        hotkey=base64.b64encode(b"fixture hotkey").decode(),
-        access_token=access(4_000_000_000).access_token,
-    )
+    await state["run"](config)
     assert imports.read_text().splitlines() == ["loaded"]
-    assert set(state["rows"]) == set(config.prompts)
+    assert set(state["rows"]) == {"chair", "lamp"}
     assert state["rows"]["lamp"]["failure_reason"] == ("render_rejected" if terminal_rejection else "generation_failed")
     assert state["reads"].count("lamp") == 1
     assert state["reads"].count("chair") == 2
@@ -240,14 +255,14 @@ async def test_worker_retries_pending_prompts_with_a_single_client_and_twenty_mi
 
 
 async def test_one_configured_client_and_fresh_witness_pod_per_pass(generation):
-    config, directory, state = generation
-    await pod.generate_batch(config, directory)
+    config, _, state = generation
+    await state["run"](config)
     assert len(state["clients"]) == 1
     assert state["entered"] == state["closed"] == 1
     assert state["replacements"] == 1
     assert state["clients"][0]["parallel_calls"] == config.parallel_calls
     assert state["clients"][0]["parallel_preparations"] == config.parallel_preparations
-    assert len(state["submitted"]) == len(config.prompts)
+    assert len(state["submitted"]) == 2
 
 
 async def test_prompt_exception_is_skipped_for_the_pass_and_retried_on_the_next_pod(generation):
@@ -276,20 +291,20 @@ async def test_prompt_exception_is_skipped_for_the_pass_and_retried_on_the_next_
     state["reads"].clear()
     await state["once"](config, directory)
     assert state["reads"] == ["chair"]
-    assert state["replacements"] == 2
-    assert set(state["rows"]) == set(config.prompts)
+    assert set(state["rows"]) == {"chair", "lamp"}
 
 
-async def test_real_batch_uses_source_seed_and_skips_witness_saved_ids(generation):
-    config, directory, state = generation
+async def test_worker_uses_git_leader_and_seed_and_skips_saved_ids(generation, scenario):
+    config, _, state = generation
+    files = scenario.deps.git.files
+    leader = scenario.leader.model_copy(update={"repo": "test/new-leader", "commit": "c" * 40, "effective_block": 2})
+    files["leader.json"] = json.dumps([scenario.leader.model_dump(), leader.model_dump()])
+    files["rounds/1/seed.json"] = '{"seed":97}'
     state["rows"]["lamp"] = {"failure_reason": "generation_failed"}
-    await state["once"](config, directory)
+    await state["run"](config)
+    assert state["source_fetches"] == [(leader.repo, leader.commit)]
     assert state["reads"] == ["chair"]
-    assert state["submitted"] == ["chair:42"]
-    state["reads"].clear()
-    await state["once"](config, directory)
-    assert state["reads"] == []
-    assert state["submitted"] == ["chair:42"]
+    assert state["submitted"] == ["chair:97"]
 
 
 async def test_workers_download_and_submit_without_prefetching_all_images(generation, scenario, monkeypatch):
@@ -306,33 +321,45 @@ async def test_workers_download_and_submit_without_prefetching_all_images(genera
     monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", download)
     await state["once"](replace(config, workers=1), directory)
     assert events == ["chair", "lamp"]
-    assert set(state["rows"]) == set(config.prompts)
+    assert set(state["rows"]) == {"chair", "lamp"}
 
 
-async def test_worker_downloads_the_frozen_competition_urls(generation, scenario, monkeypatch):
-    config, directory, state = generation
+@pytest.mark.parametrize(
+    "chair_url",
+    [
+        "images/chair.png",
+        "https://raw.githubusercontent.com/test/competition/main/images/chair.png",
+        "https://github.com/Test/Competition/blob/main/images/chair.png",
+    ],
+)
+async def test_worker_pins_competition_prompt_urls_to_the_git_revision(generation, scenario, monkeypatch, chair_url):
+    config, _, state = generation
+    scenario.deps.git.files["rounds/1/prompts.txt"] = f"{chair_url}\nhttps://images.test/lamp.png"
     downloads = []
     original_download = httpx.AsyncHTTPTransport.handle_async_request
 
     async def download(transport, request):
-        downloads.append(str(request.url))
+        if request.url.host != "api.github.com":
+            downloads.append(str(request.url))
         return await original_download(transport, request)
 
     monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", download)
-    await state["once"](replace(config, workers=1), directory)
-    assert downloads == [prompt.source_url for prompt in scenario.inputs.prompts]
-    assert set(state["rows"]) == set(config.prompts)
+    await state["run"](replace(config, workers=1))
+    assert downloads == [
+        f"https://raw.githubusercontent.com/test/competition/{scenario.deps.git.ref_sha}/images/chair.png",
+        "https://images.test/lamp.png",
+    ]
+    assert set(state["rows"]) == {"chair", "lamp"}
 
 
 async def test_worker_accepts_an_uppercase_https_scheme(generation, scenario):
-    config, directory, state = generation
-    chair, lamp = scenario.inputs.prompts
-    chair = chair.model_copy(update={"source_url": chair.source_url.replace("https:", "HTTPS:", 1)})
-    scenario.inputs = scenario.inputs.model_copy(update={"prompts": (chair, lamp)})
+    config, _, state = generation
+    files = scenario.deps.git.files
+    files["rounds/1/prompts.txt"] = files["rounds/1/prompts.txt"].replace("https:", "HTTPS:", 1)
 
-    await state["once"](config, directory)
+    await state["run"](config)
 
-    assert set(state["rows"]) == set(config.prompts)
+    assert set(state["rows"]) == {"chair", "lamp"}
 
 
 async def test_worker_stops_at_the_prompt_download_limit(generation, monkeypatch):
@@ -360,19 +387,6 @@ async def test_worker_stops_at_the_prompt_download_limit(generation, monkeypatch
     assert reads == [chunk_bytes, chunk_bytes, 1]
 
 
-async def test_hash_mismatch_remains_pending_while_other_prompts_save(generation):
-    config, directory, state = generation
-    state["bad_image"] = "chair"
-    with pytest.raises(RuntimeError, match="prompts remain"):
-        await state["once"](config, directory)
-    assert set(state["rows"]) == {"lamp"}
-    state["bad_image"] = None
-    state["reads"].clear()
-    await state["once"](config, directory)
-    assert state["reads"] == ["chair"]
-    assert len(state["submitted"]) == 2
-
-
 async def test_save_outage_does_not_manufacture_failure_results(generation):
     config, directory, state = generation
     state["failure"] = True
@@ -393,88 +407,14 @@ async def test_none_is_saved_as_terminal_and_skipped_on_resume(generation):
     assert state["submitted"] == [None, None]
 
 
-@pytest.mark.parametrize("rollover", ["download", "retry", "confirmation"])
-async def test_every_witness_connection_checks_frozen_round_before_saved_ids(
-    generation, scenario, monkeypatch, rollover
-):
-    config, directory, state = generation
-    generated = directory / "generated.txt"
-    (directory / "source/main.py").write_text(
-        "from pathlib import Path\n"
-        "async def generate(image, seed, witness):\n"
-        f"    with Path({str(generated)!r}).open('a') as stream:\n"
-        "        stream.write(str(seed) + '\\n')\n"
-        "    return image.decode() + ':' + str(seed)\n"
-    )
-    rounds = {
-        1: scenario.inputs,
-        2: scenario.inputs.model_copy(update={"number": 2, "round": "test-2", "seed": 99}),
-    }
-    current = [1]
-    rows = {1: {}, 2: {name: {"failure_reason": "generation_failed"} for name in scenario.images}}
-    lookups, contexts, submissions = [], [], []
+@pytest.mark.parametrize("number,stage", [(2, "miner_generation"), (1, "collecting")])
+async def test_worker_exits_when_the_requested_round_is_no_longer_generating(generation, scenario, number, stage):
+    config, _, state = generation
+    scenario.deps.git.files["state.json"] = json.dumps({"current_round": number, "stage": stage})
 
-    class Witness:
-        def __init__(self, config, **kwargs):
-            self.inputs = rounds[current[0]]
+    await state["run"](config)
 
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *args):
-            pass
-
-        async def replace_pod(self):
-            pass
-
-        def renderer_transport(self):
-            self.inputs = rounds[current[0]]
-
-            def context(request):
-                contexts.append(self.inputs.number)
-                return httpx.Response(
-                    200,
-                    json={
-                        "saving_enabled": True,
-                        "round_inputs": self.inputs.model_dump(mode="json"),
-                        "submission_commit": None,
-                        "prompts": [
-                            {**prompt.model_dump(), "url": f"https://saved-images.test/{prompt.id}"}
-                            for prompt in self.inputs.prompts
-                        ],
-                    },
-                )
-
-            return httpx.MockTransport(context)
-
-        async def get_submitted(self):
-            lookups.append(self.inputs.number)
-            return rows[self.inputs.number]
-
-        async def submit(self, image, result):
-            submissions.append(self.inputs.number)
-            if rollover == "retry":
-                current[0] = 2
-                raise RuntimeError("Fixture save connection lost during rollover")
-            name = next(name for name, raw in scenario.images.items() if raw == image)
-            rows[self.inputs.number][name] = {"failure_reason": "generation_failed"}
-            if rollover == "confirmation" and len(rows[1]) == len(scenario.images):
-                current[0] = 2
-            return {"saved": True}
-
-    async def download(transport, request):
-        if rollover == "download":
-            current[0] = 2
-        return httpx.Response(200, content=scenario.images[PurePosixPath(request.url.path).stem])
-
-    monkeypatch.setattr(witness_client, "AsyncWitnessClient", Witness)
-    monkeypatch.setattr(batch, "AsyncWitnessClient", Witness)
-    monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", download)
-    with pytest.raises(ValueError, match="Witness seed differs"):
-        await state["once"](config, directory)
-    assert 2 in contexts
-    assert lookups == [1]
-    assert submissions == {"download": [], "retry": [1], "confirmation": [1, 1]}[rollover]
-    assert (generated.read_text().splitlines() if generated.exists() else []) == (
-        {"download": [], "retry": ["42"], "confirmation": ["42", "42"]}[rollover]
-    )
+    assert state["git_files"] == ["state.json"]
+    assert state["source_fetches"] == []
+    assert state["clients"] == []
+    assert state["submitted"] == []

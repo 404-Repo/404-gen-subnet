@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import os
 from collections.abc import Awaitable, Callable, Mapping
@@ -45,17 +44,13 @@ async def run_pass(
     *,
     client: AsyncWitnessClient,
     workers: int = 8,
-    validate_witness: Callable[[AsyncWitnessClient], Awaitable[Mapping[str, str]]] | None = None,
-    prompt_hashes: Mapping[str, str] | None = None,
+    max_prompt_bytes: int | None = None,
 ) -> None:
     """Process pending prompts once, removing confirmed submissions as they finish."""
     if not pending:
         return
-    download_limit = MAX_PROMPT_DOWNLOAD_BYTES if prompt_hashes is not None else None
     async with httpx.AsyncClient(timeout=30, follow_redirects=True, trust_env=False) as http:
         submitted = await client.get_submitted()
-        if prompt_hashes is not None and set(submitted) - set(prompt_hashes):
-            raise ValueError("Witness contains unexpected prompt IDs")
         queue = asyncio.Queue[tuple[str, str | bytes]]()
         for prompt_id, source in pending.copy().items():
             if prompt_id in submitted:
@@ -68,11 +63,7 @@ async def run_pass(
             while not queue.empty():
                 prompt_id, source = queue.get_nowait()
                 try:
-                    image = await read_image(source, http, max_bytes=download_limit)
-                    if prompt_hashes is not None and hashlib.sha256(image).hexdigest() != prompt_hashes[prompt_id]:
-                        raise ValueError("Prompt image differs from its frozen hash")
-                    if validate_witness is not None:
-                        await validate_witness(client)
+                    image = await read_image(source, http, max_bytes=max_prompt_bytes)
                     logger.info("{} | generating", prompt_id[:12])
 
                     result = await generate(image, seed, client)
@@ -87,8 +78,6 @@ async def run_pass(
         await asyncio.gather(*(worker() for _ in range(workers)))
         # A failed submission request may already have saved a terminal outcome.
         if pending:
-            if validate_witness is not None:
-                await validate_witness(client)
             submitted = await client.get_submitted()
             for prompt_id in submitted:
                 pending.pop(prompt_id, None)

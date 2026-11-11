@@ -20,7 +20,6 @@ from miner_runtime.pod import Config, pod_body
 from pod_gateway.runpod import CreateRejected, CreateUnknown, PodProvider
 from subnet_common.graceful_shutdown import GracefulShutdown
 from subnet_common.witness.models import Pod
-from subnet_common.witness.rounds import repository
 
 from .credentials import ACCESS_TOKEN_MARGIN_SECONDS, AccessCredentials
 from .models import Allocation, Job
@@ -58,10 +57,7 @@ async def _threaded(operation: Callable[[], T]) -> T:
 
 
 def read_config(store: JobStore, job: Job) -> Config:
-    data = json.loads((store.run_directory(job) / "config.json").read_bytes())
-    data.pop("credentials_url", None)
-    data.pop("credential_interval_seconds", None)
-    return Config(**data)
+    return Config(**json.loads((store.run_directory(job) / "config.json").read_bytes()))
 
 
 class RunpodRunner:
@@ -136,17 +132,17 @@ class RunpodRunner:
         return total
 
     def _prepare_payload(self, job: Job) -> None:
-        directory = self.store.run_directory(job)
-        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
-        if (directory / "config.json").exists():
-            return
         snapshot = job.snapshot
+        path = self.store.run_directory(job) / "config.json"
+        if path.exists():
+            payload = json.loads(path.read_bytes())
+            if "competition_repository" in payload and payload["generation_image"] == snapshot.generation_image:
+                return
         config = Config(
             generation_image=snapshot.generation_image,
-            source_repository=f"https://github.com/{repository(snapshot.leader.repo)}",
-            source_commit=snapshot.leader.commit,
-            prompts={prompt.id: prompt.sha256 for prompt in snapshot.inputs.prompts},
-            seed=snapshot.inputs.seed,
+            competition_repository=snapshot.inputs.repository,
+            competition_branch=snapshot.inputs.branch,
+            round_number=snapshot.inputs.number,
             hotkey=snapshot.hotkey,
             account_id=snapshot.account_id,
             witness_url=snapshot.witness_url,
@@ -160,18 +156,17 @@ class RunpodRunner:
             prover_contexts=snapshot.prover_contexts,
             go_cpus=snapshot.go_cpus,
             go_memory_mib=snapshot.go_memory_mib,
-            round_inputs_fingerprint=snapshot.inputs.fingerprint,
         )
-        atomic_write(directory / "config.json", json.dumps(asdict(config)).encode())
+        atomic_write(path, json.dumps(asdict(config)).encode())
 
     def _ensure(self, job: Job) -> None:
         allocation = job.allocation
         if allocation is None or allocation.phase == "terminated":
-            allocation = Allocation()
-            job.allocations.append(allocation)
-            self.store.save(job)
+            job.allocations.append(Allocation())
         elif allocation.phase != "intent":
             raise RuntimeError("Previous generation attempt must be terminated before preparation")
+        job.snapshot = job.snapshot.model_copy(update={"generation_image": self.settings.generation_image})
+        self.store.save(job)
         self._prepare_payload(job)
 
     async def ensure(self, job: Job) -> None:

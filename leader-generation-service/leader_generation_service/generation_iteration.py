@@ -7,28 +7,24 @@ from dataclasses import dataclass
 import httpx
 from bittensor_wallet import Wallet
 from loguru import logger
-from miner_runtime.pod import PARAMS_PATH
 from pod_gateway.membership import Membership, MembershipRefresher
 from pod_gateway.runpod import RunPodClient
 from subnet_common.competition.config import require_competition_config
-from subnet_common.competition.leader import require_leader_state
-from subnet_common.competition.prompts import require_prompts
+from subnet_common.competition.prompts import prompt_ids, require_prompts
 from subnet_common.competition.schedule import require_schedule
-from subnet_common.competition.seed import require_seed_from_git
 from subnet_common.competition.state import RoundStage, require_state
 from subnet_common.discord import DiscordWebhook
 from subnet_common.github import GitHubClient
 from subnet_common.graceful_shutdown import GracefulShutdown
-from subnet_common.witness.rounds import RoundInputs, repository
+from subnet_common.witness.rounds import repository
 
 from .credentials import CredentialManager
-from .models import Job, Snapshot
-from .round_runner import RoundRunner, Runner, prompt_ids
+from .models import Job, RoundProgress, Snapshot
+from .round_runner import RoundRunner, Runner
 from .runpod import RunpodRunner
-from .runtime import ROOT
 from .settings import Settings
 from .store import JobStore
-from .witness import SavedResults, WitnessInputs
+from .witness import SavedResults
 
 
 @dataclass
@@ -37,7 +33,6 @@ class Dependencies:
     store: JobStore
     runner: Runner
     credentials: CredentialManager
-    inputs: Callable[[], Awaitable[RoundInputs]]
     saved: SavedResults
     head: Callable[[], Awaitable[tuple[int, float]]]
     hotkey: str
@@ -61,13 +56,11 @@ async def create_dependencies(settings: Settings, shutdown: GracefulShutdown) ->
                 async def head() -> tuple[int, float]:
                     return await asyncio.to_thread(chain.generation_head)
 
-                witness = WitnessInputs(settings.witness_url, key, ROOT / PARAMS_PATH)
                 yield Dependencies(
                     git,
                     store,
                     RunpodRunner(settings, store, provider, provider_http, shutdown=shutdown),
                     CredentialManager(settings.codex_home, settings.codex),
-                    witness.read,
                     SavedResults(http, settings.cdn_url),
                     head,
                     key.ss58_address,
@@ -106,51 +99,46 @@ async def generation_iteration(
             continue
         current = job
     if current is not None:
+        logger.info("Round {} checking its existing generation job", state.current_round)
         await controller.run(current)
         return
     if state.stage != RoundStage.MINER_GENERATION:
         logger.info("Round {} skipped because stage is {}", state.current_round, state.stage.value)
         return
+    logger.info("Round {} loading competition settings", state.current_round)
     config = await require_competition_config(git, ref)
     if config.leader_generation_hotkey is None:
         logger.info("Round {} skipped because config.json has no leader_generation_hotkey", state.current_round)
         return
     if config.leader_generation_hotkey != dependencies.hotkey:
+        logger.error("Round {} configured hotkey differs from the operator wallet", state.current_round)
         raise ValueError("Configured leader generation hotkey differs from the operator wallet")
     schedule = await require_schedule(git, state.current_round, ref)
-    urls = await require_prompts(git, state.current_round, ref)
-    seed = await require_seed_from_git(git, state.current_round, ref)
-    leader = (await require_leader_state(git, ref)).get_latest()
-    if leader is None:
-        raise ValueError("Competition has no incumbent leader")
     if not schedule.witness_save_submissions:
         raise ValueError("Leader generation requires witness result saving")
     if schedule.generation_deadline_block is not None:
-        # Avoid even a witness allocation when the published deadline has closed.
+        logger.info("Round {} checking the generation deadline on Finney", state.current_round)
         block, observed = await dependencies.head()
         if not time.time() - 60 <= observed <= time.time() + 5:
             raise ValueError("Generation block is stale")
         if block >= schedule.generation_deadline_block:
             logger.info("Round {} skipped because the generation deadline has been reached", state.current_round)
             return
+    urls = await require_prompts(git, state.current_round, ref)
+    inputs = RoundProgress(
+        repository=repository(settings.github_repo),
+        branch=settings.github_branch,
+        round=f"{config.name}-{state.current_round}",
+        number=state.current_round,
+        prompt_ids=tuple(prompt_ids(urls)),
+        generation_deadline_block=schedule.generation_deadline_block,
+        storage_prefix=schedule.witness_storage_prefix,
+    )
+    logger.info("Round {} checking subscription credentials", state.current_round)
     credentials = await dependencies.credentials.current()
-    inputs = await dependencies.inputs()
-    if (
-        inputs.repository != repository(settings.github_repo)
-        or inputs.branch != settings.github_branch
-        or inputs.number != state.current_round
-        or inputs.round != f"{config.name}-{state.current_round}"
-        or inputs.seed != seed
-        or set(inputs.prompt_ids.values()) != prompt_ids(urls)
-        or inputs.storage_prefix != schedule.witness_storage_prefix
-        or inputs.generation_deadline_block != schedule.generation_deadline_block
-        or not inputs.save_submissions
-    ):
-        raise ValueError("Witness frozen inputs differ from the published round")
     snapshot = Snapshot(
         state_ref=ref,
         generation_image=settings.generation_image,
-        leader=leader,
         inputs=inputs,
         hotkey=dependencies.hotkey,
         account_id=credentials.account_id,
@@ -166,6 +154,7 @@ async def generation_iteration(
     )
     job = Job(snapshot=snapshot)
     store.save(job)
+    logger.info("Round {} checking saved witness results", state.current_round)
     await controller.run(job)
 
 

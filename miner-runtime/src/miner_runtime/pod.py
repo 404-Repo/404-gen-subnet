@@ -16,23 +16,17 @@ import sys
 import tempfile
 import time
 import uuid
-from collections.abc import Awaitable, Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from types import ModuleType
-from typing import TYPE_CHECKING
-from urllib.parse import urlsplit
-
-if TYPE_CHECKING:
-    from witness_client import AsyncWitnessClient
+from urllib.parse import quote, urlsplit
 
 IMAGE_PATTERN = r"^[a-z0-9][a-z0-9._:/-]*@sha256:[0-9a-f]{64}$"
 IMAGE_ROOT = Path("/opt/leader-image")
 IMAGE_PARAMETERS = IMAGE_ROOT / "params"
 IMAGE_MANIFEST = IMAGE_ROOT / "provenance.json"
 REMOTE = Path("/opt/leader-run")
-PARAMS_PATH = "witness-server/worker/witness_pod/verifier/params"
 PARAMETERS = {
     "circuit.bin": "451b8ebe434e1b9cee5982a46f4630d3d3647fe49c11f2ec6d88b8731617f9c7",
     "proving.bin": "31bd198d1325f526f5f1add2272bf73ffaff23c9e2d0ac7463c0f5e88c8701e7",
@@ -51,10 +45,9 @@ def https(value: str) -> str:
 @dataclass(frozen=True)
 class Config:
     generation_image: str
-    source_repository: str
-    source_commit: str
-    prompts: dict[str, str]
-    seed: int
+    competition_repository: str
+    competition_branch: str
+    round_number: int
     hotkey: str
     account_id: str
     witness_url: str = "https://witness.subnet404.xyz"
@@ -68,18 +61,14 @@ class Config:
     prover_contexts: int = 4
     go_cpus: int = 8
     go_memory_mib: int = 2048
-    round_inputs_fingerprint: str | None = None
 
     def __post_init__(self) -> None:
-        if not re.fullmatch(r"[0-9a-f]{40}", self.source_commit):
-            raise ValueError("Use a full 40-character source commit")
         if not re.fullmatch(IMAGE_PATTERN, self.generation_image):
             raise ValueError("Generation image must be pinned by SHA256 digest")
-        for digest_value in (self.round_inputs_fingerprint,):
-            if digest_value is not None and not re.fullmatch(r"[0-9a-f]{64}", digest_value):
-                raise ValueError("Expected a SHA256 digest")
-        if not re.fullmatch(r"https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/?", self.source_repository):
-            raise ValueError("Source must be an HTTPS GitHub repository URL")
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", self.competition_repository):
+            raise ValueError("Competition repository must be a GitHub owner/repository")
+        if not self.competition_branch or self.round_number < 0:
+            raise ValueError("Expected a competition branch and round")
         if not re.fullmatch(r"[1-9A-HJ-NP-Za-km-z]{48}", self.hotkey):
             raise ValueError("Expected an operator hotkey address")
         if not re.fullmatch(r"[a-f0-9-]{1,80}", self.account_id):
@@ -87,12 +76,6 @@ class Config:
         https(self.witness_url)
         if urlsplit(self.witness_url).path not in ("", "/"):
             raise ValueError("Witness URL must be an HTTPS origin")
-        if not 1 <= len(self.prompts) <= 4096 or any(
-                not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,254}", key)
-                or not re.fullmatch(r"[0-9a-f]{64}", value) for key, value in self.prompts.items()):
-            raise ValueError("Expected official prompt IDs and image SHA256 values")
-        if not 0 <= self.seed < 2**64:
-            raise ValueError("Seed must be an unsigned 64-bit integer")
         if self.vcpus < 2 or self.vcpus > 32 or self.vcpus & (self.vcpus - 1):
             raise ValueError("vcpus must be a power of two from 2 through 32")
         if not 1 <= self.go_cpus <= self.vcpus or self.go_memory_mib < 768 or self.disk_gb < 10:
@@ -167,14 +150,18 @@ def check_hardware(config: Config) -> dict[str, int | float | str]:
     return {"effective_cpus": cpus, "memory_bytes": memory, "machine": platform.machine()}
 
 
-def fetch_source(config: Config, directory: Path) -> None:
+def fetch_source(repo: str, commit: str, directory: Path) -> None:
+    from subnet_common.witness.rounds import repository
+
+    if not re.fullmatch(r"[0-9a-f]{40}", commit):
+        raise ValueError("Use a full 40-character source commit")
+    url = f"https://github.com/{repository(repo)}"
     source = directory / "source"
     source.mkdir(exist_ok=True)
     git(source, "init")
-    execute(["git", "-C", str(source), "fetch", "--depth=1", config.source_repository, config.source_commit],
-            timeout=600)
+    execute(["git", "-C", str(source), "fetch", "--depth=1", url, commit], timeout=600)
     git(source, "checkout", "--detach", "FETCH_HEAD")
-    if git(source, "rev-parse", "HEAD") != config.source_commit:
+    if git(source, "rev-parse", "HEAD") != commit:
         raise RuntimeError("Fetched leader commit differs from the pinned source")
     if not (source / "main.py").is_file():
         raise RuntimeError("Leader commit lacks main.py")
@@ -202,28 +189,25 @@ def runtime_environment(config: Config) -> dict[str, str]:
             "GOMEMLIMIT": f"{config.go_memory_mib}MiB", "PYTHONUNBUFFERED": "1"}
 
 
-def fingerprint(inputs: dict[str, object]) -> str:
-    """Hash the RoundInputs wire representation using its protocol canonicalization."""
-    data = {key: value for key, value in inputs.items() if key not in ("revision", "prompts")}
-    rows = inputs["prompts"]
-    if not isinstance(rows, list):
-        raise TypeError("Invalid frozen prompts")
-    data["prompts"] = [{key: row[key] for key in ("id", "sha256", "image_key")} for row in rows]
-    return hashlib.sha256(json.dumps(data, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-
-
-def check_context(config: Config, context: dict[str, object]) -> dict[str, str]:
-    inputs = context.get("round_inputs")
-    if not isinstance(inputs, dict) or not context.get("saving_enabled") or not inputs.get("save_submissions"):
-        raise ValueError("Witness result saving is unavailable")
-    if inputs.get("seed") != config.seed:
-        raise ValueError("Witness seed differs from the job")
-    rows = inputs["prompts"]
-    if {row["id"]: row["sha256"] for row in rows} != config.prompts:
-        raise ValueError("Witness prompts differ from the job")
-    if config.round_inputs_fingerprint is not None and fingerprint(inputs) != config.round_inputs_fingerprint:
-        raise ValueError("Witness frozen inputs differ from the job")
-    return {row["id"]: row["source_url"] for row in rows}
+def prompt_url(value: str, config: Config, revision: str) -> str:
+    parsed = urlsplit(value)
+    origin = f"https://raw.githubusercontent.com/{config.competition_repository}/{revision}/"
+    if not parsed.scheme and not parsed.netloc:
+        if value.startswith("/") or any(part in (".", "..") for part in value.split("/")):
+            raise ValueError("Invalid repository prompt path")
+        return origin + quote(value, safe="/")
+    if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.fragment:
+        raise ValueError("Prompt references must use HTTPS")
+    repo_path = f"/{config.competition_repository}/"
+    if parsed.path[:len(repo_path)].lower() == repo_path.lower():
+        path = parsed.path[len(repo_path):]
+        for host, prefix in (
+            ("raw.githubusercontent.com", f"{config.competition_branch}/"),
+            ("github.com", f"blob/{config.competition_branch}/"),
+        ):
+            if parsed.hostname == host and path.startswith(prefix):
+                return origin + path.removeprefix(prefix)
+    return value
 
 
 def install_identity(config: Config, directory: Path, value: str) -> None:
@@ -275,40 +259,11 @@ def load_miner(source: Path) -> ModuleType:
     return module
 
 
-async def generate_pass(
-    config: Config,
-    witness: AsyncWitnessClient,
-    generate: Callable[[bytes, int, AsyncWitnessClient], Awaitable[str | None]],
-) -> None:
-    import httpx
-    from miner_runtime.batch import run_pass
-
-    async def validate_witness(client: AsyncWitnessClient) -> dict[str, str]:
-        async with httpx.AsyncClient(transport=client.renderer_transport(), trust_env=False) as control:
-            response = await control.get("https://witness.pod/v1/artifacts/context")
-            response.raise_for_status()
-            return check_context(config, response.json())
-
-    await witness.replace_pod()
-    urls = await validate_witness(witness)
-    await run_pass(
-        generate,
-        dict(urls),
-        config.seed,
-        workers=config.workers,
-        validate_witness=validate_witness,
-        client=witness,
-        prompt_hashes=config.prompts,
-    )
-    await validate_witness(witness)
-    submitted = await witness.get_submitted()
-    if set(submitted) != set(config.prompts):
-        raise RuntimeError("Witness results do not cover exactly the official prompts")
-
-
-async def generate_batch(config: Config, directory: Path) -> None:
+async def generate_batch(config: Config, directory: Path, pending: dict[str, str | bytes], seed: int) -> None:
     from bittensor_wallet import Wallet
     from witness_client import AsyncWitnessClient, WitnessConfig
+
+    from miner_runtime.batch import MAX_PROMPT_DOWNLOAD_BYTES, run_pass
 
     hotkey = Wallet(name="leader", hotkey="default", path=str(directory / "private/wallets")).hotkey
     if hotkey.ss58_address != config.hotkey:
@@ -329,7 +284,11 @@ async def generate_batch(config: Config, directory: Path) -> None:
                     await asyncio.sleep(delay)
             requested_at = time.monotonic()
             try:
-                await generate_pass(config, witness, generate)
+                await witness.replace_pod()
+                await run_pass(
+                    generate, pending, seed, workers=config.workers, client=witness,
+                    max_prompt_bytes=MAX_PROMPT_DOWNLOAD_BYTES,
+                )
             except Exception as error:
                 print(f"Generation pass failed ({type(error).__name__}); pending prompts will be retried", flush=True)
             else:
@@ -337,9 +296,35 @@ async def generate_batch(config: Config, directory: Path) -> None:
 
 
 async def run_job(config: Config, directory: Path, *, hotkey: str, access_token: str) -> None:
+    from subnet_common.competition.leader import require_leader_state
+    from subnet_common.competition.prompts import prompt_ids, require_prompts
+    from subnet_common.competition.seed import require_seed_from_git
+    from subnet_common.competition.state import RoundStage, require_state
+    from subnet_common.github import GitHubClient
+
+    async with GitHubClient(config.competition_repository) as git:
+        revision = await git.get_ref_sha(config.competition_branch)
+        state = await require_state(git, revision)
+        if state.current_round != config.round_number or state.stage != RoundStage.MINER_GENERATION:
+            print(f"Round {config.round_number} skipped: Git shows round {state.current_round} at {state.stage.value}",
+                  flush=True)
+            return
+        leader = (await require_leader_state(git, revision)).get_latest()
+        if leader is None:
+            raise ValueError("Competition has no incumbent leader")
+        seed = await require_seed_from_git(git, state.current_round, revision)
+        urls = await require_prompts(git, state.current_round, revision)
+    if not 0 <= seed < 2**64:
+        raise ValueError("Seed must be an unsigned 64-bit integer")
+    pending: dict[str, str | bytes] = {
+        name: prompt_url(url, config, revision) for name, url in zip(prompt_ids(urls), urls, strict=True)
+    }
+    print(f"Round {state.current_round} at {revision[:10]}: {len(pending)} prompts, "
+          f"leader {leader.repo}@{leader.commit}", flush=True)
+    await asyncio.to_thread(fetch_source, leader.repo, leader.commit, directory)
     install_credentials(config, directory, access_token)
     install_identity(config, directory, hotkey)
-    await generate_batch(config, directory)
+    await generate_batch(config, directory, pending, seed)
 
 
 def main() -> None:
@@ -352,7 +337,6 @@ def main() -> None:
     print(f"Generation image source commit: {source_commit}", flush=True)
     check_hardware(config)
     REMOTE.mkdir(parents=True, exist_ok=True)
-    fetch_source(config, REMOTE)
 
     async def run() -> None:
         asyncio.get_running_loop().set_default_executor(
