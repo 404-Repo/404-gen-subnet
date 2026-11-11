@@ -177,12 +177,15 @@ async def validate_prompt(
     settings: Settings,
     budget: PromptBudget,
 ) -> ValidationResult:
+    canonical = inputs.generations[prompt.id]
+    if canonical.js is None and canonical.failure_reason != "generation_failed":
+        raise ValueError(f"No completed independent submission: {canonical.failure_reason or 'missing_saved_output'}")
+
     image = await read_object(r2, r2.bucket, prompt.image_key)
     if hashlib.sha256(image).hexdigest() != prompt.sha256:
         raise ValueError("Frozen prompt bytes differ")
     image_path = directory / "prompt.png"
     await asyncio.to_thread(image_path.write_bytes, image)
-    canonical = inputs.generations[prompt.id]
     expected = None
     if canonical.js is not None:
         response = await http.get(canonical.js, follow_redirects=True)

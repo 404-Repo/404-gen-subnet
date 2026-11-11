@@ -369,6 +369,42 @@ def generate(image, seed, witness, renderer):
         self.assertEqual(self.reads["/canonical/chair.js"], 1)
         self.assertEqual(self.reads["/repos/test/miner/tarball/" + "d" * 40], 2)
 
+    async def test_missing_submission_stays_pending(self) -> None:
+        self.stop_after_chair = False
+        self.failed_read = True
+        self.commits[self.ref][f"rounds/7/{self.hotkey}/generated.json"] = json.dumps(
+            {
+                "chair": {"failure_reason": "generation_failed"},
+                "lamp": {"failure_reason": "not_submitted"},
+                "table": {"failure_reason": "not_submitted"},
+            }
+        )
+        source = self.source.replace(b"    return name\n", b'    return name if name == "table" else None\n')
+        archive = io.BytesIO()
+        with tarfile.open(fileobj=archive, mode="w:gz") as stream:
+            member = tarfile.TarInfo("submission/main.py")
+            member.size = len(source)
+            stream.addfile(member, io.BytesIO(source))
+        self.archive = archive.getvalue()
+
+        async with (
+            GitHubClient("test/competition", token=self.secret, base_url=self.base) as git,
+            R2Client("fixture", "fixture", self.base + "/r2", bucket="main") as r2,
+            httpx.AsyncClient(trust_env=False) as http,
+            asyncio.timeout(45),
+        ):
+            await run_validation(
+                7, self.hotkey, self.ref, self.private_path / "validation", git, r2, http, self.settings, self.shutdown
+            )
+
+        prompts = ValidationProgress.model_validate_json(self.commits[self.head][self.path]).prompts
+        self.assertEqual(
+            {name: prompt.status for name, prompt in prompts.items()},
+            {"chair": "passed", "lamp": "pending", "table": "pending"},
+        )
+        for name in ("lamp", "table"):
+            self.assertIn("not_submitted", prompts[name].reason)
+
     async def test_unrecorded_model_call_allows_miner_fallback(self) -> None:
         self.stop_after_chair = False
         self.failed_read = True
