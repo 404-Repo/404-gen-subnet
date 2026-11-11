@@ -20,6 +20,10 @@ from validation_worker.inputs import ValidationInputs
 from validation_worker.settings import Settings
 
 
+class SourceArchiveNotFound(ValueError):
+    pass
+
+
 async def read_object(r2: R2Client, bucket: str, key: str) -> bytes:
     response = await r2.client.get_object(Bucket=bucket, Key=key)
     body = response["Body"]
@@ -95,7 +99,14 @@ def extract_source(archive: Path, destination: Path) -> None:
 
 async def prepare_source(inputs: ValidationInputs, git: GitHubClient, directory: Path) -> Path:
     archive = directory / "source.tar.gz"
-    await download(git.client, f"/repos/{inputs.submission.repo}/tarball/{inputs.submission.commit}", archive)
+    try:
+        await download(git.client, f"/repos/{inputs.submission.repo}/tarball/{inputs.submission.commit}", archive)
+    except httpx.HTTPStatusError as error:
+        if error.response.status_code != 404:
+            raise
+        raise SourceArchiveNotFound(
+            f"GitHub returned 404 Not Found for submitted source {inputs.submission.repo}@{inputs.submission.commit}"
+        ) from error
     source = directory / "source"
     await asyncio.to_thread(source.mkdir)
     await asyncio.to_thread(extract_source, archive, source)

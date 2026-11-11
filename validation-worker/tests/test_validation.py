@@ -71,6 +71,7 @@ class ValidationIntegration(unittest.IsolatedAsyncioTestCase):
         self.reads: dict[str, int] = {}
         self.failed_write = False
         self.failed_read = False
+        self.source_missing = False
         self.stop_after_chair = True
         self.stop_after_lamp_render = False
         self.unavailable_render: str | None = None
@@ -306,6 +307,8 @@ def generate(image, seed, witness, renderer):
             self.head = payload["sha"]
             return web.json_response({"object": {"sha": self.head}})
         if path.startswith("/repos/test/miner/tarball/"):
+            if self.source_missing:
+                return web.Response(status=404)
             return web.Response(body=self.archive)
         if path.startswith("/canonical/"):
             return web.Response(body=self.objects["main"][path.removeprefix("/")])
@@ -369,6 +372,24 @@ def generate(image, seed, witness, renderer):
         self.assertEqual(self.reads["/r2/main/" + self.frozen.prompts[0].image_key], 1)
         self.assertEqual(self.reads["/canonical/chair.js"], 1)
         self.assertEqual(self.reads["/repos/test/miner/tarball/" + "d" * 40], 2)
+
+    async def test_missing_submitted_source_fails_immediately(self) -> None:
+        self.source_missing = True
+        async with (
+            GitHubClient("test/competition", token=self.secret, base_url=self.base) as git,
+            R2Client("fixture", "fixture", self.base + "/r2", bucket="main") as r2,
+            httpx.AsyncClient(trust_env=False) as http,
+        ):
+            await run_validation(
+                7, self.hotkey, self.ref, self.private_path / "validation", git, r2, http, self.settings, self.shutdown
+            )
+
+        progress = ValidationProgress.model_validate_json(self.commits[self.head][self.path])
+        self.assertEqual(self.reads["/repos/test/miner/tarball/" + "d" * 40], 1)
+        self.assertEqual(set(progress.prompts), {"chair"})
+        self.assertEqual(progress.prompts["chair"].status, "failed")
+        self.assertIn("404 Not Found", progress.prompts["chair"].reason)
+        self.assertIn("test/miner@" + "d" * 40, progress.prompts["chair"].reason)
 
     async def test_missing_submission_stays_pending(self) -> None:
         self.stop_after_chair = False
