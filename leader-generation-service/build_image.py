@@ -64,6 +64,12 @@ def prepare_context(root: Path, target: Path, commit: str, *, development: bool)
         archive = execute(["git", "-C", str(root), "archive", "--format=tar", commit, *SOURCES])
         with tarfile.open(fileobj=io.BytesIO(archive)) as package:
             package.extractall(target, filter="data")
+        # The image copies these parameters without the shared source directory.
+        key = target / "witness-server/worker/witness_pod/verifier/params/verifying.bin"
+        if key.is_symlink():
+            contents = key.read_bytes()
+            key.unlink()
+            key.write_bytes(contents)
     for path in sorted(target.rglob("*")):
         if path.is_file():
             hashes[str(path.relative_to(target))] = digest(path)
