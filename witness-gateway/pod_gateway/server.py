@@ -510,10 +510,10 @@ class Gateway:
                 "certificate": peer.certificate, "pod_id": session.pod_id, "start_id": session.start_id,
                 "access": "hotkey", "expires": LEGACY_ACCESS_EXPIRES}
 
-    def _selected(self, scope: Scope, start_id: str, pod_id: str) -> bool:
-        session, pod = self._current.get(scope), self._pods.get(pod_id)
-        return (session is not None and session.phase == "allocated" and session.start_id == start_id and
-                session.pod_id == pod_id and pod is not None and pod.status == "RUNNING" and pod.lifecycle == "active")
+    def _selected(self, scope: Scope, start_id: str, pod: Pod) -> bool:
+        session = self._current.get(scope)
+        return (session is not None and session.phase in ("creating", "allocated") and
+                session.start_id == start_id and session.pod_id == pod.id and pod.lifecycle == "active")
 
     def _publish(self, inventory: list[Pod]) -> None:
         grouped: dict[Scope, list[Pod]] = {}
@@ -571,7 +571,8 @@ class Gateway:
             pod = self._pods.get(session.pod_id)
             if pod is None or (
                 pod.status not in ("EXITED", "ERROR", "TERMINATED")
-                and (pod.status != "RUNNING" or not self.registry.ready(session.pod_id))
+                and (session.phase == "creating" or pod.status != "RUNNING"
+                     or not self.registry.ready(session.pod_id))
             ):
                 return self.refresh_seconds
         return self.idle_refresh_seconds
@@ -754,7 +755,7 @@ class Gateway:
             ):
                 raise AuthRejected("pod_starting", 503)
             endpoint = pod.tcp.get(self.allocator.spec.port)
-            if endpoint is None and self._selected(scope, start_id, pod_id):
+            if endpoint is None and self._selected(scope, start_id, pod):
                 raise AuthRejected("pod_starting", 503)
             socket = web.WebSocketResponse(max_msg_size=16384, heartbeat=15)
             await socket.prepare(request)
@@ -784,7 +785,7 @@ class Gateway:
         try:
             if not self._live():
                 return socket
-            selected = self._selected(scope, start_id, pod_id)
+            selected = self._selected(scope, start_id, pod)
             await socket.send_json(
                 {
                     "type": "activate" if selected else "drain",
@@ -801,7 +802,7 @@ class Gateway:
                 if isinstance(certificate, str) and len(certificate) <= 8192:
                     peer.certificate = certificate
                 if data.get("type") in ("ready", "heartbeat"):
-                    selected = self._selected(scope, start_id, pod_id)
+                    selected = self._selected(scope, start_id, pod)
                     peer.ready = (
                         selected
                         and data.get("ready") is True

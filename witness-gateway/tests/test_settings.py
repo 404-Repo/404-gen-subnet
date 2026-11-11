@@ -317,8 +317,13 @@ def test_final_saving_requires_and_forwards_embedding_settings(values: dict[str,
 
 
 @pytest.mark.filterwarnings("ignore:It is recommended to use web.RequestKey instances")
+@pytest.mark.parametrize("cached_status,cached_lifecycle", [
+    ("STARTING", "active"),
+    ("RUNNING", "pending"),
+])
 def test_gateway_polls_faster_for_starting_and_reconnecting_pods(
     values: dict[str, object], tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    cached_status: str, cached_lifecycle: str,
 ) -> None:
     from aiohttp import ClientWebSocketResponse
     from aiohttp.test_utils import TestClient, TestServer
@@ -341,11 +346,13 @@ def test_gateway_polls_faster_for_starting_and_reconnecting_pods(
         scope = Scope(settings.deployment, "test-0", Keypair.create_from_uri("//Bob").ss58_address)
         start = "00000000-0000-4000-8000-000000000002"
         pod_id = "fixture-worker"
+        pod_name = scope.name(start)
         pod = spec.body(scope, start, epoch_ns=2)
-        pod.update(id=pod_id, status="STARTING", name=scope.name(start) + "-active",
+        pod.update(id=pod_id, status=cached_status, name=f"{pod_name}-{cached_lifecycle}",
                    runtime={"ports": [{"type": "tcp", "ip": "8.8.8.8", "private": spec.port, "public": 44001}]})
         state = MemoryState()
-        Selection(state).update(runpod.RunPodClient._pod(pod), active=True)
+        selection = Selection(state)
+        selection.update(runpod.RunPodClient._pod(pod), active=True)
         reads = 0
 
         def handle(request: httpx.Request) -> httpx.Response:
@@ -401,17 +408,20 @@ def test_gateway_polls_faster_for_starting_and_reconnecting_pods(
             async with asyncio.timeout(1):
                 while not gateway._live():
                     await asyncio.sleep(0.005)
-            assert gateway._pods[pod_id].status == "STARTING"
             startup_reads = reads
-            pod["status"] = "RUNNING"
+            pod.update(status="RUNNING", name=f"{pod_name}-active")
             await advance(1)
             assert reads == startup_reads
-            await advance(1)
-            assert reads > startup_reads
-            assert gateway._pods[pod_id].status == "RUNNING"
+            assert gateway._pods[pod_id].status == cached_status
+            assert gateway._pods[pod_id].lifecycle == cached_lifecycle
 
             async with client.ws_connect(path, headers=headers) as socket:
                 await report_ready(socket)
+                assert await gateway._endpoint(scope, gateway._cached(scope)) is None
+                await advance(1)
+                assert reads > startup_reads
+                endpoint = await gateway._endpoint(scope, gateway._cached(scope))
+                assert endpoint is not None and endpoint["pod_id"] == pod_id
                 assert gateway._inventory_refresh_interval() == 15
                 idle_reads = reads
                 await advance(12)
@@ -430,9 +440,21 @@ def test_gateway_polls_faster_for_starting_and_reconnecting_pods(
             assert reads > reconnect_reads
             assert gateway._pods[pod_id].status == "STARTING"
             pod["status"] = "RUNNING"
-            await advance(2)
+            await advance(1)
+            assert gateway._pods[pod_id].status == "STARTING"
             async with client.ws_connect(path, headers=headers) as socket:
                 await report_ready(socket)
+                await advance(1)
+                assert await gateway._endpoint(scope, gateway._cached(scope)) is not None
+
+            async with asyncio.timeout(1):
+                while pod_id in gateway.registry.peers:
+                    await asyncio.sleep(0.005)
+            selection.update(runpod.RunPodClient._pod(pod), active=False)
+            pod["name"] = f"{pod_name}-draining"
+            assert gateway._pods[pod_id].lifecycle == "active"
+            async with client.ws_connect(path, headers=headers) as socket:
+                assert (await socket.receive_json(timeout=1))["type"] == "drain"
 
     asyncio.run(scenario())
 

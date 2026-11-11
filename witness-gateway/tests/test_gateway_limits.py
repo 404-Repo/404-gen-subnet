@@ -456,7 +456,7 @@ def test_gateway_authority_loss_preserves_the_selected_worker(phase: str, monkey
             assert response.status == 202
             await response.read()
             async with asyncio.timeout(2):
-                while not gateway._pods or not gateway._selected(scope, FIRST, next(iter(gateway._pods))):
+                while not gateway._pods or not gateway._selected(scope, FIRST, next(iter(gateway._pods.values()))):
                     await asyncio.sleep(0.01)
             pod = next(iter(gateway._pods.values()))
             selection = state.load(Selection.key(scope))
@@ -507,7 +507,7 @@ def test_gateway_authority_loss_preserves_the_selected_worker(phase: str, monkey
                         "type": "heartbeat", "ready": True, "proof_key_sha256": gateway.proof_hash,
                     })
                 assert (await socket.receive(timeout=2)).type == WSMsgType.CLOSE
-            assert gateway._selected(scope, FIRST, pod.id)
+            assert gateway._selected(scope, FIRST, pod)
             assert provider.get(pod.id) == pod and provider.creates == 1
             assert state.load(Selection.key(scope)) == selection
             response = await request(client, KEYS[1], "POST", "/v1/pods/start", {"start_id": SECOND})
@@ -526,7 +526,7 @@ def test_authoritative_gateway_drains_a_superseded_worker(connected: bool) -> No
             assert response.status == 202
             await response.read()
             async with asyncio.timeout(2):
-                while not gateway._pods or not gateway._selected(scope, FIRST, next(iter(gateway._pods))):
+                while not gateway._pods or not gateway._selected(scope, FIRST, next(iter(gateway._pods.values()))):
                     await asyncio.sleep(0.01)
             pod = next(iter(gateway._pods.values()))
             gateway._due[scope] = time.time() + 60
@@ -536,7 +536,7 @@ def test_authoritative_gateway_drains_a_superseded_worker(connected: bool) -> No
                 async with asyncio.timeout(2):
                     while gateway._current[scope].start_id != SECOND:
                         await asyncio.sleep(0.01)
-                assert not gateway._selected(scope, FIRST, pod.id)
+                assert not gateway._selected(scope, FIRST, pod)
                 return successor
 
             successor = None if connected else await supersede()
@@ -567,7 +567,7 @@ def test_background_retirement_preserves_worker_after_gateway_authority_loss() -
             assert response.status == 202
             await response.read()
             async with asyncio.timeout(2):
-                while not gateway._pods or not gateway._selected(scope, FIRST, next(iter(gateway._pods))):
+                while not gateway._pods or not gateway._selected(scope, FIRST, next(iter(gateway._pods.values()))):
                     await asyncio.sleep(0.01)
             pod = next(iter(gateway._pods.values()))
             selection = state.load(Selection.key(scope))
