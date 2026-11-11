@@ -45,7 +45,7 @@ async def main(round_num: int, hotkey: str, ref: str, output: Path) -> None:
             httpx.AsyncClient(timeout=30, trust_env=False) as http,
         ):
             terminal = await run_validation(round_num, hotkey, ref, output, git, r2, http, settings, shutdown)
-        if terminal:
+        if terminal and os.environ.get("RUNPOD_POD_ID"):
             await shutdown.wait()
     finally:
         shutdown.remove_signal_handlers()

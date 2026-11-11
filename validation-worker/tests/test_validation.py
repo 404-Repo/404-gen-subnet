@@ -60,8 +60,10 @@ class ValidationIntegration(unittest.IsolatedAsyncioTestCase):
         self.private = tempfile.TemporaryDirectory()
         self.private_path = Path(self.private.name)
         self.saved_environment = {
-            key: os.environ.get(key) for key in ("GITHUB_TOKEN", "R2_SECRET_ACCESS_KEY", "AWS_MAX_ATTEMPTS")
+            key: os.environ.get(key)
+            for key in ("GITHUB_TOKEN", "R2_SECRET_ACCESS_KEY", "AWS_MAX_ATTEMPTS", "RUNPOD_POD_ID", "RUNPOD_API_KEY")
         }
+        os.environ.pop("RUNPOD_POD_ID", None)
         os.environ["AWS_MAX_ATTEMPTS"] = "1"
         self.path = f"rounds/7/{self.hotkey}/validation.json"
         self.head = self.ref
@@ -196,7 +198,8 @@ def generate(image, seed, witness, renderer):
             pass
         else:
             raise RuntimeError("miner input is writable")
-    if any(os.environ.get(key) for key in ("GITHUB_TOKEN", "R2_SECRET_ACCESS_KEY", "SSH_AUTH_SOCK")):
+    credential_keys = ("GITHUB_TOKEN", "R2_SECRET_ACCESS_KEY", "RUNPOD_API_KEY", "SSH_AUTH_SOCK")
+    if any(os.environ.get(key) for key in credential_keys):
         raise RuntimeError("credential environment exposed")
     for root in ("", "/proc/1/root", "/proc/self/root"):
         for path in {private_paths!r}:
@@ -211,7 +214,7 @@ def generate(image, seed, witness, renderer):
             content = environment.read_bytes()
         except OSError:
             continue
-        if b"GITHUB_TOKEN=" in content or b"R2_SECRET_ACCESS_KEY=" in content:
+        if any(key.encode() + b"=" in content for key in credential_keys):
             raise RuntimeError("worker process environment exposed")
     try:
         with socket.socket() as connection:
@@ -298,11 +301,10 @@ def generate(image, seed, witness, renderer):
         if path == "/repos/test/competition/git/refs/heads/main":
             payload = await request.json()
             progress = ValidationProgress.model_validate_json(self.commits[payload["sha"]][self.path])
-            if (
-                len(progress.prompts) == 3
-                and all(state.status == "passed" for state in progress.prompts.values())
-                and not self.failed_write
-            ):
+            all_passed = len(progress.prompts) == 3 and all(
+                state.status == "passed" for state in progress.prompts.values()
+            )
+            if (all_passed or self.source_missing) and not self.failed_write:
                 self.failed_write = True
                 return web.Response(status=503)
             self.head = payload["sha"]
@@ -348,6 +350,7 @@ def generate(image, seed, witness, renderer):
         key.write_text("synthetic private SSH key")
         os.environ["GITHUB_TOKEN"] = self.secret
         os.environ["R2_SECRET_ACCESS_KEY"] = self.secret
+        os.environ["RUNPOD_API_KEY"] = self.secret
         with tempfile.TemporaryDirectory() as temporary:
             output = Path(temporary)
             async with (
@@ -382,11 +385,29 @@ def generate(image, seed, witness, renderer):
     async def test_missing_submitted_source_fails_immediately(self) -> None:
         self.source_missing = True
         self.settings.jobs = 8
+        os.environ["RUNPOD_POD_ID"] = "fixture-pod"
+        os.environ["RUNPOD_API_KEY"] = self.secret
         output = self.private_path / "validation"
+        termination_heads = []
+
+        def terminate(request: httpx.Request) -> httpx.Response:
+            self.assertEqual(request.method, "POST")
+            self.assertEqual(request.url.path, "/graphql")
+            self.assertEqual(request.headers["Authorization"], f"Bearer {self.secret}")
+            self.assertEqual(json.loads(request.content)["variables"], {"input": {"podId": "fixture-pod"}})
+            saved = ValidationProgress.model_validate_json(self.commits[self.head][self.path])
+            self.assertEqual(saved.prompts["chair"].status, "failed")
+            termination_heads.append(self.head)
+            if len(termination_heads) == 1:
+                return httpx.Response(200, json={"errors": [{"message": "Temporarily unavailable"}]})
+            return httpx.Response(200, json={"data": {"podTerminate": None}})
+
         async with (
             GitHubClient("test/competition", token=self.secret, base_url=self.base) as git,
             R2Client("fixture", "fixture", self.base + "/r2", bucket="main") as r2,
-            httpx.AsyncClient(trust_env=False) as http,
+            httpx.AsyncClient(
+                mounts={"https://api.runpod.io": httpx.MockTransport(terminate)}, trust_env=False
+            ) as http,
         ):
             finished = await run_validation(
                 7, self.hotkey, self.ref, output, git, r2, http, self.settings, self.shutdown
@@ -398,6 +419,7 @@ def generate(image, seed, witness, renderer):
 
         progress = ValidationProgress.model_validate_json(self.commits[self.head][self.path])
         self.assertEqual(self.reads["/repos/test/miner/tarball/" + "d" * 40], 1)
+        self.assertEqual(termination_heads, [saved_head] * 3)
         self.assertEqual(self.head, saved_head)
         self.assertTrue(finished)
         self.assertTrue(resumed)
