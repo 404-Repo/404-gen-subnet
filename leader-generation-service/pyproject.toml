@@ -10,6 +10,7 @@ packages = [{include = "leader_generation_service"}]
 python = ">=3.11,<3.14"
 subnet-common = {path = "../shared", develop = true}
 404-witness-client = {path = "../witness-client", develop = true}
+404-renderer-client = {path = "../renderer-client", develop = true}
 404-miner-runtime = {path = "../miner-runtime", develop = true}
 404-witness-gateway = {path = "../witness-gateway", develop = true}
 pydantic-settings = "2.12.0"
