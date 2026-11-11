@@ -1,10 +1,11 @@
 import hashlib
 import json
+from datetime import datetime
 from urllib.parse import quote
 
 import httpx
 from loguru import logger
-from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 from subnet_common.competition.generations import get_generations
 from subnet_common.competition.validation import ValidationProgress, ValidationResult, ValidationVerdict
 from subnet_common.github import GitHubClient
@@ -17,6 +18,7 @@ class Pod(BaseModel):
     id: str
     name: str
     status: str
+    created_at: AwareDatetime | None = Field(default=None, alias="createdAt")
 
 
 PodList = TypeAdapter(list[Pod])
@@ -60,20 +62,20 @@ async def execute_validation_job(
         GITHUB_BRANCH=settings.github_branch,
     )
     args = ["--round-num", str(round_num), "--hotkey", hotkey, "--ref", ref, "--output", "/var/lib/validation"]
-    response = await runpod.post(
-        "pods",
-        json={
-            "name": pod_name(settings, round_num, hotkey),
-            "image": settings.pod_image,
-            "registry": settings.pod_registry,
-            "cpu": {"id": "cpu3c", "vcpuCount": 4},
-            "cloud": "SECURE",
-            "disk": 12,
-            "env": env,
-            "args": json.dumps({"cmd": args}),
-            "ports": [],
-        },
-    )
+    body: dict[str, object] = {
+        "name": pod_name(settings, round_num, hotkey),
+        "image": settings.pod_image,
+        "registry": settings.pod_registry,
+        "cpu": {"id": "cpu3c", "vcpuCount": 4},
+        "cloud": "SECURE",
+        "disk": 12,
+        "env": env,
+        "args": json.dumps({"cmd": args}),
+        "ports": [],
+    }
+    if settings.pod_data_centers:
+        body["dataCenterIds"] = settings.pod_data_centers
+    response = await runpod.post("pods", json=body)
     response.raise_for_status()
     try:
         pod = Pod.model_validate_json(response.content)
@@ -87,6 +89,26 @@ async def delete_worker_pod(runpod: httpx.AsyncClient, pod: Pod) -> None:
     if response.status_code != 404:
         response.raise_for_status()
     logger.info(f"Removed validation Pod {pod.id}")
+
+
+async def pod_has_stalled(
+    git: GitHubClient, branch: str, round_num: int, hotkey: str, pod: Pod, cutoff: datetime
+) -> bool:
+    if pod.created_at is None or pod.created_at > cutoff:
+        return False
+    response = await git.client.get(
+        f"/repos/{git.repo}/commits",
+        params={"sha": branch, "path": f"rounds/{round_num}/{hotkey}/validation.json", "per_page": 1},
+    )
+    response.raise_for_status()
+    history = response.json()
+    if history == []:
+        return True
+    try:
+        committed_at = datetime.fromisoformat(history[0]["commit"]["committer"]["date"])
+        return committed_at <= cutoff
+    except (KeyError, TypeError, ValueError) as error:
+        raise ValueError("Invalid checkpoint commit timestamp") from error
 
 
 async def validation_outcome(

@@ -50,8 +50,15 @@ Git commit and starts the next pending candidate if the Pod slot is free. If a P
 disappears while work is pending, a replacement resumes the checkpoint. A
 candidate with exhausted prompt attempts stays pending. The coordinator removes
 any remaining Pods for completed candidates or requests that leave the current
-round. Each poll reads one commit. Later polls resolve the branch again to see new
-requests, results or rounds.
+round.
+
+The coordinator replaces a Pod after 45 minutes without a new checkpoint. It
+uses the Pod's creation time until the first save. The replacement starts in
+the same poll and resumes the candidate from Git.
+
+If a checkpoint read fails, the coordinator logs the error and ends the scan. It
+publishes the verdicts it has collected and can start the candidate it has
+already selected when the Pod slot is free.
 
 Missing `state.json`, malformed competition data and infrastructure failures are
 service errors. They are logged and retried on a later poll, leaving affected
@@ -95,7 +102,9 @@ VALIDATION_WORKER_ENV='{"R2_ENDPOINT":"https://your-account.r2.cloudflarestorage
 The Pod image must contain the worker and its sandbox. Reserve a distinct
 `VALIDATION_POD_PREFIX` for each coordinator. It tracks its Pods by name and
 uses `VALIDATION_POD_IMAGE` when launching a Pod. Each uses 4 `cpu3c` vCPUs and a
-12 GB container disk. `VALIDATION_WORKER_ENV` supplies the worker's R2 and Witness
+12 GB container disk. Set `VALIDATION_POD_DATA_CENTERS` to a JSON array of preferred
+RunPod data center IDs, such as `["EU-CZ-1","EU-NL-1","EU-RO-1"]`.
+`VALIDATION_WORKER_ENV` supplies the worker's R2 and Witness
 settings. Include `"VALIDATION_JOBS":"8"` in that JSON to run up to eight prompts
 at once per Pod. GitHub settings come from the coordinator configuration. Set
 `WITNESS_COMPETITION_BRANCH` in the worker environment when a test branch reuses

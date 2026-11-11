@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     pod_image: str = Field(alias="VALIDATION_POD_IMAGE", pattern=r"@sha256:[0-9a-f]{64}$")
     pod_registry: str | None = Field(default=None, alias="VALIDATION_POD_REGISTRY_ID")
     pod_prefix: str = Field(alias="VALIDATION_POD_PREFIX", pattern=r"^validation-[a-z0-9-]{1,40}$")
+    pod_data_centers: list[str] = Field(default_factory=list, alias="VALIDATION_POD_DATA_CENTERS")
     worker_environment: dict[str, SecretStr] = Field(alias="VALIDATION_WORKER_ENV")
 
     min_check_state_interval_seconds: int = Field(
