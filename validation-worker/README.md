@@ -57,9 +57,11 @@ fails.
 Writes follow GitBatcher's normal batching interval. Normal completion or a
 graceful stop makes one final save. If it fails, the worker keeps its queued
 results and retries, with up to three job attempts and 1s/2s delays. A replacement
-worker restores the last committed snapshot and reruns unfinished work. A crash
-can lose unsaved attempt counts and charges. Saved exhausted attempts remain pending until
-an operator resets them. Git outages are logged while persistence is unavailable.
+worker restores the last committed snapshot and reruns unfinished work while the
+candidate is pending. A worker with a committed terminal checkpoint waits for the
+coordinator to remove its Pod. A crash can lose unsaved attempt counts and charges.
+Saved exhausted attempts remain pending until an operator resets them. Git outages
+are logged while persistence is unavailable.
 R2 SDK retries are disabled in the automatic entry point so prompt retries have
 one owner.
 

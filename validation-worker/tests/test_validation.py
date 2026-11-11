@@ -382,17 +382,25 @@ def generate(image, seed, witness, renderer):
     async def test_missing_submitted_source_fails_immediately(self) -> None:
         self.source_missing = True
         self.settings.jobs = 8
+        output = self.private_path / "validation"
         async with (
             GitHubClient("test/competition", token=self.secret, base_url=self.base) as git,
             R2Client("fixture", "fixture", self.base + "/r2", bucket="main") as r2,
             httpx.AsyncClient(trust_env=False) as http,
         ):
-            await run_validation(
-                7, self.hotkey, self.ref, self.private_path / "validation", git, r2, http, self.settings, self.shutdown
+            finished = await run_validation(
+                7, self.hotkey, self.ref, output, git, r2, http, self.settings, self.shutdown
+            )
+            saved_head = self.head
+            resumed = await run_validation(
+                7, self.hotkey, self.ref, output, git, r2, http, self.settings, self.shutdown
             )
 
         progress = ValidationProgress.model_validate_json(self.commits[self.head][self.path])
         self.assertEqual(self.reads["/repos/test/miner/tarball/" + "d" * 40], 1)
+        self.assertEqual(self.head, saved_head)
+        self.assertTrue(finished)
+        self.assertTrue(resumed)
         self.assertEqual(set(progress.prompts), {"chair"})
         self.assertEqual(progress.prompts["chair"].status, "failed")
         self.assertIn("404 Not Found", progress.prompts["chair"].reason)

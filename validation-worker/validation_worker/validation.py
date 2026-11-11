@@ -41,7 +41,8 @@ async def run_validation(
     http: httpx.AsyncClient,
     settings: Settings,
     shutdown: GracefulShutdown,
-) -> None:
+) -> bool:
+    """Replay unfinished prompts and return whether a terminal checkpoint is committed."""
     path = f"rounds/{round_num}/{hotkey}/validation.json"
     frozen: RoundInputs | None = None
     source: Path | None = None
@@ -148,7 +149,7 @@ async def run_validation(
         for attempt in range(3):
             stopping = shutdown.should_stop
             if stopping:
-                return
+                return False
             try:
                 await asyncio.to_thread(output.mkdir, parents=True, exist_ok=True, mode=0o700)
                 if batcher is None:
@@ -160,18 +161,21 @@ async def run_validation(
                 inputs = await load_validation_inputs(git, round_num, hotkey, progress.ref)
                 if set(progress.prompts) - inputs.generations.keys():
                     raise ValueError("Validation checkpoint contains foreign prompts")
-                await replay_prompts(inputs, progress, batcher, source_cleanup)
+                if all(state.status != "failed" for state in progress.prompts.values()):
+                    await replay_prompts(inputs, progress, batcher, source_cleanup)
                 if not await batcher.flush():
                     raise RuntimeError("Validation checkpoint has not been committed")
-                if source_failure is not None:
-                    logger.warning(f"Validation failed: round={round_num}, hotkey={hotkey}, reason={source_failure}")
-                    return
+                failure = next((state for state in progress.prompts.values() if state.status == "failed"), None)
+                if failure is not None:
+                    logger.warning(f"Validation failed: round={round_num}, hotkey={hotkey}, reason={failure.reason}")
+                    return True
                 complete = all(
                     key in progress.prompts and progress.prompts[key].status != "pending" for key in inputs.generations
                 )
                 logger.info(f"Validation {'complete' if complete else 'pending'}: round={round_num}, hotkey={hotkey}")
-                return
+                return complete
             except Exception as error:
                 logger.error(f"Validation interrupted: round={round_num}, hotkey={hotkey}, error={error!r}")
                 if not transient(error) or attempt == 2 or await shutdown.wait(timeout=attempt + 1):
-                    return
+                    return False
+    return False
