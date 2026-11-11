@@ -16,7 +16,7 @@ class Settings(BaseSettings):
     github_repo: str
     github_branch: str = "main"
     generation_image: str = Field(pattern=IMAGE_PATTERN)
-    runpod_api_key: SecretStr
+    runpod_api_key: SecretStr = Field(alias="RUNPOD_PROVIDER_API_KEY")
     max_hourly_cost: Decimal = Field(default=Decimal("0.25"), gt=0, allow_inf_nan=False)
     cdn_url: str
     witness_url: str = "https://witness.subnet404.xyz"

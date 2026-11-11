@@ -45,7 +45,7 @@ Settings load from the environment and the local `.env` file.
 | --- | --- |
 | `GITHUB_REPO`, `GITHUB_TOKEN` | Competition repository and token with read access |
 | `GENERATION_IMAGE` | Published generation image reference pinned with `@sha256:<digest>` |
-| `RUNPOD_API_KEY` | Generation CPU lifecycle credentials; retained on the service |
+| `RUNPOD_PROVIDER_API_KEY` | Generation CPU lifecycle credentials; retained on the service |
 | `CDN_URL` | Same artifact CDN origin/prefix used by the collector |
 | `LEADER_CODEX_HOME` | Dedicated durable file-backed ChatGPT login directory |
 | `WALLET_PATH` | Dedicated unencrypted sr25519 operator wallet directory |

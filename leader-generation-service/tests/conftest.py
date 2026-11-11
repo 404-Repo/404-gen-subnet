@@ -71,7 +71,7 @@ def settings(tmp_path):
         github_token=SecretStr("fixture-github"),
         github_repo="test/competition",
         generation_image="registry.test/leader@sha256:" + "d" * 64,
-        runpod_api_key="fixture-runpod",
+        RUNPOD_PROVIDER_API_KEY="fixture-runpod",
         cdn_url="https://cdn.test",
         witness_url="https://witness.test",
         state_directory=tmp_path / "state",
