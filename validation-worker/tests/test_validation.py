@@ -546,16 +546,18 @@ def generate(image, seed, witness, renderer):
                     await run_validation(
                         7, self.hotkey, self.ref, directory, git, r2, http, self.settings, self.shutdown
                     )
-                    interrupted = ValidationProgress.model_validate_json(self.commits[self.head][self.path])
-                    first = interrupted.prompts["lamp"]
+                    checkpoint = json.loads(self.commits[self.head][self.path])
+                    first = ValidationProgress.model_validate(checkpoint).prompts["lamp"]
                     self.assertEqual((first.status, first.attempts, first.consumed_calls), ("pending", 1, 1))
+                    # The previous Pod checkpointed a deadline that expired while it was down.
+                    checkpoint["prompts"]["lamp"]["deadline"] = "2000-01-01T00:00:00Z"
+                    self.commits[self.head][self.path] = json.dumps(checkpoint)
                     self.shutdown = GracefulShutdown()
                     await run_validation(
                         7, self.hotkey, self.ref, directory, git, r2, http, self.settings, self.shutdown
                     )
                     progress = ValidationProgress.model_validate_json(self.commits[self.head][self.path])
                     state = progress.prompts["lamp"]
-                    self.assertEqual(state.deadline, first.deadline)
                     self.assertEqual((state.status, state.attempts), ("pending", 3))
                     self.assertIn("ServiceUnavailable", state.reason)
                     self.assertEqual(state.charges, {request.id: Decimal("2")})

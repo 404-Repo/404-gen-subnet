@@ -1,6 +1,5 @@
 import asyncio
 from contextlib import ExitStack
-from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -66,14 +65,14 @@ async def run_validation(
                     if shutdown.should_stop:
                         break
                     state = progress.prompts.setdefault(prompt_id, PromptProgress())
+                    deadline = None
                     while state.status == "pending" and state.retryable and state.attempts < 3:
                         if shutdown.should_stop or (state.attempts and await shutdown.wait(timeout=state.attempts)):
                             break
-                        now = datetime.now(UTC)
-                        if state.deadline is None:
-                            state.deadline = now + timedelta(seconds=settings.sandbox_timeout_seconds)
-                        remaining = (state.deadline - now).total_seconds()
-                        if remaining <= 0:
+                        now = asyncio.get_running_loop().time()
+                        if deadline is None:
+                            deadline = now + settings.sandbox_timeout_seconds
+                        if deadline <= now:
                             state.retryable = False
                             state.reason = "Validation deadline exhausted"
                             await batcher.write(
@@ -83,7 +82,7 @@ async def run_validation(
                         state.attempts += 1
                         budget = None
                         try:
-                            async with asyncio.timeout(remaining):
+                            async with asyncio.timeout_at(deadline):
                                 if frozen is None:
                                     frozen = await load_round_inputs(inputs, r2, settings)
                                 if jail is None:

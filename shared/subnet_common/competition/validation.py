@@ -10,7 +10,6 @@ from typing import Literal, Self
 
 from pydantic import (
     AliasChoices,
-    AwareDatetime,
     BaseModel,
     ConfigDict,
     Field,
@@ -29,7 +28,6 @@ class PromptProgress(BaseModel):
         default="pending", validation_alias=AliasChoices("status", "verdict")
     )
     attempts: int = Field(default=0, ge=0, le=3)
-    deadline: AwareDatetime | None = None
     retryable: bool = True
     reason: str = ""
     charges: dict[str, Decimal | None] = Field(default_factory=dict)

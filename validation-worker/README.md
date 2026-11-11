@@ -25,7 +25,6 @@ The checkpoint is `rounds/{n}/{hotkey}/validation.json`:
     "prompt_id": {
       "status": "pending",
       "attempts": 1,
-      "deadline": "2026-11-11T12:30:00Z",
       "retryable": false,
       "reason": "RenderUnavailable: Missing preview recovery exhausted after 32 trials",
       "charges": {"logical_call_id": "2000000"},
@@ -41,16 +40,17 @@ prompts, seed and canonical output references. Progress commits advance the
 competition branch without changing these inputs.
 
 Each prompt has up to three recorded attempts, with delays of one second and then
-two seconds. Source preparation, sandbox startup, evidence reads, verification and
-execution share the allowance and the original watchdog deadline. Transient
-failures exhaust into `pending`, with the last error recorded. Invalid evidence or
-configuration stays pending without retries. A confirmed miner or budget failure
-is `failed`.
+two seconds. The watchdog starts with the first attempt on each Pod and covers
+source preparation, sandbox startup, evidence reads, verification and execution
+across that Pod's attempts. A replacement resumes from the saved attempt count.
+Transient failures exhaust into `pending`, with the last error recorded. Invalid
+evidence or configuration stays pending without retries. A confirmed miner or
+budget failure is `failed`.
 
 `charges` records distinct consumed logical calls and their exact decimal credit
-costs. The replay updates this ledger in memory; each completed attempt queues its
-status, attempts, deadline, reason and charges through `GitBatcher`. Repeating a
-logical call counts once. Call and credit totals are derived from the ledger.
+costs. Each completed attempt queues its status, attempt count, reason and charges
+through `GitBatcher`. Repeating a logical call counts once. Call and credit
+totals are derived from the ledger.
 A known budget breach remains a failure even if a later infrastructure operation
 fails.
 
@@ -63,9 +63,9 @@ an operator resets them. Git outages are logged while persistence is unavailable
 R2 SDK retries are disabled in the automatic entry point so prompt retries have
 one owner.
 
-`SIGTERM` and `SIGINT` stop between prompts or interrupt retry waits; cancellation
+`SIGTERM` and `SIGINT` stop between prompts or interrupt retry waits. Cancellation
 terminates the active sandbox. Operators can explicitly reset a pending prompt's
-retryable flag, attempts and deadline after repairing infrastructure.
+retryable flag and attempt count after repairing infrastructure.
 
 ## Inputs and R2 reads
 
@@ -186,8 +186,8 @@ LOG_LEVEL=DEBUG
 GitHub access must allow reading source and writing the competition checkpoint.
 R2 credentials need object reads from both buckets. They remain in the trusted
 worker. `WITNESS_PROVIDER` selects the original `api` or `codex` request
-normalization; its default is `codex`. `SANDBOX_TIMEOUT` is an operational watchdog
-in seconds across all attempts for a prompt, not a competition time budget.
+normalization and defaults to `codex`. `SANDBOX_TIMEOUT` sets the watchdog in
+seconds for a prompt's attempts on one Pod.
 
 ```bash
 poetry run python main.py --round-num 7 --hotkey MINER_HOTKEY \
