@@ -93,7 +93,7 @@ The test gateway admits only signed requests from
 `5CAJpeDRXoE9EnsJRsDP1MLKuP31aztpXyPH5JaR49b14P1y`. Provision that hotkey in the
 configured test wallet. Keep its private key, GitHub and RunPod tokens, and the
 dedicated file-backed subscription login outside Git. The example uses separate
-state/login directories and sets `CONTROL_PORT=8081` for local job control.
+state and login directories.
 Fill in the published `GENERATION_IMAGE` digest and the required API tokens.
 
 The competition fixture must also supply:
@@ -156,19 +156,6 @@ soon. The RunPod create request supplies the serialized operator hotkey and
 access token. The worker installs them in private files at startup. The refresh
 token, Codex login, and coldkey stay on the controller.
 
-Manual job control is available at `http://127.0.0.1:8080/v1/jobs/{n}` on the
-controller. Set `CONTROL_PORT` to use a different loopback port. Pass the
-`control_token` from the private round journal as `LEADER_CONTROL_TOKEN` to the
-manual control client. `POST /start` enables generation and keeps an active pod.
-`POST /resume` requests a fresh attempt while the round is open. `GET /status`
-reads provider status and `POST /terminate` stops the job until start or resume.
-Control responses contain only `pod_id`, `name`, `phase`, `stopped`, and
-`completed`. Resume first terminates the previous attempt. Start and resume
-respect the same allocation interval as the generation loop. A request during
-the interval can return an `intent` phase and the next eligible iteration
-starts a fresh attempt. The generation loop and control operations share one
-lifecycle lock.
-
 If renewal requires signing in again, maintenance reports the error type. Repair
 the same dedicated account and let the service retry. A different account or
 operator hotkey cannot take over an existing job.
@@ -202,7 +189,7 @@ does not block pod recovery.
 failures, and must be at least 1200 seconds (20 minutes). Stall thresholds are
 evaluated at each check; longer intervals delay warnings and replacement.
 Allocation-request timestamps in the private journal enforce the minimum gap
-between generation-pod creates across rounds, restarts, manual controls, and rejected requests.
+between generation-pod creates across rounds, restarts, and rejected requests.
 Failed cleanup prevents another allocation. The service retries pod deletion on
 later iterations. The collector can read completed witness results while cleanup
 is pending.
@@ -226,7 +213,7 @@ poetry poe lint
 ```
 
 Tests replace provider, source preparation and credential-refresh I/O. They cover
-idle renewal, create-time credential delivery, manual resume, progress monitoring,
-restart reconciliation, worker retry spacing, deadlines and index publication. Shared worker tests live in
+idle renewal, create-time credential delivery, progress monitoring, restart
+reconciliation, worker retry spacing, deadlines and pod cleanup. Shared worker tests live in
 `miner-runtime/tests`. Live RunPod/Linux readiness, native proof execution,
 provider authentication and throughput need separate acceptance runs.

@@ -1,24 +1,21 @@
 import asyncio
 import base64
-import json
 import threading
 from decimal import Decimal
 from types import SimpleNamespace
 
-import aiohttp
 import httpx
 import pytest
-from aiohttp.test_utils import make_mocked_request
 from bittensor_wallet import Keypair, Wallet
 from conftest import access
 from pod_gateway.runpod import CreateRejected, CreateUnknown
 from subnet_common.competition.state import CompetitionState, RoundStage
 from subnet_common.witness.models import Pod
 
-from leader_generation_service import runpod, server
+from leader_generation_service import runpod
 from leader_generation_service.generation_iteration import generation_iteration
 from leader_generation_service.models import Job
-from leader_generation_service.store import JobStore, exclusive_lock
+from leader_generation_service.store import JobStore
 from leader_generation_service.witness import SavedResults
 
 
@@ -86,27 +83,7 @@ async def launch(value, job):
 
 
 @pytest.fixture
-def control(scenario, settings, runner):
-    value, _ = runner
-    scenario.deps.runner = value
-    value.store.save(Job(snapshot=scenario.snapshot, control_token="c" * 43))
-    shutdown = scenario.controller.shutdown
-    app = server.application(scenario.controller, settings)
-
-    async def request(action, *, token="c" * 43, method=None):
-        method = method or ("GET" if action == "status" else "POST")
-        path = f"/v1/jobs/1/{action}"
-        headers = {"Authorization": f"Bearer {token}"}
-        initial = make_mocked_request(method, path, headers=headers, app=app)
-        match = await app.router.resolve(initial)
-        request = make_mocked_request(method, path, headers=headers, app=app, match_info=match)
-        return await match.handler(request)
-
-    return request, shutdown
-
-
-@pytest.fixture
-async def pending_create(control, runner, monkeypatch):
+async def pending_create(runner, monkeypatch):
     value, provider = runner
     loop = asyncio.get_running_loop()
     pending = SimpleNamespace(
@@ -138,37 +115,30 @@ async def pending_create(control, runner, monkeypatch):
 
 
 @pytest.mark.parametrize("unknown_reply", [False, True])
-async def test_cancelled_create_finishes_before_a_queued_termination(
-    control, pending_create, runner, scenario, settings, unknown_reply
+async def test_cancelled_iteration_waits_for_the_create_reply(
+    pending_create, runner, scenario, settings, unknown_reply
 ):
-    request, _ = control
     value, provider = runner
+    scenario.deps.runner = value
     pending_create.unknown = unknown_reply
-    operation = asyncio.create_task(request("start"))
-    termination = None
+    operation = asyncio.create_task(generation_iteration(scenario.controller, settings))
     try:
         await asyncio.wait_for(pending_create.created.wait(), timeout=2)
         operation.cancel()
         await asyncio.sleep(0)
         assert not operation.done()
-        assert scenario.deps.lifecycle.locked()
         operation.cancel()
-        termination = asyncio.create_task(request("terminate"))
         await asyncio.sleep(0)
-        assert not termination.done()
+        assert not operation.done()
         pending_create.release.set()
         with pytest.raises(asyncio.CancelledError):
             await operation
-        assert (await termination).status == 200
-        assert value.store.load(1).stopped is True
-        assert value.store.load(1).allocation.phase == "terminated"
-        assert provider.pods == {}
-        await generation_iteration(scenario.controller, settings)
+        assert value.store.load(1).allocation.phase == ("creating" if unknown_reply else "active")
         assert provider.creates == 1
     finally:
         pending_create.release.set()
         await asyncio.wait_for(pending_create.finished.wait(), timeout=2)
-        await asyncio.gather(operation, *([] if termination is None else [termination]), return_exceptions=True)
+        await asyncio.gather(operation, return_exceptions=True)
 
 
 async def test_shutdown_during_final_chain_check_skips_create(scenario, settings, runner, monkeypatch):
@@ -221,111 +191,14 @@ async def test_shutdown_during_create_journal_write_skips_create(scenario, setti
     assert allocation.requested_at is None
 
 
-async def test_http_shutdown_drains_provider_work_before_clients_and_state_lock_close(
-    control, pending_create, runner, scenario, settings, unused_tcp_port
-):
-    request, _ = control
+async def test_stopped_cleanup_retries_after_provider_outage(scenario, settings, runner, monkeypatch):
     value, provider = runner
-    settings.control_port = unused_tcp_port
-    shutdown = scenario.controller.shutdown
-    ready, stop = asyncio.Event(), asyncio.Event()
-    lock_path = settings.state_directory / ".lock"
-
-    async def host():
-        with exclusive_lock(lock_path):
-            async with server.serve_control(scenario.controller, settings):
-                ready.set()
-                await stop.wait()
-            value.http.close()
-
-    host_task = asyncio.create_task(host())
-    operation = None
-    try:
-        await asyncio.wait_for(ready.wait(), timeout=2)
-        async with aiohttp.ClientSession(trust_env=False) as client:
-            operation = asyncio.create_task(
-                client.post(
-                    f"http://127.0.0.1:{unused_tcp_port}/v1/jobs/1/start",
-                    headers={"Authorization": "Bearer " + "c" * 43},
-                    json={},
-                )
-            )
-            await asyncio.wait_for(pending_create.created.wait(), timeout=2)
-            shutdown.request_shutdown()
-            stop.set()
-            with pytest.raises(aiohttp.ClientConnectionError):
-                await asyncio.wait_for(asyncio.shield(operation), timeout=15)
-            assert not host_task.done()
-            assert scenario.deps.lifecycle.locked()
-            assert not value.http.is_closed
-            with pytest.raises(RuntimeError, match="Another service"):
-                with exclusive_lock(lock_path):
-                    pytest.fail("State lock was released before the provider reply")
-            pending_create.release.set()
-            await asyncio.wait_for(host_task, timeout=2)
-            await asyncio.gather(operation, return_exceptions=True)
-        assert value.http.is_closed
-        with exclusive_lock(lock_path):
-            pass
-        assert value.store.load(1).allocation.phase == "active"
-        assert (await request("terminate")).status == 200
-        await generation_iteration(scenario.controller, settings)
-        assert value.store.load(1).stopped is True
-        assert provider.creates == 1
-    finally:
-        pending_create.release.set()
-        stop.set()
-        if operation is not None:
-            await asyncio.gather(operation, return_exceptions=True)
-        await asyncio.gather(host_task, return_exceptions=True)
-        await asyncio.wait_for(pending_create.finished.wait(), timeout=2)
-
-
-async def test_control_start_keeps_the_pod_and_resume_replaces_after_the_cooldown(control, runner, clock):
-    request, _ = control
-    value, provider = runner
-    assert (await request("start")).status == 200
-    first = value.store.load(1)
-    assert (await request("start")).status == 200
-    assert provider.creates == 1
-    clock[0] += 1200
-    response = await request("resume")
-    assert response.status == 200
-    second = value.store.load(1)
-    assert provider.events == ["create", "delete", "create"]
-    assert second.allocations[0].phase == "terminated"
-    assert second.allocation.id != first.allocation.id
-    assert second.control_token == first.control_token
-    assert json.loads(response.body) == {
-        "pod_id": second.allocation.pod_id,
-        "name": second.allocation.name,
-        "phase": "running",
-        "stopped": False,
-        "completed": False,
-    }
-
-
-async def test_control_terminate_stays_stopped_until_explicit_start(control, scenario, settings, runner, clock):
-    request, _ = control
-    value, provider = runner
-    await request("start")
-    response = await request("terminate")
-    assert response.status == 200
-    assert value.store.load(1).stopped is True
+    scenario.deps.runner = value
     await generation_iteration(scenario.controller, settings)
-    assert provider.creates == 1
-    assert provider.pods == {}
-    clock[0] += 1200
-    assert (await request("start")).status == 200
-    assert value.store.load(1).stopped is False
-    assert provider.creates == 2
-
-
-async def test_stopped_cleanup_retries_after_provider_outage(control, scenario, settings, runner, monkeypatch):
-    request, _ = control
-    value, provider = runner
-    await request("start")
-    pod_id = value.store.load(1).allocation.pod_id
+    job = value.store.load(1)
+    job.stopped = True
+    value.store.save(job)
+    pod_id = job.allocation.pod_id
     original_delete = provider.delete
     attempts = []
 
@@ -336,8 +209,8 @@ async def test_stopped_cleanup_retries_after_provider_outage(control, scenario, 
         original_delete(identifier)
 
     monkeypatch.setattr(provider, "delete", delete)
-    assert (await request("terminate")).status == 503
-    assert value.store.load(1).stopped is True
+    with pytest.raises(RuntimeError, match="transient provider outage"):
+        await generation_iteration(scenario.controller, settings)
     await generation_iteration(scenario.controller, settings)
 
     assert attempts == [pod_id, pod_id]
@@ -347,10 +220,10 @@ async def test_stopped_cleanup_retries_after_provider_outage(control, scenario, 
     assert provider.creates == 1
 
 
-async def test_completed_job_retries_pod_cleanup(control, scenario, settings, runner, monkeypatch):
-    request, _ = control
+async def test_completed_job_retries_pod_cleanup(scenario, settings, runner, monkeypatch):
     value, provider = runner
-    await request("start")
+    scenario.deps.runner = value
+    await generation_iteration(scenario.controller, settings)
     scenario.state["saved"] = {name: {"failure_reason": "generation_failed"} for name in scenario.images}
     delete = provider.delete
 
@@ -366,70 +239,6 @@ async def test_completed_job_retries_pod_cleanup(control, scenario, settings, ru
 
     assert value.store.load(1).allocation.phase == "terminated"
     assert provider.creates == 1
-
-
-@pytest.mark.parametrize("action", ["start", "resume", "status", "terminate"])
-async def test_invalid_control_tokens_are_rejected_while_lifecycle_is_busy(control, scenario, action):
-    request, _ = control
-    async with scenario.deps.lifecycle:
-        operation = asyncio.create_task(request(action, token=f"invalid-{action}"))
-        try:
-            response = await asyncio.wait_for(asyncio.shield(operation), timeout=0.25)
-            assert response.status == 401
-        finally:
-            operation.cancel()
-            await asyncio.gather(operation, return_exceptions=True)
-
-
-async def test_controls_and_iteration_share_the_lifecycle_lock(control, scenario, settings, runner):
-    request, _ = control
-    _, provider = runner
-    await request("start")
-    async with scenario.deps.lifecycle:
-        iteration = asyncio.create_task(generation_iteration(scenario.controller, settings))
-        command = asyncio.create_task(request("start"))
-        await asyncio.sleep(0)
-        assert not iteration.done()
-        assert not command.done()
-    await asyncio.gather(iteration, command)
-    assert provider.creates == 1
-
-
-async def test_closed_round_or_shutdown_rejects_new_control_work(control, scenario, runner):
-    request, shutdown = control
-    value, provider = runner
-    await request("start")
-    original_id = value.store.load(1).allocation.id
-    scenario.state["block"] = 100
-    assert (await request("resume")).status == 409
-    assert value.store.load(1).allocation.id == original_id
-    assert provider.deleted == []
-    shutdown.request_shutdown()
-    assert (await request("start")).status == 503
-    assert provider.creates == 1
-
-
-async def test_control_resume_reconciles_unknown_create_before_replacement(control, runner):
-    request, _ = control
-    value, provider = runner
-    provider.absent_reply = True
-    assert (await request("start")).status == 503
-    assert (await request("resume")).status == 503
-    assert provider.creates == 1
-    assert value.store.load(1).allocation.phase == "creating"
-
-
-async def test_status_returns_current_provider_phase_without_starting_work(control, runner):
-    request, _ = control
-    value, provider = runner
-    await request("start")
-    pod = provider.pods[value.store.load(1).allocation.pod_id]
-    provider.pods[pod.id] = Pod(pod.id, pod.name, pod.image, "EXITED", {})
-    response = await request("status")
-    assert response.status == 200
-    assert json.loads(response.body)["phase"] == "exited"
-    assert provider.creates == 1
-    assert provider.deleted == []
 
 
 async def test_restart_adopts_a_lost_create_reply_and_replaces_only_after_a_stall(scenario, settings, runner, clock):
@@ -532,21 +341,6 @@ async def test_old_job_must_be_disposed_before_starting_the_next_round(
     assert value.store.load(2).allocation.id == allocation.id
     assert value.store.load(1).allocation.phase == "terminated"
     assert value.store.load(1).snapshot == scenario.snapshot
-
-
-async def test_starting_an_old_job_only_cleans_up_its_pod(control, scenario, runner):
-    request, _ = control
-    value, provider = runner
-    await request("start")
-    scenario.deps.git.files["state.json"] = CompetitionState(
-        current_round=2, stage=RoundStage.MINER_GENERATION
-    ).model_dump_json()
-    scenario.state["saved"] = {name: {"failure_reason": "generation_failed"} for name in scenario.images}
-    reads = scenario.state["index_reads"]
-    assert (await request("start")).status == 200
-    assert scenario.state["index_reads"] == reads
-    assert value.store.load(1).allocation.phase == "terminated"
-    assert provider.creates == 1
 
 
 @pytest.mark.parametrize("already_deleted", [False, True])
@@ -788,14 +582,12 @@ async def test_start_request_uses_frozen_source_inputs_and_image(scenario, setti
 
 
 @pytest.mark.parametrize("interval", [1200, 1800])
-async def test_restart_and_manual_start_cannot_bypass_the_allocation_interval(
-    control, runner, scenario, settings, clock, interval
-):
-    request, _ = control
+async def test_restart_cannot_bypass_the_allocation_interval(runner, scenario, settings, clock, interval):
     value, provider = runner
     settings.progress_interval_seconds = interval
-    assert (await request("start")).status == 200
-    assert (await request("terminate")).status == 200
+    scenario.deps.runner = value
+    await generation_iteration(scenario.controller, settings)
+    await value.terminate(value.store.load(1))
     clock[0] += interval - 1
     store = JobStore(settings.state_directory)
     scenario.deps.store = store
@@ -805,17 +597,15 @@ async def test_restart_and_manual_start_cannot_bypass_the_allocation_interval(
     await generation_iteration(scenario.controller, settings)
     assert not provider.pods
     assert provider.creates == 1
-    assert (await request("start")).status == 200
-    assert provider.creates == 1
     clock[0] += 1
     await generation_iteration(scenario.controller, settings)
     assert provider.creates == 2
     assert len(provider.pods) == 1
 
 
-async def test_rejected_allocation_is_also_rate_limited(control, runner, scenario, settings, clock, monkeypatch):
-    request, _ = control
-    _, provider = runner
+async def test_rejected_allocation_is_also_rate_limited(runner, scenario, settings, clock, monkeypatch):
+    value, provider = runner
+    scenario.deps.runner = value
     requests = []
 
     def reject(body):
@@ -823,7 +613,8 @@ async def test_rejected_allocation_is_also_rate_limited(control, runner, scenari
         raise CreateRejected("Fixture rejected allocation")
 
     monkeypatch.setattr(provider, "create", reject)
-    assert (await request("start")).status == 503
+    with pytest.raises(CreateRejected):
+        await generation_iteration(scenario.controller, settings)
     await generation_iteration(scenario.controller, settings)
     assert len(requests) == 1
     clock[0] += 1200
@@ -834,11 +625,11 @@ async def test_rejected_allocation_is_also_rate_limited(control, runner, scenari
 
 @pytest.mark.parametrize("failure", ["unavailable", "unconfirmed"])
 async def test_cleanup_failure_prevents_replacement_of_a_stalled_pod(
-    control, runner, scenario, settings, clock, monkeypatch, failure
+    runner, scenario, settings, clock, monkeypatch, failure
 ):
-    request, _ = control
     value, provider = runner
-    await request("start")
+    scenario.deps.runner = value
+    await generation_iteration(scenario.controller, settings)
     reads = scenario.state["index_reads"]
 
     def unavailable(identifier):
@@ -854,10 +645,10 @@ async def test_cleanup_failure_prevents_replacement_of_a_stalled_pod(
     assert value.store.load(1).allocation.phase == "active"
 
 
-async def test_allocation_interval_applies_across_rounds(control, runner, scenario, settings, clock):
-    request, _ = control
+async def test_allocation_interval_applies_across_rounds(runner, scenario, settings, clock):
     value, provider = runner
-    await request("start")
+    scenario.deps.runner = value
+    await generation_iteration(scenario.controller, settings)
     git = scenario.deps.git
     for path, content in list(git.files.items()):
         if path.startswith("rounds/1/"):
@@ -881,10 +672,10 @@ async def test_allocation_interval_applies_across_rounds(control, runner, scenar
     assert len(provider.pods) == 1
 
 
-async def test_closed_round_disposes_running_attempt_without_replacement(control, runner, scenario, settings, clock):
-    request, _ = control
+async def test_closed_round_disposes_running_attempt_without_replacement(runner, scenario, settings, clock):
     value, provider = runner
-    await request("start")
+    scenario.deps.runner = value
+    await generation_iteration(scenario.controller, settings)
     scenario.state["block"] = 100
     clock[0] += 1200
     await generation_iteration(scenario.controller, settings)
@@ -895,13 +686,13 @@ async def test_closed_round_disposes_running_attempt_without_replacement(control
 
 @pytest.mark.parametrize("replacement_seconds", [None, 7200], ids=["one-hour-default", "two-hours-configured"])
 async def test_no_progress_warns_at_twenty_minutes_and_uses_the_replacement_threshold(
-    control, runner, scenario, settings, clock, discord, replacement_seconds
+    runner, scenario, settings, clock, discord, replacement_seconds
 ):
     if replacement_seconds is not None:
         settings.stall_replacement_seconds = replacement_seconds
-    request, _ = control
     value, provider = runner
-    await request("start")
+    scenario.deps.runner = value
+    await generation_iteration(scenario.controller, settings)
     previous = value.store.load(1).allocation.id
     clock[0] += 1199
     await generation_iteration(scenario.controller, settings)
@@ -922,13 +713,13 @@ async def test_no_progress_warns_at_twenty_minutes_and_uses_the_replacement_thre
 
 
 async def test_saved_progress_keeps_a_running_generation_pod_and_logs_counts(
-    control, runner, scenario, settings, clock, discord
+    runner, scenario, settings, clock, discord
 ):
     from loguru import logger
 
-    request, _ = control
     value, provider = runner
-    await request("start")
+    scenario.deps.runner = value
+    await generation_iteration(scenario.controller, settings)
     previous = value.store.load(1).allocation.id
     messages = []
     sink = logger.add(lambda message: messages.append(str(message)), format="{message}")
@@ -953,10 +744,10 @@ async def test_saved_progress_keeps_a_running_generation_pod_and_logs_counts(
     assert provider.creates == 1 and not provider.pods
 
 
-async def test_progress_clock_and_warning_survive_service_restart(control, runner, scenario, settings, clock, discord):
-    request, _ = control
+async def test_progress_clock_and_warning_survive_service_restart(runner, scenario, settings, clock, discord):
     value, provider = runner
-    await request("start")
+    scenario.deps.runner = value
+    await generation_iteration(scenario.controller, settings)
     clock[0] += 1200
     await generation_iteration(scenario.controller, settings)
     store = JobStore(settings.state_directory)
@@ -970,10 +761,10 @@ async def test_progress_clock_and_warning_survive_service_restart(control, runne
     assert len(discord.messages) == 1
 
 
-async def test_new_progress_resets_the_stall_timer_and_warning(control, runner, scenario, settings, clock, discord):
-    request, _ = control
+async def test_new_progress_resets_the_stall_timer_and_warning(runner, scenario, settings, clock, discord):
     value, provider = runner
-    await request("start")
+    scenario.deps.runner = value
+    await generation_iteration(scenario.controller, settings)
     clock[0] += 1200
     await generation_iteration(scenario.controller, settings)
     assert len(discord.messages) == 1
@@ -991,10 +782,10 @@ async def test_new_progress_resets_the_stall_timer_and_warning(control, runner, 
     assert provider.events == ["create", "delete", "create"]
 
 
-async def test_regressing_progress_is_an_error_and_does_not_replace_the_pod(control, runner, scenario, settings, clock):
-    request, _ = control
+async def test_regressing_progress_is_an_error_and_does_not_replace_the_pod(runner, scenario, settings, clock):
     value, provider = runner
-    await request("start")
+    scenario.deps.runner = value
+    await generation_iteration(scenario.controller, settings)
     clock[0] += 1200
     scenario.state["saved"] = {"chair": {"failure_reason": "generation_failed"}}
     await generation_iteration(scenario.controller, settings)
@@ -1008,10 +799,10 @@ async def test_regressing_progress_is_an_error_and_does_not_replace_the_pod(cont
     assert value.store.load(1).completed_prompts == 1
 
 
-async def test_closed_round_cleans_up_even_when_progress_is_unavailable(control, runner, scenario, settings):
-    request, _ = control
+async def test_closed_round_cleans_up_even_when_progress_is_unavailable(runner, scenario, settings):
     value, provider = runner
-    await request("start")
+    scenario.deps.runner = value
+    await generation_iteration(scenario.controller, settings)
     scenario.state["block"] = 100
     async with httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(503))) as http:
         scenario.deps.saved = SavedResults(http, settings.cdn_url)
@@ -1021,10 +812,10 @@ async def test_closed_round_cleans_up_even_when_progress_is_unavailable(control,
     assert value.store.load(1).allocation.phase == "terminated"
 
 
-async def test_failed_progress_read_does_not_kill_a_generation_pod(control, runner, scenario, settings, clock, discord):
-    request, _ = control
+async def test_failed_progress_read_does_not_kill_a_generation_pod(runner, scenario, settings, clock, discord):
     value, provider = runner
-    await request("start")
+    scenario.deps.runner = value
+    await generation_iteration(scenario.controller, settings)
     clock[0] += 1200
     await generation_iteration(scenario.controller, settings)
     clock[0] += settings.stall_replacement_seconds - 1200
@@ -1056,12 +847,10 @@ async def test_discord_failure_logs_the_error_type_without_the_webhook(scenario,
     assert all("https://discord.test/progress" not in message for message in messages)
 
 
-async def test_discord_outage_does_not_prevent_stalled_pod_recovery(
-    control, runner, scenario, settings, clock, discord
-):
-    request, _ = control
-    _, provider = runner
-    await request("start")
+async def test_discord_outage_does_not_prevent_stalled_pod_recovery(runner, scenario, settings, clock, discord):
+    value, provider = runner
+    scenario.deps.runner = value
+    await generation_iteration(scenario.controller, settings)
     discord.status = 503
     clock[0] += 1200
     await generation_iteration(scenario.controller, settings)
@@ -1070,12 +859,10 @@ async def test_discord_outage_does_not_prevent_stalled_pod_recovery(
     assert provider.events == ["create", "delete", "create"]
 
 
-async def test_render_rejection_is_terminal_progress(
-    control, runner, scenario, settings, clock, discord
-):
-    request, _ = control
+async def test_render_rejection_is_terminal_progress(runner, scenario, settings, clock, discord):
     value, provider = runner
-    await request("start")
+    scenario.deps.runner = value
+    await generation_iteration(scenario.controller, settings)
     scenario.state["saved"] = {"chair": {"failure_reason": "render_rejected", "js": "chair.js"}}
     clock[0] += 1200
     await generation_iteration(scenario.controller, settings)

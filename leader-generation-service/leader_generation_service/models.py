@@ -60,7 +60,9 @@ class Job(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     snapshot: Snapshot
-    control_token: str | None = Field(default=None, min_length=43, max_length=128, repr=False)
+    legacy_control_token: str | None = Field(
+        default=None, validation_alias="control_token", min_length=43, max_length=128, repr=False, exclude=True
+    )
     stopped: bool = False
     allocations: list[Allocation] = Field(default_factory=list)
     legacy_published: bool = Field(default=False, validation_alias="published", exclude=True, repr=False)

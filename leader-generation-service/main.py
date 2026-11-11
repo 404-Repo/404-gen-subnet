@@ -11,7 +11,6 @@ from leader_generation_service.generation_iteration import (
     maintain_credentials,
 )
 from leader_generation_service.round_runner import RoundRunner
-from leader_generation_service.server import serve_control
 from leader_generation_service.settings import Settings
 from leader_generation_service.store import exclusive_lock
 
@@ -32,24 +31,23 @@ async def main() -> None:
     ):
         async with create_dependencies(settings, shutdown) as dependencies:
             controller = RoundRunner(dependencies, settings, shutdown)
-            async with serve_control(controller, settings):
-                maintenance = asyncio.create_task(maintain_credentials(dependencies, settings, shutdown))
-                try:
-                    logger.info("Leader generation service started")
-                    while not shutdown.should_stop:
-                        try:
-                            await generation_iteration(controller, settings)
-                        except asyncio.CancelledError:
-                            break
-                        except Exception as error:
-                            logger.error("Leader generation cycle failed ({})", type(error).__name__)
-                        wait = settings.progress_interval_seconds
-                        logger.debug("Next generation iteration in {}", format_duration(wait))
-                        await shutdown.wait(timeout=wait)
-                finally:
-                    shutdown.request_shutdown()
-                    await maintenance
-                    shutdown.remove_signal_handlers()
+            maintenance = asyncio.create_task(maintain_credentials(dependencies, settings, shutdown))
+            try:
+                logger.info("Leader generation service started")
+                while not shutdown.should_stop:
+                    try:
+                        await generation_iteration(controller, settings)
+                    except asyncio.CancelledError:
+                        break
+                    except Exception as error:
+                        logger.error("Leader generation cycle failed ({})", type(error).__name__)
+                    wait = settings.progress_interval_seconds
+                    logger.debug("Next generation iteration in {}", format_duration(wait))
+                    await shutdown.wait(timeout=wait)
+            finally:
+                shutdown.request_shutdown()
+                await maintenance
+                shutdown.remove_signal_handlers()
     logger.info("Leader generation service stopped gracefully")
 
 
