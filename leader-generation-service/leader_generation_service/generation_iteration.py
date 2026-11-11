@@ -85,12 +85,20 @@ async def generation_iteration(
     current = None
     for job in jobs:
         inputs = job.snapshot.inputs
-        if (
-            inputs.repository != repository(settings.github_repo)
-            or inputs.branch != settings.github_branch
-            or job.snapshot.hotkey != dependencies.hotkey
-            or job.snapshot.witness_url != settings.witness_url
-        ):
+        mismatches = [
+            name
+            for name, recorded, configured in (
+                ("GITHUB_REPO", inputs.repository, repository(settings.github_repo)),
+                ("GITHUB_BRANCH", inputs.branch, settings.github_branch),
+                ("operator hotkey", job.snapshot.hotkey, dependencies.hotkey),
+                ("WITNESS_URL", job.snapshot.witness_url, settings.witness_url),
+            )
+            if recorded != configured
+        ]
+        if mismatches:
+            logger.error(
+                "Round {} saved job differs from controller settings ({})", inputs.number, ", ".join(mismatches)
+            )
             raise ValueError("Job belongs to another competition, witness or operator identity")
         if shutdown.should_stop:
             return None

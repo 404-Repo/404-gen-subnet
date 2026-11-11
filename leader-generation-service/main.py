@@ -1,5 +1,6 @@
 import asyncio
 import sys
+from urllib.parse import urlsplit
 
 from httpx import HTTPStatusError
 from loguru import logger
@@ -34,7 +35,17 @@ async def main() -> None:
             controller = RoundRunner(dependencies, settings, shutdown)
             maintenance = asyncio.create_task(maintain_credentials(dependencies, settings, shutdown))
             try:
-                logger.info("Leader generation service started")
+                logger.info(
+                    "Leader generation service started. GITHUB_REPO={} GITHUB_BRANCH={} WITNESS_URL={} "
+                    "CDN host={} STATE_DIRECTORY={} operator hotkey={} generation image digest={}",
+                    settings.github_repo,
+                    settings.github_branch,
+                    settings.witness_url,
+                    urlsplit(settings.cdn_url).hostname,
+                    settings.state_directory,
+                    dependencies.hotkey,
+                    settings.generation_image.split("@", 1)[1],
+                )
                 while not shutdown.should_stop:
                     wait = settings.progress_interval_seconds
                     retry_in = format_duration(wait)
