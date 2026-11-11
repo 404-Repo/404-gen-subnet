@@ -38,7 +38,7 @@ def config():
                       source_repository="https://github.com/fixture/miner.git", source_commit="b" * 40,
                       prompts={"chair": hashlib.sha256(b"first").hexdigest(),
                                "table": hashlib.sha256(b"second").hexdigest()}, seed=42,
-                      hotkey="5" + "A" * 47, account_id="abc123", credentials_url="https://leader.test/jobs/3")
+                      hotkey="5" + "A" * 47, account_id="abc123")
 
 
 def context(config):
@@ -51,19 +51,21 @@ def context(config):
             "prompts": [{**row, "url": row["source_url"]} for row in inputs["prompts"]]}
 
 
-def token(account="abc123", expiry=None):
+def token(expiry=None):
     payload = base64.urlsafe_b64encode(json.dumps({"exp": expiry or time.time() + 3600}).encode()).decode().rstrip("=")
-    return {"access_token": "fixture." + payload + "." + "s" * 64, "account_id": account}
+    return "fixture." + payload + "." + "s" * 64
 
 
 def test_request_starts_worker_and_each_attempt_gets_a_new_pod(config):
-    first = pod.pod_body(config, "fixture-job-token")
-    second = pod.pod_body(config, "fixture-job-token")
+    access_token = token()
+    first = pod.pod_body(config, hotkey="fixture-hotkey", access_token=access_token)
+    second = pod.pod_body(config, hotkey="fixture-hotkey", access_token=access_token)
     assert first["name"] != second["name"]
     assert first["cpu"] == {"id": "cpu3c", "vcpuCount": 8}
     assert first["image"] == config.generation_image
     assert pod.Config(**json.loads(first["env"]["LEADER_JOB_CONFIG"])) == config
-    assert pod.pod_body(config, "token", name="leader-runner-fixed")["name"] == "leader-runner-fixed"
+    fixed = pod.pod_body(config, hotkey="fixture-hotkey", access_token=access_token, name="leader-runner-fixed")
+    assert fixed["name"] == "leader-runner-fixed"
 
 
 def test_worker_exception_logs_omit_local_values(config, tmp_path):
@@ -84,7 +86,8 @@ def run():
 run()
 """
     )
-    environment = {**os.environ, "LOGURU_DIAGNOSE": "YES", **pod.pod_body(config, "fixture-job-token")["env"]}
+    body = pod.pod_body(config, hotkey="fixture-hotkey", access_token=token())
+    environment = {**os.environ, "LOGURU_DIAGNOSE": "YES", **body["env"]}
     result = subprocess.run(
         [sys.executable, str(script)], env=environment, capture_output=True, text=True, check=True, timeout=5,
     )
@@ -135,10 +138,12 @@ def test_worker_checks_prebuilt_image_source_and_proof_integrity(tmp_path, monke
 def test_image_entrypoint_runs_the_worker_with_private_credentials_and_prover_settings(
         config, tmp_path, monkeypatch, capsys):
     events = []
+    expected_token = token()
     for key in pod.runtime_environment(config):
         monkeypatch.setenv(key, os.environ.get(key, ""))
     monkeypatch.setenv("LEADER_JOB_CONFIG", json.dumps(asdict(config)))
-    monkeypatch.setenv("LEADER_JOB_TOKEN", "fixture-job-token")
+    monkeypatch.setenv("LEADER_JOB_HOTKEY", "fixture-hotkey")
+    monkeypatch.setenv("LEADER_JOB_ACCESS_TOKEN", expected_token)
     monkeypatch.setattr(pod, "REMOTE", tmp_path)
 
     def image():
@@ -147,13 +152,18 @@ def test_image_entrypoint_runs_the_worker_with_private_credentials_and_prover_se
 
     monkeypatch.setattr(pod, "verify_image", image)
     monkeypatch.setattr(pod, "check_hardware", lambda value: events.append(("hardware", value)))
-    monkeypatch.setattr(pod, "fetch_source", lambda value, directory: events.append(("source", directory)))
+    def fetch_source(value, directory):
+        assert "LEADER_JOB_HOTKEY" not in os.environ
+        assert "LEADER_JOB_ACCESS_TOKEN" not in os.environ
+        events.append(("source", directory))
 
-    async def worker(value, directory, token):
+    monkeypatch.setattr(pod, "fetch_source", fetch_source)
+
+    async def worker(value, directory, *, hotkey, access_token):
         assert value == config
         assert directory == tmp_path
-        assert token == "fixture-job-token"
-        assert os.environ.get("LEADER_JOB_TOKEN") is None
+        assert hotkey == "fixture-hotkey"
+        assert access_token == expected_token
         assert {key: os.environ[key] for key in pod.runtime_environment(config)} == pod.runtime_environment(config)
         events.append(("worker", directory))
 
@@ -183,21 +193,10 @@ def test_job_context_is_validated_before_work(config, change):
         pod.check_context(config, data)
 
 
-def test_access_credentials_rotate_without_replacing_identity(config, tmp_path):
-    hotkey = tmp_path / "private/wallets/leader/hotkeys/default"
-    hotkey.parent.mkdir(parents=True)
-    hotkey.write_bytes(b"fixture identity")
-    first = token()
-    pod.install_credentials(config, tmp_path, first)
-    second = token(expiry=time.time() + 7200)
-    pod.install_credentials(config, tmp_path, second)
-    credential_file = tmp_path / "private/subscription.json"
-    assert json.loads(credential_file.read_bytes()) == second
-    assert credential_file.stat().st_mode & 0o777 == 0o600
-    with pytest.raises(ValueError, match="account differs"):
-        pod.install_credentials(config, tmp_path, token(account="def456"))
-    assert json.loads(credential_file.read_bytes()) == second
-    assert hotkey.read_bytes() == b"fixture identity"
+def test_bootstrap_rejects_access_token_with_less_than_five_minutes(config, tmp_path):
+    with pytest.raises(ValueError, match="expire too soon"):
+        pod.install_credentials(config, tmp_path, token(expiry=time.time() + 200))
+    assert not (tmp_path / "private/subscription.json").exists()
 
 
 def test_identity_is_checked_before_installing_or_replacing_it(config, tmp_path):
@@ -315,37 +314,31 @@ def test_frozen_scope_is_checked_before_each_saved_lookup(config, generation, tm
     assert generation["clients"] == 1
 
 
-def test_credentials_are_delivered_during_foreground_generation(config, tmp_path, monkeypatch):
-    values = [token(), token(expiry=time.time() + 7200)]
+def test_bootstrap_installs_private_credentials_before_generation(config, tmp_path, monkeypatch):
+    from bittensor_wallet import Keypair, Wallet
+
+    key = Keypair.create_from_uri("//Alice")
+    config = replace(config, hotkey=key.ss58_address)
+    source = tmp_path / "identity-source"
+    wallet = Wallet(name="leader", hotkey="default", path=str(source))
+    wallet.set_hotkey(key, encrypt=False, overwrite=True)
+    hotkey = base64.b64encode((source / "leader/hotkeys/default").read_bytes()).decode()
+    access_token = token()
+    directory = tmp_path / "pod"
+    directory.mkdir()
     calls = []
 
-    async def request(transport, request):
-        calls.append(request.url.path)
-        assert request.headers["Authorization"] == "Bearer fixture-job-token"
-        if request.url.path.endswith("/identity"):
-            return httpx.Response(200, json={"hotkey": "fixture-hotkey"})
-        return httpx.Response(200, json=values[min(calls.count(request.url.path) - 1, 1)])
+    async def generate(value, target):
+        calls.append(value)
+        credential_file = target / "private/subscription.json"
+        assert json.loads(credential_file.read_bytes()) == {"access_token": access_token, "account_id": config.account_id}
+        assert credential_file.stat().st_mode & 0o777 == 0o600
+        installed = Wallet(name="leader", hotkey="default", path=str(target / "private/wallets"))
+        assert installed.hotkey.ss58_address == key.ss58_address
 
-    monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", request)
-    monkeypatch.setattr(pod, "install_identity", lambda *args: None)
-
-    async def generate(*args):
-        while calls.count("/jobs/3/credentials") < 2:
-            await asyncio.sleep(0)
-
-    original_sleep = asyncio.sleep
-
-    async def sleep(delay):
-        await original_sleep(0)
-
-    async def observe(*args, **kwargs):
-        await generate()
-        assert json.loads((tmp_path / "private/subscription.json").read_bytes()) == values[1]
-
-    monkeypatch.setattr(pod, "generate_batch", observe)
-    monkeypatch.setattr(asyncio, "sleep", sleep)
-    asyncio.run(pod.run_job(config, tmp_path, "fixture-job-token"))
-    assert calls.count("/jobs/3/identity") == 1
+    monkeypatch.setattr(pod, "generate_batch", generate)
+    asyncio.run(pod.run_job(config, directory, hotkey=hotkey, access_token=access_token))
+    assert calls == [config]
 
 
 @pytest.mark.parametrize("mismatch", [None, "source", "main", "fetch"])

@@ -50,7 +50,6 @@ Settings load from the environment and the local `.env` file.
 | `GENERATION_IMAGE` | Published generation image reference pinned with `@sha256:<digest>` |
 | `RUNPOD_API_KEY` | Generation CPU lifecycle credentials; retained on the service |
 | `CDN_URL` | Same artifact CDN origin/prefix used by the collector |
-| `CREDENTIALS_URL` | Public HTTPS origin routed to the service's job endpoint |
 | `LEADER_CODEX_HOME` | Dedicated durable file-backed ChatGPT login directory |
 | `WALLET_PATH` | Dedicated unencrypted sr25519 operator wallet directory |
 
@@ -62,8 +61,7 @@ directory. A separate lock owns service state.
 
 `WALLET_NAME=leader` and `WALLET_HOTKEY=default` select the operator hotkey. It
 must be admitted by the witness and is distinct from the incumbent miner's public
-hotkey. The coldkey is never transferred. Operator hotkey and provider account
-are frozen per job; credential delivery never rewrites the hotkey.
+hotkey. The operator hotkey and provider account are frozen per job.
 
 Optional settings include `GITHUB_BRANCH=main`,
 `WITNESS_URL`, `SUBTENSOR_RPC_URL`,
@@ -93,9 +91,8 @@ The test gateway admits only signed requests from
 `5CAJpeDRXoE9EnsJRsDP1MLKuP31aztpXyPH5JaR49b14P1y`. Provision that hotkey in the
 configured test wallet. Keep its private key, GitHub and RunPod tokens, and the
 dedicated file-backed subscription login outside Git. The example uses separate
-state/login directories and loopback port `8081`. Route a separate HTTPS origin to
-that listener as described below, then fill `CREDENTIALS_URL` and the published
-`GENERATION_IMAGE` digest. These required values are empty in the example.
+state/login directories and sets `CONTROL_PORT=8081` for local job control.
+Fill in the published `GENERATION_IMAGE` digest and the required API tokens.
 
 The competition fixture must also supply:
 
@@ -124,8 +121,9 @@ python leader-generation-service/build_image.py --release-branch main --tag lead
 ```
 
 The command builds a local image. Publishing and deployment are separate actions.
-Configure `GENERATION_IMAGE` with the published registry digest. It is frozen
-per round, so replacing a pod continues using the same verified runtime. The source
+Configure `GENERATION_IMAGE` with the published registry digest of a worker that
+supports the controller's create request. It is frozen per round, so replacing a
+pod continues using the same verified runtime. The source
 commit is recorded in `/opt/leader-image/provenance.json` during the image build
 and read by the worker at startup.
 
@@ -146,33 +144,26 @@ source verification. Renderer wheel builds retain their isolated setuptools back
 ## Credentials and recovery
 
 Subscription maintenance runs independently of competition checks and CPU setup.
-It renews the login before expiry, including while no round is active. Each CPU
-attempt receives a scoped bearer token in its create request and polls the
-service for access-token/account JSON. The worker atomically updates its private
-credentials file; the SDK rereads it for each provider request. The refresh token
-and Codex login stay with the service. Unavailable credentials leave generation
-pending.
+It renews the login before expiry, including while no round is active. Before
+each pod create, the controller requires an access token valid for the
+competition's configured generation window plus ten minutes. It refreshes on
+the controller as needed and defers allocation if the token still expires too
+soon. The RunPod create request supplies the serialized operator hotkey and
+access token. The worker installs them in private files at startup. The refresh
+token, Codex login, and coldkey stay on the controller.
 
-Route `CREDENTIALS_URL` through an HTTPS ingress to the service's loopback listener
-at `127.0.0.1:CREDENTIALS_PORT` (default `8080`). The ingress must preserve the
-`Authorization` header and disable response caching and credential-header logging.
-Under `/v1/jobs/{n}`, `GET /job`, `/identity`, and `/credentials` serve
-public job configuration, the serialized hotkey, and access credentials.
-Each request requires the current attempt's bearer token. Responses use
-`Cache-Control: no-store`; publication, termination and replacement revoke access.
-
-Job control uses a separate stable `control_token` in the private round journal.
-Pass it privately as `LEADER_CONTROL_TOKEN` to the manual control client. On the
-same job base, `POST /start` enables generation and keeps an active pod, `POST /resume` requests a
-fresh attempt while the round is open, `GET /status` reads provider status, and `POST /terminate`
-stops the job. Termination keeps that job stopped until start or resume. Control
-responses contain only `pod_id`, `name`, `phase`, `stopped`, and `published`.
-Control tokens cannot fetch worker credentials; worker tokens cannot control
-jobs. Resume first terminates the previous attempt. Both respect the same
-allocation interval as the generation loop. A request during the interval can
-return an `intent` phase; the next eligible iteration starts a fresh attempt.
-The generation loop and control operations share one lifecycle lock;
-credential polling remains independent.
+Manual job control is available at `http://127.0.0.1:8080/v1/jobs/{n}` on the
+controller. Set `CONTROL_PORT` to use a different loopback port. Pass the
+`control_token` from the private round journal as `LEADER_CONTROL_TOKEN` to the
+manual control client. `POST /start` enables generation and keeps an active pod.
+`POST /resume` requests a fresh attempt while the round is open. `GET /status`
+reads provider status and `POST /terminate` stops the job until start or resume.
+Control responses contain only `pod_id`, `name`, `phase`, `stopped`, and
+`published`. Resume first terminates the previous attempt. Start and resume
+respect the same allocation interval as the generation loop. A request during
+the interval can return an `intent` phase and the next eligible iteration
+starts a fresh attempt. The generation loop and control operations share one
+lifecycle lock.
 
 If renewal requires signing in again, maintenance reports the error type. Repair
 the same dedicated account and let the service retry. A different account or
@@ -181,8 +172,8 @@ operator hotkey cannot take over an existing job.
 `STATE_DIRECTORY/rounds/{n}.json` stores frozen inputs, allocation attempts,
 the completed-prompt count, last progress time, and whether the current stall was warned.
 `STATE_DIRECTORY/runs/{uuid}/config.json` stores the public worker configuration.
-The private round journal stores each attempt's bearer token. Its lifecycle states
-are `intent`, `creating`, `active` and `terminated`; provider status is read separately.
+Allocation lifecycle states are `intent`, `creating`, `active` and `terminated`.
+The controller reads provider status separately.
 The witness owns completed results.
 Retain this directory and `LEADER_CODEX_HOME` across restarts.
 
@@ -232,7 +223,7 @@ poetry poe lint
 ```
 
 Tests replace provider, source preparation and credential-refresh I/O. They cover
-idle renewal, scoped credential delivery, manual resume, progress monitoring,
+idle renewal, create-time credential delivery, manual resume, progress monitoring,
 restart reconciliation, worker retry spacing, deadlines and index publication. Shared worker tests live in
 `miner-runtime/tests`. Live RunPod/Linux readiness, native proof execution,
 provider authentication and throughput need separate acceptance runs.

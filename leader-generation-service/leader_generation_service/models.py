@@ -41,7 +41,9 @@ class Allocation(BaseModel):
     id: UUID = Field(default_factory=uuid4)
     pod_id: str | None = None
     requested_at: float | None = Field(default=None, ge=0, allow_inf_nan=False)
-    token: str | None = Field(default=None, min_length=43, max_length=128, repr=False)
+    legacy_worker_token: str | None = Field(
+        default=None, validation_alias="token", min_length=43, max_length=128, repr=False, exclude=True
+    )
     phase: Literal["intent", "creating", "active", "terminated"] = "intent"
 
     @field_validator("phase", mode="before")

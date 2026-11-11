@@ -6,12 +6,13 @@ from typing import TYPE_CHECKING, Protocol
 from urllib.parse import unquote, urlsplit
 
 from loguru import logger
+from subnet_common.competition.config import require_competition_config
 from subnet_common.competition.generations import GenerationsAdapter, generations_path, get_generations
 from subnet_common.competition.schedule import require_schedule
 from subnet_common.competition.state import RoundStage, require_state
 from subnet_common.graceful_shutdown import GracefulShutdown
 
-from .credentials import AccessCredentials
+from .credentials import ACCESS_TOKEN_MARGIN_SECONDS, AccessCredentials
 from .models import Job
 from .witness import complete, is_terminal
 
@@ -23,7 +24,7 @@ if TYPE_CHECKING:
 
 class Runner(Protocol):
     async def ensure(self, job: Job) -> None: ...
-    async def start(self, job: Job, credentials: AccessCredentials) -> None: ...
+    async def start(self, job: Job, credentials: AccessCredentials, *, min_validity_seconds: int) -> None: ...
     async def terminate(self, job: Job) -> None: ...
     async def status(self, job: Job) -> dict[str, str | None]: ...
 
@@ -158,9 +159,11 @@ class RoundRunner:
             self.dependencies.store.save(job)
             return
 
-        credentials = await self.dependencies.credentials.current()
+        generation_minutes = (await require_competition_config(git, ref)).generation_stage_minutes
+        min_validity_seconds = max(0, generation_minutes) * 60 + ACCESS_TOKEN_MARGIN_SECONDS
+        credentials = await self.dependencies.credentials.current(min_validity_seconds=min_validity_seconds)
         if credentials.account_id != job.snapshot.account_id:
             raise ValueError("Provider account differs from the frozen job")
         await self.dependencies.runner.ensure(job)
         if not self.shutdown.should_stop and await self.may_generate(job):
-            await self.dependencies.runner.start(job, await self.dependencies.credentials.current())
+            await self.dependencies.runner.start(job, credentials, min_validity_seconds=min_validity_seconds)

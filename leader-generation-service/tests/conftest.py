@@ -73,7 +73,6 @@ def settings(tmp_path):
         generation_image="registry.test/leader@sha256:" + "d" * 64,
         runpod_api_key="fixture-runpod",
         cdn_url="https://cdn.test",
-        credentials_url="https://leader.test",
         witness_url="https://witness.test",
         state_directory=tmp_path / "state",
         LEADER_CODEX_HOME=tmp_path / "login",
@@ -92,12 +91,12 @@ class Runner:
     async def ensure(self, job):
         self.ensured.append(job)
         if job.allocation is None or job.allocation.phase == "terminated":
-            job.allocations.append(Allocation(pod_id="runner", phase="active", token="t" * 43))
+            job.allocations.append(Allocation(pod_id="runner", phase="active"))
         self.store.save(job)
         if self.on_ensure:
             self.on_ensure()
 
-    async def start(self, job, credentials):
+    async def start(self, job, credentials, *, min_validity_seconds):
         self.started.append(job)
         job.allocation.phase = "active"
         self.store.save(job)
@@ -176,7 +175,7 @@ def scenario(settings, tmp_path):
         state["index_reads"] += 1
         return httpx.Response(200, json=state["saved"])
 
-    credentials = CredentialManager(tmp_path, "fixture-codex", load=lambda: access(time.time() + 3600))
+    credentials = CredentialManager(tmp_path, "fixture-codex", load=lambda _: access(time.time() + 86400))
     http = httpx.AsyncClient(transport=httpx.MockTransport(request))
     dependencies = Dependencies(
         git, store, runner, credentials, read_inputs, SavedResults(http, settings.cdn_url), head, hotkey
