@@ -93,7 +93,8 @@ The Pod image must contain the worker and its sandbox. Reserve a distinct
 `VALIDATION_POD_PREFIX` for each coordinator. It tracks its Pods by name and
 uses `VALIDATION_POD_IMAGE` when launching a Pod. Each uses 4 `cpu3c` vCPUs and a
 12 GB container disk. `VALIDATION_WORKER_ENV` supplies the worker's R2 and Witness
-settings. GitHub settings come from the coordinator configuration. Set
+settings. Include `"VALIDATION_JOBS":"8"` in that JSON to run up to eight prompts
+at once per Pod. GitHub settings come from the coordinator configuration. Set
 `WITNESS_COMPETITION_BRANCH` in the worker environment when a test branch reuses
 frozen evidence from another branch.
 

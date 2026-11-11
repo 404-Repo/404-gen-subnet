@@ -41,5 +41,6 @@ class Settings(BaseSettings):
     r2_secret_access_key: SecretStr = Field(..., alias="R2_SECRET_ACCESS_KEY", description="R2 read secret key")
     witness_provider: Literal["api", "codex"] = Field(default="codex", alias="WITNESS_PROVIDER")
     renderer_id: str = Field(..., alias="RENDERER_ID", description="Original renderer identity for v1 saved previews")
-    sandbox_root: Path = Field(..., alias="SANDBOX_ROOT", description="Pristine miner runtime template copied per job")
+    jobs: int = Field(default=1, alias="VALIDATION_JOBS", ge=1, le=8, description="Concurrent prompts in one Pod")
+    sandbox_root: Path = Field(..., alias="SANDBOX_ROOT", description="Pristine miner runtime template")
     sandbox_timeout_seconds: float = Field(default=1800, alias="SANDBOX_TIMEOUT", gt=0)

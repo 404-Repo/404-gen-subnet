@@ -74,6 +74,7 @@ class ValidationIntegration(unittest.IsolatedAsyncioTestCase):
         self.source_missing = False
         self.stop_after_chair = True
         self.stop_after_lamp_render = False
+        self.parallel_prompts: asyncio.Event | None = None
         self.unavailable_render: str | None = None
         self.shutdown = GracefulShutdown()
         app = web.Application()
@@ -311,6 +312,11 @@ def generate(image, seed, witness, renderer):
                 return web.Response(status=404)
             return web.Response(body=self.archive)
         if path.startswith("/canonical/"):
+            if self.parallel_prompts is not None:
+                if "/canonical/chair.js" in self.reads and "/canonical/lamp.js" in self.reads:
+                    self.shutdown.request_shutdown()
+                    self.parallel_prompts.set()
+                await self.parallel_prompts.wait()
             return web.Response(body=self.objects["main"][path.removeprefix("/")])
         if path.startswith("/r2/"):
             bucket, key = path.removeprefix("/r2/").split("/", 1)
@@ -375,6 +381,7 @@ def generate(image, seed, witness, renderer):
 
     async def test_missing_submitted_source_fails_immediately(self) -> None:
         self.source_missing = True
+        self.settings.jobs = 8
         async with (
             GitHubClient("test/competition", token=self.secret, base_url=self.base) as git,
             R2Client("fixture", "fixture", self.base + "/r2", bucket="main") as r2,
@@ -390,6 +397,40 @@ def generate(image, seed, witness, renderer):
         self.assertEqual(progress.prompts["chair"].status, "failed")
         self.assertIn("404 Not Found", progress.prompts["chair"].reason)
         self.assertIn("test/miner@" + "d" * 40, progress.prompts["chair"].reason)
+
+    async def test_parallel_prompts_resume_from_one_checkpoint(self) -> None:
+        self.settings.jobs = 2
+        self.stop_after_chair = False
+        self.failed_read = True
+        self.failed_write = True
+        self.parallel_prompts = asyncio.Event()
+        output = self.private_path / "validation"
+        tarball = "/repos/test/miner/tarball/" + "d" * 40
+        async with (
+            GitHubClient("test/competition", token=self.secret, base_url=self.base) as git,
+            R2Client("fixture", "fixture", self.base + "/r2", bucket="main") as r2,
+            httpx.AsyncClient(trust_env=False) as http,
+            asyncio.timeout(45),
+        ):
+            await run_validation(7, self.hotkey, self.ref, output, git, r2, http, self.settings, self.shutdown)
+            saved = ValidationProgress.model_validate_json(self.commits[self.head][self.path])
+            self.assertEqual(
+                {key: state.status for key, state in saved.prompts.items()}, {"chair": "passed", "lamp": "passed"}
+            )
+            self.assertNotIn("/canonical/table.js", self.reads)
+            self.assertEqual(self.reads[tarball], 1)
+
+            self.parallel_prompts = None
+            self.shutdown = GracefulShutdown()
+            await run_validation(7, self.hotkey, self.ref, output, git, r2, http, self.settings, self.shutdown)
+
+        progress = ValidationProgress.model_validate_json(self.commits[self.head][self.path])
+        self.assertEqual(
+            {key: state.status for key, state in progress.prompts.items()},
+            {"chair": "passed", "lamp": "passed", "table": "passed"},
+        )
+        self.assertEqual([self.reads[f"/canonical/{name}.js"] for name in ("chair", "lamp", "table")], [1, 1, 1])
+        self.assertEqual(self.reads[tarball], 2)
 
     async def test_missing_submission_stays_pending(self) -> None:
         self.stop_after_chair = False

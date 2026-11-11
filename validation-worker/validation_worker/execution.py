@@ -196,6 +196,8 @@ async def validate_prompt(
     http: httpx.AsyncClient,
     settings: Settings,
     budget: PromptBudget,
+    *,
+    slot: int = 0,
 ) -> ValidationResult:
     canonical = inputs.generations[prompt.id]
     if canonical.js is None and canonical.failure_reason != "generation_failed":
@@ -219,7 +221,7 @@ async def validate_prompt(
         trial_budget = copy(budget)
         trial_budget.charges = {}
         try:
-            async with Sandbox(sandbox_root, image_path, inputs.seed, settings) as sandbox:
+            async with Sandbox(sandbox_root, image_path, inputs.seed, settings, slot) as sandbox:
                 while True:
                     message = await sandbox.receive()
                     if isinstance(message, MinerResult):

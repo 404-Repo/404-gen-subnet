@@ -67,6 +67,10 @@ one owner.
 terminates the active sandbox. Operators can explicitly reset a pending prompt's
 retryable flag and attempt count after repairing infrastructure.
 
+The Pod runs up to `VALIDATION_JOBS` prompts concurrently for one candidate.
+Each slot reuses its own jail, starts a fresh miner process for each prompt and
+queues progress through the same GitBatcher.
+
 ## Inputs and R2 reads
 
 The worker reads the candidate's `submissions.json`, `prompts.txt`, `seed.json`,
@@ -106,15 +110,15 @@ exits. Git holds the durable checkpoint.
 ## Miner isolation
 
 NsJail 3.6 runs in standalone once mode with namespace creation disabled, using a
-chroot, UID/GID 40000, no supplementary groups, no capabilities, `no_new_privs` and
-the bundled seccomp allowlist. This profile works with RunPod's default container
-capabilities. It requires a root worker able to chroot and change UID/GID; UID
-40000 must be reserved for the miner in that Pod.
+chroot, no supplementary groups, no capabilities, `no_new_privs` and the bundled
+seccomp allowlist. This profile works with RunPod's default container capabilities.
+It requires a root worker able to chroot and change UID/GID. Each slot uses its
+own reserved UID/GID, starting at 40000.
 
 The worker copies only the pristine runtime, submitted source and credential-free
-entry point into a job directory. Runtime and source files are owned by root and
+entry point into each slot's jail. Runtime and source files are owned by root and
 unwritable by the miner. Before each prompt, the worker replaces the prompt image
-and recreates `/scratch` for UID 40000. It clears the miner environment and closes
+and recreates `/scratch` for the slot's UID. It clears the miner environment and closes
 all inherited file descriptors except stdin/stdout/stderr. Worker storage,
 expected outputs, raw evidence, tokens, home directories, SSH keys and agent
 sockets stay outside the chroot. `/proc` and `/sys` are not mounted.
@@ -179,6 +183,7 @@ R2_REPLAY_BUCKET=your-replay-bucket
 R2_ACCESS_KEY_ID=your-read-access-key
 R2_SECRET_ACCESS_KEY=your-read-secret-key
 RENDERER_ID=original-witness-image-identity
+VALIDATION_JOBS=1
 SANDBOX_ROOT=/opt/validation-miner-root
 SANDBOX_TIMEOUT=1800
 LOG_LEVEL=DEBUG
@@ -187,8 +192,9 @@ LOG_LEVEL=DEBUG
 GitHub access must allow reading source and writing the competition checkpoint.
 R2 credentials need object reads from both buckets. They remain in the trusted
 worker. `WITNESS_PROVIDER` selects the original `api` or `codex` request
-normalization and defaults to `codex`. `SANDBOX_TIMEOUT` sets the watchdog in
-seconds for a prompt's attempts on one Pod.
+normalization and defaults to `codex`. `VALIDATION_JOBS` accepts 1 through 8
+and defaults to 1. `SANDBOX_TIMEOUT` sets the watchdog in seconds for a prompt's
+attempts on one Pod.
 
 ```bash
 poetry run python main.py --round-num 7 --hotkey MINER_HOTKEY \
