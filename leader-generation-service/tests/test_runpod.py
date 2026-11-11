@@ -479,7 +479,7 @@ async def test_restart_adopts_a_lost_create_reply_and_replaces_only_after_a_stal
     await generation_iteration(scenario.controller, settings)
     assert provider.events == ["create"]
     assert value.store.load(1).allocation.pod_id == "pod-1"
-    clock[0] += 1200
+    clock[0] += settings.stall_replacement_seconds - 1200
     await generation_iteration(scenario.controller, settings)
     current = value.store.load(1)
     assert provider.events == ["create", "delete", "create"]
@@ -661,7 +661,7 @@ async def test_known_lost_runner_is_replaced_with_same_snapshot(scenario, settin
     await launch(value, job)
     provider.pods.clear()
     scenario.deps.runner = value
-    clock[0] += 2400
+    clock[0] += settings.stall_replacement_seconds
     await generation_iteration(scenario.controller, settings)
     job = value.store.load(1)
     assert provider.creates == 2
@@ -721,7 +721,7 @@ async def test_broken_pod_is_replaced_after_a_stall_and_preserves_witness_progre
     clock[0] += 1200
     await generation_iteration(scenario.controller, settings)
     assert provider.creates == 1
-    clock[0] += 2400
+    clock[0] += settings.stall_replacement_seconds
     await generation_iteration(scenario.controller, settings)
     resumed = value.store.load(1)
     assert provider.events == ["create", "delete", "create"]
@@ -826,7 +826,7 @@ async def test_cleanup_failure_prevents_replacement_of_a_stalled_pod(
             raise RuntimeError("Fixture deletion unavailable")
 
     monkeypatch.setattr(provider, "delete", unavailable)
-    clock[0] += 2400
+    clock[0] += settings.stall_replacement_seconds
     with pytest.raises(RuntimeError, match="deletion unavailable|termination is not confirmed"):
         await generation_iteration(scenario.controller, settings)
     assert scenario.state["index_reads"] == reads + 1
@@ -873,9 +873,12 @@ async def test_closed_round_disposes_running_attempt_without_replacement(control
     assert value.store.load(1).allocation.phase == "terminated"
 
 
-async def test_no_progress_warns_at_twenty_minutes_and_replaces_at_forty(
-    control, runner, scenario, settings, clock, discord
+@pytest.mark.parametrize("replacement_seconds", [None, 7200], ids=["one-hour-default", "two-hours-configured"])
+async def test_no_progress_warns_at_twenty_minutes_and_uses_the_replacement_threshold(
+    control, runner, scenario, settings, clock, discord, replacement_seconds
 ):
+    if replacement_seconds is not None:
+        settings.stall_replacement_seconds = replacement_seconds
     request, _ = control
     value, provider = runner
     await request("start")
@@ -888,7 +891,7 @@ async def test_no_progress_warns_at_twenty_minutes_and_replaces_at_forty(
     assert value.store.load(1).allocation.id == previous
     assert provider.creates == 1 and provider.deleted == []
     assert len(discord.messages) == 1
-    clock[0] += 1199
+    clock[0] += (replacement_seconds or 3600) - 1201
     await generation_iteration(scenario.controller, settings)
     assert provider.creates == 1 and provider.deleted == []
     clock[0] += 1
@@ -941,7 +944,7 @@ async def test_progress_clock_and_warning_survive_service_restart(control, runne
     scenario.deps.runner = runpod.RunpodRunner(
         settings, store, provider, value.http, shutdown=scenario.controller.shutdown
     )
-    clock[0] += 1200
+    clock[0] += settings.stall_replacement_seconds - 1200
     await generation_iteration(scenario.controller, settings)
     assert provider.events == ["create", "delete", "create"]
     assert len(discord.messages) == 1
@@ -963,7 +966,7 @@ async def test_new_progress_resets_the_stall_timer_and_warning(control, runner, 
     await generation_iteration(scenario.controller, settings)
     assert len(discord.messages) == 2
     assert provider.creates == 1
-    clock[0] += 1200
+    clock[0] += settings.stall_replacement_seconds - 1200
     await generation_iteration(scenario.controller, settings)
     assert provider.events == ["create", "delete", "create"]
 
@@ -976,7 +979,7 @@ async def test_regressing_progress_is_an_error_and_does_not_replace_the_pod(cont
     scenario.state["saved"] = {"chair": {"failure_reason": "generation_failed"}}
     await generation_iteration(scenario.controller, settings)
     progress_at = value.store.load(1).last_progress_at
-    clock[0] += 2400
+    clock[0] += settings.stall_replacement_seconds
     scenario.state["saved"] = {}
     with pytest.raises(ValueError, match="count regressed"):
         await generation_iteration(scenario.controller, settings)
@@ -1004,7 +1007,7 @@ async def test_failed_progress_read_does_not_kill_a_generation_pod(control, runn
     await request("start")
     clock[0] += 1200
     await generation_iteration(scenario.controller, settings)
-    clock[0] += 1200
+    clock[0] += settings.stall_replacement_seconds - 1200
     saved = scenario.deps.saved
     async with httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(503))) as http:
         scenario.deps.saved = SavedResults(http, settings.cdn_url)
@@ -1042,7 +1045,7 @@ async def test_discord_outage_does_not_prevent_stalled_pod_recovery(
     discord.status = 503
     clock[0] += 1200
     await generation_iteration(scenario.controller, settings)
-    clock[0] += 1200
+    clock[0] += settings.stall_replacement_seconds - 1200
     await generation_iteration(scenario.controller, settings)
     assert provider.events == ["create", "delete", "create"]
 

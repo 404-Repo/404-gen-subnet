@@ -18,6 +18,7 @@ from .witness import complete, is_terminal
 
 if TYPE_CHECKING:
     from .generation_iteration import Dependencies
+    from .settings import Settings
 
 
 class Runner(Protocol):
@@ -38,14 +39,14 @@ class RoundRunner:
     def __init__(
         self,
         dependencies: Dependencies,
-        branch: str,
+        settings: Settings,
         shutdown: GracefulShutdown,
     ) -> None:
-        self.dependencies, self.branch, self.shutdown = dependencies, branch, shutdown
+        self.dependencies, self.settings, self.shutdown = dependencies, settings, shutdown
 
     async def may_generate(self, job: Job) -> bool:
         git = self.dependencies.git
-        ref = await git.get_ref_sha(self.branch)
+        ref = await git.get_ref_sha(self.settings.github_branch)
         state = await require_state(git, ref)
         if state.current_round != job.snapshot.inputs.number or state.stage != RoundStage.MINER_GENERATION:
             return False
@@ -73,7 +74,7 @@ class RoundRunner:
             return
         git = self.dependencies.git
         number = job.snapshot.inputs.number
-        ref = await git.get_ref_sha(self.branch)
+        ref = await git.get_ref_sha(self.settings.github_branch)
         state = await require_state(git, ref)
         if state.current_round != number:
             await self.dependencies.runner.terminate(job)
@@ -103,7 +104,7 @@ class RoundRunner:
                     await git.commit_files(
                         files={generations_path(number, "leader"): content},
                         message=f"Update generated.json for round {number}, miner leader",
-                        branch=self.branch,
+                        branch=self.settings.github_branch,
                         base_sha=ref,
                     )
             except Exception as error:
@@ -148,7 +149,7 @@ class RoundRunner:
                         ),
                         fields=[{"name": "Completed", "value": f"{completed}/{len(expected)}", "inline": True}],
                     )
-            if stalled < 2400:
+            if stalled < self.settings.stall_replacement_seconds:
                 return
             await self.dependencies.runner.terminate(job)
 
