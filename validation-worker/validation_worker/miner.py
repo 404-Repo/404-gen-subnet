@@ -19,7 +19,8 @@ from openai.types.responses.response_create_params import ResponseCreateParamsBa
 from pydantic import BaseModel
 from renderer_client import RenderOptions, RenderRejected
 from renderer_client.client import DEFAULT_OPTIONS, RenderRequest
-from witness_client import AsyncWitnessClient, CapturedResponse, WitnessClient, WitnessError
+from witness_client import AsyncWitnessClient, CapturedResponse, WitnessError
+from witness_client._core import _ClientState
 from witness_client.calls import RequestKey
 from witness_client.response import AsyncModelStream, ModelStream, model_error, model_result
 
@@ -54,7 +55,7 @@ class ReplayMismatch(WitnessError):
         super().__init__(message, code="replay_mismatch")
 
 
-class Witness(WitnessClient):
+class Witness(_ClientState):
     """Responses adapter using the credential-free validation host bridge."""
 
     def __init__(self, provider: Literal["api", "codex"]) -> None:
@@ -231,7 +232,7 @@ class Renderer:
 
 def invoke_generate(
     generate: (
-        Callable[[bytes, int, WitnessClient, Renderer], str | None]
+        Callable[[bytes, int, Witness, Renderer], str | None]
         | Callable[[bytes, int, AsyncWitnessClient], Awaitable[str | None]]
     ),
     image: bytes,
@@ -247,7 +248,7 @@ def invoke_generate(
             return await entry(image, seed, AsyncWitness(witness))
 
         return asyncio.run(run())
-    return cast(Callable[[bytes, int, WitnessClient, Renderer], str | None], generate)(image, seed, witness, renderer)
+    return cast(Callable[[bytes, int, Witness, Renderer], str | None], generate)(image, seed, witness, renderer)
 
 
 def main(provider: Literal["api", "codex"]) -> None:

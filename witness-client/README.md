@@ -1,4 +1,4 @@
-# Python WitnessClient
+# Python AsyncWitnessClient
 
 Send OpenAI requests through the subnet witness using Python. The witness
 records the requests and responses so the validator can replay your submitted
@@ -17,8 +17,8 @@ It installs the separate async base miner, authenticates your wallet, and runs
 model calls, previews and final submission through your assigned Pod.
 
 The release set is `404-witness-client==0.2.17`, `404-renderer-client==0.1.4`
-and `404-miner-runtime==0.1.5`. Miners and the leader use the shared
-`miner_runtime.batch.run` runner. Install the immutable wheels from the
+and `404-miner-runtime==0.1.5`. Miners and the leader share the batch workers in
+`miner_runtime.batch`. Install the immutable wheels from the
 [GitHub release](https://github.com/404-Repo/404-gen-subnet/releases/tag/miner-runtime-v0.1.5).
 The requirements file selects Linux x86_64 with glibc 2.34+ or macOS 13+ arm64.
 The packages require Python 3.11+; the base miner requires Python 3.13.
@@ -98,15 +98,14 @@ proof concurrency to supply that many simultaneous preparations.
 
 An async miner exports `generate(image, seed, witness)` and awaits its model calls
 and previews through the supplied witness. The execution host also supports
-synchronous `generate(image, seed, witness, renderer)` programs. Model calls work
+legacy synchronous `generate(image, seed, witness, renderer)` programs through
+private recorded-response adapters. Model calls work
 without prompt binding or recording lifecycle APIs. With the async client:
 
 ```python
 response = await witness.responses.create(model=model, input=prompt, instructions="Return JavaScript.")
 source = response.output_text
 ```
-
-With `WitnessClient`, use the same call without `await`.
 
 The default result is an OpenAI `Response`, including output items and typed usage.
 Failed/incomplete Responses retain their status. Provider HTTP failures use SDK
@@ -119,7 +118,7 @@ The SDK does not automatically repeat a paid request after a provider or capture
 failure. Caller code can retry with the same request and `request_id` once the
 attempt has durably failed; an unfinished capture is joined instead.
 
-A direct `WitnessClient.responses.create()` also works for other work during the
+A direct `await witness.responses.create()` also works for other work during the
 round's access window. Equal provider/body/`request_id`/subscription-`session_id`
 keys reuse a saved successful outcome throughout the miner's allocation scope.
 Use a stable, different `request_id` for intentionally fresh inference. It is distinct from the
@@ -127,8 +126,8 @@ generation seed and is not sent to OpenAI as a randomness seed.
 
 ### Async calls
 
-Use `AsyncWitnessClient` in an asyncio application. Its configuration and request
-arguments match `WitnessClient`; HTTP and WebSocket traffic use native async I/O.
+Use `AsyncWitnessClient` in an asyncio application. HTTP and WebSocket traffic use
+native async I/O.
 Proof initialization and credential proving run in worker threads. Local
 subscription credential loading/refresh also runs off the event loop.
 
@@ -186,6 +185,11 @@ recordings and saved submissions; it does not replay model calls or submissions.
 The existing `delivery_timeout` bounds the wait. After cancellation or an
 unresolved readiness wait, the next witness operation resumes the allocation.
 
+When a new direct connection takes over, new requests use it immediately. Requests
+already using the previous connection retain it until they finish, fail or are
+cancelled. Its HTTP client then closes in the background, without holding the Pod
+allocation lock. Closing the SDK client waits for outstanding connection cleanup.
+
 ### Model request options
 
 Pass OpenAI Responses request-body parameters to `responses.create()`, such as
@@ -231,6 +235,14 @@ Use `openai_api_key=os.environ["OPENAI_API_KEY"]` instead of `subscription="code
 for API authentication. Subscription credentials are refreshed locally and stay
 hidden by the credential proof.
 
+For service-owned subscriptions, set `codex_credentials_file` in the client
+configuration to an access-only JSON file with `access_token` and `account_id`.
+The client rereads this file for every provider request and requires at least
+five minutes of validity. The service must atomically replace it with renewed
+credentials during long runs. This mode never reads or refreshes the local Codex
+login; missing, malformed or stale snapshots fail the request. The refresh token
+stays with the service.
+
 ### Render previews
 
 Use `witness.render(source, options)` or `await witness.render(source, options)`
@@ -257,8 +269,6 @@ After generation returns, submit its JavaScript or `None` through the connected
 witness:
 
 ```python
-result = witness.submit(image, source)
-# With AsyncWitnessClient:
 result = await witness.submit(image, source)
 ```
 
@@ -301,8 +311,6 @@ The live runner can resume a batch by reading saved results from the assigned Po
 ```python
 from pathlib import Path
 
-submitted = witness.get_submitted()
-# With AsyncWitnessClient:
 submitted = await witness.get_submitted()
 
 for image_url in prompt_urls:
@@ -338,7 +346,7 @@ from the SDK's Pod-based recovery flow.
 
 ## Concurrency
 
-Configure both clients with numeric limits:
+Configure the client with numeric limits:
 
 ```python
 client = AsyncWitnessClient(
@@ -347,7 +355,7 @@ client = AsyncWitnessClient(
 )
 ```
 
-`WitnessClient` accepts the same limits. Both default to three and accept integers
+Both limits default to three and accept integers
 from 1 through 32. `parallel_calls` bounds active captures across all prompt
 pipelines sharing the client. `parallel_preparations` bounds TLS setup, credential
 proving and authorization within those captures. Preparation capacity releases
@@ -355,8 +363,7 @@ after authorization, so provider inference can overlap with later preparations.
 Native proving remains serialized.
 
 Concurrent async `responses.create()` calls queue inside the SDK when capacity is
-full. Synchronous calls obey the same limits when invoked concurrently. The
-delivery wait starts after acquiring initial capacity; queueing does not consume
+full. The delivery wait starts after acquiring initial capacity; queueing does not consume
 the provider's capture window. Callers
 do not need executors, semaphores or locks to enforce either limit. Completed
 response reuse bypasses both capacities; `resume()` retrieves an existing exchange

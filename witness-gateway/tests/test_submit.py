@@ -6,72 +6,61 @@ import asyncio
 import hashlib
 import time
 from collections.abc import AsyncIterator
-from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack, asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Literal
 from unittest.mock import AsyncMock
 
 import httpx
 import openai
 import pytest
 from bittensor_wallet import Keypair
-from renderer_client import ArtifactUnavailable, RenderOptions, RenderRejected, RenderUnavailable
+from renderer_client import RenderOptions, RenderRejected, RenderUnavailable
 from subnet_common.competition.generations import GenerationResult, GenerationsAdapter
 from subnet_common.witness.models import Pod, Scope
 from test_artifacts import PNG, SOURCE, client, enable
 from test_service import Harness
-from witness_client import AsyncWitnessClient, WitnessClient, WitnessError
+from witness_client import AsyncWitnessClient, WitnessError
 from witness_client.async_tunnel import AsyncWebSocketTunnel
 from witness_pod.artifacts import ArtifactRepository, SubmissionContext
 
-Mode = Literal["sync", "async"]
-
 
 @asynccontextmanager
-async def live_client(fixture: Harness, mode: Mode) -> AsyncIterator[WitnessClient | AsyncWitnessClient]:
-    if mode == "sync":
-        with fixture.client() as witness:
-            await asyncio.to_thread(witness._gateway.ensure_pod)
-            yield witness
-    else:
-        witness_async = AsyncWitnessClient(
-            {
-                "witness_url": fixture.origin,
-                "proof_parameters": "unused",
-                "state_directory": str(fixture.directory / "async-client"),
-            },
-            hotkey=fixture.key,
-            openai_api_key="fixture-" + "a" * 80,
-        )
-        try:
-            await witness_async._gateway.ensure_pod()
-            yield witness_async
-        finally:
-            await witness_async.aclose()
+async def live_client(fixture: Harness) -> AsyncIterator[AsyncWitnessClient]:
+    witness_async = AsyncWitnessClient(
+        {
+            "witness_url": fixture.origin,
+            "proof_parameters": "unused",
+            "state_directory": str(fixture.directory / "async-client"),
+        },
+        hotkey=fixture.key,
+        openai_api_key="fixture-" + "a" * 80,
+    )
+    try:
+        await witness_async._gateway.ensure_pod()
+        yield witness_async
+    finally:
+        await witness_async.aclose()
 
 
-async def submit(witness: WitnessClient | AsyncWitnessClient, image: bytes, source: str | None) -> dict[str, object]:
-    if isinstance(witness, AsyncWitnessClient):
-        return await witness.submit(image, source)
-    return await asyncio.to_thread(witness.submit, image, source)
+async def submit(
+    witness: AsyncWitnessClient, image: bytes, source: str | None
+) -> dict[str, object]:
+    return await witness.submit(image, source)
 
 
-async def get_submitted(witness: WitnessClient | AsyncWitnessClient) -> dict[str, dict[str, object]]:
-    if isinstance(witness, AsyncWitnessClient):
-        return await witness.get_submitted()
-    return await asyncio.to_thread(witness.get_submitted)
+async def get_submitted(witness: AsyncWitnessClient) -> dict[str, dict[str, object]]:
+    return await witness.get_submitted()
 
 
-@pytest.mark.parametrize("mode", ["sync", "async"])
 def test_get_submitted_resumes_only_this_miners_round_after_client_restart(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: Mode,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def scenario() -> None:
         fixture = Harness(tmp_path, monkeypatch)
         async with fixture.running():
-            async with live_client(fixture, mode) as witness:
+            async with live_client(fixture) as witness:
                 failed_image = b"failed frozen prompt"
                 rendered = await enable(fixture, prompt_ids={
                     hashlib.sha256(fixture.image).hexdigest(): "official-chair",
@@ -98,25 +87,23 @@ prompt_ids={"f" * 64: "f" * 64},
                     )
                     foreign.update_result("f" * 64, GenerationResult(failure_reason="generation_failed"))
             fixture.services[-1].round_end = 0
-            async with live_client(fixture, mode) as resumed:
+            async with live_client(fixture) as resumed:
                 assert await get_submitted(resumed) == expected
                 assert rendered == [SOURCE] and fixture.paid == 0 and fixture.provider.creates == 1
 
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize("mode", ["sync", "async"])
 @pytest.mark.parametrize("source", [SOURCE, None])
 def test_submit_uses_round_seed_and_remains_compatible_with_existing_artifact_client(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    mode: Mode,
     source: str | None,
 ) -> None:
     async def scenario() -> None:
         fixture = Harness(tmp_path, monkeypatch)
         fixture.image = PNG
-        async with fixture.running(), live_client(fixture, mode) as witness:
+        async with fixture.running(), live_client(fixture) as witness:
             rendered = await enable(fixture)
             # Use a seed the new SDK cannot infer from its constructor or image.
             store = fixture.services[-1].artifacts
@@ -140,14 +127,6 @@ def test_submit_uses_round_seed_and_remains_compatible_with_existing_artifact_cl
                 ):
                     assert fixture.state.get(f"{result['views']}/{name}") is not None
                 assert fixture.state.get(f"{result['views']}/embeddings.npz") == b"fixture embeddings"
-            if isinstance(witness, WitnessClient):
-                with client(fixture, witness.renderer_transport()) as legacy:
-                    legacy.generation["seed"] = store.seed
-                    assert await asyncio.to_thread(legacy.save_final, source) == result
-                    legacy.generation["seed"] = store.seed + 1
-                    with pytest.raises(ArtifactUnavailable) as mismatch:
-                        await asyncio.to_thread(legacy.save_final, source)
-                    assert mismatch.value.status == 400
             assert rendered == ([] if source is None else [source])
             assert fixture.paid == 0 and fixture.provider.creates == 1
         assert owned.http.is_closed
@@ -155,17 +134,15 @@ def test_submit_uses_round_seed_and_remains_compatible_with_existing_artifact_cl
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize("mode", ["sync", "async"])
 @pytest.mark.parametrize("source", [SOURCE, None])
 def test_saved_result_resubmission_after_lost_reply_does_not_regenerate_or_render_previews(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    mode: Mode,
     source: str | None,
 ) -> None:
     async def scenario() -> None:
         fixture = Harness(tmp_path, monkeypatch)
-        async with fixture.running(), live_client(fixture, mode) as witness:
+        async with fixture.running(), live_client(fixture) as witness:
             rendered = await enable(fixture, prompt_ids={hashlib.sha256(fixture.image).hexdigest(): "official-choice"})
             attempts: list[str] = []
 
@@ -177,28 +154,16 @@ def test_saved_result_resubmission_after_lost_reply_does_not_regenerate_or_rende
                         raise httpx.ReadError("Final reply lost after durable saving", request=request)
                 return response
 
-            if isinstance(witness, AsyncWitnessClient):
-                async_original = witness._gateway.send
+            async_original = witness._gateway.send
 
-                async def delivery(request: httpx.Request) -> httpx.Response:
-                    response = await async_original(request)
-                    try:
-                        return delivered(request, response)
-                    finally:
-                        await response.aclose()
+            async def delivery(request: httpx.Request) -> httpx.Response:
+                response = await async_original(request)
+                try:
+                    return delivered(request, response)
+                finally:
+                    await response.aclose()
 
-                monkeypatch.setattr(witness._gateway, "send", delivery)
-            else:
-                sync_original = witness._gateway.send
-
-                def sync_delivery(request: httpx.Request) -> httpx.Response:
-                    response = sync_original(request)
-                    try:
-                        return delivered(request, response)
-                    finally:
-                        response.close()
-
-                monkeypatch.setattr(witness._gateway, "send", sync_delivery)
+            monkeypatch.setattr(witness._gateway, "send", delivery)
             with pytest.raises(WitnessError) as lost:
                 await submit(witness, fixture.image, source)
             assert lost.value.code == "submission_unresolved" and len(attempts) == 1
@@ -213,18 +178,19 @@ def test_saved_result_resubmission_after_lost_reply_does_not_regenerate_or_rende
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize("mode", ["sync", "async"])
-@pytest.mark.parametrize("first,second", [(SOURCE, SOURCE + "\n// conflicting"), (SOURCE, None), (None, SOURCE)])
+@pytest.mark.parametrize(
+    "first,second",
+    [(SOURCE, SOURCE + "\n// conflicting"), (SOURCE, None), (None, SOURCE)],
+)
 def test_submit_conflicts_keep_the_existing_result(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    mode: Mode,
     first: str | None,
     second: str | None,
 ) -> None:
     async def scenario() -> None:
         fixture = Harness(tmp_path, monkeypatch)
-        async with fixture.running(), live_client(fixture, mode) as witness:
+        async with fixture.running(), live_client(fixture) as witness:
             rendered = await enable(fixture)
             saved = await submit(witness, fixture.image, first)
             with pytest.raises(WitnessError) as conflict:
@@ -236,7 +202,10 @@ def test_submit_conflicts_keep_the_existing_result(
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize("failure", ["render", "embeddings", "closed", "prompt", "rejected", "unselected", "auth"])
+@pytest.mark.parametrize(
+    "failure",
+    ["render", "embeddings", "closed", "prompt", "rejected", "unselected", "auth"],
+)
 def test_submit_propagates_admission_and_judging_failures_without_retrying(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -244,7 +213,7 @@ def test_submit_propagates_admission_and_judging_failures_without_retrying(
 ) -> None:
     async def scenario() -> None:
         fixture = Harness(tmp_path, monkeypatch)
-        async with fixture.running(), live_client(fixture, "async") as witness:
+        async with fixture.running(), live_client(fixture) as witness:
             rendered = await enable(fixture, fail_first_render=failure == "render")
             image, source, expected = fixture.image, SOURCE, 503
             if failure == "embeddings":
@@ -278,9 +247,11 @@ def test_submit_propagates_admission_and_judging_failures_without_retrying(
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize("kind", ["sync", "async", "artifact"])
+@pytest.mark.parametrize("kind", ["async", "artifact"])
 def test_slow_final_saves_complete_while_another_save_is_waiting(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    kind: str,
 ) -> None:
     # Scale finite client timeouts from seconds to milliseconds; use real local TLS I/O.
     original_sync = httpx.HTTPTransport.handle_request
@@ -310,7 +281,7 @@ def test_slow_final_saves_complete_while_another_save_is_waiting(
         images = [fixture.image, b"another frozen prompt"]
         prompts = [hashlib.sha256(image).hexdigest() for image in images]
         sources = [SOURCE, SOURCE + "\n// another"]
-        async with fixture.running(), live_client(fixture, "async" if kind == "async" else "sync") as witness:
+        async with fixture.running(), live_client(fixture) as witness:
             rendered = await enable(fixture, prompt_ids={prompt: prompt for prompt in prompts})
             store = fixture.services[-1].artifacts
             assert store is not None
@@ -332,10 +303,17 @@ def test_slow_final_saves_complete_while_another_save_is_waiting(
             with ExitStack() as stack:
                 legacy = []
                 if kind == "artifact":
-                    assert isinstance(witness, WitnessClient)
-                    legacy = [stack.enter_context(client(
-                        fixture, witness.renderer_transport(), prompt_image=image,
-                    )) for image in images]
+
+                    legacy = [
+                        stack.enter_context(
+                            client(
+                                fixture,
+                                fixture.renderer_transport(witness),
+                                prompt_image=image,
+                            )
+                        )
+                        for image in images
+                    ]
 
                 async def save(index: int) -> dict[str, object]:
                     if legacy:
@@ -360,10 +338,11 @@ def test_slow_final_saves_complete_while_another_save_is_waiting(
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize("mode", ["sync", "async"])
 @pytest.mark.parametrize("case", ["pool_timeout", "stale_auth"])
 def test_concurrent_final_saves_reach_the_pod_with_fresh_authentication(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: Mode, case: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    case: str,
 ) -> None:
     original_sync = httpx.HTTPTransport.handle_request
     original_async = httpx.AsyncHTTPTransport.handle_async_request
@@ -384,14 +363,11 @@ def test_concurrent_final_saves_reach_the_pod_with_fresh_authentication(
     monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", handle_async)
 
     async def scenario() -> None:
-        if mode == "sync":
-            # Client calls and Pod storage share this test loop's executor.
-            asyncio.get_running_loop().set_default_executor(ThreadPoolExecutor(max_workers=128))
         fixture = Harness(tmp_path, monkeypatch)
         images = [f"prompt-{i}".encode() for i in range(101)]
         prompts = [hashlib.sha256(image).hexdigest() for image in images]
         started, release, arrived = asyncio.Event(), asyncio.Event(), asyncio.Event()
-        async with fixture.running(), live_client(fixture, mode) as witness:
+        async with fixture.running(), live_client(fixture) as witness:
             await enable(fixture, prompt_ids={prompt: prompt for prompt in prompts})
             service = fixture.services[-1]
             store, saver = service.artifacts, service.result_saver
@@ -437,7 +413,7 @@ def test_cancelled_async_submission_can_retrieve_the_result_saved_by_the_pod(
     async def scenario() -> None:
         fixture = Harness(tmp_path, monkeypatch)
         started, release = asyncio.Event(), asyncio.Event()
-        async with fixture.running(), live_client(fixture, "async") as witness:
+        async with fixture.running(), live_client(fixture) as witness:
             assert isinstance(witness, AsyncWitnessClient)
             rendered = await enable(fixture)
             store = fixture.services[-1].artifacts
@@ -483,18 +459,18 @@ def model_transport(fixture: Harness) -> None:
     fixture.monkeypatch.setattr(
         "witness_client.async_client.Prover", lambda _: SimpleNamespace(verifying_key_sha256=fixture.proof)
     )
-    fixture.monkeypatch.setattr("witness_client.async_client.async_exchange", exchange)
+    fixture.monkeypatch.setattr(fixture, "exchange", exchange)
 
 
-async def generated_source(witness: WitnessClient | AsyncWitnessClient) -> str:
-    if isinstance(witness, AsyncWitnessClient):
-        return (await witness.responses.create(model="fixture", input="image", request_id=7)).output_text
-    return (await asyncio.to_thread(witness.responses.create, model="fixture", input="image", request_id=7)).output_text
+async def generated_source(witness: AsyncWitnessClient) -> str:
+    return (
+        await witness.responses.create(model="fixture", input="image", request_id=7)
+    ).output_text
 
 
-@pytest.mark.parametrize("mode", ["sync", "async"])
 def test_allocated_pod_keeps_working_through_the_day_with_the_gateway_offline(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: Mode,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from dataclasses import replace
 
@@ -519,7 +495,7 @@ def test_allocated_pod_keeps_working_through_the_day_with_the_gateway_offline(
             })
             await competition.controller.refresh()
             await fixture.gateway.round_changed()
-            async with live_client(fixture, mode) as witness:
+            async with live_client(fixture) as witness:
                 now = [time.time()]
                 inputs = competition.controller.require()
                 deadline = competition.controller.round_end
@@ -531,23 +507,17 @@ def test_allocated_pod_keeps_working_through_the_day_with_the_gateway_offline(
                 saved: dict[str, object] | None = None
                 for hour in (1, 6, 23):
                     now[0] = deadline - (24 - hour) * 3600
-                    if isinstance(witness, AsyncWitnessClient):
-                        result = await witness.create(model="fixture", input="image", request_id=hour)
-                        assert result.output_text == f"answer-{fixture.paid}"
-                        assert await witness.render(SOURCE) == PNG
-                    else:
-                        result = await asyncio.to_thread(witness.create, model="fixture", input="image", request_id=hour)
-                        assert result.output_text == f"answer-{fixture.paid}"
-                        assert await asyncio.to_thread(witness.render, SOURCE) == PNG
+                    result = await witness.create(
+                        model="fixture", input="image", request_id=hour
+                    )
+                    assert result.output_text == f"answer-{fixture.paid}"
+                    assert await witness.render(SOURCE) == PNG
                     saved = await submit(witness, fixture.image, SOURCE)
                     assert await get_submitted(witness) == {"chair": saved}
                 assert saved is not None
                 now[0] = deadline
                 with pytest.raises(openai.APIConnectionError):
-                    if isinstance(witness, AsyncWitnessClient):
-                        await witness.create(model="fixture", input="after-deadline")
-                    else:
-                        await asyncio.to_thread(witness.create, model="fixture", input="after-deadline")
+                    await witness.create(model="fixture", input="after-deadline")
                 assert await get_submitted(witness) == {"chair": saved}
                 assert await submit(witness, fixture.image, SOURCE) == saved
                 assert fixture.gateway_paths == gateway_paths
@@ -559,13 +529,15 @@ def test_allocated_pod_keeps_working_through_the_day_with_the_gateway_offline(
 
 @pytest.mark.parametrize("failure", ["unknown", "http404", "malformed"])
 def test_async_caller_retries_a_failed_request_with_the_same_id(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
 ) -> None:
     async def scenario() -> None:
         fixture = Harness(tmp_path, monkeypatch)
         fixture.failures = [failure]
         model_transport(fixture)
-        async with fixture.running(), live_client(fixture, "async") as witness:
+        async with fixture.running(), live_client(fixture) as witness:
             assert isinstance(witness, AsyncWitnessClient)
             with pytest.raises(openai.APIError) as error:
                 await witness.responses.create(model="fixture", input="image", request_id=7)
@@ -580,27 +552,24 @@ def test_async_caller_retries_a_failed_request_with_the_same_id(
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize("mode", ["sync", "async"])
 def test_fresh_client_recovers_a_lost_model_result_without_local_state_or_duplicate_inference(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: Mode,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def scenario() -> None:
         fixture = Harness(tmp_path, monkeypatch)
         async with fixture.running():
             model_transport(fixture)
-            async with live_client(fixture, mode) as first:
-                if isinstance(first, AsyncWitnessClient):
-                    async def lost_async(*args: object, **kwargs: object) -> None:
-                        raise httpx.ReadError("Recorded model result reply lost")
-                    monkeypatch.setattr(first._gateway, "recorded", lost_async)
-                else:
-                    def lost_sync(*args: object, **kwargs: object) -> None:
-                        raise httpx.ReadError("Recorded model result reply lost")
-                    monkeypatch.setattr(first._gateway, "recorded", lost_sync)
+            async with live_client(fixture) as first:
+
+                async def lost_async(*args: object, **kwargs: object) -> None:
+                    raise httpx.ReadError("Recorded model result reply lost")
+
+                monkeypatch.setattr(first._gateway, "recorded", lost_async)
                 with pytest.raises(openai.APIConnectionError):
                     await generated_source(first)
                 assert fixture.paid == 1
-            async with live_client(fixture, mode) as restarted:
+            async with live_client(fixture) as restarted:
                 assert await generated_source(restarted) == "answer-1"
                 assert fixture.paid == fixture.provider.creates == 1
             assert not (tmp_path / "client").exists() and not (tmp_path / "async-client").exists()
@@ -608,22 +577,22 @@ def test_fresh_client_recovers_a_lost_model_result_without_local_state_or_duplic
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize("mode", ["sync", "async"])
 def test_failed_submission_can_rerun_generation_from_pod_recordings_and_submit(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: Mode,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def scenario() -> None:
         fixture = Harness(tmp_path, monkeypatch)
         fixture.response_text = lambda body, number: SOURCE
         async with fixture.running():
             model_transport(fixture)
-            async with live_client(fixture, mode) as first:
+            async with live_client(fixture) as first:
                 rendered = await enable(fixture, fail_first_render=True)
                 assert await get_submitted(first) == {}
                 with pytest.raises(WitnessError) as failed:
                     await submit(first, fixture.image, await generated_source(first))
                 assert failed.value.status_code == 503
-            async with live_client(fixture, mode) as restarted:
+            async with live_client(fixture) as restarted:
                 assert await get_submitted(restarted) == {}
                 result = await submit(restarted, fixture.image, await generated_source(restarted))
                 assert await get_submitted(restarted) == {hashlib.sha256(fixture.image).hexdigest(): result}
@@ -634,7 +603,8 @@ def test_failed_submission_can_rerun_generation_from_pod_recordings_and_submit(
 
 
 def test_fresh_async_client_joins_an_ambiguously_delivered_model_call_without_local_state(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def scenario() -> None:
         fixture = Harness(tmp_path, monkeypatch)
@@ -642,14 +612,14 @@ def test_fresh_async_client_joins_an_ambiguously_delivered_model_call_without_lo
         async with fixture.running():
             model_transport(fixture)
             try:
-                async with live_client(fixture, "async") as first:
+                async with live_client(fixture) as first:
                     task = asyncio.create_task(generated_source(first))
                     await asyncio.wait_for(asyncio.to_thread(fixture.dispatched.wait, 5), 6)
                     assert fixture.paid == 1
                     task.cancel()
                     with pytest.raises(asyncio.CancelledError):
                         await task
-                async with live_client(fixture, "async") as restarted:
+                async with live_client(fixture) as restarted:
                     recovered = asyncio.create_task(generated_source(restarted))
                     await asyncio.sleep(0.1)
                     assert fixture.paid == 1 and not recovered.done()
@@ -663,24 +633,20 @@ def test_fresh_async_client_joins_an_ambiguously_delivered_model_call_without_lo
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize("mode", ["sync", "async"])
 def test_witness_preview_uses_its_pod_and_leaves_submission_explicit(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    mode: Mode,
 ) -> None:
     async def scenario() -> None:
         fixture = Harness(tmp_path, monkeypatch)
-        async with fixture.running(), live_client(fixture, mode) as witness:
+        async with fixture.running(), live_client(fixture) as witness:
             rendered = await enable(fixture, fail_first_render=True)
             owned = witness._gateway._direct
             assert owned is not None
             options = RenderOptions(lighting="neutral")
 
             async def preview(source: str) -> bytes:
-                if isinstance(witness, AsyncWitnessClient):
-                    return await witness.render(source, options)
-                return await asyncio.to_thread(witness.render, source, options)
+                return await witness.render(source, options)
 
             with pytest.raises(RenderUnavailable):
                 await preview(SOURCE)
@@ -696,14 +662,15 @@ def test_witness_preview_uses_its_pod_and_leaves_submission_explicit(
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize("mode", ["sync", "async"])
 @pytest.mark.parametrize("source", [SOURCE, None])
 def test_existing_hash_keyed_results_recover_under_official_ids_without_rendering(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: Mode, source: str | None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    source: str | None,
 ) -> None:
     async def scenario() -> None:
         fixture = Harness(tmp_path, monkeypatch)
-        async with fixture.running(), live_client(fixture, mode) as witness:
+        async with fixture.running(), live_client(fixture) as witness:
             digest = hashlib.sha256(fixture.image).hexdigest()
             rendered = await enable(fixture, prompt_ids={digest: "official-chair"})
             store = fixture.services[-1].artifacts

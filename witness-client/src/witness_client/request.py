@@ -81,9 +81,12 @@ def load_credentials(
     account: str | None
     if mode == "codex":
         try:
-            credential, account = subscription_credentials(
-                config.get("codex_home"), config.get("codex", "codex")
-            )
+            if "codex_credentials_file" in config:
+                credential, account = subscription_credentials(credentials_file=config["codex_credentials_file"])
+            else:
+                credential, account = subscription_credentials(
+                    config.get("codex_home"), config.get("codex", "codex")
+                )
         except (OSError, RuntimeError) as error:
             raise WitnessError(
                 f"Could not load ChatGPT subscription credentials: {error}",

@@ -20,10 +20,12 @@ from collections.abc import Callable, Iterable
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
+from pydantic import ValidationError
 from renderer_client import Renderer, RenderOptions, RenderRejected, RenderUnavailable
 from renderer_client.client import MAX_RESPONSE_BYTES
+from witness_client import WitnessError
 from witness_client.calls import RequestKey
 
 from .render_recovery import (
@@ -35,10 +37,11 @@ from .render_recovery import (
     RenderFailure,
     RenderRecoverySearch,
 )
-from .request_replay import ReplaySource
+from .request_replay import EvidenceUnavailable, RecordedWitnessClient, ReplaySource, RequestInventory, SavedCapture
 
 
 INDEX_CACHE = Path(__file__).resolve().parents[1] / ".reports/replay-indexes"
+T = TypeVar("T")
 
 
 def index_cache_directory(endpoint: str, bucket: str) -> Path:
@@ -207,6 +210,35 @@ class Log:
         self.emit(event, traceback=traceback.format_exc(), **fields)
 
 
+class HostReplaySource:
+    """Read replay evidence before watchdog expiry and translate storage errors."""
+
+    def __init__(self, source: ReplaySource, log: Log, prompt: str, expired: threading.Event) -> None:
+        self.source, self.log, self.prompt = source, log, prompt
+        self.expired = expired
+
+    def _read(self, load: Callable[[], T]) -> T:
+        if self.expired.is_set():
+            raise EvidenceUnavailable("Replay watchdog expired")
+        try:
+            return load()
+        except Exception as error:
+            self.log.exception("evidence_unavailable", prompt=self.prompt)
+            raise EvidenceUnavailable(str(error)) from error
+
+    def fetch(self, exchange_id: str) -> tuple[SavedCapture, bytes]:
+        return self._read(lambda: self.source.fetch(exchange_id))
+
+    def lookup(self, request: RequestKey) -> dict[str, SavedCapture]:
+        return self._read(lambda: self.source.lookup(request))
+
+    def image_index(self, request_id: int, session_id: str | None) -> dict[str, str | None]:
+        return self._read(lambda: self.source.image_index(request_id, session_id))
+
+    def request_body(self, request: RequestKey) -> bytes:
+        return self._read(lambda: self.source.request_body(request))
+
+
 def execute_prompt(
     *,
     directory: Path,
@@ -273,6 +305,12 @@ def execute_prompt(
     timer.start()
     code = 1
     parent_error = None
+    witness = None
+    accounting_accepted = False
+
+    def emit(event: str, **fields: object) -> None:
+        log.emit(event, prompt_id=prompt, recovery_attempt=plan.get("recovery_attempt", 1), **fields)
+
     try:
         assert process.stdin is not None and process.stdout is not None
         process.stdin.write(json.dumps({**plan, "directory": str(directory)}) + "\n")
@@ -281,21 +319,48 @@ def execute_prompt(
             message = json.loads(line)
             event = message.pop("event")
             if event != "rpc":
-                log.emit(event, prompt_id=prompt, recovery_attempt=plan.get("recovery_attempt", 1), **message)
+                if event == "prompt_finished":
+                    message["accounting_accepted"] = accounting_accepted
+                    if witness is not None:
+                        message.update(witness.summary())
+                emit(event, **message)
                 continue
             reply: dict[str, Any]
             try:
-                if message["operation"] == "model":
-                    capture, body = source.fetch(message["exchange_id"])
-                    reply = {"capture": capture.model_dump(mode="json"), "body": base64.b64encode(body).decode()}
-                elif message["operation"] == "image_index":
-                    reply = {"requests": source.image_index(message["request_id"], message["session_id"])}
-                elif message["operation"] == "request_lookup":
-                    captures = source.lookup(RequestKey.model_validate(message["request_key"]))
-                    reply = {"captures": {key: item.model_dump(mode="json") for key, item in captures.items()}}
-                elif message["operation"] == "request_body":
-                    body = source.request_body(RequestKey.model_validate(message["request_key"]))
-                    reply = {"body": base64.b64encode(body).decode()}
+                if message["operation"] == "model_start":
+                    if witness is not None:
+                        raise ValueError("Replay witness is already initialized")
+                    witness = RecordedWitnessClient(
+                        RequestInventory.model_validate_json((directory / "bundle/requests.json").read_bytes()),
+                        (directory / "bundle/pricing.json").read_bytes(),
+                        HostReplaySource(source, log, prompt, expired),
+                        emit,
+                        reference=(directory / "prompts" / prompt / "image.png").read_bytes(),
+                    )
+                    reply = {}
+                elif message["operation"] in ("model", "model_finish", "model_accept"):
+                    if witness is None:
+                        raise EvidenceUnavailable("Replay witness is not initialized")
+                    if message["operation"] == "model":
+                        key, body, call_id, occurrence = witness.start_call(
+                            message["request_id"], message["session_id"], message["params"], stream=message["stream"]
+                        )
+                        captured = witness.recorded_response(key, body)
+                        reply = {
+                            "exchange_id": captured.exchange_id,
+                            "status": captured.status,
+                            "body": base64.b64encode(captured.body).decode(),
+                            "provider": key.provider,
+                            "call_id": call_id,
+                            "occurrence": occurrence,
+                        }
+                    elif message["operation"] == "model_finish":
+                        witness.finish()
+                        reply = {}
+                    else:
+                        witness.budget.accept()
+                        accounting_accepted = True
+                        reply = {}
                 elif message["operation"] == "render":
                     try:
                         png = renderer.render(message["source"], RenderOptions(**message["options"]))
@@ -326,8 +391,27 @@ def execute_prompt(
                 else:
                     raise ValueError("Unknown replay bridge operation")
             except Exception as error:
-                log.exception("evidence_unavailable", prompt=prompt)
                 reply = {"error": str(error)}
+                if message["operation"] in ("model_start", "model", "model_finish", "model_accept"):
+                    reply["error_type"] = type(error).__name__
+                    if witness is not None:
+                        reply["provider"] = witness._mode
+                    if isinstance(error, WitnessError):
+                        reply["witness_error"] = {
+                            "exchange_id": error.exchange_id,
+                            "status_code": error.status_code,
+                            "code": error.code,
+                            "source": error.source,
+                            "provider_code": error.provider_code,
+                            "param": error.param,
+                            "provider_message": error.provider_message,
+                            "retry_after": error.retry_after,
+                        }
+                    elif isinstance(error, ValidationError):
+                        reply["validation_title"] = error.title
+                        reply["validation_errors"] = json.loads(error.json(include_url=False))
+                else:
+                    log.exception("evidence_unavailable", prompt=prompt)
             if expired.is_set():
                 break
             process.stdin.write(json.dumps(reply) + "\n")
@@ -348,6 +432,10 @@ def execute_prompt(
                 stream.close()
     path = output / "summary.json"
     summary = json.loads(path.read_bytes()) if path.is_file() else {"passed": False, "error": "Worker did not complete"}
+    if "accounting_accepted" in summary:
+        summary["accounting_accepted"] = accounting_accepted
+        if witness is not None:
+            summary.update(witness.summary())
     summary.update(prompt=prompt, process_exit_code=code, timeout=expired.is_set())
     summary["missing_render_attempts"] = [asdict(attempt) for attempt in missing_renders]
     if recovery_limited:

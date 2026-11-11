@@ -3,7 +3,7 @@
 Collects Python miner submissions from chain and records generated and submitted results.
 
 Miners submit a repository and an exact commit containing root `main.py` with
-`generate(image: bytes, seed: int, witness: WitnessClient, renderer: Renderer) -> str | None`,
+`async generate(image: bytes, seed: int, witness: AsyncWitnessClient) -> str | None`,
 plus supporting committed source. The operator supplies a fixed runtime and library set.
 See the current [miner guide](../miner-reference/README.md) for the contract.
 

@@ -25,6 +25,60 @@ results from its pinned Python source and the published prompts/seed, then publi
 
 All competition state is stored in a public git repository, making every decision auditable and every transition traceable.
 
+## Operator generation
+
+The shared [operator command](miner-runtime/run.py) runs an unchanged miner whose
+root `main.py` exports `async generate(image, seed, witness)`. Use the miner's
+pinned Python environment with witness-client 0.3.x, renderer-client 0.1.5 and
+miner-runtime 0.1.6 installed. See the [launch quickstart](miner-reference/README.md#launch-quickstart).
+The command loads the batch runner and result schema from this checkout.
+
+```sh
+set -o pipefail
+WITNESS_PROVER_CONTEXTS=4 GOMAXPROCS=8 GOMEMLIMIT=2048MiB \
+.venv/bin/python -u /path/to/404-subnet/miner-runtime/run.py \
+  --source /path/to/leader \
+  --competition-branch main \
+  --proof-parameters /path/to/proof-parameters \
+  --wallet-name validator --wallet-hotkey default --wallet-path ~/.bittensor/wallets \
+  --workers 24 --parallel-calls 32 --parallel-preparations 4 \
+  --output /path/to/competition/rounds/3/leader/generated.json \
+  2>&1 | tee /path/to/generation.log
+```
+
+The command resolves `--competition-branch` (default `main`) in
+`404-Repo/404-active-competition` to one commit. It reads `state.json`, `config.json`
+and that round's prompts, seed and schedule at that commit. Relative prompt paths
+resolve against the same commit; absolute prompt URLs are used as published.
+`GITHUB_TOKEN` is optional for reading this public repository.
+
+The wallet authenticates to `--witness-url` (default `https://witness.subnet404.xyz`),
+which must serve the selected competition branch. Its saved artifacts stay under
+that wallet's hotkey. After the batch, the command reads the round's saved index
+from `--cdn` (default `https://subnet404.xyz`) using the schedule's storage prefix.
+It validates the index and writes `--output` with absolute artifact URLs. Recorded
+failures remain recorded failures. Incomplete batches or invalid indexes exit
+with an error before writing the output.
+
+`--workers` controls active prompts; `--parallel-calls` controls active model
+captures across those prompts. Match the call limit to the Pod's configured
+capacity. The local thread pool has one thread per prompt plus one per model
+slot, allowing threaded miners and SDK preparation to progress together.
+`--parallel-preparations` bounds TLS setup, credential proving and authorization
+(default three). Set `WITNESS_PROVER_CONTEXTS=4` before starting Python and use
+`--parallel-preparations 4` to allow four concurrent native proofs. The contexts
+share the `GOMAXPROCS` CPU budget and `GOMEMLIMIT` soft memory budget.
+Retrying the command reuses the batch
+runner's saved-result lookup and skips completed prompts. `--attempts` defaults
+to three passes over unfinished prompts. Authentication uses the local Codex login,
+or `OPENAI_API_KEY` when `--api` is supplied. Logs go to stderr and the completed
+output path is printed to stdout.
+
+For the isolated two-prompt fixture, select `--competition-branch witness-test`,
+`--witness-url https://witness-test.subnet404.xyz`, the admitted test wallet and a
+separate local `--output` path. Test state, seed, prompts and storage scope come
+from that branch.
+
 ## Stage Machine
 
 The competition progresses through well-defined stages:

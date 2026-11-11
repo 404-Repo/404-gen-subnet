@@ -2,21 +2,20 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import random
 import re
 from collections.abc import Iterable
-from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol, Unpack, cast
+from typing import cast
 
 from openai import APIConnectionError, APIError
-from openai.types.responses import Response, ResponseInputParam
-from openai.types.responses.response_create_params import ResponseCreateParamsBase
+from openai.types.responses import ResponseInputParam
 from pydantic import BaseModel, ConfigDict
-from renderer_client import Renderer, RenderOptions, RenderRejected
-from witness_client import WitnessError
+from renderer_client import RenderOptions, RenderRejected
+from witness_client import AsyncWitnessClient, WitnessError
 
 from .images import png_data_url
 
@@ -29,10 +28,6 @@ INSTRUCTIONS = (
 GRID = RenderOptions(lighting="neutral")
 SOL = "gpt-6.1-sol"
 NORMALIZATION = Path(__file__).with_name("normalize.js").read_text()
-
-
-class ModelCalls(Protocol):
-    def create(self, *, request_id: int = 0, **params: Unpack[ResponseCreateParamsBase]) -> Response: ...
 
 
 @dataclass(frozen=True)
@@ -56,9 +51,9 @@ def normalize(source: str) -> str:
     return NORMALIZATION.replace("__GENERATED_SOURCE__", source[exported.end() :])
 
 
-def candidate(
+async def candidate(
     image: bytes,
-    calls: ModelCalls,
+    witness: AsyncWitnessClient,
     model: str,
     position: int,
     *,
@@ -100,7 +95,7 @@ def candidate(
             }
         )
     try:
-        result = calls.create(
+        result = await witness.responses.create(
             request_id=position,
             model=model,
             store=False,
@@ -125,40 +120,44 @@ def candidate(
     return normalize(source) if source else None
 
 
-def render_candidates(
-    futures: Iterable[Future[str | None]],
-    renderer: Renderer,
+async def render_candidates(
+    futures: Iterable[asyncio.Task[str | None]],
+    witness: AsyncWitnessClient,
     *,
     image: bytes,
-    calls: ModelCalls,
-    pool: ThreadPoolExecutor,
     repair_seeds: Iterable[int],
 ) -> list[Candidate]:
+    pending = list(futures)
     candidates = []
     repairs = []
-    for future, repair_seed in zip(futures, repair_seeds, strict=True):
-        source = future.result()
-        if source is not None:
-            try:
-                candidates.append(Candidate(source, renderer.render(source, GRID)))
-            except RenderRejected as error:
-                repairs.append(
-                    pool.submit(candidate, image, calls, SOL, repair_seed, rejection=(source, error.detail_json))
-                )
-    for future in repairs:
-        source = future.result()
-        if source is not None:
-            try:
-                candidates.append(Candidate(source, renderer.render(source, GRID)))
-            except RenderRejected:
-                pass
-    return candidates
+    try:
+        for future, repair_seed in zip(pending, repair_seeds, strict=True):
+            source = await future
+            if source is not None:
+                try:
+                    candidates.append(Candidate(source, await witness.render(source, GRID)))
+                except RenderRejected as error:
+                    repairs.append(
+                        asyncio.create_task(
+                            candidate(image, witness, SOL, repair_seed, rejection=(source, error.detail_json))
+                        )
+                    )
+        for future in repairs:
+            source = await future
+            if source is not None:
+                try:
+                    candidates.append(Candidate(source, await witness.render(source, GRID)))
+                except RenderRejected:
+                    pass
+        return candidates
+    finally:
+        await asyncio.gather(*pending, *repairs, return_exceptions=True)
 
 
-def choose(
+async def choose(
     image: bytes,
     seed: int,
-    calls: ModelCalls,
+    witness: AsyncWitnessClient,
     candidates: list[Candidate],
     position: int,
 ) -> tuple[Candidate, Choice] | None:
@@ -179,7 +178,7 @@ def choose(
             ]
         )
     try:
-        result = calls.create(
+        result = await witness.responses.create(
             request_id=position,
             model=SOL,
             store=False,
@@ -227,31 +226,29 @@ def choose(
     return None if winner is None else (winner, choice)
 
 
-def run(image: bytes, seed: int, calls: ModelCalls, renderer: Renderer) -> str | None:
-    with ThreadPoolExecutor(max_workers=3, thread_name_prefix="miner-candidate") as pool:
-        initial = [
-            pool.submit(candidate, image, calls, model, position)
-            for position, model in enumerate(("gpt-6-astra", SOL, SOL), start=1)
-        ]
-        candidates = render_candidates(initial, renderer, image=image, calls=calls, pool=pool, repair_seeds=(8, 9, 10))
-        selected = choose(image, seed, calls, candidates, 4)
-        if selected is None:
-            return None
-        winner, choice = selected
-        refinements = [
-            pool.submit(
-                candidate,
+async def run(image: bytes, seed: int, witness: AsyncWitnessClient) -> str | None:
+    initial = [
+        asyncio.create_task(candidate(image, witness, model, position))
+        for position, model in enumerate(("gpt-6-astra", SOL, SOL), start=1)
+    ]
+    candidates = await render_candidates(initial, witness, image=image, repair_seeds=(8, 9, 10))
+    selected = await choose(image, seed, witness, candidates, 4)
+    if selected is None:
+        return None
+    winner, choice = selected
+    refinements = [
+        asyncio.create_task(
+            candidate(
                 image,
-                calls,
+                witness,
                 SOL,
                 position,
                 parent=winner,
                 feedback=choice.reason + "\n" + choice.improvements,
             )
-            for position in (5, 6)
-        ]
-        candidates = render_candidates(
-            refinements, renderer, image=image, calls=calls, pool=pool, repair_seeds=(11, 12)
         )
-        selected = choose(image, seed, calls, [winner, *candidates], 7)
-        return None if selected is None else selected[0].source
+        for position in (5, 6)
+    ]
+    candidates = await render_candidates(refinements, witness, image=image, repair_seeds=(11, 12))
+    selected = await choose(image, seed, witness, [winner, *candidates], 7)
+    return None if selected is None else selected[0].source

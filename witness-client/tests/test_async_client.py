@@ -18,17 +18,25 @@ import httpx
 import openai
 import pytest
 from bittensor_wallet import Keypair
-
-from witness_client import AsyncWitnessClient, WitnessClient, WitnessConfig, WitnessError
+from test_async_transport import tls_context as tls_context
+from test_config import config as config
+from witness_client import AsyncWitnessClient, WitnessConfig, WitnessError
 from witness_client.async_pods import AsyncSignedTransport
 from witness_client.async_tunnel import AsyncWebSocketTunnel
 from witness_client.calls import RequestKey, canonical
-from witness_client.gateway import SignedTransport
 from witness_client.pods import CallView, Snapshot
 from witness_client.response import AsyncModelStream
 from witness_client.types import CredentialProof, EarlyDisclosure, PrivateRecord
-from test_client_api import config as config, event
-from test_async_transport import tls_context as tls_context
+
+
+def event(response: dict[str, object]) -> bytes:
+    return (
+        b"data: "
+        + json.dumps(
+            {"type": f"response.{response['status']}", "response": response}
+        ).encode()
+        + b"\n\n"
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -46,7 +54,6 @@ def isolated_async_client(monkeypatch: pytest.MonkeyPatch) -> None:
         pytest.fail("Async SDK tests must not contact a service")
 
     monkeypatch.setattr("witness_client.async_client.Prover", ProverStub)
-    monkeypatch.setattr("witness_client.client.Prover", ProverStub)
     monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", forbidden)
     monkeypatch.setattr(httpx.HTTPTransport, "handle_request", forbidden)
 
@@ -249,7 +256,7 @@ def test_async_failed_capture_allows_same_id_retry(
 
 
 @pytest.mark.parametrize("mode", ["api", "codex"])
-def test_async_create_stream_request_ids_and_sync_restart_reuse_saved_evidence(
+def test_async_create_stream_and_request_ids_reuse_saved_evidence(
     config: WitnessConfig,
     mode: Literal["api", "codex"],
 ) -> None:
@@ -301,33 +308,6 @@ def test_async_create_stream_request_ids_and_sync_restart_reuse_saved_evidence(
         return service
 
     service = asyncio.run(run())
-    with WitnessClient(
-        config,
-        hotkey=key,
-        openai_api_key="x" * 80 if mode == "api" else None,
-        subscription="codex" if mode == "codex" else None,
-    ) as sync:
-        with httpx.Client(
-            base_url="https://witness.test", transport=httpx.MockTransport(service.handle)
-        ) as http:
-            sync._gateway._direct = SignedTransport(
-                http,
-                key,
-                5,
-                headers={"Authorization": "Bearer pod-access"},
-                server_name="witness.internal",
-            )
-            sync._gateway._start_id = str(uuid.uuid4())
-            sync._gateway._artifacts.http.close()
-            sync._gateway._artifacts.http = httpx.Client(
-                transport=httpx.MockTransport(service.handle)
-            )
-            assert (
-                sync.responses.create(
-                    model="fixture", input="image", request_id=7, session_id=session_id
-                ).id
-                == "resp_fixture"
-            )
     assert len(service.calls) == 2
 
 
@@ -695,6 +675,7 @@ def test_cancelled_pod_startup_recovers_the_remote_allocation_and_renderer_conne
                     assert (
                         await renderer.post(url, json={"source": "fixture source"}, timeout=7)
                     ).content == b"fixture PNG"
+                await asyncio.sleep(0)
                 assert len(restarted._connections) == 1
             finally:
                 await restarted.aclose()
@@ -992,9 +973,7 @@ def test_async_queued_cancellation_failure_and_saved_recovery_do_not_leak_capaci
                     pass
 
             @asynccontextmanager
-            async def tunnel(
-                identifier: str, *, deadline: float
-            ) -> AsyncIterator[AsyncWebSocketTunnel]:
+            async def tunnel(identifier: str, *, deadline: float) -> AsyncIterator[AsyncWebSocketTunnel]:
                 yield AsyncWebSocketTunnel(Socket(), identifier)
 
             async def exchange(

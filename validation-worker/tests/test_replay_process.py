@@ -23,11 +23,12 @@ from subnet_common.github import GitHubClient
 from subnet_common.witness.rounds import PromptImage, RoundInputs
 from test_manual_replay import Stored, archive, round_fixture
 from test_replay_command import png_bytes, png_input, replay_requests
-from witness_client.calls import canonical
+from witness_client.calls import RequestKey, canonical
 
 from validation_worker import manual_replay as local_replay
 from validation_worker.manual_replay import Log, ReplayProcesses, execute_prompt
 from validation_worker.replay_evidence import SavedRenderer
+from validation_worker.request_replay import SavedCapture
 
 
 PNG = b"\x89PNG\r\n\x1a\nfixture"
@@ -75,6 +76,7 @@ async def generate(image, seed, witness):
         "capture",
         "uncaptured",
         "validation",
+        "tuple_input",
         "bad_request",
         "index_miss",
     ],
@@ -102,6 +104,7 @@ def test_complete_local_replay_bridge(
         "capture",
         "uncaptured",
         "validation",
+        "tuple_input",
         "bad_request",
         "index_miss",
     ],
@@ -191,7 +194,7 @@ async def generate(image, seed, witness):
             '    try:\n        await witness.render("candidate", RenderOptions(lighting="neutral"))\n'
             '    except RenderRejected:\n        print("saved render rejection", flush=True)',
         )
-    elif case in ("http", "provider", "capture", "uncaptured", "validation", "bad_request"):
+    elif case in ("http", "provider", "capture", "uncaptured", "validation", "tuple_input", "bad_request"):
         code = "import openai\n" + SOURCE.replace(
             '    reply = await witness.responses.create(model="fixture", input="image")',
             """    try:
@@ -210,6 +213,11 @@ async def generate(image, seed, witness):
                 'await witness.responses.create(model="fixture", input="image")',
                 'await witness.responses.create(model="fixture", input="image", background=True)',
             )
+        elif case == "tuple_input":
+            code = code.replace(
+                'await witness.responses.create(model="fixture", input="image")',
+                'await witness.responses.create(model="fixture", input=("image",))',
+            ).replace("except (openai.APIError, ValueError) as error:", "except ValueError as error:")
         expected = "1"
     (source / "main.py").write_text(code)
     prompt = tmp_path / "prompts/one"
@@ -321,11 +329,11 @@ async def generate(image, seed, witness):
             assert result["assumed_render_failures"] == []
     elif case == "timeout":
         assert result["timeout"]
-    elif case in ("http", "provider", "capture", "uncaptured", "validation", "bad_request"):
+    elif case in ("http", "provider", "capture", "uncaptured", "validation", "tuple_input", "bad_request"):
         assert result["output_exact"] and result["accounting_accepted"]
         assert result["charged_calls"] == (2 if case == "bad_request" else 1)
-        assert len(result["unknown_usage_calls"]) == (0 if case in ("validation", "bad_request") else 1)
-        assert len(result["used_exchanges"]) == (1 if case in ("uncaptured", "validation") else 2)
+        assert len(result["unknown_usage_calls"]) == (0 if case in ("validation", "tuple_input", "bad_request") else 1)
+        assert len(result["used_exchanges"]) == (1 if case in ("uncaptured", "validation", "tuple_input") else 2)
         assert len(result["assumed_connection_failures"]) == (1 if case == "uncaptured" else 0)
         assert result["render_calls"] == 2
         expected_error = {
@@ -334,40 +342,58 @@ async def generate(image, seed, witness):
             "capture": "APIConnectionError",
             "uncaptured": "APIConnectionError",
             "validation": "ValueError",
+            "tuple_input": "ValueError",
             "bad_request": "BadRequestError",
         }[case]
         assert "recorded failure " + expected_error in saved
         assert "request_mismatch" not in console
 
 
+@pytest.mark.parametrize(("model_input", "operation"), [("image", "fetch"), ("different image", "lookup")])
 def test_timeout_during_host_rpc_is_saved_and_allows_next_prompt(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, model_input: str, operation: str
 ) -> None:
     (tmp_path / "source").mkdir()
     worker = """import json, sys
 json.loads(sys.stdin.readline())
-print(json.dumps({"event": "rpc", "operation": "image_index", "request_id": 0, "session_id": None}), flush=True)
+print(json.dumps({"event": "rpc", "operation": "model_start"}), flush=True)
+sys.stdin.readline()
+print(json.dumps({"event": "rpc", "operation": "model", "request_id": 0, "session_id": None,
+                  "stream": False, "params": {"model": "fixture", "input": sys.argv[1]}}), flush=True)
 sys.stdin.readline()
 """
     popen = subprocess.Popen
     children: list[subprocess.Popen[str]] = []
 
     def launch(command: list[str], **kwargs: Any) -> subprocess.Popen[str]:
-        child = popen([sys.executable, "-u", "-c", worker], **kwargs)
+        child = popen([sys.executable, "-u", "-c", worker, model_input], **kwargs)
         children.append(child)
         return child
 
     monkeypatch.setattr(subprocess, "Popen", launch)
-    loading: list[int] = []
+    recording = replay_requests(tmp_path)
+    fetch_capture = recording.source.fetch
+    lookup_capture = recording.source.lookup
+    loading: list[tuple[str, int]] = []
 
-    def image_index(request_id: int, session_id: str | None) -> dict[str, str | None]:
-        loading.append(request_id)
+    def wait_for_watchdog(name: str, request_id: int) -> None:
+        loading.append((name, request_id))
         assert children[0].stdout is not None
         assert children[0].stdout.read() == ""
-        return {}
 
-    recording = replay_requests(tmp_path)
-    monkeypatch.setattr(recording.source, "image_index", image_index)
+    def fetch(exchange_id: str) -> tuple[SavedCapture, bytes]:
+        wait_for_watchdog("fetch", recording.inventory.captures[exchange_id].call.request.request_id)
+        return fetch_capture(exchange_id)
+
+    def lookup(request: RequestKey) -> dict[str, SavedCapture]:
+        wait_for_watchdog("lookup", request.request_id)
+        return lookup_capture(request)
+
+    image = tmp_path / "prompts/one/image.png"
+    image.parent.mkdir(parents=True)
+    image.write_bytes(b"PNG")
+    monkeypatch.setattr(recording.source, "fetch", fetch)
+    monkeypatch.setattr(recording.source, "lookup", lookup)
     processes = ReplayProcesses()
     log = Log(tmp_path)
     try:
@@ -405,7 +431,7 @@ sys.stdin.readline()
         for child in children:
             child.wait(timeout=5)
         log.close()
-    assert loading == [0]
+    assert loading == [(operation, 0)]
     assert summary["completed_prompts"] == 2 and not summary["passed"]
     first = summary["results"][0]
     assert first["timeout"] and not first["passed"]

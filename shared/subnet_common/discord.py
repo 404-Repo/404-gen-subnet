@@ -30,5 +30,5 @@ class DiscordWebhook:
             async with httpx.AsyncClient() as client:
                 response = await client.post(self._webhook_url, json={"embeds": [embed]}, timeout=10.0)
                 response.raise_for_status()
-        except Exception as e:
-            logger.warning(f"Discord notification failed: {e}")
+        except Exception as error:
+            logger.warning("Discord notification failed ({})", type(error).__name__)

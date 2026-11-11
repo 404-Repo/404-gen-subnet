@@ -1,5 +1,6 @@
 """Configuration preserves authentication and TLS defaults."""
 
+import asyncio
 import json
 import ssl
 from pathlib import Path
@@ -9,7 +10,7 @@ from unittest.mock import Mock
 import httpx
 import pytest
 from bittensor_wallet import Keypair
-from witness_client import WitnessClient, WitnessConfig
+from witness_client import AsyncWitnessClient, WitnessConfig
 from witness_client.request import prepare_request, serialize_body
 
 PARAMS = Path(__file__).resolve().parents[2] / "witness-server/worker/witness_pod/verifier/params"
@@ -24,9 +25,10 @@ def key() -> Keypair:
 @pytest.fixture
 def config(tmp_path: Path) -> WitnessConfig:
     return {
-        "witness_url": "https://witness.example",
-        "proof_parameters": str(PARAMS),
+        "witness_url": "https://witness.test",
+        "proof_parameters": str(tmp_path / "parameters"),
         "state_directory": str(tmp_path / "state"),
+        "codex_home": str(tmp_path / "missing-codex-login"),
     }
 
 
@@ -39,9 +41,12 @@ def test_configuration_is_copied_or_loaded_as_utf8(
     if from_file:
         source = tmp_path / "witness.json"
         source.write_text(json.dumps(config, ensure_ascii=False), encoding="utf-8")
-    with WitnessClient(source, openai_api_key=TOKEN, hotkey=key) as client:
+    client = AsyncWitnessClient(source, openai_api_key=TOKEN, hotkey=key)
+    try:
         config["codex_home"] = "changed"
         assert client._config["codex_home"] == "учётная-запись"
+    finally:
+        asyncio.run(client.aclose())
 
 
 @pytest.mark.parametrize(
@@ -63,21 +68,26 @@ def test_non_https_origins_are_rejected(
 ) -> None:
     config["witness_url"] = url
     with pytest.raises(ValueError, match="HTTPS origin"):
-        WitnessClient(config, hotkey=key, openai_api_key=TOKEN)
+        AsyncWitnessClient(config, hotkey=key, openai_api_key=TOKEN)
     assert not Path(config["state_directory"]).exists()
 
 
 @pytest.mark.parametrize("preparations", [0, -1, 33, True, 1.5, "3"])
 def test_invalid_preparation_limit_is_rejected_before_setup(
-    config: WitnessConfig, monkeypatch: pytest.MonkeyPatch, key: Keypair, preparations: int
+    config: WitnessConfig,
+    monkeypatch: pytest.MonkeyPatch,
+    key: Keypair,
+    preparations: int,
 ) -> None:
     def forbidden(*args: object, **kwargs: object) -> None:
         pytest.fail("Invalid concurrency must not initialize the prover or HTTP")
 
-    monkeypatch.setattr("witness_client.client.Prover", forbidden)
-    monkeypatch.setattr("witness_client.client.httpx.Client", forbidden)
+    monkeypatch.setattr("witness_client.async_client.Prover", forbidden)
+    monkeypatch.setattr("witness_client.async_client.httpx.AsyncClient", forbidden)
     with pytest.raises(ValueError, match="parallel_preparations"):
-        WitnessClient(config, hotkey=key, openai_api_key=TOKEN, parallel_preparations=preparations)
+        AsyncWitnessClient(
+            config, hotkey=key, openai_api_key=TOKEN, parallel_preparations=preparations
+        )
     assert not Path(config["state_directory"]).exists()
 
 
@@ -90,14 +100,14 @@ def test_invalid_configuration_is_rejected_before_setup(
     def forbidden(*args: object, **kwargs: object) -> None:
         pytest.fail("Invalid configuration must not initialize the prover or HTTP")
 
-    monkeypatch.setattr("witness_client.client.Prover", forbidden)
-    monkeypatch.setattr("witness_client.client.httpx.Client", forbidden)
+    monkeypatch.setattr("witness_client.async_client.Prover", forbidden)
+    monkeypatch.setattr("witness_client.async_client.httpx.AsyncClient", forbidden)
     raw = dict(config)
     del raw["proof_parameters"]
     path = tmp_path / "witness.json"
     path.write_text(json.dumps(raw), encoding="utf-8")
     with pytest.raises(KeyError, match="proof_parameters"):
-        WitnessClient(path, hotkey=key, openai_api_key=TOKEN)
+        AsyncWitnessClient(path, hotkey=key, openai_api_key=TOKEN)
     assert not Path(config["state_directory"]).exists()
 
 
@@ -125,9 +135,12 @@ def test_configuration_cannot_override_certificate_trust_or_provider(
         "witness_client.request.subscription_credentials",
         lambda *args: (TOKEN, "abc123"),
     )
-    client_constructor = Mock(wraps=httpx.Client)
-    monkeypatch.setattr("witness_client.client.httpx.Client", client_constructor)
-    with WitnessClient(path, openai_api_key=TOKEN, hotkey=key) as client:
+    client_constructor = Mock(wraps=httpx.AsyncClient)
+    monkeypatch.setattr(
+        "witness_client.async_client.httpx.AsyncClient", client_constructor
+    )
+    client = AsyncWitnessClient(path, openai_api_key=TOKEN, hotkey=key)
+    try:
         assert client_constructor.call_args is not None
         context = client_constructor.call_args.kwargs["verify"]
         assert isinstance(context, ssl.SSLContext)
@@ -142,27 +155,34 @@ def test_configuration_cannot_override_certificate_trust_or_provider(
             if mode == "api"
             else "https://chatgpt.com/backend-api/codex/responses"
         )
+    finally:
+        asyncio.run(client.aclose())
 
 
-@pytest.mark.parametrize("asynchronous", [False, True])
 @pytest.mark.parametrize("field", ["parallel_calls", "parallel_preparations"])
 @pytest.mark.parametrize("limit", [0, -1, 33, True, 1.5, "3"])
 def test_numeric_concurrency_limits_are_validated_before_resources(
-    config: WitnessConfig, monkeypatch: pytest.MonkeyPatch, key: Keypair,
-    asynchronous: bool, field: str, limit: int,
+    config: WitnessConfig,
+    monkeypatch: pytest.MonkeyPatch,
+    key: Keypair,
+    field: str,
+    limit: int,
 ) -> None:
     from witness_client import AsyncWitnessClient
 
     def forbidden(*args: object, **kwargs: object) -> None:
         pytest.fail("Invalid concurrency must not initialize prover or HTTP resources")
 
-    monkeypatch.setattr("witness_client.client.Prover", forbidden)
+    monkeypatch.setattr("witness_client.async_client.Prover", forbidden)
     monkeypatch.setattr(httpx, "Client", forbidden)
     monkeypatch.setattr(httpx, "AsyncClient", forbidden)
-    constructor = AsyncWitnessClient if asynchronous else WitnessClient
     with pytest.raises(ValueError, match=field):
         if field == "parallel_calls":
-            constructor(config, hotkey=key, openai_api_key=TOKEN, parallel_calls=limit)
+            AsyncWitnessClient(
+                config, hotkey=key, openai_api_key=TOKEN, parallel_calls=limit
+            )
         else:
-            constructor(config, hotkey=key, openai_api_key=TOKEN, parallel_preparations=limit)
+            AsyncWitnessClient(
+                config, hotkey=key, openai_api_key=TOKEN, parallel_preparations=limit
+            )
     assert not Path(config["state_directory"]).exists()

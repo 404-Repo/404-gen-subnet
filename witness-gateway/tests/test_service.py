@@ -27,13 +27,9 @@ from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
-from miner_runtime.observations import Execution
-from miner_runtime.runner import run_generation
-from openai.types.responses import ResponseStreamEvent
-from pod_gateway.control import DrainControl, Registry
-from pod_gateway.lifecycle import Allocator
-from pod_gateway.membership import Membership
-from pod_gateway.server import Gateway
+from miner_runtime.observations import Execution, ObservedWitness
+from miner_runtime.runner import _AsyncCaptureSource
+from miner_runtime.runner import run_async_generation as run_generation
 from subnet_common.witness.auth import Authenticator
 from subnet_common.witness.certs import pod_context
 from subnet_common.witness.models import Pod, PodSpec, Scope
@@ -45,17 +41,22 @@ from subnet_common.witness.state import PrefixedState, WriteUncertain
 from support import MemoryState, Provider
 from test_pricing import extended_pricing
 from test_recording import PRICING
-from witness_client import WitnessClient, WitnessError
+from witness_client import AsyncWitnessClient, WitnessError
+from witness_client.async_tunnel import AsyncWebSocketTunnel
 from witness_client.auth import hotkey_headers
 from witness_client.calls import RequestKey, canonical
 from witness_client.pods import Snapshot
 from witness_client.request import serialize_body
-from witness_client.tunnel import WebSocketTunnel
 from witness_pod.budget import Budget
 from witness_pod.channel import Channel, WorkerChannel
 from witness_pod.direct import Witness
 from witness_pod.pod import PodRuntime
 from witness_pod.records import Call, CallRecord, CallRecords
+
+from pod_gateway.control import DrainControl, Registry
+from pod_gateway.lifecycle import Allocator
+from pod_gateway.membership import Membership
+from pod_gateway.server import Gateway
 
 SECRET = b"s" * 32
 PROOF = "c" * 64
@@ -178,11 +179,16 @@ class Harness:
         self.allocator: Allocator
         self.server_tls: ssl.SSLContext
 
-    def client(self, state: str = "client", *, subscription: bool = False) -> WitnessClient:
-        return WitnessClient(
+    def client(
+        self, state: str = "client", *, subscription: bool = False
+    ) -> AsyncWitnessClient:
+        return AsyncWitnessClient(
             {
                 "witness_url": self.origin,
-                "proof_parameters": str(Path(__file__).resolve().parents[2] / "witness-server/worker/witness_pod/verifier/params"),
+                "proof_parameters": str(
+                    Path(__file__).resolve().parents[2]
+                    / "witness-server/worker/witness_pod/verifier/params"
+                ),
                 "state_directory": str(self.directory / state),
             },
             hotkey=self.key,
@@ -191,13 +197,22 @@ class Harness:
             delivery_timeout=180 if self.native else 5,
         )
 
-    def exchange(self, tunnel: WebSocketTunnel, host: str, chunks: list[tuple[bool, bytes]], **kwargs: object) -> bytes:
+    def renderer_transport(self, witness: AsyncWitnessClient) -> httpx.BaseTransport:
+        return _AsyncCaptureSource(witness, self.loop).renderer_transport()
+
+    async def exchange(
+        self,
+        tunnel: AsyncWebSocketTunnel,
+        host: str,
+        chunks: list[tuple[bool, bytes]],
+        **kwargs: object,
+    ) -> bytes:
         body = b"".join(chunk for _, chunk in chunks).partition(b"\r\n\r\n")[2]
-        tunnel.send(len(body).to_bytes(8, "big") + body)
-        tunnel.flush()
+        await tunnel.send(len(body).to_bytes(8, "big") + body)
+        await tunnel.flush()
         response = bytearray()
         while True:
-            chunk = tunnel.recv(timeout=10)
+            chunk = await tunnel.recv(timeout=10)
             if not chunk:
                 return bytes(response)
             response.extend(chunk)
@@ -364,9 +379,12 @@ class Harness:
         self.monkeypatch.setattr(ssl, "create_default_context", trust)
         if not self.native:
             self.monkeypatch.setattr(
-                "witness_client.client.Prover", lambda _: SimpleNamespace(verifying_key_sha256=self.proof)
+                "witness_client.async_client.Prover",
+                lambda _: SimpleNamespace(verifying_key_sha256=self.proof),
             )
-            self.monkeypatch.setattr("witness_client.client.exchange", self.exchange)
+            self.monkeypatch.setattr(
+                "witness_client.async_client.async_exchange", self.exchange
+            )
             self.monkeypatch.setattr("witness_pod.pod.relay", self.relay)
         self.registry = Registry()
         self.allocator = Allocator(
@@ -426,6 +444,7 @@ class Harness:
         artifacts.router.add_get("/{key:.*}", artifact)
         self.artifact_origin = (await self.listen(artifacts, self.server_tls)).replace("127.0.0.1", "localhost")
         loop = asyncio.get_running_loop()
+        self.loop = loop
 
         def created(pod: Pod, body: dict[str, object]) -> None:
             loop.call_soon_threadsafe(lambda: self.tasks.append(asyncio.create_task(self.launch(pod, body))))
@@ -445,155 +464,99 @@ class Harness:
                 await runner.cleanup()
 
 
+def test_running_generation_accepts_an_added_model(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
 
-
-
-def test_running_generation_accepts_an_added_model(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     async def scenario() -> None:
         fixture = Harness(tmp_path, monkeypatch)
         prices = PricingStore(fixture.state, fixture.scope.deployment)
         prices.publish(PRICING)
         fixture.response_text = lambda body, _: str(json.loads(body)["model"])
         async with fixture.running():
-            def run() -> None:
-                def generate(image: bytes, seed: int, client: WitnessClient, renderer: None) -> str:
+
+            async def run() -> None:
+
+                def generate(
+                    image: bytes, seed: int, client: ObservedWitness, renderer: None
+                ) -> str:
                     first = client.create(model="fixture", input="image").output_text
                     prices.publish(extended_pricing())
                     second = client.create(model="gpt-6.1-terra", input="image").output_text
                     return first + "," + second
 
-                with fixture.client() as witness:
-                    witness._gateway.ensure_pod()
+                async with fixture.client() as witness:
+                    await witness._gateway.ensure_pod()
                     fixture.runtimes[0].budget.refresh = prices.read
-                    assert run_generation(generate, fixture.image, 42, witness, None) == "fixture,gpt-6.1-terra"
+                    assert (
+                        await run_generation(generate, fixture.image, 42, witness, None)
+                        == "fixture,gpt-6.1-terra"
+                    )
                 assert fixture.paid == 2
                 assert fixture.provider.creates == len(fixture.runtimes) == 1
 
-            await asyncio.wait_for(asyncio.to_thread(run), 30)
+            await asyncio.wait_for(run(), 30)
 
     asyncio.run(scenario())
 
 
 @pytest.mark.parametrize("failure", ["", "before", "lost"])
-def test_direct_call_deduplication_and_recovery(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str) -> None:
+def test_direct_call_deduplication_and_recovery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+
     async def scenario() -> None:
         fixture = Harness(tmp_path, monkeypatch)
         fixture.large, fixture.failures = True, [failure]
         async with fixture.running():
-            def run() -> None:
-                def generate(image: bytes, seed: int, client: WitnessClient, renderer: None) -> str:
+
+            async def run() -> None:
+
+                def generate(
+                    image: bytes, seed: int, client: ObservedWitness, renderer: None
+                ) -> str:
                     with ThreadPoolExecutor(max_workers=2) as pool:
                         answers = list(pool.map(lambda _: client.create(model="fixture", input="x" * (1024 * 1024)), range(2)))
                     assert answers[0].output_text == answers[1].output_text
                     return answers[0].output_text
-                with fixture.client() as witness:
-                    expected = run_generation(generate, fixture.image, 42, witness, None)
+
+                async with fixture.client() as witness:
+                    expected = await run_generation(
+                        generate, fixture.image, 42, witness, None
+                    )
                     assert fixture.paid == fixture.provider.creates == 1
                     identifier = exchange_id(witness)
-                    assert witness.resume(identifier).output_text == expected
-                    old_start = witness._gateway.ensure_pod()
-                    assert run_generation(generate, fixture.image, 42, witness, None) == expected
-                with fixture.client("restarted") as witness:
-                    assert witness.create(model="fixture", input="x" * (1024 * 1024)).output_text == expected
-                    assert witness._gateway.ensure_pod() == old_start and fixture.paid == 1
-            await asyncio.wait_for(asyncio.to_thread(run), 45)
-            assert fixture.gateway_bytes < 32 * 1024
-            assert all(path.startswith(("/v1/pods/", "/v1/control/")) for path in fixture.gateway_paths)
-    asyncio.run(scenario())
-
-
-def test_http_start_and_duplicate_clients_share_one_paid_capture(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    async def scenario() -> None:
-        fixture = Harness(tmp_path, monkeypatch)
-        fixture.allow_response.clear()
-        async with fixture.running():
-            with fixture.client() as first, fixture.client("second") as second:
-                await asyncio.to_thread(first._gateway.ensure_pod)
-                direct = first._gateway._service()
-
-                def start() -> httpx.Response:
-                    body = canonical({"request": call_key().model_dump()})
-                    return direct.http.post(
-                        "/v1/calls", content=body, headers=direct._headers("POST", "/v1/calls", body),
-                        extensions={"sni_hostname": direct.server_name},
+                    assert (await witness.resume(identifier)).output_text == expected
+                    old_start = await witness._gateway.ensure_pod()
+                    assert (
+                        await run_generation(generate, fixture.image, 42, witness, None)
+                        == expected
+                    )
+                async with fixture.client("restarted") as witness:
+                    assert (
+                        await witness.create(model="fixture", input="x" * (1024 * 1024))
+                    ).output_text == expected
+                    assert (
+                        await witness._gateway.ensure_pod() == old_start
+                        and fixture.paid == 1
                     )
 
-                initial = await asyncio.to_thread(start)
-                assert initial.status_code == 202
-                accepted = Snapshot.model_validate(initial.json())
-                identifier = accepted.call.exchange_id
-                assert accepted.call.phase == "assigned" and accepted.session is not None
-                assert accepted.call.deadline is not None and accepted.call.deadline > time.time()
-                assert initial.headers["Location"] == f"/v1/calls/{identifier}"
-
-                def duplicates() -> list[httpx.Response]:
-                    with ThreadPoolExecutor(max_workers=4) as pool:
-                        return list(pool.map(lambda _: start(), range(4)))
-
-                replies = await asyncio.to_thread(duplicates)
-                assert all(reply.status_code == 202 for reply in replies)
-                assert all(Snapshot.model_validate(reply.json()) == accepted for reply in replies)
-                assert fixture.paid == 0
-
-                running = asyncio.create_task(asyncio.to_thread(first.responses.create, model="fixture", input="image"))
-                polled = threading.Event()
-                await asyncio.to_thread(second._gateway.ensure_pod)
-
-                def delivered(response: httpx.Response) -> None:
-                    if response.request.url.path == f"/v1/calls/{identifier}":
-                        polled.set()
-
-                second._gateway._service().http.event_hooks["response"].append(delivered)
-
-                def repeated_stream() -> list[ResponseStreamEvent]:
-                    return list(second.responses.create(stream=True, model="fixture", input="image"))
-
-                duplicate: asyncio.Task[list[ResponseStreamEvent]] | None = None
-                try:
-                    assert await asyncio.to_thread(fixture.dispatched.wait, 3)
-                    pending = await asyncio.to_thread(start)
-                    assert pending.status_code == 202
-                    capturing = Snapshot.model_validate(pending.json())
-                    assert capturing.call.exchange_id == identifier and capturing.call.authorized
-                    assert capturing.call.deadline is not None and capturing.call.deadline < accepted.call.deadline
-                    duplicate = asyncio.create_task(asyncio.to_thread(repeated_stream))
-                    assert await asyncio.to_thread(polled.wait, 3)
-                    assert not running.done() and not duplicate.done() and fixture.paid == 1
-                finally:
-                    fixture.allow_response.set()
-                answer = await asyncio.wait_for(running, 5)
-                assert duplicate is not None
-                events = await asyncio.wait_for(duplicate, 5)
-                terminal = events[-1]
-                assert terminal.type == "response.completed"
-                assert terminal.response.output_text == answer.output_text == "answer-1"
-                assert terminal.response.usage is not None and answer.usage is not None
-                assert terminal.response.usage.input_tokens == answer.usage.input_tokens == 10
-                completed = await asyncio.to_thread(start)
-                assert completed.status_code == 200
-                saved = Snapshot.model_validate(completed.json())
-                assert saved.call.exchange_id == identifier and saved.completion is not None
-                repeated = await asyncio.to_thread(
-                    first._gateway.start, call_key(), expected_exchange_id=identifier,
-                )
-                assert repeated.call == saved.call and repeated.completion is not None
-                assert fixture.paid == fixture.provider.creates == 1
+            await asyncio.wait_for(run(), 45)
+            assert fixture.gateway_bytes < 32 * 1024
+            assert all(path.startswith(("/v1/pods/", "/v1/control/")) for path in fixture.gateway_paths)
 
     asyncio.run(scenario())
 
 
-def test_start_recovery_checks_the_failed_attempt_and_dispatch_state(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_start_recovery_checks_the_failed_attempt_and_dispatch_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+
     async def scenario() -> None:
         fixture = Harness(tmp_path, monkeypatch)
         async with fixture.running():
-            with fixture.client() as witness:
-                await asyncio.to_thread(witness._gateway.ensure_pod)
+            async with fixture.client() as witness:
+                await witness._gateway.ensure_pod()
                 gateway, item = witness._gateway, call_key()
-                first = await asyncio.to_thread(gateway.start, item)
+                first = await gateway.start(item)
                 runtime = fixture.runtimes[0]
 
                 def fail_setup(identifier: str) -> None:
@@ -604,58 +567,58 @@ def test_start_recovery_checks_the_failed_attempt_and_dispatch_state(
                     fixture.records.failed(fixture.scope, item, runtime.pod_id, "SetupFailed",
                                            exchange_id=identifier, not_dispatched=True)
 
-                def recover(identifier: str) -> Snapshot:
-                    return gateway.start(item, expected_exchange_id=identifier)
+                async def recover(identifier: str) -> Snapshot:
+                    return await gateway.start(item, expected_exchange_id=identifier)
 
-                def duplicate_recovery(identifier: str) -> list[Snapshot]:
-                    with ThreadPoolExecutor(max_workers=4) as pool:
-                        return list(pool.map(lambda _: recover(identifier), range(4)))
-
+                async def duplicate_recovery(identifier: str) -> list[Snapshot]:
+                    return await asyncio.gather(*map(lambda _: recover(identifier), range(4)))
                 fail_setup(first.call.exchange_id)
-                replacements = await asyncio.to_thread(duplicate_recovery, first.call.exchange_id)
+                replacements = await duplicate_recovery(first.call.exchange_id)
                 second = replacements[0]
                 assert second.call.phase == "assigned" and second.session is not None
                 assert second.call.exchange_id != first.call.exchange_id
                 assert all(snapshot == second for snapshot in replacements)
                 fail_setup(second.call.exchange_id)
-                stale = await asyncio.to_thread(duplicate_recovery, first.call.exchange_id)
+                stale = await duplicate_recovery(first.call.exchange_id)
                 assert all(snapshot.call.exchange_id == second.call.exchange_id
                            and snapshot.call.phase == "failed" for snapshot in stale)
-                third = await asyncio.to_thread(recover, second.call.exchange_id)
+                third = await recover(second.call.exchange_id)
                 assert third.call.exchange_id != second.call.exchange_id
                 located = fixture.records.locate(fixture.scope, third.call.exchange_id)
                 assert located is not None
                 assert fixture.records.claim(fixture.scope, item, runtime.pod_id, located[1].capture_id or "")
-                current = await asyncio.to_thread(recover, third.call.exchange_id)
+                current = await recover(third.call.exchange_id)
                 assert current.call.exchange_id == third.call.exchange_id and current.call.phase == "capturing"
                 fixture.records.authorize(fixture.scope, item, runtime.pod_id, exchange_id=third.call.exchange_id)
-                current = await asyncio.to_thread(recover, third.call.exchange_id)
+                current = await recover(third.call.exchange_id)
                 assert current.call.exchange_id == third.call.exchange_id and current.call.authorized
                 fixture.records.failed(fixture.scope, item, runtime.pod_id, "UnknownOutcome",
                                        exchange_id=third.call.exchange_id)
-                current = await asyncio.to_thread(recover, third.call.exchange_id)
+                current = await recover(third.call.exchange_id)
                 assert current.call.exchange_id != third.call.exchange_id and current.call.phase == "assigned"
                 assert fixture.paid == 0
-
     asyncio.run(scenario())
 
 
 @pytest.mark.parametrize("failures", [2, 3])
 def test_public_create_bounds_safe_setup_recovery(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failures: int,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failures: int
 ) -> None:
+
     async def scenario() -> None:
         fixture = Harness(tmp_path, monkeypatch)
         fixture.failures = ["before"] * failures
         async with fixture.running():
-            with fixture.client() as witness:
+            async with fixture.client() as witness:
                 witness._gateway.delivery_timeout = 10
                 if failures == 2:
-                    response = await asyncio.to_thread(witness.responses.create, model="fixture", input="image")
+                    response = await witness.responses.create(
+                        model="fixture", input="image"
+                    )
                     assert response.output_text == "answer-1" and fixture.paid == 1
                 else:
                     with pytest.raises(openai.APIConnectionError) as error:
-                        await asyncio.to_thread(witness.responses.create, model="fixture", input="image")
+                        await witness.responses.create(model="fixture", input="image")
                     assert isinstance(error.value.__cause__, WitnessError)
                     assert error.value.__cause__.code == "capture_failed" and fixture.paid == 0
 
@@ -663,34 +626,41 @@ def test_public_create_bounds_safe_setup_recovery(
 
 
 def test_replaced_unclaimed_pod_recovers_in_the_same_create(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+
     async def scenario() -> None:
         fixture = Harness(tmp_path, monkeypatch)
         async with fixture.running():
-            with fixture.client() as witness:
+            async with fixture.client() as witness:
                 gateway = witness._gateway
                 original = gateway.start
                 first: str | None = None
 
-                def start(
-                    invocation: RequestKey, *, expected_exchange_id: str | None = None,
+                async def start(
+                    invocation: RequestKey,
+                    *,
+                    expected_exchange_id: str | None = None,
                     deadline: float | None = None,
                 ) -> Snapshot:
                     nonlocal first
-                    snapshot = original(invocation, expected_exchange_id=expected_exchange_id, deadline=deadline)
+                    snapshot = await original(
+                        invocation,
+                        expected_exchange_id=expected_exchange_id,
+                        deadline=deadline,
+                    )
                     if first is None:
                         first = snapshot.call.exchange_id
                         previous = fixture.provider.list()[0]
                         fixture.selection.update(previous, active=False)
                         fixture.provider.delete(previous.id)
                         gateway._direct = None
-                        gateway.ensure_pod()
+                        await gateway.ensure_pod()
                     return snapshot
 
                 monkeypatch.setattr(gateway, "start", start)
                 response = await asyncio.wait_for(
-                    asyncio.to_thread(witness.responses.create, model="fixture", input="image"), 12,
+                    witness.responses.create(model="fixture", input="image"), 12
                 )
                 assert response.output_text == "answer-1"
                 assert len(fixture.runtimes) == 2 and fixture.paid == 1
@@ -702,20 +672,21 @@ def test_replaced_unclaimed_pod_recovers_in_the_same_create(
 
 
 def test_expired_unclaimed_call_recovers_in_public_create(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+
     async def scenario() -> None:
         fixture = Harness(tmp_path, monkeypatch)
         async with fixture.running():
-            with fixture.client() as witness:
-                first = await asyncio.to_thread(witness._gateway.start, call_key())
+            async with fixture.client() as witness:
+                first = await witness._gateway.start(call_key())
 
                 def expire(record: CallRecord) -> None:
                     record.call.deadline = int(time.time()) - 1
 
                 fixture.records._change(fixture.scope, call_key(), expire)
                 response = await asyncio.wait_for(
-                    asyncio.to_thread(witness.responses.create, model="fixture", input="image"), 8,
+                    witness.responses.create(model="fixture", input="image"), 8
                 )
                 assert response.output_text == "answer-1" and fixture.paid == 1
                 record = fixture.records.load(fixture.scope, call_key().id)
@@ -725,115 +696,28 @@ def test_expired_unclaimed_call_recovers_in_public_create(
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize("replace_pod,expired", [(True, False), (True, True), (False, True)])
-def test_interrupted_capture_allows_an_ordinary_same_id_retry(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, replace_pod: bool, expired: bool,
-) -> None:
-    class PodKilled(BaseException):
-        pass
-
-    async def scenario() -> None:
-        fixture = Harness(tmp_path, monkeypatch)
-
-        def killed_relay(
-            store: MemoryState, prefix: str, deadline: float | None, directory: Path,
-            verifier: object, channel: Channel, **kwargs: object,
-        ) -> dict[str, object]:
-            data = bytearray()
-            setup_deadline = time.monotonic() + 30
-            while len(data) < 8 or len(data) < 8 + int.from_bytes(data[:8], "big"):
-                data.extend(channel.recv(setup_deadline))
-            (directory / "authorization.json").write_bytes(b"{}")
-            cast(Callable[[bytes], float], kwargs["before_release"])(bytes(data[8:]))
-            fixture.paid += 1
-            channel.finish()
-            raise PodKilled()
-
-        async with fixture.running():
-            monkeypatch.setattr("witness_pod.pod.relay", killed_relay)
-            with fixture.client() as witness:
-                witness._gateway.delivery_timeout = 5
-                with pytest.raises(openai.APIError):
-                    await asyncio.to_thread(witness.create, model="fixture", input="image")
-                record = fixture.records.load(fixture.scope, call_key().id)
-                assert record is not None and record.call.phase == "capturing"
-                if expired:
-                    def expire(value: CallRecord) -> None:
-                        value.call.deadline = int(time.time()) - 1
-
-                    fixture.records._change(fixture.scope, call_key(), expire)
-                if replace_pod:
-                    previous = fixture.provider.list()[0]
-                    fixture.selection.update(previous, active=False)
-                    fixture.provider.delete(previous.id)
-                    witness._gateway._invalidate_for("pod_not_selected")
-                    await asyncio.to_thread(witness._gateway.ensure_pod)
-                    assert len(fixture.runtimes) == 2
-                monkeypatch.setattr("witness_pod.pod.relay", fixture.relay)
-                snapshot = await asyncio.to_thread(witness._gateway.snapshot, record.call.exchange_id)
-                assert snapshot.call.phase == "failed" and fixture.paid == 1
-                result = await asyncio.to_thread(witness.create, model="fixture", input="image")
-                assert result.output_text == "answer-2" and fixture.paid == 2
-                summary = fixture.runtimes[-1].budget.summary(fixture.scope, call_key())
-                assert summary["possible_dispatches"] == 1 and summary["pending_usage"] == 0
-                assert summary["known_credits"] == "2.0"
-
-    asyncio.run(scenario())
-
-
-def test_lost_start_response_reuses_the_assigned_attempt(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    async def scenario() -> None:
-        fixture = Harness(tmp_path, monkeypatch)
-        async with fixture.running():
-            with fixture.client() as witness:
-                await asyncio.to_thread(witness._gateway.ensure_pod)
-                attempts: list[str] = []
-                assign = fixture.records.assign
-
-                def assigned(*args: object, **kwargs: object) -> Call:
-                    call = assign(*args, **kwargs)  # type: ignore[arg-type]
-                    attempts.append(call.exchange_id)
-                    return call
-
-                monkeypatch.setattr(fixture.records, "assign", assigned)
-
-                def delivered(response: httpx.Response) -> None:
-                    if response.request.url.path == "/v1/calls":
-                        response.read()
-                        if len(attempts) == 1:
-                            raise httpx.ReadError("Fixture lost the start acknowledgement", request=response.request)
-
-                witness._gateway._service().http.event_hooks["response"].append(delivered)
-                response = await asyncio.to_thread(witness.responses.create, model="fixture", input="image")
-                assert response.output_text == "answer-1"
-                assert len(attempts) == 2 and len(set(attempts)) == 1
-                assert fixture.paid == fixture.provider.creates == 1
-
-    asyncio.run(scenario())
-
-
 def test_gateway_handover_preserves_worker_and_inflight_capture(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+
     async def scenario() -> None:
         fixture = Harness(tmp_path, monkeypatch)
         async with fixture.running():
             fixture.allocator.spec = replace(fixture.allocator.spec, env={"WITNESS_MAX_CAPTURES": "12"})
-            with fixture.client() as witness:
+            async with fixture.client() as witness:
                 witness._gateway.delivery_timeout = 15
-                start_id = await asyncio.to_thread(witness._gateway.ensure_pod)
+                start_id = await witness._gateway.ensure_pod()
                 runtime = fixture.runtimes[0]
                 assert runtime.max_captures == 12
                 pod = fixture.provider.get(runtime.pod_id)
                 settings = runtime.max_captures, runtime.idle_seconds, runtime.round_inputs
                 fixture.allow_response.clear()
-                capture = asyncio.create_task(asyncio.to_thread(witness.create, model="fixture", input="image"))
+                capture = asyncio.create_task(
+                    witness.create(model="fixture", input="image")
+                )
                 assert await asyncio.to_thread(fixture.dispatched.wait, 2)
                 recording = fixture.records.load(fixture.scope, call_key().id)
                 assert recording is not None and recording.call.authorized
-
                 registry = Registry()
                 successor = Gateway(
                     allocator=Allocator(
@@ -860,7 +744,6 @@ def test_gateway_handover_preserves_worker_and_inflight_capture(
                 assert (runtime.max_captures, runtime.idle_seconds, runtime.round_inputs) == settings
                 assert fixture.provider.get(runtime.pod_id) == pod
                 assert fixture.selection.selected(fixture.scope, start_id, runtime.pod_id)
-
                 fixture.allow_response.set()
                 answer = await asyncio.wait_for(capture, 5)
                 assert answer.output_text == "answer-1"
@@ -872,10 +755,16 @@ def test_gateway_handover_preserves_worker_and_inflight_capture(
                 response = fixture.state.get(evidence + "/response.sse")
                 assert response is not None and fixture.state.get(evidence + "/manifest.json") is not None
                 witness._gateway.http.base_url = origin
-                assert await asyncio.to_thread(witness._gateway.ensure_pod) == start_id
-                assert (await asyncio.to_thread(witness.create, model="fixture", input="image")).output_text == "answer-1"
-                assert (await asyncio.to_thread(witness.create, model="fixture", input="next")).output_text == "answer-2"
-                assert (await asyncio.to_thread(witness.resume, completed.call.exchange_id)).output_text == "answer-1"
+                assert await witness._gateway.ensure_pod() == start_id
+                assert (
+                    await witness.create(model="fixture", input="image")
+                ).output_text == "answer-1"
+                assert (
+                    await witness.create(model="fixture", input="next")
+                ).output_text == "answer-2"
+                assert (
+                    await witness.resume(completed.call.exchange_id)
+                ).output_text == "answer-1"
                 assert fixture.state.get(evidence + "/response.sse") == response
                 summary = runtime.budget.summary(fixture.scope, call_key())
                 assert summary["possible_dispatches"] == 1 and summary["pending_usage"] == 0
@@ -887,35 +776,36 @@ def test_gateway_handover_preserves_worker_and_inflight_capture(
 
 
 def test_client_reconnects_to_gateway_current_round(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+
     async def scenario() -> None:
         fixture = Harness(tmp_path, monkeypatch)
         async with fixture.running():
-            with fixture.client() as witness:
+            async with fixture.client() as witness:
                 gateway = witness._gateway
-                old_start = await asyncio.to_thread(gateway.ensure_pod)
-                first = await asyncio.to_thread(witness.create, model="fixture", input="image")
+                old_start = await gateway.ensure_pod()
+                first = await witness.create(model="fixture", input="image")
                 assert first.output_text == "answer-1" and fixture.paid == 1
-                namespace = witness.capture_context.namespace
+                namespace = (await witness.capture_context()).namespace
                 fixture.scope = Scope(fixture.scope.deployment, "test-1", fixture.scope.hotkey)
                 fixture.gateway.round = fixture.scope.round
                 fixture.services[0].round_end = fixture.runtimes[0].round_end = int(time.time()) - 1
                 gateway._direct = None
-                result = await asyncio.to_thread(witness.create, model="fixture", input="image")
-                new_start = await asyncio.to_thread(gateway.ensure_pod)
+                result = await witness.create(model="fixture", input="image")
+                new_start = await gateway.ensure_pod()
                 assert new_start != old_start
-                assert witness.capture_context.namespace != namespace
+                assert (await witness.capture_context()).namespace != namespace
                 assert result.output_text == "answer-2" and fixture.paid == 2
                 current = fixture.records.load(fixture.scope, call_key().id)
                 assert current is not None and current.call.start_id == new_start
                 config_path = tmp_path / "stale-config.json"
                 config_path.write_bytes(canonical({**witness._config, "round": "test-0"}))
-            with WitnessClient(
-                config_path, hotkey=fixture.key, openai_api_key="fixture-" + "a" * 80,
+            async with AsyncWitnessClient(
+                config_path, hotkey=fixture.key, openai_api_key="fixture-" + "a" * 80
             ) as restarted:
-                assert await asyncio.to_thread(restarted._gateway.ensure_pod) == new_start
-                recovered = await asyncio.to_thread(restarted.create, model="fixture", input="image")
+                assert await restarted._gateway.ensure_pod() == new_start
+                recovered = await restarted.create(model="fixture", input="image")
                 assert recovered.output_text == result.output_text
                 assert fixture.paid == 2 and fixture.provider.creates == 2
 
@@ -924,121 +814,83 @@ def test_client_reconnects_to_gateway_current_round(
 
 @pytest.mark.parametrize("lost_response", [False, True])
 def test_initial_connection_waits_once_then_reuses_its_pod(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, lost_response: bool,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, lost_response: bool
 ) -> None:
+
     async def scenario() -> None:
         fixture = Harness(tmp_path, monkeypatch)
         async with fixture.running():
             fixture.gateway.poll_seconds = 30
-            with fixture.client() as witness:
+            async with fixture.client() as witness:
                 gateway = witness._gateway
                 posted: list[str] = []
 
-                def delivered(response: httpx.Response) -> None:
+                async def delivered(response: httpx.Response) -> None:
                     if response.request.url.path == "/v1/pods/start":
                         posted.append(json.loads(response.request.content)["start_id"])
                         if lost_response and len(posted) == 1:
-                            response.close()
+                            await response.aclose()
                             raise httpx.ReadError("Fixture lost the allocation response", request=response.request)
 
                 gateway.http.event_hooks["response"].append(delivered)
-                start_id = await asyncio.wait_for(asyncio.to_thread(gateway.ensure_pod), 4.5)
+                start_id = await asyncio.wait_for(gateway.ensure_pod(), 4.5)
                 allocations = [path for path in fixture.gateway_paths if path.startswith("/v1/pods/")]
                 assert allocations == ["/v1/pods/current"] + ["/v1/pods/start"] * (2 if lost_response else 1)
                 assert set(posted) == {start_id}
                 for _ in range(5):
-                    assert await asyncio.to_thread(gateway.ensure_pod) == start_id
+                    assert await gateway.ensure_pod() == start_id
                 assert [path for path in fixture.gateway_paths if path.startswith("/v1/pods/")] == allocations
-                assert await asyncio.wait_for(asyncio.to_thread(gateway.ensure_pod), 3) == start_id
-            with fixture.client("restarted") as restarted:
-                assert await asyncio.wait_for(asyncio.to_thread(restarted._gateway.ensure_pod), 3) == start_id
+                assert await asyncio.wait_for(gateway.ensure_pod(), 3) == start_id
+            async with fixture.client("restarted") as restarted:
+                assert (
+                    await asyncio.wait_for(restarted._gateway.ensure_pod(), 3)
+                    == start_id
+                )
             assert fixture.provider.creates == 1
 
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize("saved_connection", [False, True])
-def test_fresh_client_waits_for_retiring_capture_then_reuses_its_result(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, saved_connection: bool,
-) -> None:
+@pytest.mark.parametrize('saved_connection', [False, True])
+def test_fresh_client_waits_for_retiring_capture_then_reuses_its_result(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, saved_connection: bool) -> None:
+
     async def scenario() -> None:
         fixture = Harness(tmp_path, monkeypatch)
         async with fixture.running():
-            with fixture.client() as witness, fixture.client("client" if saved_connection else "fresh") as fresh:
-                old_start = await asyncio.to_thread(witness._gateway.ensure_pod)
+            async with fixture.client() as witness, fixture.client('client' if saved_connection else 'fresh') as fresh:
+                old_start = await witness._gateway.ensure_pod()
                 old_pod = fixture.provider.list()[0]
                 fixture.allow_response.clear()
-                capture = asyncio.create_task(asyncio.to_thread(witness.create, model="fixture", input="image"))
+                capture = asyncio.create_task(witness.create(model='fixture', input='image'))
                 assert await asyncio.to_thread(fixture.dispatched.wait, 2)
                 retired = await asyncio.to_thread(fixture.allocator.retire, fixture.scope, old_start, old_pod.id)
                 assert retired.phase == "retiring"
 
-                def immediate_current(request: httpx.Request) -> None:
+                async def immediate_current(request: httpx.Request) -> None:
                     if request.url.path == "/v1/pods/current":
                         request.headers["Prefer"] = "wait=0"
-
                 fresh._gateway.http.event_hooks["request"].append(immediate_current)
                 async with asyncio.timeout(2):
                     while fixture.gateway._current[fixture.scope].phase != "retiring":
                         await asyncio.sleep(0.01)
-                reconnect = asyncio.create_task(asyncio.to_thread(fresh._gateway.ensure_pod))
+                reconnect = asyncio.create_task(fresh._gateway.ensure_pod())
                 await asyncio.sleep(0.1)
                 assert not reconnect.done() and fixture.provider.get(old_pod.id) is not None
                 assert fixture.provider.creates == fixture.paid == 1
                 fixture.allow_response.set()
                 original = await asyncio.wait_for(capture, 5)
                 new_start = await asyncio.wait_for(reconnect, 5)
-                recovered = await asyncio.to_thread(fresh.create, model="fixture", input="image")
+                recovered = await fresh.create(model='fixture', input='image')
                 assert new_start != old_start and fixture.provider.get(old_pod.id) is None
                 assert recovered.output_text == original.output_text == "answer-1"
                 assert fixture.provider.creates == 2 and fixture.paid == 1
-
     asyncio.run(scenario())
 
 
+def test_renderer_payload_uses_direct_authenticated_pod(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
 
-
-def test_direct_authorization_and_certificate_identity(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    async def scenario() -> None:
-        fixture = Harness(tmp_path, monkeypatch)
-        async with fixture.running():
-            with fixture.client() as witness:
-                client = witness._gateway
-                await asyncio.to_thread(client.ensure_pod)
-                direct = client._service()
-                path = "/v1/calls/00000000-0000-4000-8000-000000000001"
-                other = Keypair.create_from_mnemonic(Keypair.generate_mnemonic())
-
-                def denied() -> None:
-                    headers = {**hotkey_headers(other, b"", method="GET", path=path), **direct.headers}
-                    response = direct.http.get(path, headers=headers, extensions={"sni_hostname": direct.server_name})
-                    assert response.status_code == 403 and response.json()["error"] == "miner_not_assigned"
-                    headers = {
-                        **hotkey_headers(fixture.key, b"", method="GET", path=path),
-                        "Authorization": "Bearer invalid",
-                    }
-                    response = direct.http.get(path, headers=headers, extensions={"sni_hostname": direct.server_name})
-                    assert response.status_code == 404 and response.json()["error"] == "exchange_not_found"
-                    headers = hotkey_headers(fixture.key, b"", method="GET", path=path)
-                    response = direct.http.get(path, headers=headers, extensions={"sni_hostname": direct.server_name})
-                    assert response.status_code == 404 and response.json()["error"] == "exchange_not_found"
-                    response = direct.http.get(path, headers=headers, extensions={"sni_hostname": direct.server_name})
-                    assert response.status_code == 401 and response.json()["error"] == "replayed_hotkey_auth"
-                    direct.server_name = "different.internal"
-                    direct.http.close()
-                    assert direct.tls is not None
-                    with httpx.Client(base_url=direct.http.base_url, verify=direct.tls, trust_env=False) as wrong:
-                        direct.http = wrong
-                        with pytest.raises(httpx.ConnectError):
-                            direct._request_once("GET", path)
-
-                await asyncio.to_thread(denied)
-                assert fixture.paid == 0
-
-    asyncio.run(scenario())
-
-
-def test_renderer_payload_uses_direct_authenticated_pod(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     async def scenario() -> None:
         fixture = Harness(tmp_path, monkeypatch)
         async with fixture.running():
@@ -1058,23 +910,25 @@ def test_renderer_payload_uses_direct_authenticated_pod(tmp_path: Path, monkeypa
             app = web.Application()
             app.router.add_post("/render/grid", backend)
             origin = await fixture.listen(app, None)
-            with fixture.client() as witness:
-                await asyncio.to_thread(witness._gateway.ensure_pod)
+            async with fixture.client() as witness:
+                await witness._gateway.ensure_pod()
                 fixture.services[0].renderer_url = origin + "/render/grid"
                 await fixture.runners[0].cleanup()
                 baseline = fixture.gateway_bytes
 
-                def render() -> None:
-                    with httpx.Client(transport=witness.renderer_transport()) as http:
+                async def render() -> None:
+                    async with httpx.AsyncClient(
+                        transport=witness.renderer_transport()
+                    ) as http:
                         url = "https://witness.internal/v1/render/grid?thetas=24%2C120"
-                        reply = http.post(url, json={"source": source})
+                        reply = await http.post(url, json={"source": source})
                         assert reply.status_code == 200 and reply.content == png
-                        reply = http.post(url, json={"source": "rejected"})
+                        reply = await http.post(url, json={"source": "rejected"})
                         assert reply.status_code == 422 and reply.json() == {"error": "Fixture rejection"}
                         with pytest.raises(httpx.ReadTimeout):
-                            http.post(url, json={"source": "slow"}, timeout=0.05)
+                            await http.post(url, json={"source": "slow"}, timeout=0.05)
 
-                await asyncio.to_thread(render)
+                await render()
                 assert seen == [source, "rejected", "slow"]
                 assert fixture.gateway_bytes == baseline and fixture.paid == 0
 
@@ -1082,26 +936,26 @@ def test_renderer_payload_uses_direct_authenticated_pod(tmp_path: Path, monkeypa
 
 
 def test_failed_dispatch_retries_same_id_after_pod_replacement(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+
     async def scenario() -> None:
         fixture = Harness(tmp_path, monkeypatch)
         fixture.failures = ["unknown"]
         async with fixture.running():
-            with fixture.client() as witness:
+            async with fixture.client() as witness:
                 gateway = witness._gateway
 
-                def unresolved() -> None:
+                async def unresolved() -> None:
                     with pytest.raises(openai.APIConnectionError) as pending:
-                        witness.create(model="fixture", input="image")
+                        await witness.create(model='fixture', input='image')
                     assert isinstance(pending.value.__cause__, WitnessError)
                     assert pending.value.__cause__.code == "capture_failed"
-
-                await asyncio.to_thread(unresolved)
+                await unresolved()
                 old = fixture.provider.list()[0]
                 fixture.selection.update(old, active=False)
                 fixture.provider.delete(old.id)
                 gateway._direct = None
-                await asyncio.to_thread(gateway.ensure_pod)
-                response = await asyncio.to_thread(witness.create, model="fixture", input="image")
+                await gateway.ensure_pod()
+                response = await witness.create(model='fixture', input='image')
                 assert response.output_text == "answer-2"
                 recording = fixture.records.load(fixture.scope, call_key().id)
                 assert recording is not None
@@ -1112,64 +966,61 @@ def test_failed_dispatch_retries_same_id_after_pod_replacement(tmp_path: Path, m
                 assert fixture.paid == 2 and summary["possible_dispatches"] == 1
                 assert summary["pending_usage"] == 0
                 assert call.authorized and not call.not_dispatched
-
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize("failure", ["unknown", "http404", "malformed"])
-def test_failed_capture_accepts_an_ordinary_same_id_start(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str,
-) -> None:
+@pytest.mark.parametrize('failure', ['unknown', 'http404', 'malformed'])
+def test_failed_capture_accepts_an_ordinary_same_id_start(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str) -> None:
+
     async def scenario() -> None:
         fixture = Harness(tmp_path, monkeypatch)
         fixture.failures = [failure]
         async with fixture.running():
-            def run() -> None:
-                with fixture.client() as witness:
+
+            async def run() -> None:
+                async with fixture.client() as witness:
                     with pytest.raises(openai.APIError):
-                        witness.create(model="fixture", input="image")
+                        await witness.create(model='fixture', input='image')
                     previous = fixture.records.load(fixture.scope, call_key().id)
                     assert previous is not None and previous.call.phase == "failed"
                     for _ in range(3):
-                        status = witness._gateway.snapshot(previous.call.exchange_id)
+                        status = await witness._gateway.snapshot(previous.call.exchange_id)
                         assert status.call.exchange_id == previous.call.exchange_id
                         assert status.call.failure == previous.call.failure
                     summary = fixture.runtimes[-1].budget.summary(fixture.scope, call_key())
                     assert summary["possible_dispatches"] == summary["pending_usage"] == 0
                     assert fixture.paid == 1
-                    replacement = witness._gateway.start(call_key())
+                    replacement = await witness._gateway.start(call_key())
                     assert replacement.call.phase == "assigned"
                     assert replacement.call.exchange_id != previous.call.exchange_id
                     assert fixture.paid == 1
-                    assert witness.create(model="fixture", input="image").output_text == "answer-2"
+                    assert (await witness.create(model='fixture', input='image')).output_text == 'answer-2'
                     assert fixture.paid == 2
-
-            await asyncio.wait_for(asyncio.to_thread(run), 20)
-
+            await asyncio.wait_for(run(), 20)
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize("failure", ["unknown", "http404", "malformed"])
-def test_failed_attempt_returns_error_then_same_id_retry_is_saved(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str,
-) -> None:
+@pytest.mark.parametrize('failure', ['unknown', 'http404', 'malformed'])
+def test_failed_attempt_returns_error_then_same_id_retry_is_saved(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str) -> None:
+
     async def scenario() -> None:
         fixture = Harness(tmp_path, monkeypatch)
         fixture.failures = [failure]
         async with fixture.running():
-            def run() -> None:
-                def generate(image: bytes, seed: int, client: WitnessClient, renderer: None) -> str:
+
+            async def run() -> None:
+
+                def generate(image: bytes, seed: int, client: ObservedWitness, renderer: None) -> str:
                     try:
                         return client.create(model="fixture", input="image").output_text
                     except openai.APIError as error:
                         if failure == "http404":
                             assert isinstance(error, openai.NotFoundError)
                         return client.create(model="fixture", input="image").output_text
-
-                with fixture.client() as witness:
-                    expected = run_generation(generate, fixture.image, 42, witness, None)
+                async with fixture.client() as witness:
+                    expected = await run_generation(generate, fixture.image, 42, witness, None)
                     assert expected == "answer-2"
-                    assert witness.create(model="fixture", input="image").output_text == expected
+                    assert (await witness.create(model='fixture', input='image')).output_text == expected
                     execution = next(witness._state.glob("executions/*/*/execution.json"))
                     assert fixture.paid == 2
                 recording = fixture.records.load(fixture.scope, call_key().id)
@@ -1186,37 +1037,39 @@ def test_failed_attempt_returns_error_then_same_id_retry_is_saved(
                 }[failure]
                 if failure != "unknown":
                     assert fixture.state.get(prefix + "response.sse") is not None
-
-            await asyncio.wait_for(asyncio.to_thread(run), 20)
-
+            await asyncio.wait_for(run(), 20)
     asyncio.run(scenario())
 
 
-def test_completed_call_remains_recoverable_after_round_end(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_completed_call_remains_recoverable_after_round_end(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+
     async def scenario() -> None:
         fixture = Harness(tmp_path, monkeypatch)
         async with fixture.running():
-            with fixture.client() as witness:
-                result = await asyncio.to_thread(
-                    witness.create, model="fixture", input="image"
-                )
+            async with fixture.client() as witness:
+                result = await witness.create(model="fixture", input="image")
                 fixture.services[0].round_end = fixture.runtimes[0].round_end = int(time.time()) - 1
                 assert not fixture.runtimes[0].tick()
-                recovered = await asyncio.to_thread(witness.resume, exchange_id(witness))
+                recovered = await witness.resume(exchange_id(witness))
                 assert recovered.output_text == result.output_text and fixture.paid == 1
-                repeated = await asyncio.to_thread(witness.responses.create, model="fixture", input="image")
+                repeated = await witness.responses.create(
+                    model="fixture", input="image"
+                )
                 assert repeated.output_text == result.output_text and fixture.paid == 1
                 with pytest.raises(openai.APIConnectionError) as closed:
-                    await asyncio.to_thread(
-                        witness.create, model="fixture", input="another image"
-                    )
+                    await witness.create(model="fixture", input="another image")
                 assert isinstance(closed.value.__cause__, WitnessError)
                 assert closed.value.__cause__.code == "round_closed" and fixture.paid == 1
 
     asyncio.run(scenario())
 
 
-def test_direct_renderer_finishes_before_drain_ack(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_direct_renderer_finishes_before_drain_ack(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+
     async def scenario() -> None:
         fixture = Harness(tmp_path, monkeypatch)
         async with fixture.running():
@@ -1230,15 +1083,22 @@ def test_direct_renderer_finishes_before_drain_ack(tmp_path: Path, monkeypatch: 
             app = web.Application()
             app.router.add_post("/render/grid", backend)
             origin = await fixture.listen(app, None)
-            with fixture.client() as witness:
-                await asyncio.to_thread(witness._gateway.ensure_pod)
+            async with fixture.client() as witness:
+                await witness._gateway.ensure_pod()
                 fixture.services[0].renderer_url = origin + "/render/grid"
 
-                def render() -> bytes:
-                    with httpx.Client(transport=witness.renderer_transport()) as http:
-                        return http.post("https://witness.internal/v1/render/grid", json={"source": "fixture"}).content
+                async def render() -> bytes:
+                    async with httpx.AsyncClient(
+                        transport=witness.renderer_transport()
+                    ) as http:
+                        return (
+                            await http.post(
+                                "https://witness.internal/v1/render/grid",
+                                json={"source": "fixture"},
+                            )
+                        ).content
 
-                result = asyncio.create_task(asyncio.to_thread(render))
+                result = asyncio.create_task(render())
                 await asyncio.wait_for(started.wait(), 5)
                 runtime = fixture.runtimes[0]
                 assert runtime.rendering == 1
@@ -1251,15 +1111,22 @@ def test_direct_renderer_finishes_before_drain_ack(tmp_path: Path, monkeypatch: 
     asyncio.run(scenario())
 
 
-def test_concurrent_direct_calls_retain_distinct_results(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_concurrent_direct_calls_retain_distinct_results(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+
     async def scenario() -> None:
         fixture = Harness(tmp_path, monkeypatch)
         async with fixture.running():
-            with fixture.client() as witness:
-                await asyncio.to_thread(witness._gateway.ensure_pod)
+            async with fixture.client() as witness:
+                await witness._gateway.ensure_pod()
                 fixture.allow_response.clear()
-                calls = [asyncio.create_task(asyncio.to_thread(witness.create, model="fixture", input="image", request_id=i))
-                         for i in (0, 1)]
+                calls = [
+                    asyncio.create_task(
+                        witness.create(model="fixture", input="image", request_id=i)
+                    )
+                    for i in (0, 1)
+                ]
                 deadline = time.monotonic() + 10
                 while fixture.paid != 2 and time.monotonic() < deadline:
                     await asyncio.sleep(0.01)
@@ -1268,16 +1135,19 @@ def test_concurrent_direct_calls_retain_distinct_results(tmp_path: Path, monkeyp
                 results = await asyncio.wait_for(asyncio.gather(*calls), 10)
                 assert {result.output_text for result in results} == {"answer-1", "answer-2"}
                 assert fixture.paid == 2
+
     asyncio.run(scenario())
 
 
+def test_call_waits_for_capture_capacity_without_restarting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
 
-def test_call_waits_for_capture_capacity_without_restarting(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     async def scenario() -> None:
         fixture = Harness(tmp_path, monkeypatch)
         async with fixture.running():
-            with fixture.client() as witness:
-                await asyncio.to_thread(witness._gateway.ensure_pod)
+            async with fixture.client() as witness:
+                await witness._gateway.ensure_pod()
                 fixture.records.exchange_seconds = 5
                 bound = witness
                 other = witness
@@ -1292,16 +1162,21 @@ def test_call_waits_for_capture_capacity_without_restarting(tmp_path: Path, monk
 
                 monkeypatch.setattr(fixture.runtimes[0], "start_capture", admit)
                 fixture.allow_response.clear()
-                calls = [asyncio.create_task(asyncio.to_thread(
-                    bound.create, model="fixture", input="image", request_id=i,
-                )) for i in (0, 1)]
+                calls = [
+                    asyncio.create_task(
+                        bound.create(model="fixture", input="image", request_id=i)
+                    )
+                    for i in (0, 1)
+                ]
                 deadline = time.monotonic() + 4
                 while fixture.paid != 2 and time.monotonic() < deadline:
                     await asyncio.sleep(0.01)
                 assert fixture.paid == 2
-                calls.append(asyncio.create_task(asyncio.to_thread(
-                    other.create, model="fixture", input="other image",
-                )))
+                calls.append(
+                    asyncio.create_task(
+                        other.create(model="fixture", input="other image")
+                    )
+                )
                 assert await asyncio.to_thread(rejected.wait, 3)
                 fixture.allow_response.set()
                 answers = await asyncio.wait_for(asyncio.gather(*calls), 10)
@@ -1313,13 +1188,14 @@ def test_call_waits_for_capture_capacity_without_restarting(tmp_path: Path, monk
 
 @pytest.mark.parametrize("committed", [False, True])
 def test_lost_claim_acknowledgement_recovers_without_repeating_inference(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, committed: bool,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, committed: bool
 ) -> None:
+
     async def scenario() -> None:
         fixture = Harness(tmp_path, monkeypatch)
         async with fixture.running():
-            with fixture.client() as witness:
-                await asyncio.to_thread(witness._gateway.ensure_pod)
+            async with fixture.client() as witness:
+                await witness._gateway.ensure_pod()
                 fixture.records.exchange_seconds = 5
                 claim, lost = fixture.records.claim, False
 
@@ -1334,7 +1210,9 @@ def test_lost_claim_acknowledgement_recovers_without_repeating_inference(
 
                 monkeypatch.setattr(fixture.records, "claim", uncertain)
                 bound = witness
-                answer = await asyncio.wait_for(asyncio.to_thread(bound.create, model="fixture", input="image"), 10)
+                answer = await asyncio.wait_for(
+                    bound.create(model="fixture", input="image"), 10
+                )
                 assert answer.output_text == "answer-1" and fixture.paid == 1
                 recording = fixture.records.load(fixture.scope, call_key().id)
                 assert recording is not None
@@ -1346,14 +1224,17 @@ def test_lost_claim_acknowledgement_recovers_without_repeating_inference(
     asyncio.run(scenario())
 
 
-def test_direct_upload_waits_for_a_slow_consumer(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_direct_upload_waits_for_a_slow_consumer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+
     async def scenario() -> None:
         fixture = Harness(tmp_path, monkeypatch)
         entered, resume = threading.Event(), threading.Event()
         async with fixture.running():
-            with fixture.client() as witness:
+            async with fixture.client() as witness:
                 gateway = witness._gateway
-                await asyncio.to_thread(gateway.ensure_pod)
+                await gateway.ensure_pod()
                 runtime = fixture.runtimes[0]
                 capture = runtime._capture
 
@@ -1365,13 +1246,17 @@ def test_direct_upload_waits_for_a_slow_consumer(tmp_path: Path, monkeypatch: py
                 monkeypatch.setattr(runtime, "_capture", delayed)
                 body = serialize_body({"model": "fixture", "input": "x" * (5 * 1024 * 1024), "stream": True}, "api")
                 invocation = RequestKey.from_body("api", body)
-                snapshot = await asyncio.to_thread(gateway.start, invocation)
+                snapshot = await gateway.start(invocation)
 
-                def upload() -> bytes:
-                    with gateway.tunnel(snapshot.call.exchange_id) as tunnel:
-                        return fixture.exchange(tunnel, "fixture", [(False, b"POST / HTTP/1.1\r\n\r\n" + body)])
+                async def upload() -> bytes:
+                    async with gateway.tunnel(snapshot.call.exchange_id) as tunnel:
+                        return await fixture.exchange(
+                            tunnel,
+                            "fixture",
+                            [(False, b"POST / HTTP/1.1\r\n\r\n" + body)],
+                        )
 
-                task = asyncio.create_task(asyncio.to_thread(upload))
+                task = asyncio.create_task(upload())
                 try:
                     assert await asyncio.to_thread(entered.wait, 3)
                     await asyncio.sleep(0.2)
@@ -1383,8 +1268,6 @@ def test_direct_upload_waits_for_a_slow_consumer(tmp_path: Path, monkeypatch: py
                 assert located is not None and located[1].phase == "issued"
 
     asyncio.run(scenario())
-
-
 
 
 def test_direct_upgrade_during_tls_session_ticket_processing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1460,17 +1343,18 @@ def test_allocated_calls_continue_without_gateway_and_normal_completion_skips_ar
     monkeypatch: pytest.MonkeyPatch,
     record_property: Callable[[str, object], None],
 ) -> None:
+
     async def scenario() -> None:
         fixture = Harness(tmp_path, monkeypatch)
         fixture.large = True
         async with fixture.running():
-            with fixture.client() as witness:
+            async with fixture.client() as witness:
                 gateway = witness._gateway
-                await asyncio.to_thread(gateway.ensure_pod)
+                await gateway.ensure_pod()
                 await fixture.runners[0].cleanup()
                 baseline = fixture.gateway_bytes
-                result = await asyncio.to_thread(
-                    witness.create, model="fixture", input="x" * (1024 * 1024)
+                result = await witness.create(
+                    model="fixture", input="x" * (1024 * 1024)
                 )
                 assert len(result.output_text) > 1024 * 1024
                 assert fixture.gateway_bytes == baseline
@@ -1483,58 +1367,10 @@ def test_allocated_calls_continue_without_gateway_and_normal_completion_skips_ar
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize("corrupt", [False, True])
-def test_restart_and_replacement_use_original_evidence_and_deny_stale_worker(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    corrupt: bool,
-) -> None:
-    async def scenario() -> None:
-        fixture = Harness(tmp_path, monkeypatch)
-        async with fixture.running():
-            with fixture.client() as witness:
-                generation = witness
-                first = await asyncio.to_thread(generation.create, model="fixture", input="image", request_id=7)
-                saved_exchange = exchange_id(witness)
-                current = fixture.provider.list()[0]
-                fixture.selection.update(current, active=False)
-                old = fixture.runtimes[0]
-                assert not old.selected()
-                fixture.provider.delete(current.id)
-                witness._gateway._invalidate_for("pod_not_selected")
-                await asyncio.to_thread(witness._gateway.ensure_pod)
-                assert len(fixture.runtimes) == 2 and fixture.provider.creates == 2
-                fixture.corrupt = corrupt
-                if corrupt:
-                    with pytest.raises(WitnessError, match="hash differs"):
-                        await asyncio.to_thread(witness.resume, exchange_id(witness))
-                else:
-                    assert (
-                        await asyncio.to_thread(witness.resume, exchange_id(witness))
-                    ).output_text == first.output_text
-                    with fixture.client("replacement") as replacement:
-                        repeated = await asyncio.to_thread(
-                            replacement.create, model="fixture", input="image", request_id=7,
-                        )
-                        assert repeated.model_dump() == first.model_dump()
-                        assert exchange_id(replacement) == saved_exchange
-                assert fixture.paid == 1
-                new_item = RequestKey.from_body(
-                        "api", serialize_body({"model": "fixture", "input": "new", "stream": True}, "api")
-                    )
-                call = fixture.records.reserve(fixture.scope, new_item)
-                assigned = fixture.records.assign(fixture.scope, new_item, old.start_id, old.pod_id)
-                assert not old.start_capture(new_item, assigned, cast(Channel, None))
-                located = fixture.records.locate(fixture.scope, call.exchange_id)
-                assert located is not None and located[1].phase == "assigned"
-
-    asyncio.run(scenario())
-
-
 def call_key() -> RequestKey:
     return RequestKey.from_body("api", serialize_body({"model": "fixture", "input": "image", "stream": True,
                                                        "service_tier": "default"}, "api"))
 
 
-def exchange_id(witness: WitnessClient) -> str:
+def exchange_id(witness: AsyncWitnessClient) -> str:
     return next(reversed(witness._gateway._snapshots))

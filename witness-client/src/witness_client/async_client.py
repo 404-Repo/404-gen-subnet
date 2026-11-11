@@ -22,11 +22,7 @@ from renderer_client.client import DEFAULT_OPTIONS, _source_bytes
 from websockets.exceptions import WebSocketException
 
 from . import request as openai_request
-from .async_pods import AsyncPodGatewayClient
-from .async_transport import async_exchange
-from .async_tunnel import AsyncWebSocketTunnel
-from .calls import RequestKey
-from .client import (
+from ._core import (
     CaptureContext,
     CapturedResponse,
     _ClientState,
@@ -36,6 +32,10 @@ from .client import (
     _submission_result,
     _submissions_result,
 )
+from .async_pods import AsyncPodGatewayClient
+from .async_transport import async_exchange
+from .async_tunnel import AsyncWebSocketTunnel
+from .calls import RequestKey
 from .errors import ExchangePending, WitnessError
 from .proof import Prover
 from .response import AsyncModelStream, ModelStream, model_error, model_result

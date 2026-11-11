@@ -16,9 +16,9 @@ from openai.types.responses.response_create_params import ResponseCreateParamsBa
 from pydantic import BaseModel, ConfigDict, Field
 from renderer_client import Renderer, RenderOptions
 from renderer_client.client import DEFAULT_OPTIONS
-from witness_client import AsyncWitnessClient
+from witness_client import AsyncWitnessClient, CapturedResponse
+from witness_client._core import _ClientState
 from witness_client.calls import Digest, RequestKey, canonical
-from witness_client.client import CapturedResponse, WitnessClient
 from witness_client.errors import ExchangePending, WitnessError
 from witness_client.response import AsyncModelStream, ModelStream, model_error, model_result
 from witness_client.state import save
@@ -26,7 +26,7 @@ from witness_client.state import save
 T = TypeVar("T")
 R = TypeVar("R")
 Generate: TypeAlias = (
-    Callable[[bytes, int, WitnessClient, R], str | None]
+    Callable[[bytes, int, "ObservedWitness", R], str | None]
     | Callable[[bytes, int, AsyncWitnessClient], Awaitable[str | None]]
 )
 
@@ -320,7 +320,7 @@ class ObservedStream(ModelStream):
         self.closed = True
 
 
-class ObservedWitness(WitnessClient):
+class ObservedWitness(_ClientState):
     """Recorded model-call boundary with rendering supplied by the execution host."""
 
     def __init__(self, schedule: Schedule) -> None:
@@ -395,6 +395,12 @@ class ObservedWitness(WitnessClient):
 
     def close(self) -> None:
         pass
+
+    def __enter__(self) -> ObservedWitness:
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.close()
 
     def resume(self, exchange_id: str) -> Response:
         raise ReplayMismatch("Execution code must use responses.create()")
@@ -507,4 +513,6 @@ def invoke_generate(
             return await entry(image, seed, _AsyncObservedWitness(witness))
 
         return asyncio.run(run())
-    return cast(Callable[[bytes, int, WitnessClient, R], str | None], generate)(image, seed, witness, renderer)
+    return cast(Callable[[bytes, int, ObservedWitness, R], str | None], generate)(
+        image, seed, witness, renderer
+    )

@@ -50,7 +50,7 @@ GenerationsMap = dict[str, GenerationResult]
 GenerationsAdapter = TypeAdapter(GenerationsMap)
 
 
-def _path(round_num: int, hotkey: str) -> str:
+def generations_path(round_num: int, hotkey: str) -> str:
     return f"rounds/{round_num}/{hotkey}/generated.json"
 
 
@@ -61,7 +61,7 @@ async def get_generations(
     ref: str,
 ) -> GenerationsMap:
     content = await git.get_file(
-        path=_path(round_num=round_num, hotkey=hotkey),
+        path=generations_path(round_num=round_num, hotkey=hotkey),
         ref=ref,
     )
     if content is None:
@@ -75,7 +75,7 @@ async def save_generations(
     hotkey: str,
     generations: GenerationsMap,
 ) -> None:
-    path = _path(round_num=round_num, hotkey=hotkey)
+    path = generations_path(round_num=round_num, hotkey=hotkey)
     await git_batcher.write(
         path=path,
         content=GenerationsAdapter.dump_json(generations, indent=2).decode(),

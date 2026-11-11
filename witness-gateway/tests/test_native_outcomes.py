@@ -14,13 +14,13 @@ from typing import cast
 
 import openai
 import pytest
-from miner_runtime.runner import run_generation
+from miner_runtime.observations import ObservedWitness
+from miner_runtime.runner import run_async_generation as run_generation
 from openai.types.responses import Response
 from subnet_common.witness.certs import create
 from test_service import Harness
-from witness_client import WitnessClient
+from witness_client.async_transport import async_exchange as exchange
 from witness_client.response import ModelStream
-from witness_client.transport import exchange
 from witness_pod import VERIFY_SCRIPT
 from witness_pod.channel import Channel
 from witness_pod.storage import Store
@@ -79,10 +79,7 @@ def outcome_body(outcome: str) -> tuple[int, bytes]:
     ],
 )
 def test_native_provider_outcome_is_recorded(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    outcome: str,
-    stream: bool,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, outcome: str, stream: bool
 ) -> None:
     provider_dir = tmp_path / "provider"
     create(provider_dir, "localhost")
@@ -131,7 +128,6 @@ def test_native_provider_outcome_is_recorded(
                 connection.sendall(rest)
 
         captured = pool.submit(provider)
-
         original_run = subprocess.run
 
         def run_verifier(
@@ -176,13 +172,17 @@ def test_native_provider_outcome_is_recorded(
                 ("localhost", "/v1/responses"),
             )
 
-            def client_exchange(*args: object, **kwargs: object) -> bytes:
-                return exchange(*args, ca_file=provider_dir / "ca.pem", **kwargs)  # type: ignore[arg-type]
+            async def client_exchange(*args: object, **kwargs: object) -> bytes:
+                return await exchange(*args, ca_file=provider_dir / "ca.pem", **kwargs)
 
-            monkeypatch.setattr("witness_client.client.exchange", client_exchange)
+            monkeypatch.setattr(
+                "witness_client.async_client.async_exchange", client_exchange
+            )
             async with fixture.running():
 
-                def generate(image: bytes, seed: int, witness: WitnessClient, renderer: None) -> str:
+                def generate(
+                    image: bytes, seed: int, witness: ObservedWitness, renderer: None
+                ) -> str:
                     observed = []
                     for _ in range(1 if outcome in ("http-error", "sse-error", "embedded-error", "truncated-http") else 2):
                         try:
@@ -215,9 +215,9 @@ def test_native_provider_outcome_is_recorded(
                             )
                     return json.dumps(observed, sort_keys=True)
 
-                with fixture.client() as witness:
+                async with fixture.client() as witness:
                     work = asyncio.create_task(
-                        asyncio.to_thread(run_generation, generate, fixture.image, 42, witness, None)
+                        run_generation(generate, fixture.image, 42, witness, None)
                     )
                     try:
                         if buffered:
