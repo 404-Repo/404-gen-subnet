@@ -49,10 +49,12 @@ class Gateway:
                  max_requests: int = 64, max_queue: int = 1024,
                  refresh_seconds: float = 2, body_timeout: float = 5,
                  rounds: RoundController | None = None,
-                 spec_for_round: Callable[[RoundInputs], PodSpec] | None = None) -> None:
+                 spec_for_round: Callable[[RoundInputs], PodSpec] | None = None,
+                 poll_fence: Callable[[], tuple[bool, float]] | None = None) -> None:
         self.allocator, self.auth, self.registry = allocator, auth, registry
         self.deployment, self.round, self.round_end = deployment, round_number, round_end
         self.secret, self.proof_hash, self.fence = secret, proof_hash, fence
+        self._poll_fence = poll_fence
         self.rounds, self.spec_for_round = rounds, spec_for_round
         if allocator.selection is None:
             raise ValueError("Gateway admission requires durable selection storage")
@@ -563,8 +565,11 @@ class Gateway:
         while True:
             refresh_at = time.monotonic() + self.refresh_seconds
             try:
-                self._fence_ok = await self._run(self._fencing, self.fence)
-                self._fence_at = time.monotonic()
+                if self._poll_fence is None:
+                    self._fence_ok = await self._run(self._fencing, self.fence)
+                    self._fence_at = time.monotonic()
+                else:
+                    self._fence_ok, self._fence_at = await self._run(self._fencing, self._poll_fence)
             except Exception as error:  # noqa: BLE001 - failed ownership checks stop admission
                 self._fence_ok = False
                 self._fence_at = 0

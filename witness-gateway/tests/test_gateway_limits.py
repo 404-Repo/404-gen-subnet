@@ -164,7 +164,7 @@ def test_allocation_metadata_and_idempotent_replacement_with_paced_runpod_http()
     async def scenario() -> None:
         state, clock = MemoryState(), [1000.0]
         with httpx.Client(transport=httpx.MockTransport(handle)) as http:
-            provider = RunPodClient("offline-key", http, min_interval=1.1, cache_seconds=2)
+            provider = RunPodClient("offline-key", http, min_interval=1.1, cache_seconds=15)
             async with coordinator(provider, state, clock) as gateway:
                 scope = gateway.scope(KEYS[0].ss58_address)
                 gateway.queue.enqueue(scope, FIRST, None)

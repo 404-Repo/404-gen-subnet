@@ -10,6 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
+import httpx
 import pytest
 from aiohttp import web
 from bittensor_wallet import Keypair
@@ -311,6 +312,86 @@ def test_final_saving_requires_and_forwards_embedding_settings(values: dict[str,
         spec = worker_spec(Settings.model_validate(values), inputs)
         assert spec.env["DINOV3_REVISION"] == "fixture-revision"
         assert spec.env["HF_TOKEN"] == "fixture-token"
+
+    asyncio.run(scenario())
+
+
+def test_gateway_shares_idle_inventory_and_checks_ownership_fresh(
+    values: dict[str, object], tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pod_gateway import main, runpod
+    from pod_gateway.server import Gateway
+
+    async def scenario() -> None:
+        observed_at = time.monotonic()
+        now = observed_at
+        (tmp_path / "verifying.bin").write_bytes(b"fixture verification key")
+        settings = GatewaySettings.model_validate({
+            **values, "WITNESS_PARAMETERS": tmp_path, "GATEWAY_MIN_REQUEST_INTERVAL": 0,
+            "WITNESS_START_ID": "00000000-0000-4000-8000-000000000001",
+            "RUNPOD_POD_ID": "fixture-gateway",
+        })
+        pod = gateway_spec(settings).body(settings.gateway_scope, settings.start_id, epoch_ns=1)
+        pod.update(id=settings.pod_id, status="RUNNING",
+                   name=settings.gateway_scope.name(settings.start_id) + "-active")
+        inventory = [pod]
+        reads = 0
+
+        def handle(request: httpx.Request) -> httpx.Response:
+            nonlocal reads
+            assert request.method == "GET" and request.url.path == "/v2/pods"
+            reads += 1
+            return httpx.Response(200, json={"pods": inventory, "pagination": {"hasNextPage": False}})
+
+        gateways: list[Gateway] = []
+        application = Gateway.application
+
+        def capture(gateway: Gateway) -> web.Application:
+            gateways.append(gateway)
+            return application(gateway)
+
+        monkeypatch.setattr(Gateway, "application", capture)
+        monkeypatch.setattr(runpod, "time", SimpleNamespace(monotonic=lambda: now))
+        monkeypatch.setattr(runpod.RunPodClient, "http_client", lambda: httpx.Client(
+            transport=httpx.MockTransport(handle),
+        ))
+        monkeypatch.setattr("pod_gateway.main.R2StateStore.connect", Mock(return_value=MemoryState()))
+        monkeypatch.setattr(main, "RoundImages", Mock())
+        monkeypatch.setattr(main, "RoundController", Mock(
+            return_value=SimpleNamespace(inputs=None, refresh=AsyncMock()),
+        ))
+        monkeypatch.setattr("pod_gateway.main.MembershipRefresher.refresh", lambda _: None)
+        app = await main.application(settings, worker_spec(settings))
+        gateway = gateways[0]
+        gateway.refresh_seconds = 0.01
+        runner = web.AppRunner(app)
+        await runner.setup()
+        try:
+            async with asyncio.timeout(1):
+                while not gateway._live():
+                    await asyncio.sleep(0.005)
+            assert reads == 1
+
+            now += 14
+            inventory.clear()
+            assert gateway.allocator.provider.list()
+            await asyncio.sleep(0.03)
+            assert gateway._live()
+            assert reads == 1
+            assert gateway._fence_at == observed_at
+
+            now += 1
+            async with asyncio.timeout(1):
+                while gateway._live():
+                    await asyncio.sleep(0.005)
+            assert reads == 2
+            assert gateway._fence_at == now
+
+            inventory.append(pod)
+            assert gateway.fence()
+            assert reads == 3
+        finally:
+            await runner.cleanup()
 
     asyncio.run(scenario())
 

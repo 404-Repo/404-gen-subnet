@@ -451,8 +451,9 @@ entry, remain idempotent for the round after later allocations and gateway resta
 
 One gateway coordinates worker creation; a host file lock allows one revivor
 process on the independent host. Multiple supervisor hosts are not supported.
-Read-only selection checks share a two-second in-memory RunPod inventory cache;
-create admission and cleanup explicitly refresh it. Mutable names are updated
+Gateway ownership and worker inventory polling share a RunPod inventory snapshot
+for up to 15 seconds. The revivor uses a two-second inventory cache. Create
+admission and cleanup explicitly refresh inventory. Mutable names are updated
 with name-only PATCH requests; worker secrets and container settings are preserved.
 
 Allocation and status replies use inventory and reported Pod readiness and TLS
