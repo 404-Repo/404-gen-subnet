@@ -47,18 +47,18 @@ class Gateway:
                  create_interval: float = 10,
                  request_interval: float = 10, poll_seconds: float = 30,
                  max_requests: int = 64, max_queue: int = 1024,
-                 refresh_seconds: float = 2, body_timeout: float = 5,
+                 refresh_seconds: float = 2, idle_refresh_seconds: float | None = None,
+                 body_timeout: float = 5,
                  rounds: RoundController | None = None,
-                 spec_for_round: Callable[[RoundInputs], PodSpec] | None = None,
-                 poll_fence: Callable[[], tuple[bool, float]] | None = None) -> None:
+                 spec_for_round: Callable[[RoundInputs], PodSpec] | None = None) -> None:
         self.allocator, self.auth, self.registry = allocator, auth, registry
         self.deployment, self.round, self.round_end = deployment, round_number, round_end
         self.secret, self.proof_hash, self.fence = secret, proof_hash, fence
-        self._poll_fence = poll_fence
         self.rounds, self.spec_for_round = rounds, spec_for_round
         if allocator.selection is None:
             raise ValueError("Gateway admission requires durable selection storage")
         if (request_interval < 0 or poll_seconds <= 0 or refresh_seconds <= 0 or
+                (idle_refresh_seconds is not None and idle_refresh_seconds < refresh_seconds) or
                 body_timeout <= 0 or max_requests < 1):
             raise ValueError("Invalid gateway request bounds")
         self.queue = StartQueue(allocator.selection.store, deployment,
@@ -67,6 +67,7 @@ class Gateway:
         allocator.pending_creates = self.queue.unresolved
         self.request_interval, self.poll_seconds = request_interval, poll_seconds
         self.max_requests, self.refresh_seconds, self.body_timeout = max_requests, refresh_seconds, body_timeout
+        self.idle_refresh_seconds = idle_refresh_seconds
         self._active = self._authenticating = self._journal_pending = 0
         self._rate: dict[str, tuple[float, float]] = {}
         self._busy: set[str] = set()
@@ -561,24 +562,40 @@ class Gateway:
             return self.allocator.reconcile(scope)
         return self.allocator.acquire(scope, entry.start_id, replaces=entry.replaces)
 
+    def _inventory_refresh_interval(self) -> float:
+        if self.idle_refresh_seconds is None or self.queue.has_pending():
+            return self.refresh_seconds
+        for session in self._current.values():
+            if session.phase not in ("creating", "allocated") or session.pod_id is None:
+                continue
+            pod = self._pods.get(session.pod_id)
+            if pod is None or (
+                pod.status not in ("EXITED", "ERROR", "TERMINATED")
+                and (pod.status != "RUNNING" or not self.registry.ready(session.pod_id))
+            ):
+                return self.refresh_seconds
+        return self.idle_refresh_seconds
+
     async def _fences(self) -> None:
+        refresh_started_at = -math.inf
         while True:
-            refresh_at = time.monotonic() + self.refresh_seconds
+            now = time.monotonic()
+            delay = refresh_started_at + self._inventory_refresh_interval() - now
+            if delay > 0:
+                await asyncio.sleep(min(delay, self.refresh_seconds))
+                continue
+            refresh_started_at = now
             try:
-                if self._poll_fence is None:
-                    self._fence_ok = await self._run(self._fencing, self.fence)
-                    self._fence_at = time.monotonic()
-                else:
-                    self._fence_ok, self._fence_at = await self._run(self._fencing, self._poll_fence)
+                self._fence_ok = await self._run(self._fencing, self.fence)
+                self._fence_at = time.monotonic()
             except Exception as error:  # noqa: BLE001 - failed ownership checks stop admission
                 self._fence_ok = False
                 self._fence_at = 0
                 output.write("gateway_background_failed", phase="fence", error_type=type(error).__name__,
                              provider_status=error.status if isinstance(error, ProviderUnavailable) else None)
-            await asyncio.sleep(max(0, refresh_at - time.monotonic()))
 
     async def _work(self) -> None:
-        refresh_at = 0.0
+        refreshed_at = -math.inf
         journal_at = time.monotonic() + self.poll_seconds
         while True:
             self._wake.clear()
@@ -587,10 +604,10 @@ class Gateway:
                 if now >= journal_at:
                     await self._run(self._journal, self.queue.load)
                     journal_at = time.monotonic() + self.poll_seconds
-                if now >= refresh_at:
+                if now >= refreshed_at + self._inventory_refresh_interval():
                     self._publish(await self._run(self._worker, self.allocator.provider.list))
                     self._loaded = True
-                    refresh_at = time.monotonic() + self.refresh_seconds
+                    refreshed_at = time.monotonic()
                 if self._live():
                     await self._step()
             except Exception as error:  # noqa: BLE001 - retain durable intents without request-driven retries
@@ -814,6 +831,7 @@ class Gateway:
             peer.ready = False
             if self.registry.peers.get(pod_id) is peer:
                 self.registry.peers.pop(pod_id, None)
+                self._wake.set()
             for future in peer.replies.values():
                 if not future.done():
                     future.set_result({})

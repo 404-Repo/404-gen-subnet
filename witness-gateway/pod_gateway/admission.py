@@ -160,6 +160,10 @@ class StartQueue:
                 key=lambda item: item[1].sequence,
             )
 
+    def has_pending(self) -> bool:
+        with self._read_lock:
+            return bool(self._state.pending)
+
     def pending(self, scope: Scope) -> PendingStart | None:
         with self._read_lock:
             entry = self._state.pending.get(scope.hotkey)

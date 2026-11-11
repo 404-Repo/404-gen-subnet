@@ -179,19 +179,16 @@ class RunPodClient:
             raise ProviderUnavailable("Malformed RunPod Pod") from None
 
     def list(self, *, fresh: bool = False) -> list[Pod]:
-        return self.list_with_timestamp(fresh=fresh)[1]
-
-    def list_with_timestamp(self, *, fresh: bool = False) -> tuple[float, PodList]:
-        """Return the inventory and the monotonic time it was fetched."""
         with self._cache_lock:
-            cached = self._cached
-            if not fresh and cached is not None and time.monotonic() - cached[0] < self._cache_seconds:
-                observed_at, pods = cached
-            else:
-                pods = self._list()
-                observed_at = time.monotonic()
-                self._cached = (observed_at, pods)
-            return observed_at, list(pods)
+            if (
+                not fresh
+                and self._cached is not None
+                and time.monotonic() - self._cached[0] < self._cache_seconds
+            ):
+                return list(self._cached[1])
+            pods = self._list()
+            self._cached = (time.monotonic(), pods)
+            return list(pods)
 
     def _list(self) -> PodList:
         pods: dict[str, Pod] = {}

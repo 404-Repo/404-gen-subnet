@@ -316,82 +316,123 @@ def test_final_saving_requires_and_forwards_embedding_settings(values: dict[str,
     asyncio.run(scenario())
 
 
-def test_gateway_shares_idle_inventory_and_checks_ownership_fresh(
+@pytest.mark.filterwarnings("ignore:It is recommended to use web.RequestKey instances")
+def test_gateway_polls_faster_for_starting_and_reconnecting_pods(
     values: dict[str, object], tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from pod_gateway import main, runpod
-    from pod_gateway.server import Gateway
+    from aiohttp import ClientWebSocketResponse
+    from aiohttp.test_utils import TestClient, TestServer
+    from pod_gateway import main, runpod, server
+    from subnet_common.witness.security import capability
+    from subnet_common.witness.selection import Selection
 
     async def scenario() -> None:
-        observed_at = time.monotonic()
-        now = observed_at
+        now = time.monotonic()
         (tmp_path / "verifying.bin").write_bytes(b"fixture verification key")
         settings = GatewaySettings.model_validate({
             **values, "WITNESS_PARAMETERS": tmp_path, "GATEWAY_MIN_REQUEST_INTERVAL": 0,
             "WITNESS_START_ID": "00000000-0000-4000-8000-000000000001",
             "RUNPOD_POD_ID": "fixture-gateway",
         })
-        pod = gateway_spec(settings).body(settings.gateway_scope, settings.start_id, epoch_ns=1)
-        pod.update(id=settings.pod_id, status="RUNNING",
-                   name=settings.gateway_scope.name(settings.start_id) + "-active")
-        inventory = [pod]
+        gateway_pod = gateway_spec(settings).body(settings.gateway_scope, settings.start_id, epoch_ns=1)
+        gateway_pod.update(id=settings.pod_id, status="RUNNING",
+                           name=settings.gateway_scope.name(settings.start_id) + "-active")
+        spec = worker_spec(settings)
+        scope = Scope(settings.deployment, "test-0", Keypair.create_from_uri("//Bob").ss58_address)
+        start = "00000000-0000-4000-8000-000000000002"
+        pod_id = "fixture-worker"
+        pod = spec.body(scope, start, epoch_ns=2)
+        pod.update(id=pod_id, status="STARTING", name=scope.name(start) + "-active",
+                   runtime={"ports": [{"type": "tcp", "ip": "8.8.8.8", "private": spec.port, "public": 44001}]})
+        state = MemoryState()
+        Selection(state).update(runpod.RunPodClient._pod(pod), active=True)
         reads = 0
 
         def handle(request: httpx.Request) -> httpx.Response:
             nonlocal reads
-            assert request.method == "GET" and request.url.path == "/v2/pods"
-            reads += 1
-            return httpx.Response(200, json={"pods": inventory, "pagination": {"hasNextPage": False}})
+            assert request.method == "GET"
+            if request.url.path == "/v2/pods":
+                reads += 1
+                return httpx.Response(200, json={"pods": [gateway_pod, pod], "pagination": {"hasNextPage": False}})
+            assert request.url.path == f"/v2/pods/{pod_id}"
+            return httpx.Response(200, json=pod)
 
-        gateways: list[Gateway] = []
-        application = Gateway.application
+        gateways: list[server.Gateway] = []
+        application = server.Gateway.application
 
-        def capture(gateway: Gateway) -> web.Application:
+        def capture(gateway: server.Gateway) -> web.Application:
             gateways.append(gateway)
             return application(gateway)
 
-        monkeypatch.setattr(Gateway, "application", capture)
+        monkeypatch.setattr(server.Gateway, "application", capture)
+        monkeypatch.setattr(server, "time", SimpleNamespace(monotonic=lambda: now, time=time.time))
         monkeypatch.setattr(runpod, "time", SimpleNamespace(monotonic=lambda: now))
         monkeypatch.setattr(runpod.RunPodClient, "http_client", lambda: httpx.Client(
             transport=httpx.MockTransport(handle),
         ))
-        monkeypatch.setattr("pod_gateway.main.R2StateStore.connect", Mock(return_value=MemoryState()))
+        monkeypatch.setattr("pod_gateway.main.R2StateStore.connect", Mock(return_value=state))
         monkeypatch.setattr(main, "RoundImages", Mock())
         monkeypatch.setattr(main, "RoundController", Mock(
             return_value=SimpleNamespace(inputs=None, refresh=AsyncMock()),
         ))
         monkeypatch.setattr("pod_gateway.main.MembershipRefresher.refresh", lambda _: None)
-        app = await main.application(settings, worker_spec(settings))
+        app = await main.application(settings, spec)
         gateway = gateways[0]
-        gateway.refresh_seconds = 0.01
-        runner = web.AppRunner(app)
-        await runner.setup()
-        try:
+
+        async def advance(seconds: float) -> None:
+            nonlocal now
+            now += seconds
+            for _ in range(2):
+                changed = gateway._changed
+                gateway._wake.set()
+                await asyncio.wait_for(changed.wait(), 1)
+
+        async def report_ready(socket: ClientWebSocketResponse) -> None:
+            assert (await socket.receive_json(timeout=1))["type"] == "activate"
+            await socket.send_json({"type": "ready", "ready": True,
+                                    "proof_key_sha256": gateway.proof_hash, "certificate": "fixture-ca"})
+            async with asyncio.timeout(1):
+                while not gateway.registry.ready(pod_id):
+                    await asyncio.sleep(0.005)
+
+        path = f"/v1/control/{scope.hotkey}/{start}"
+        headers = {"Authorization": "Bearer " + capability(settings.secret, scope, start), "x-witness-pod": pod_id}
+        async with TestClient(TestServer(app)) as client:
             async with asyncio.timeout(1):
                 while not gateway._live():
                     await asyncio.sleep(0.005)
-            assert reads == 1
+            assert gateway._pods[pod_id].status == "STARTING"
+            startup_reads = reads
+            pod["status"] = "RUNNING"
+            await advance(1)
+            assert reads == startup_reads
+            await advance(1)
+            assert reads > startup_reads
+            assert gateway._pods[pod_id].status == "RUNNING"
 
-            now += 14
-            inventory.clear()
-            assert gateway.allocator.provider.list()
-            await asyncio.sleep(0.03)
-            assert gateway._live()
-            assert reads == 1
-            assert gateway._fence_at == observed_at
+            async with client.ws_connect(path, headers=headers) as socket:
+                await report_ready(socket)
+                assert gateway._inventory_refresh_interval() == 15
+                idle_reads = reads
+                await advance(12)
+                assert reads == idle_reads
+                await advance(3)
+                assert reads > idle_reads
 
-            now += 1
             async with asyncio.timeout(1):
-                while gateway._live():
+                while pod_id in gateway.registry.peers:
                     await asyncio.sleep(0.005)
-            assert reads == 2
-            assert gateway._fence_at == now
-
-            inventory.append(pod)
-            assert gateway.fence()
-            assert reads == 3
-        finally:
-            await runner.cleanup()
+            reconnect_reads = reads
+            pod["status"] = "STARTING"
+            await advance(1)
+            assert reads == reconnect_reads
+            await advance(1)
+            assert reads > reconnect_reads
+            assert gateway._pods[pod_id].status == "STARTING"
+            pod["status"] = "RUNNING"
+            await advance(2)
+            async with client.ws_connect(path, headers=headers) as socket:
+                await report_ready(socket)
 
     asyncio.run(scenario())
 

@@ -42,7 +42,7 @@ async def application(settings: GatewaySettings, worker_spec: PodSpec) -> web.Ap
         settings.runpod_api_key.get_secret_value(),
         http,
         min_interval=settings.min_request_interval,
-        cache_seconds=15,
+        cache_seconds=2,
     )
     admission = Admission(max_pods=settings.max_pods)
     allocator = Allocator(
@@ -73,12 +73,10 @@ async def application(settings: GatewaySettings, worker_spec: PodSpec) -> web.Ap
         head=head, ttl=settings.round_policy_seconds,
     )
 
-    def check_ownership(*, fresh: bool = False) -> tuple[bool, float]:
-        observed_at, inventory = provider.list_with_timestamp(fresh=fresh)
-        pod = Allocator.winner(Allocator.owned(inventory, settings.gateway_scope))
-        owns_gateway = (pod is not None and pod.lifecycle == "active" and pod.status == "RUNNING" and
-                        pod.id == settings.pod_id and pod.markers["WITNESS_START_ID"] == settings.start_id)
-        return owns_gateway, observed_at
+    def fence() -> bool:
+        pod = Allocator.winner(Allocator.owned(provider.list(fresh=True), settings.gateway_scope))
+        return (pod is not None and pod.lifecycle == "active" and pod.status == "RUNNING" and
+                pod.id == settings.pod_id and pod.markers["WITNESS_START_ID"] == settings.start_id)
 
     def authorize(hotkey: str) -> None:
         if settings.mode == "test":
@@ -96,8 +94,8 @@ async def application(settings: GatewaySettings, worker_spec: PodSpec) -> web.Ap
         round_end=None,
         secret=settings.secret,
         proof_hash=hashlib.sha256((settings.parameters / "verifying.bin").read_bytes()).hexdigest(),
-        fence=lambda: check_ownership(fresh=True)[0],
-        poll_fence=check_ownership,
+        fence=fence,
+        idle_refresh_seconds=15,
         create_interval=settings.create_interval,
         request_interval=settings.request_interval,
         poll_seconds=settings.poll_seconds,
