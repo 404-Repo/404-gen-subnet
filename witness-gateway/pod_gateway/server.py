@@ -570,7 +570,7 @@ class Gateway:
                 continue
             pod = self._pods.get(session.pod_id)
             if pod is None or (
-                pod.status not in ("EXITED", "ERROR", "TERMINATED")
+                (session.pod_id in self.registry.peers or pod.status not in ("EXITED", "ERROR", "TERMINATED"))
                 and (session.phase == "creating" or pod.status != "RUNNING"
                      or not self.registry.ready(session.pod_id))
             ):

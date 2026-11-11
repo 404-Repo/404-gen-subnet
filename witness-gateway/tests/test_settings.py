@@ -317,13 +317,14 @@ def test_final_saving_requires_and_forwards_embedding_settings(values: dict[str,
 
 
 @pytest.mark.filterwarnings("ignore:It is recommended to use web.RequestKey instances")
-@pytest.mark.parametrize("cached_status,cached_lifecycle", [
-    ("STARTING", "active"),
-    ("RUNNING", "pending"),
+@pytest.mark.parametrize("cached_status,cached_lifecycle,reconnect_status", [
+    ("STARTING", "active", "STARTING"),
+    ("RUNNING", "pending", "STARTING"),
+    ("STARTING", "active", "EXITED"),
 ])
 def test_gateway_polls_faster_for_starting_and_reconnecting_pods(
     values: dict[str, object], tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-    cached_status: str, cached_lifecycle: str,
+    cached_status: str, cached_lifecycle: str, reconnect_status: str,
 ) -> None:
     from aiohttp import ClientWebSocketResponse
     from aiohttp.test_utils import TestClient, TestServer
@@ -433,15 +434,19 @@ def test_gateway_polls_faster_for_starting_and_reconnecting_pods(
                 while pod_id in gateway.registry.peers:
                     await asyncio.sleep(0.005)
             reconnect_reads = reads
-            pod["status"] = "STARTING"
+            pod["status"] = reconnect_status
             await advance(1)
             assert reads == reconnect_reads
             await advance(1)
             assert reads > reconnect_reads
-            assert gateway._pods[pod_id].status == "STARTING"
+            assert gateway._pods[pod_id].status == reconnect_status
+            if reconnect_status == "EXITED":
+                idle_reads = reads
+                await advance(2)
+                assert reads == idle_reads
             pod["status"] = "RUNNING"
             await advance(1)
-            assert gateway._pods[pod_id].status == "STARTING"
+            assert gateway._pods[pod_id].status == reconnect_status
             async with client.ws_connect(path, headers=headers) as socket:
                 await report_ready(socket)
                 await advance(1)
