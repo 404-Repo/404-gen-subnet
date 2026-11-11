@@ -56,7 +56,11 @@ async def validation_iteration(
             if pod is not None:
                 await delete_worker_pod(runpod, pods.pop(name))
             continue
-        result, has_work = await validation_outcome(git, round_num, hotkey, ref)
+        try:
+            result, has_work = await validation_outcome(git, round_num, hotkey, ref)
+        except (httpx.HTTPError, ValueError) as error:
+            logger.warning(f"Could not read validation checkpoint: round={round_num}, hotkey={hotkey}, error={error}")
+            break
         if result is not None:
             results[hotkey] = result
             finished.append(name)

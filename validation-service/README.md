@@ -53,6 +53,10 @@ any remaining Pods for completed candidates or requests that leave the current
 round. Each poll reads one commit. Later polls resolve the branch again to see new
 requests, results or rounds.
 
+If a checkpoint read fails, the coordinator logs the error and ends the scan. It
+publishes the verdicts it has collected and can start the candidate it has
+already selected when the Pod slot is free.
+
 Missing `state.json`, malformed competition data and infrastructure failures are
 service errors. They are logged and retried on a later poll, leaving affected
 requests pending rather than publishing a miner failure.

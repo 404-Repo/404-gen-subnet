@@ -13,7 +13,7 @@ from validation_service.validation_iteration import validation_iteration
 
 
 class PodSchedulingTest(unittest.IsolatedAsyncioTestCase):
-    async def test_publishes_finished_results_before_starting_next_pod(self) -> None:
+    async def test_finishes_known_work_after_later_checkpoint_error(self) -> None:
         token = secrets.token_hex(16)
         settings = Settings(
             _env_file=None,
@@ -26,12 +26,18 @@ class PodSchedulingTest(unittest.IsolatedAsyncioTestCase):
         )
         ref = "b" * 40
         results_path = "rounds/3/validation_results.json"
+        candidates = ("failed", "next", "passed", "malformed", "unread")
         files = {
             "state.json": '{"current_round":3,"stage":"duels"}',
-            "rounds/3/validation_requests.json": '[{"hotkey":"failed"},{"hotkey":"next"},{"hotkey":"passed"}]',
+            "rounds/3/validation_requests.json": json.dumps([{"hotkey": hotkey} for hotkey in candidates]),
+            "rounds/3/malformed/validation.json": "{}",
             results_path: '{"existing":{"verdict":"passed","reason":""}}',
         }
-        for hotkey, status, reason in (("failed", "failed", "Missing submitted source"), ("passed", "passed", "")):
+        for hotkey, status, reason in (
+            ("failed", "failed", "Missing submitted source"),
+            ("passed", "passed", ""),
+            ("unread", "passed", ""),
+        ):
             files[f"rounds/3/{hotkey}/generated.json"] = '{"prompt":{"js":"https://artifacts.test/model.js"}}'
             files[f"rounds/3/{hotkey}/validation.json"] = json.dumps(
                 {"ref": ref, "prompts": {"prompt": {"status": status, "reason": reason}}}
