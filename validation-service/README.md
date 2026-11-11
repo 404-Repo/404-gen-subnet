@@ -50,8 +50,11 @@ Git commit and starts the next pending candidate if the Pod slot is free. If a P
 disappears while work is pending, a replacement resumes the checkpoint. A
 candidate with exhausted prompt attempts stays pending. The coordinator removes
 any remaining Pods for completed candidates or requests that leave the current
-round. Each poll reads one commit. Later polls resolve the branch again to see new
-requests, results or rounds.
+round.
+
+The coordinator replaces a Pod after 45 minutes without a new checkpoint. It
+uses the Pod's creation time until the first save. The replacement starts in
+the same poll and resumes the candidate from Git.
 
 If a checkpoint read fails, the coordinator logs the error and ends the scan. It
 publishes the verdicts it has collected and can start the candidate it has
