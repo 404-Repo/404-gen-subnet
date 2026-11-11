@@ -414,38 +414,44 @@ def generate(image, seed, witness, renderer):
         self.objects["main"][grid] = self.objects["replay"][self.render_keys["lamp"] + ".png"]
         scope = Scope("test", "gpt-7", self.hotkey)
         live = Capture(self.private_path)
-        request, body = live._request(0, None, {"model": "fixture", "input": "recorded"})
-        call = live.records.assign(scope, request, "start", "pod")
-        self.assertTrue(live.records.claim(scope, request, "pod", call.capture_id or ""))
-        live.records.authorize(scope, request, "pod", exchange_id=call.exchange_id)
-        live.records.failed(scope, request, "pod", "CaptureInterrupted", exchange_id=call.exchange_id)
-        key = live.records.key(scope, request.id)
-        self.objects["main"]["fixture/" + key] = live.state.objects[key].data
-        capture = f"fixture/rounds/{scope.round}/{scope.hotkey}/{call.exchange_id}/"
-        self.objects["replay"][capture + "request.json"] = body
-        self.objects["replay"][capture + "failure.json"] = json_bytes(
-            {"status": "failed", "error_type": "CaptureInterrupted"}
-        )
+        exchanges = {}
+        for failure, authorized in (("CaptureInterrupted", True), ("BeforeDispatch", False)):
+            request, body = live._request(0, None, {"model": "fixture", "input": failure})
+            call = live.records.assign(scope, request, "start", "pod")
+            self.assertTrue(live.records.claim(scope, request, "pod", call.capture_id or ""))
+            if authorized:
+                live.records.authorize(scope, request, "pod", exchange_id=call.exchange_id)
+            live.records.failed(
+                scope, request, "pod", failure, exchange_id=call.exchange_id, not_dispatched=not authorized
+            )
+            key = live.records.key(scope, request.id)
+            self.objects["main"]["fixture/" + key] = live.state.objects[key].data
+            capture = f"fixture/rounds/{scope.round}/{scope.hotkey}/{call.exchange_id}/"
+            if authorized:
+                self.objects["replay"][capture + "request.json"] = body
+            self.objects["replay"][capture + "failure.json"] = json_bytes({"status": "failed", "error_type": failure})
+            exchanges[failure] = call.exchange_id
 
         source = self.source.replace(
             b"    try:\n        renderer.render(name)",
             f"""    from openai import APIConnectionError
     from witness_client import WitnessError
-    try:
-        witness.responses.create(model="fixture", input="recorded" if name == "chair" else "unrecorded")
-    except APIConnectionError as error:
-        cause = error.__cause__
-        expected = ("capture_failed", {call.exchange_id!r}) if name == "chair" else ("capture_unrecorded", None)
-        if (
-            not isinstance(cause, WitnessError)
-            or (cause.code, cause.exchange_id) != expected
-            or cause.source != "gateway"
-        ):
-            raise
-        if name != "chair":
-            return name if name == "lamp" else "different output"
-    else:
-        raise AssertionError("Expected a Witness connection error")
+    requests = {exchanges!r} if name == "chair" else {{"unrecorded": None}}
+    for model_input, exchange_id in requests.items():
+        try:
+            witness.responses.create(model="fixture", input=model_input)
+        except APIConnectionError as error:
+            cause = error.__cause__
+            expected = "capture_failed" if exchange_id is not None else "capture_unrecorded"
+            if (
+                not isinstance(cause, WitnessError)
+                or (cause.code, cause.exchange_id, cause.source) != (expected, exchange_id, "gateway")
+            ):
+                raise
+        else:
+            raise AssertionError("Expected a Witness connection error")
+    if name != "chair":
+        return name if name == "lamp" else "different output"
     try:
         renderer.render(name)""".encode(),
         )

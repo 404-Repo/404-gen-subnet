@@ -69,12 +69,20 @@ async def model_response(
     if record.scope_key != scope.key or call.request != request:
         raise ValueError("Recorded call identity differs")
     prefix = f"{inputs.witness_storage_prefix}rounds/{scope.round}/{scope.hotkey}/{call.exchange_id}/"
-    if call.phase == "failed" and call.manifest_sha256 is None and call.authorized and call.failure is not None:
+    if (
+        call.phase == "failed"
+        and call.manifest_sha256 is None
+        and (call.authorized or call.not_dispatched)
+        and call.failure is not None
+    ):
         failure = await optional_object(r2, settings.r2_replay_bucket, prefix + "failure.json")
         if failure is None:
             failure = await read_object(r2, settings.r2_replay_bucket, prefix + "status.json")
-        disclosed = await read_object(r2, settings.r2_replay_bucket, prefix + "request.json")
-        verify_recorded_failure(call, disclosed, failure)
+        # The matched journal binds the request for a failure before dispatch.
+        request_bytes = body
+        if call.authorized:
+            request_bytes = await read_object(r2, settings.r2_replay_bucket, prefix + "request.json")
+        verify_recorded_failure(call, request_bytes, failure)
         return WitnessError(
             "Recorded witness capture failed", call.exchange_id, code="capture_failed", source="gateway"
         )
