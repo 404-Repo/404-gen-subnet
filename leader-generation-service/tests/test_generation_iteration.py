@@ -182,30 +182,46 @@ async def test_subscription_failure_logs_the_failed_check(scenario, monkeypatch,
     assert errors == [expected]
 
 
-async def test_generation_finishes_with_a_complete_witness_index(scenario, settings):
+async def test_generation_finishes_with_a_complete_witness_index(scenario, settings, clock, discord):
     await generation_iteration(scenario.controller, settings)
     pod = scenario.controller.pod
-    scenario.state["saved"] = {"chair": {"js": "chair.js", "views": "chair", "size": 12}}
+    scenario.state["saved"] = {
+        "chair": {"js": "chair.js", "views": "chair", "size": 12},
+        "unlisted": {"failure_reason": "generation_failed"},
+    }
+    clock[0] += 1200
     await generation_iteration(scenario.controller, settings)
     assert scenario.controller.completed_prompts == 1
     assert scenario.controller.pod is pod
     scenario.state["saved"]["lamp"] = {"failure_reason": "generation_failed"}
+    discord.status = 503
+    clock[0] += 1200
+    await generation_iteration(scenario.controller, settings)
     await generation_iteration(scenario.controller, settings)
 
     assert scenario.controller.completed_prompts == 2
     assert scenario.controller.pod is None
     assert scenario.deps.runner.terminated == [pod]
     assert scenario.deps.runner.started == [1]
+    assert [embed["title"] for embed in discord.embeds] == [
+        "Round 1 Leader Generation Queued",
+        "Round 1 Leader Generation Progress",
+        "Round 1 Leader Generation Complete",
+    ]
+    assert discord.embeds[0]["description"] == "**2** official prompts"
+    assert discord.embeds[-1]["description"] == "**1** delivered · **1** failed"
 
 
-async def test_saved_manual_results_finish_the_job_before_cpu_allocation(scenario, settings):
+async def test_saved_manual_results_finish_the_job_before_cpu_allocation(scenario, settings, discord):
     scenario.state["saved"] = {name: {"failure_reason": "generation_failed"} for name in scenario.images}
 
+    await generation_iteration(scenario.controller, settings)
     await generation_iteration(scenario.controller, settings)
 
     assert scenario.controller.completed_prompts == 2
     assert scenario.controller.pod is None
     assert scenario.deps.runner.started == []
+    assert [embed["title"] for embed in discord.embeds] == ["Round 1 Leader Generation Complete"]
 
 
 @pytest.mark.parametrize("hotkey", [None, "5" * 48])
@@ -267,6 +283,31 @@ async def test_maintenance_renews_without_a_round_or_pod(scenario, settings, mon
     assert scenario.deps.runner.started == []
 
 
+async def test_credential_maintenance_alerts_once_until_recovery(scenario, settings, monkeypatch, discord):
+    shutdown = scenario.controller.shutdown
+    outcomes = iter([RuntimeError("private login detail"), RuntimeError(), None, ValueError()])
+    waits = []
+
+    async def current():
+        if error := next(outcomes):
+            raise error
+
+    async def wait(timeout=None):
+        waits.append(timeout)
+        if len(waits) == 4:
+            shutdown.request_shutdown()
+        return shutdown.should_stop
+
+    monkeypatch.setattr(scenario.deps.credentials, "current", current)
+    monkeypatch.setattr(shutdown, "wait", wait)
+    discord.status = 503
+    await maintain_credentials(scenario.deps, settings, shutdown)
+    assert waits == [settings.credential_check_interval_seconds] * 4
+    assert [embed["title"] for embed in discord.embeds] == ["Leader Subscription Maintenance Error"] * 2
+    assert [embed["description"].splitlines()[0] for embed in discord.embeds] == ["`RuntimeError`", "`ValueError`"]
+    assert all("private login detail" not in embed["description"] for embed in discord.embeds)
+
+
 def test_subscription_ownership_lock_is_exclusive(tmp_path):
     with exclusive_lock(tmp_path / "login.lock"), pytest.raises(RuntimeError, match="Another service"):
         with exclusive_lock(tmp_path / "login.lock"):
@@ -285,7 +326,9 @@ def test_progress_interval_has_a_twenty_minute_minimum(settings, interval):
 
 
 @pytest.mark.parametrize("unknown_create", [False, True])
-async def test_main_cleans_up_at_startup_and_waits_after_failures(scenario, settings, monkeypatch, unknown_create):
+async def test_main_cleans_up_at_startup_and_waits_after_failures(
+    scenario, settings, monkeypatch, unknown_create, discord
+):
     spec = spec_from_file_location("leader_service_main", Path(__file__).parents[1] / "main.py")
     assert spec is not None and spec.loader is not None
     service = module_from_spec(spec)
@@ -298,6 +341,14 @@ async def test_main_cleans_up_at_startup_and_waits_after_failures(scenario, sett
     shutdown = scenario.controller.shutdown
     original_wait = shutdown.wait
     waits_at_cycle_start, waits = [], []
+    request = httpx.Request("GET", "https://github.test/config.json?token=fixture")
+    with pytest.raises(httpx.HTTPStatusError) as http_error:
+        httpx.Response(503, request=request).raise_for_status()
+    outcomes = iter(
+        [CreateUnknown("private cycle detail")]
+        if unknown_create
+        else [None, http_error.value, RuntimeError("private cycle detail"), None, ValueError()]
+    )
 
     @asynccontextmanager
     async def dependencies(_, service_shutdown):
@@ -307,22 +358,16 @@ async def test_main_cleans_up_at_startup_and_waits_after_failures(scenario, sett
     async def cycle(controller, service_settings):
         assert scenario.deps.runner.startup_cleanups == 1
         waits_at_cycle_start.append(len(waits))
-        if unknown_create:
-            raise CreateUnknown("Fixture create reply unavailable")
-        if len(waits_at_cycle_start) == 1:
-            await generation_iteration(controller, service_settings)
-            return
-        if len(waits_at_cycle_start) == 2:
-            request = httpx.Request("GET", "https://github.test/config.json?token=fixture")
-            httpx.Response(503, request=request).raise_for_status()
-        raise RuntimeError("Fixture iteration failure")
+        if error := next(outcomes):
+            raise error
+        await generation_iteration(controller, service_settings)
 
     async def maintain(*args):
         await original_wait()
 
     async def wait(timeout=None):
         waits.append(timeout)
-        if not unknown_create and len(waits) == 3:
+        if not unknown_create and len(waits) == 5:
             shutdown.request_shutdown()
         return shutdown.should_stop
 
@@ -341,7 +386,7 @@ async def test_main_cleans_up_at_startup_and_waits_after_failures(scenario, sett
         await service.main()
     finally:
         logger.remove(sink)
-    assert waits_at_cycle_start == ([0] if unknown_create else [0, 1, 2])
+    assert waits_at_cycle_start == ([0] if unknown_create else [0, 1, 2, 3, 4])
     assert scenario.deps.runner.started == ([] if unknown_create else [1])
     assert waits == [1800] * len(waits_at_cycle_start)
     assert scenario.deps.runner.startup_cleanups == 1
@@ -351,6 +396,7 @@ async def test_main_cleans_up_at_startup_and_waits_after_failures(scenario, sett
         else [
             "Leader generation cycle failed at github.test (HTTP 503). Retrying in 0:30:00.",
             "Leader generation cycle failed (RuntimeError). Retrying in 0:30:00.",
+            "Leader generation cycle failed (ValueError). Retrying in 0:30:00.",
         ]
     )
     assert messages == [
@@ -361,3 +407,12 @@ async def test_main_cleans_up_at_startup_and_waits_after_failures(scenario, sett
         *failure_logs,
         "Leader generation service stopped gracefully",
     ]
+    errors = [
+        embed["description"].splitlines()[0]
+        for embed in discord.embeds
+        if embed["title"] == "Leader Generation Service Error"
+    ]
+    assert errors == (["`CreateUnknown`"] if unknown_create else ["`HTTPStatusError`", "`ValueError`"])
+    payload = json.dumps(discord.embeds)
+    assert "token=fixture" not in payload
+    assert "private cycle detail" not in payload

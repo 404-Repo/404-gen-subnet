@@ -2,9 +2,11 @@ import asyncio
 import sys
 
 from loguru import logger
+from subnet_common.discord import DiscordFailureAlert, DiscordWebhook
 from subnet_common.graceful_shutdown import GracefulShutdown
 from subnet_common.utils import calculate_wait_time, format_duration
 
+from validation_service.discord import ValidationNotifier
 from validation_service.settings import Settings
 from validation_service.validation_iteration import run_validation_iteration
 
@@ -28,17 +30,27 @@ async def main() -> None:
 
     shutdown = GracefulShutdown()
     shutdown.setup_signal_handlers()
+    webhook = DiscordWebhook(settings.discord_webhook_url.get_secret_value()) if settings.discord_webhook_url else None
+    discord = ValidationNotifier(webhook) if webhook is not None else None
+    error_alert = DiscordFailureAlert(
+        webhook,
+        title="Validation Service Error",
+        action="Check the validation service logs for the failed operation.",
+    )
     logger.info("Validation service started")
 
     try:
         while not shutdown.should_stop:
             next_stage_eta = None
             try:
-                next_stage_eta = await run_validation_iteration(settings=settings, shutdown=shutdown)
+                next_stage_eta = await run_validation_iteration(settings=settings, shutdown=shutdown, discord=discord)
             except asyncio.CancelledError:
                 break
-            except Exception as e:
-                logger.exception(f"Validation cycle failed: {e}")
+            except Exception as error:
+                logger.exception(f"Validation cycle failed: {error}")
+                await error_alert.notify(error)
+            else:
+                error_alert.reset()
 
             wait_seconds = calculate_wait_time(
                 eta=next_stage_eta,

@@ -39,6 +39,7 @@ class RoundRunner:
         self.completed_prompts = 0
         self.last_progress_at = 0.0
         self.progress_warning_sent = False
+        self._queue_reported = False
 
     async def stop(self) -> None:
         if self.pod is not None:
@@ -50,6 +51,7 @@ class RoundRunner:
             await self.stop()
             self.round_number = number
             self.completed_prompts = 0
+            self._queue_reported = False
 
     async def deadline_reached(self, deadline: int | None) -> bool:
         if deadline is None:
@@ -76,10 +78,19 @@ class RoundRunner:
         return not await self.deadline_reached(deadline)
 
     async def run(
-        self, number: int, completed: int, total: int, generation_minutes: int, ref: str, deadline: int | None
+        self,
+        number: int,
+        completed: int,
+        total: int,
+        generation_minutes: int,
+        ref: str,
+        deadline: int | None,
+        *,
+        failed: int,
     ) -> None:
         if self.shutdown.should_stop:
             return
+        discord = self.dependencies.discord
         delta = completed - self.completed_prompts
         logger.info(
             "Round {} saved {}/{} prompts (+{}, {} pending)",
@@ -91,20 +102,39 @@ class RoundRunner:
         )
         if completed == total:
             self.completed_prompts = completed
+            if delta > 0 and discord is not None:
+                await discord.send_embed(
+                    title=f"Round {number} Leader Generation Complete",
+                    color=0xE67E22 if failed else 0x2ECC71,
+                    description=f"**{completed - failed}** delivered · **{failed}** failed",
+                )
             await self.stop()
             return
         if delta < 0:
             raise ValueError("Saved completed prompt count regressed")
+        if not self._queue_reported and discord is not None:
+            self._queue_reported = True
+            await discord.send_embed(
+                title=f"Round {number} Leader Generation Queued",
+                color=0x3498DB,
+                description=f"**{total}** official prompts",
+            )
         if delta:
             self.completed_prompts = completed
             self.last_progress_at = time.time()
             self.progress_warning_sent = False
+            if discord is not None:
+                await discord.send_embed(
+                    title=f"Round {number} Leader Generation Progress",
+                    color=0x3498DB,
+                    description=f"**{completed}/{total}** prompts with terminal results",
+                )
         if self.pod is not None:
             stalled = time.time() - self.last_progress_at
             if stalled >= 1200 and not self.progress_warning_sent:
                 self.progress_warning_sent = True
-                if self.dependencies.discord is not None:
-                    await self.dependencies.discord.send_embed(
+                if discord is not None:
+                    await discord.send_embed(
                         title="Leader generation stalled",
                         color=0xE67E22,
                         description=f"Round {number}: no new saved prompts for {int(stalled / 60)} minutes.",

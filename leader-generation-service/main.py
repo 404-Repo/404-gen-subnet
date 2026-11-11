@@ -5,6 +5,7 @@ from urllib.parse import urlsplit
 from httpx import HTTPStatusError
 from loguru import logger
 from pod_gateway.runpod import CreateUnknown
+from subnet_common.discord import DiscordFailureAlert
 from subnet_common.graceful_shutdown import GracefulShutdown
 from subnet_common.utils import format_duration
 
@@ -34,6 +35,11 @@ async def main() -> None:
     ):
         async with create_dependencies(settings, shutdown) as dependencies:
             controller = RoundRunner(dependencies, settings, shutdown)
+            error_alert = DiscordFailureAlert(
+                dependencies.discord,
+                title="Leader Generation Service Error",
+                action="Check the leader generation service logs for the failed operation.",
+            )
             maintenance = asyncio.create_task(maintain_credentials(dependencies, settings, shutdown))
             try:
                 logger.info(
@@ -61,8 +67,9 @@ async def main() -> None:
                         await generation_iteration(controller, settings)
                     except asyncio.CancelledError:
                         break
-                    except CreateUnknown:
+                    except CreateUnknown as error:
                         logger.warning("Restarting in {} for cleanup after an unconfirmed pod create", retry_in)
+                        await error_alert.notify(error)
                         await shutdown.wait(timeout=wait)
                         break
                     except HTTPStatusError as error:
@@ -72,11 +79,14 @@ async def main() -> None:
                             error.response.status_code,
                             retry_in,
                         )
+                        await error_alert.notify(error)
                     except Exception as error:
                         logger.error(
                             "Leader generation cycle failed ({}). Retrying in {}.", type(error).__name__, retry_in
                         )
+                        await error_alert.notify(error)
                     else:
+                        error_alert.reset()
                         logger.debug("Next generation iteration in {}", retry_in)
                     await shutdown.wait(timeout=wait)
             finally:

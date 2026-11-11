@@ -8,6 +8,7 @@ from subnet_common.competition.validation_requests import get_validation_request
 from subnet_common.github import GitHubClient
 from subnet_common.graceful_shutdown import GracefulShutdown
 
+from validation_service.discord import ValidationNotifier
 from validation_service.execution import (
     delete_worker_pod,
     execute_validation_job,
@@ -19,7 +20,9 @@ from validation_service.execution import (
 from validation_service.settings import Settings
 
 
-async def run_validation_iteration(settings: Settings, shutdown: GracefulShutdown) -> datetime | None:
+async def run_validation_iteration(
+    settings: Settings, shutdown: GracefulShutdown, discord: ValidationNotifier | None = None
+) -> datetime | None:
     async with (
         GitHubClient(repo=settings.github_repo, token=settings.github_token.get_secret_value()) as git,
         httpx.AsyncClient(
@@ -29,11 +32,15 @@ async def run_validation_iteration(settings: Settings, shutdown: GracefulShutdow
             trust_env=False,
         ) as runpod,
     ):
-        return await validation_iteration(git, runpod, settings, shutdown)
+        return await validation_iteration(git, runpod, settings, shutdown, discord)
 
 
 async def validation_iteration(
-    git: GitHubClient, runpod: httpx.AsyncClient, settings: Settings, shutdown: GracefulShutdown
+    git: GitHubClient,
+    runpod: httpx.AsyncClient,
+    settings: Settings,
+    shutdown: GracefulShutdown,
+    discord: ValidationNotifier | None = None,
 ) -> datetime | None:
     ref = await git.get_ref_sha(ref=settings.github_branch)
     state = await require_state(git=git, ref=ref)
@@ -60,19 +67,22 @@ async def validation_iteration(
                 await delete_worker_pod(runpod, pods.pop(name))
             continue
         try:
-            result, has_work = await validation_outcome(git, round_num, hotkey, ref)
+            outcome = await validation_outcome(git, round_num, hotkey, ref)
             stalled = (
-                has_work
+                outcome.has_work
                 and pod is not None
                 and await pod_has_stalled(git, settings.github_branch, round_num, hotkey, pod, cutoff)
             )
         except (httpx.HTTPError, ValueError) as error:
             logger.warning(f"Could not read validation checkpoint: round={round_num}, hotkey={hotkey}, error={error}")
             break
+        result = outcome.result
+        if discord is not None and result is None:
+            await discord.notify_pending(round_num, name.rpartition("-")[2], outcome)
         if result is not None:
             results[hotkey] = result
             finished.append(name)
-        elif not has_work:
+        elif not outcome.has_work:
             if pod is not None:
                 await delete_worker_pod(runpod, pods.pop(name))
         elif stalled:
@@ -94,6 +104,9 @@ async def validation_iteration(
             branch=settings.github_branch,
             base_sha=ref,
         )
+        if discord is not None:
+            for name in finished:
+                await discord.notify_result(round_num, name.rpartition("-")[2], results[jobs[name]].verdict)
         for name in finished:
             hotkey = jobs[name]
             logger.info(f"Published {results[hotkey].verdict.value}: round={round_num}, hotkey={hotkey}")
@@ -103,5 +116,8 @@ async def validation_iteration(
     next_hotkey = replacement_hotkey or next_hotkey
     if next_hotkey is not None and not pods and not shutdown.should_stop:
         await execute_validation_job(runpod, settings, round_num, next_hotkey, ref)
+        if discord is not None:
+            name = pod_name(settings, round_num, next_hotkey)
+            await discord.notify_started(round_num, name.rpartition("-")[2])
 
     return state.next_stage_eta

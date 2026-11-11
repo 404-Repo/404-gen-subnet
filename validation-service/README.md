@@ -64,6 +64,12 @@ Missing `state.json`, malformed competition data and infrastructure failures are
 service errors. They are logged and retried on a later poll, leaving affected
 requests pending rather than publishing a miner failure.
 
+With `DISCORD_WEBHOOK_URL` set, the coordinator reports a candidate's first Pod
+launch and published verdict. It reports advances in committed prompt counts at
+most every 20 minutes and alerts when a candidate has no automatic attempts
+remaining. A streak of failed coordinator polls produces one alert. Discord
+embeds identify candidates by the suffix of their Pod name. Delivery is best effort.
+
 ## Configuration and running
 
 Use Python 3.12 and Poetry 2.2.1, matching the service development tooling.
@@ -95,6 +101,7 @@ VALIDATION_WORKER_ENV='{"R2_ENDPOINT":"https://your-account.r2.cloudflarestorage
 | `GITHUB_TOKEN` | Required | Secret GitHub token with read and write access to the competition repository |
 | `GITHUB_REPO` | Required | Competition state repository as `owner/repo` |
 | `GITHUB_BRANCH` | `main` | Competition branch to resolve on every poll |
+| `DISCORD_WEBHOOK_URL` | Unset | Secret webhook for coordinator status and error embeds |
 | `MIN_CHECK_STATE_INTERVAL` | `120` | Minimum delay between polls, in seconds |
 | `MAX_CHECK_STATE_INTERVAL` | `1800` | Maximum delay between polls, in seconds |
 | `LOG_LEVEL` | `DEBUG` | Loguru logging level |
