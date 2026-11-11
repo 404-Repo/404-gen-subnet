@@ -1,6 +1,7 @@
 import asyncio
 import sys
 
+from httpx import HTTPStatusError
 from loguru import logger
 from subnet_common.graceful_shutdown import GracefulShutdown
 from subnet_common.utils import format_duration
@@ -35,14 +36,25 @@ async def main() -> None:
             try:
                 logger.info("Leader generation service started")
                 while not shutdown.should_stop:
+                    wait = settings.progress_interval_seconds
+                    retry_in = format_duration(wait)
                     try:
                         await generation_iteration(controller, settings)
                     except asyncio.CancelledError:
                         break
+                    except HTTPStatusError as error:
+                        logger.error(
+                            "Leader generation cycle failed at {} (HTTP {}). Retrying in {}.",
+                            error.request.url.host,
+                            error.response.status_code,
+                            retry_in,
+                        )
                     except Exception as error:
-                        logger.error("Leader generation cycle failed ({})", type(error).__name__)
-                    wait = settings.progress_interval_seconds
-                    logger.debug("Next generation iteration in {}", format_duration(wait))
+                        logger.error(
+                            "Leader generation cycle failed ({}). Retrying in {}.", type(error).__name__, retry_in
+                        )
+                    else:
+                        logger.debug("Next generation iteration in {}", retry_in)
                     await shutdown.wait(timeout=wait)
             finally:
                 shutdown.request_shutdown()

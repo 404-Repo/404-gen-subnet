@@ -1,11 +1,27 @@
-import re
-from typing import Literal, Self
+from typing import Literal
 from uuid import UUID, uuid4
 
 from miner_runtime.pod import IMAGE_PATTERN
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
-from subnet_common.competition.leader import LeaderEntry
-from subnet_common.witness.rounds import RoundInputs, repository
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
+
+
+class RoundProgress(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    repository: str
+    branch: str
+    round: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{0,63}$")
+    number: int = Field(ge=0)
+    prompt_ids: tuple[str, ...] = Field(min_length=1, validation_alias=AliasChoices("prompt_ids", "prompts"))
+    generation_deadline_block: int | None = Field(ge=0)
+    storage_prefix: str
+
+    @field_validator("prompt_ids", mode="before")
+    @classmethod
+    def read_prompt_ids(cls, value: object) -> object:
+        if isinstance(value, (list, tuple)):
+            return tuple(row.get("id") if isinstance(row, dict) else row for row in value)
+        return value
 
 
 class Snapshot(BaseModel):
@@ -13,8 +29,7 @@ class Snapshot(BaseModel):
 
     state_ref: str = Field(pattern=r"^[0-9a-f]{40}$")
     generation_image: str = Field(pattern=IMAGE_PATTERN)
-    leader: LeaderEntry
-    inputs: RoundInputs
+    inputs: RoundProgress
     hotkey: str = Field(pattern=r"^[1-9A-HJ-NP-Za-km-z]{48}$")
     account_id: str = Field(pattern=r"^[a-f0-9-]{1,80}$")
     wallet_name: str
@@ -27,12 +42,12 @@ class Snapshot(BaseModel):
     go_cpus: int
     go_memory_mib: int
 
-    @model_validator(mode="after")
-    def source(self) -> Self:
-        repository(self.leader.repo)
-        if re.fullmatch(r"[0-9a-f]{40}", self.leader.commit) is None:
-            raise ValueError("Leader source must use a full commit SHA")
-        return self
+    @model_validator(mode="before")
+    @classmethod
+    def read_snapshot(cls, value: object) -> object:
+        if isinstance(value, dict) and "leader" in value:
+            return {key: item for key, item in value.items() if key != "leader"}
+        return value
 
 
 class Allocation(BaseModel):
@@ -72,7 +87,7 @@ class Job(BaseModel):
 
     @property
     def completed(self) -> bool:
-        return self.completed_prompts == len(self.snapshot.inputs.prompts)
+        return self.completed_prompts == len(self.snapshot.inputs.prompt_ids)
 
     @property
     def allocation(self) -> Allocation | None:

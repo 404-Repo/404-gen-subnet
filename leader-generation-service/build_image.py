@@ -20,7 +20,7 @@ SOURCES = (
     "miner-runtime",
     "renderer-client",
     "witness-client",
-    "shared/subnet_common/witness/params",
+    "shared/subnet_common",
     "witness-server/worker/witness_pod/verifier/params",
     "witness-server/worker/witness_pod/verifier/THIRD_PARTY_NOTICES.md",
     "NOTICE.md",
@@ -64,7 +64,7 @@ def prepare_context(root: Path, target: Path, commit: str, *, development: bool)
         archive = execute(["git", "-C", str(root), "archive", "--format=tar", commit, *SOURCES])
         with tarfile.open(fileobj=io.BytesIO(archive)) as package:
             package.extractall(target, filter="data")
-        # The image copies these parameters without the shared source directory.
+        # Copy the proof key into the image's parameter directory as a regular file.
         key = target / "witness-server/worker/witness_pod/verifier/params/verifying.bin"
         if key.is_symlink():
             contents = key.read_bytes()

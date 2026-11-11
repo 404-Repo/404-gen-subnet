@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import json
 import threading
 from decimal import Decimal
 from types import SimpleNamespace
@@ -340,7 +341,7 @@ async def test_old_job_must_be_disposed_before_starting_the_next_round(
         provider.absent_reply = False
     else:
         await launch(value, old)
-        old.completed_prompts = len(old.snapshot.inputs.prompts)
+        old.completed_prompts = len(old.snapshot.inputs.prompt_ids)
         value.store.save(old)
 
         def unavailable(pod_id):
@@ -356,10 +357,6 @@ async def test_old_job_must_be_disposed_before_starting_the_next_round(
             git.files[path.replace("rounds/1/", "rounds/2/")] = content
     git.files["state.json"] = CompetitionState(current_round=2, stage=RoundStage.MINER_GENERATION).model_dump_json()
 
-    async def inputs():
-        return scenario.inputs.model_copy(update={"number": 2, "round": "test-2"})
-
-    scenario.deps.inputs = inputs
     scenario.deps.runner = value
 
     def saved(request):
@@ -408,16 +405,12 @@ async def test_new_round_starts_after_old_pod_cleanup_without_reading_old_result
             git.files[path.replace("rounds/1/", "rounds/2/")] = content
     git.files["state.json"] = CompetitionState(current_round=2, stage=RoundStage.MINER_GENERATION).model_dump_json()
 
-    async def inputs():
-        return scenario.inputs.model_copy(update={"number": 2, "round": "test-2"})
-
     reads = []
 
     def saved(request):
         reads.append(request.url.path)
         return httpx.Response(503 if "/test-1/" in request.url.path else 200, json={})
 
-    scenario.deps.inputs = inputs
     scenario.deps.runner = value
     clock[0] += 1200
     async with httpx.AsyncClient(transport=httpx.MockTransport(saved)) as http:
@@ -614,21 +607,51 @@ async def test_create_rejects_a_different_hotkey(scenario, settings, runner):
     assert provider.creates == 0
 
 
-async def test_start_request_uses_frozen_source_inputs_and_image(scenario, settings, runner):
+async def test_start_request_passes_the_competition_location_and_round(scenario, settings, runner):
     value, provider = runner
-    job = Job(snapshot=scenario.snapshot)
-    await launch(value, job)
+    settings.github_branch = "witness-test"
+    scenario.deps.runner = value
+    await generation_iteration(scenario.controller, settings)
+    job = value.store.load(1)
     config = runpod.read_config(value.store, job)
-    assert config.source_repository == "https://github.com/test/incumbent"
-    assert config.source_commit == scenario.snapshot.leader.commit
+    assert config.competition_repository == settings.github_repo
+    assert config.competition_branch == settings.github_branch
+    assert config.round_number == scenario.inputs.number
     assert config.generation_image == scenario.snapshot.generation_image
     assert provider.bodies[0]["image"] == config.generation_image
-    assert config.round_inputs_fingerprint == scenario.inputs.fingerprint
-    assert config.prompts == {prompt.id: prompt.sha256 for prompt in scenario.inputs.prompts}
-    assert config.seed == scenario.inputs.seed
     assert config.hotkey == scenario.snapshot.hotkey
     assert config.account_id == scenario.snapshot.account_id
     assert provider.bodies[0]["name"] == job.allocation.name
+    assert json.loads(provider.bodies[0]["env"]["LEADER_JOB_CONFIG"]) == json.loads(
+        (value.store.run_directory(job) / "config.json").read_bytes()
+    )
+
+
+async def test_prepared_attempt_with_old_payload_uses_the_updated_worker_image(scenario, settings, runner):
+    value, provider = runner
+    job = Job(snapshot=scenario.snapshot)
+    await value.ensure(job)
+    allocation_id = job.allocation.id
+    config_path = value.store.run_directory(job) / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "generation_image": settings.generation_image,
+                "source_repository": "https://github.com/test/incumbent",
+                "source_commit": scenario.leader.commit,
+                "prompts": {"chair": "c" * 64, "lamp": "e" * 64},
+                "seed": 42,
+                "hotkey": scenario.snapshot.hotkey,
+                "account_id": scenario.snapshot.account_id,
+                "round_inputs_fingerprint": "a" * 64,
+            }
+        )
+    )
+    settings.generation_image = "registry.test/leader@sha256:" + "e" * 64
+    await launch(value, value.store.load(1))
+    assert value.store.load(1).allocation.id == allocation_id
+    assert provider.bodies[0]["image"] == settings.generation_image
+    assert runpod.read_config(value.store, job).round_number == scenario.inputs.number
 
 
 @pytest.mark.parametrize("interval", [1200, 1800])
@@ -705,10 +728,6 @@ async def test_allocation_interval_applies_across_rounds(runner, scenario, setti
             git.files[path.replace("rounds/1/", "rounds/2/")] = content
     git.files["state.json"] = CompetitionState(current_round=2, stage=RoundStage.MINER_GENERATION).model_dump_json()
 
-    async def inputs():
-        return scenario.inputs.model_copy(update={"number": 2, "round": "test-2"})
-
-    scenario.deps.inputs = inputs
     clock[0] += 1199
     async with httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200, json={}))) as http:
         scenario.deps.saved = SavedResults(http, settings.cdn_url)

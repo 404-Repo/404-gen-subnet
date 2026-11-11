@@ -1,5 +1,4 @@
 import base64
-import hashlib
 import json
 import time
 from types import SimpleNamespace
@@ -13,11 +12,10 @@ from subnet_common.competition.state import CompetitionState, RoundStage
 from subnet_common.discord import DiscordWebhook
 from subnet_common.graceful_shutdown import GracefulShutdown
 from subnet_common.testing import MockGitHubClient
-from subnet_common.witness.rounds import PromptImage, RoundInputs
 
 from leader_generation_service.credentials import AccessCredentials, CredentialManager
 from leader_generation_service.generation_iteration import Dependencies
-from leader_generation_service.models import Allocation, Snapshot
+from leader_generation_service.models import Allocation, RoundProgress, Snapshot
 from leader_generation_service.round_runner import RoundRunner
 from leader_generation_service.settings import Settings
 from leader_generation_service.store import JobStore
@@ -112,26 +110,17 @@ class Runner:
 def scenario(settings, tmp_path):
     hotkey = Keypair.create_from_uri("//Alice").ss58_address
     images = {"chair": b"chair", "lamp": b"lamp"}
-    inputs = RoundInputs(
+    inputs = RoundProgress(
         repository="test/competition",
         branch="main",
-        revision="a" * 40,
         round="test-1",
         number=1,
-        seed=42,
-        prompts=tuple(
-            PromptImage(
-                id=name,
-                source_url=f"https://images.test/{name}.png",
-                sha256=hashlib.sha256(raw).hexdigest(),
-                image_key=f"sandbox/competition-inputs/v1/{hashlib.sha256(raw).hexdigest()}",
-            )
-            for name, raw in images.items()
-        ),
+        prompt_ids=tuple(images),
         generation_deadline_block=100,
         storage_prefix="sandbox/",
     )
     leader = LeaderEntry(hotkey=hotkey, repo="test/incumbent", commit="b" * 40, weight=1, effective_block=1)
+    prompts = {name: f"https://images.test/{name}.png" for name in images}
     files = {
         "state.json": CompetitionState(current_round=1, stage=RoundStage.MINER_GENERATION).model_dump_json(),
         "config.json": json.dumps(
@@ -148,7 +137,7 @@ def scenario(settings, tmp_path):
             }
         ),
         "leader.json": json.dumps([leader.model_dump()]),
-        "rounds/1/prompts.txt": "\n".join(p.source_url for p in inputs.prompts),
+        "rounds/1/prompts.txt": "\n".join(prompts.values()),
         "rounds/1/seed.json": '{"seed":42}',
         "rounds/1/schedule.json": json.dumps(
             {
@@ -162,11 +151,7 @@ def scenario(settings, tmp_path):
     git = MockGitHubClient(files, ref_sha="a" * 40)
     store = JobStore(settings.state_directory)
     runner = Runner(store)
-    state = {"saved": {}, "block": 10, "input_reads": 0, "index_reads": 0}
-
-    async def read_inputs():
-        state["input_reads"] += 1
-        return inputs
+    state = {"saved": {}, "block": 10, "index_reads": 0}
 
     async def head():
         return state["block"], time.time()
@@ -178,13 +163,10 @@ def scenario(settings, tmp_path):
 
     credentials = CredentialManager(tmp_path, "fixture-codex", load=lambda _: access(time.time() + 86400))
     http = httpx.AsyncClient(transport=httpx.MockTransport(request))
-    dependencies = Dependencies(
-        git, store, runner, credentials, read_inputs, SavedResults(http, settings.cdn_url), head, hotkey
-    )
+    dependencies = Dependencies(git, store, runner, credentials, SavedResults(http, settings.cdn_url), head, hotkey)
     snapshot = Snapshot(
         state_ref="a" * 40,
         generation_image=settings.generation_image,
-        leader=leader,
         inputs=inputs,
         hotkey=hotkey,
         account_id="abc123",
@@ -206,5 +188,7 @@ def scenario(settings, tmp_path):
         snapshot=snapshot,
         inputs=inputs,
         images=images,
+        prompts=prompts,
+        leader=leader,
         http=http,
     )

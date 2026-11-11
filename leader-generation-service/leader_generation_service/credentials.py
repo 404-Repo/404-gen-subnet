@@ -4,12 +4,14 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from loguru import logger
 from witness_client.auth import _refresh_codex, access_token_expiry, subscription_credentials
 
 from .runtime import execute
 
 
 ACCESS_TOKEN_MARGIN_SECONDS = 600
+CODEX_CLI_VERSION = "0.167.0"
 
 
 @dataclass(frozen=True)
@@ -40,14 +42,23 @@ class CredentialManager:
 
     def _load(self, min_validity_seconds: int) -> AccessCredentials:
         if not self._checked_cli:
-            version = execute([self.executable, "--version"], timeout=10).strip()
-            if version != b"codex-cli 0.167.0":
-                raise RuntimeError("Leader service requires pinned Codex CLI 0.167.0")
+            try:
+                version = execute([self.executable, "--version"], timeout=10).strip()
+            except Exception as error:
+                logger.error("Codex CLI version command failed ({})", type(error).__name__)
+                raise
+            if version != f"codex-cli {CODEX_CLI_VERSION}".encode():
+                logger.error("Codex CLI version mismatch. Expected codex-cli {}.", CODEX_CLI_VERSION)
+                raise RuntimeError(f"Leader service requires pinned Codex CLI {CODEX_CLI_VERSION}")
             self._checked_cli = True
-        token, account = subscription_credentials(self.home, self.executable)
-        if access_token_expiry(token) < self.clock() + min_validity_seconds:
-            _refresh_codex(self.home, self.executable)
+        try:
             token, account = subscription_credentials(self.home, self.executable)
+            if access_token_expiry(token) < self.clock() + min_validity_seconds:
+                _refresh_codex(self.home, self.executable)
+                token, account = subscription_credentials(self.home, self.executable)
+        except Exception as error:
+            logger.error("Codex subscription load or refresh failed ({})", type(error).__name__)
+            raise
         return AccessCredentials(token, account)
 
     async def current(self, *, min_validity_seconds: int = ACCESS_TOKEN_MARGIN_SECONDS) -> AccessCredentials:
@@ -55,6 +66,7 @@ class CredentialManager:
             if self._current is None or self._current.expires_at < self.clock() + min_validity_seconds:
                 value = await asyncio.to_thread(self.load, min_validity_seconds)
                 if value.expires_at < self.clock() + min_validity_seconds:
+                    logger.error("Codex subscription refresh returned a token with insufficient validity")
                     raise RuntimeError("Subscription refresh did not provide sufficient validity")
                 self._current = value
             return self._current

@@ -1,10 +1,12 @@
 import asyncio
+import hashlib
 import json
 import time
 from contextlib import asynccontextmanager
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 
+import httpx
 import pytest
 from conftest import access
 from loguru import logger
@@ -34,12 +36,13 @@ async def test_idle_stage_never_starts_work(scenario, settings, stage, iteration
     scenario.deps.git.files["state.json"] = CompetitionState(current_round=1, stage=stage).model_dump_json()
     await generation_iteration(scenario.controller, settings)
     assert f"Round 1 skipped because stage is {stage.value}" in iteration_logs
-    assert scenario.state["input_reads"] == 0
     assert scenario.deps.runner.started == []
     assert scenario.deps.store.jobs() == []
 
 
-async def test_new_round_freezes_inputs_and_next_iteration_keeps_the_pod(scenario, settings):
+async def test_new_round_starts_without_worker_inputs_and_keeps_the_pod(scenario, settings, iteration_logs):
+    del scenario.deps.git.files["leader.json"]
+    del scenario.deps.git.files["rounds/1/seed.json"]
     references = []
     original = scenario.deps.git.get_file
 
@@ -49,34 +52,31 @@ async def test_new_round_freezes_inputs_and_next_iteration_keeps_the_pod(scenari
 
     scenario.deps.git.get_file = get_file
     await generation_iteration(scenario.controller, settings)
+    assert iteration_logs[-4:] == [
+        "Round 1 loading competition settings",
+        "Round 1 checking the generation deadline on Finney",
+        "Round 1 checking subscription credentials",
+        "Round 1 checking saved witness results",
+    ]
     assert scenario.deps.runner.started
     job = JobStore(settings.state_directory).load(1)
-    assert job.snapshot.leader.repo == "test/incumbent"
-    assert job.snapshot.leader.commit == "b" * 40
     assert job.snapshot.inputs == scenario.inputs
     assert job.snapshot.hotkey == scenario.deps.hotkey
     assert (job.snapshot.workers, job.snapshot.parallel_calls, job.snapshot.parallel_preparations) == (24, 32, 4)
     assert (job.snapshot.go_cpus, job.snapshot.go_memory_mib) == (8, 2048)
     assert set(references) == {"a" * 40}
     await generation_iteration(scenario.controller, settings)
-    assert scenario.state["input_reads"] == 1
+    assert len(scenario.deps.runner.started) == 1
     assert scenario.deps.store.load(1).snapshot == job.snapshot
     assert scenario.deps.store.load(1).allocation.id == job.allocation.id
 
 
-@pytest.mark.parametrize("problem", ["seed", "prompts", "deadline", "saving"])
-async def test_witness_mismatch_stops_before_generation(scenario, settings, problem):
-    if problem == "seed":
-        scenario.deps.git.files["rounds/1/seed.json"] = '{"seed":43}'
-    elif problem == "prompts":
-        scenario.deps.git.files["rounds/1/prompts.txt"] = "https://images.test/other.png"
-    else:
-        schedule = json.loads(scenario.deps.git.files["rounds/1/schedule.json"])
-        schedule["generation_deadline_block" if problem == "deadline" else "witness_save_submissions"] = (
-            99 if problem == "deadline" else False
-        )
-        scenario.deps.git.files["rounds/1/schedule.json"] = json.dumps(schedule)
-    with pytest.raises(ValueError):
+async def test_generation_requires_saving_enabled_in_git(scenario, settings):
+    files = scenario.deps.git.files
+    schedule = json.loads(files["rounds/1/schedule.json"])
+    schedule["witness_save_submissions"] = False
+    files["rounds/1/schedule.json"] = json.dumps(schedule)
+    with pytest.raises(ValueError, match="requires witness result saving"):
         await generation_iteration(scenario.controller, settings)
     assert scenario.deps.runner.ensured == []
 
@@ -85,7 +85,6 @@ async def test_deadline_closes_before_any_allocation(scenario, settings, iterati
     scenario.state["block"] = 100
     await generation_iteration(scenario.controller, settings)
     assert "Round 1 skipped because the generation deadline has been reached" in iteration_logs
-    assert scenario.state["input_reads"] == 0
     assert scenario.deps.runner.started == []
 
 
@@ -139,11 +138,73 @@ async def test_service_refreshes_proactively_using_pinned_cli_only(scenario, mon
     assert calls == [["fixture-codex", "--version"], "refresh"]
 
 
+@pytest.mark.parametrize(
+    "failure, expected",
+    [
+        ("command", "Codex CLI version command failed (RuntimeError)"),
+        ("version", "Codex CLI version mismatch. Expected codex-cli 0.167.0."),
+        ("refresh", "Codex subscription load or refresh failed (RuntimeError)"),
+        ("validity", "Codex subscription refresh returned a token with insufficient validity"),
+    ],
+)
+async def test_subscription_failure_logs_the_failed_check(scenario, monkeypatch, failure, expected):
+    from leader_generation_service import credentials
+
+    def execute(*args, **kwargs):
+        if failure == "command":
+            raise RuntimeError("Fixture command output")
+        return b"codex-cli 0.167.1\n" if failure == "version" else b"codex-cli 0.167.0\n"
+
+    def read_login(*args):
+        assert failure in ("refresh", "validity")
+        value = access(time.time() + 500)
+        return value.access_token, value.account_id
+
+    def refresh(*args):
+        if failure == "refresh":
+            raise RuntimeError("Fixture refresh response")
+
+    monkeypatch.setattr(credentials, "execute", execute)
+    monkeypatch.setattr(credentials, "subscription_credentials", read_login)
+    monkeypatch.setattr(credentials, "_refresh_codex", refresh)
+    manager = CredentialManager(scenario.deps.store.directory, "fixture-codex")
+    errors = []
+    sink = logger.add(
+        lambda message: errors.append(message.record["message"]), level="ERROR", filter=credentials.__name__
+    )
+    try:
+        with pytest.raises(RuntimeError):
+            await manager.current()
+    finally:
+        logger.remove(sink)
+    assert errors == [expected]
+
+
 async def test_generation_finishes_with_a_complete_witness_index(scenario, settings):
     await generation_iteration(scenario.controller, settings)
     journal = settings.state_directory / "rounds/1.json"
     legacy_job = json.loads(journal.read_text())
     legacy_job["published"] = False
+    snapshot = legacy_job["snapshot"]
+    snapshot["leader"] = scenario.leader.model_dump()
+    inputs = snapshot["inputs"]
+    prompts = []
+    for name in inputs.pop("prompt_ids"):
+        digest = hashlib.sha256(scenario.images[name]).hexdigest()
+        prompts.append(
+            {
+                "id": name,
+                "source_url": scenario.prompts[name],
+                "sha256": digest,
+                "image_key": f"sandbox/competition-inputs/v1/{digest}",
+            }
+        )
+    inputs.update(
+        revision=snapshot["state_ref"],
+        seed=42,
+        save_submissions=True,
+        prompts=prompts,
+    )
     journal.write_text(json.dumps(legacy_job))
 
     scenario.state["saved"] = {"chair": {"js": "chair.js", "views": "chair", "size": 12}}
@@ -184,9 +245,9 @@ async def test_generation_requires_the_configured_operator_wallet(scenario, sett
     else:
         with pytest.raises(ValueError, match="differs from the operator wallet"):
             await generation_iteration(scenario.controller, settings)
+        assert "Round 1 configured hotkey differs from the operator wallet" in iteration_logs
 
     assert scenario.deps.store.jobs() == []
-    assert scenario.state["input_reads"] == 0
 
 
 async def test_credentials_renew_while_idle_and_serialize_callers(tmp_path):
@@ -262,6 +323,9 @@ async def test_outer_loop_waits_the_configured_interval_after_every_failure(scen
 
     async def cycle(*args):
         cycles.append(1)
+        if len(cycles) == 1:
+            request = httpx.Request("GET", "https://github.test/config.json?token=fixture")
+            httpx.Response(503, request=request).raise_for_status()
         raise RuntimeError("Fixture iteration failure")
 
     async def maintain(*args):
@@ -269,7 +333,7 @@ async def test_outer_loop_waits_the_configured_interval_after_every_failure(scen
 
     async def wait(timeout=None):
         waits.append(timeout)
-        if len(waits) == 3:
+        if len(waits) == 2:
             shutdown.request_shutdown()
         return shutdown.should_stop
 
@@ -282,6 +346,15 @@ async def test_outer_loop_waits_the_configured_interval_after_every_failure(scen
     monkeypatch.setattr(service, "create_dependencies", dependencies)
     monkeypatch.setattr(service, "generation_iteration", cycle)
     monkeypatch.setattr(service, "maintain_credentials", maintain)
-    await service.main()
-    assert len(cycles) == 3
-    assert waits == [1800, 1800, 1800]
+    errors = []
+    sink = logger.add(lambda message: errors.append(message.record["message"]), level="ERROR", filter=service.__name__)
+    try:
+        await service.main()
+    finally:
+        logger.remove(sink)
+    assert len(cycles) == 2
+    assert waits == [1800, 1800]
+    assert errors == [
+        "Leader generation cycle failed at github.test (HTTP 503). Retrying in 0:30:00.",
+        "Leader generation cycle failed (RuntimeError). Retrying in 0:30:00.",
+    ]

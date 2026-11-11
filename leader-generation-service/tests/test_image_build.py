@@ -20,6 +20,7 @@ def source(tmp_path):
     key = tmp_path / "shared/subnet_common/witness/params/verifying.bin"
     key.parent.mkdir(parents=True)
     key.write_bytes(b"fixture verification key")
+    (tmp_path / "shared/subnet_common/github.py").write_text("# Fixture Git client\n")
     params = tmp_path / "witness-server/worker/witness_pod/verifier/params"
     params.mkdir(parents=True)
     (params / "verifying.bin").symlink_to("../../../../../shared/subnet_common/witness/params/verifying.bin")
@@ -83,10 +84,10 @@ def test_image_context_uses_committed_release_or_tracked_development_source(sour
     assert json.loads((context / "source.json").read_bytes())["runtime_commit"] == commit
 
 
-def test_release_context_provides_a_self_contained_verification_key(source, tmp_path, monkeypatch):
+def test_release_context_provides_the_verification_key_and_git_client(source, tmp_path, monkeypatch):
     root, commit = source
     params = "witness-server/worker/witness_pod/verifier/params"
-    monkeypatch.setattr(build_image, "SOURCES", (params, "shared/subnet_common/witness/params"))
+    monkeypatch.setattr(build_image, "SOURCES", tuple(name for name in build_image.SOURCES if (root / name).exists()))
     context = tmp_path / "context"
     context.mkdir()
 
@@ -95,6 +96,7 @@ def test_release_context_provides_a_self_contained_verification_key(source, tmp_
     shutil.copytree(context / params, image_params, symlinks=True)
 
     assert (image_params / "verifying.bin").read_bytes() == b"fixture verification key"
+    assert (context / "shared/subnet_common/github.py").is_file()
 
 
 def test_offline_development_build_uses_local_bases_and_disables_network(source, tmp_path, monkeypatch):
