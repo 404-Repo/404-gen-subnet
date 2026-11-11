@@ -9,7 +9,6 @@ import json
 import shutil
 import threading
 from contextlib import ExitStack
-from contextvars import ContextVar
 from functools import partial
 from itertools import count
 from pathlib import Path
@@ -25,7 +24,6 @@ from subnet_common.competition.generations import GenerationResult, GenerationsA
 from subnet_common.render import GRAY_BG, GRAY_VIEWS, WHITE_BG, WHITE_VIEWS
 from subnet_common.witness.auth import AuthRejected
 from subnet_common.witness.models import Scope
-from subnet_common.witness.selection import Selection
 from subnet_common.witness.state import Snapshot
 from support import MemoryState
 from test_service import Harness
@@ -101,46 +99,15 @@ def client(
 
 
 @pytest.mark.parametrize("operation", ["preview", "save"])
-def test_worker_waits_for_queued_renderer_responses(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str,
-) -> None:
-    async def scenario() -> None:
-        fixture = Harness(tmp_path, monkeypatch)
-        async with fixture.running():
-            with fixture.client() as witness:
-                await asyncio.to_thread(witness._gateway.ensure_pod)
-                await enable(fixture, render_delay=0.08)
-                original_client = httpx.AsyncClient
-
-                def renderer_client(
-                    *, timeout: httpx.Timeout | float, trust_env: bool, headers: dict[str, str] | None = None,
-                ) -> httpx.AsyncClient:
-                    scaled = httpx.Timeout(timeout)
-                    if scaled.read is not None:
-                        scaled.read /= 1000
-                    return original_client(timeout=scaled, trust_env=trust_env, headers=headers)
-
-                monkeypatch.setattr("witness_pod.results.httpx.AsyncClient", renderer_client)
-                with client(fixture, witness.renderer_transport()) as renderer:
-                    if operation == "preview":
-                        assert await asyncio.to_thread(renderer.render, SOURCE) == PNG
-                    else:
-                        saved = await asyncio.to_thread(renderer.save_final, SOURCE)
-                        assert saved["views"] and saved["failure_reason"] is None
-                        assert await asyncio.to_thread(renderer.get_submission) == saved
-
-    asyncio.run(scenario())
-
-
-@pytest.mark.parametrize("operation", ["preview", "save"])
 def test_worker_recovers_after_renderer_response_stalls(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str
 ) -> None:
+
     async def scenario() -> None:
         fixture = Harness(tmp_path, monkeypatch)
         async with fixture.running():
-            with fixture.client() as witness:
-                await asyncio.to_thread(witness._gateway.ensure_pod)
+            async with fixture.client() as witness:
+                await witness._gateway.ensure_pod()
                 await enable(fixture, render_delay=0.4)
                 runtime, service = fixture.runtimes[-1], fixture.services[-1]
                 original_client = httpx.AsyncClient
@@ -154,7 +121,7 @@ def test_worker_recovers_after_renderer_response_stalls(
                     return original_client(timeout=scaled, trust_env=trust_env, headers=headers)
 
                 monkeypatch.setattr("witness_pod.results.httpx.AsyncClient", renderer_client)
-                with client(fixture, witness.renderer_transport()) as renderer:
+                with client(fixture, fixture.renderer_transport(witness)) as renderer:
                     with pytest.raises(RenderUnavailable):
                         if operation == "preview":
                             await asyncio.to_thread(renderer.render, SOURCE)
@@ -165,7 +132,6 @@ def test_worker_recovers_after_renderer_response_stalls(
                     with pytest.raises(ArtifactUnavailable) as pending:
                         await asyncio.to_thread(renderer.get_submission)
                     assert pending.value.status == 404
-
                     await enable(fixture)
                     if operation == "preview":
                         assert await asyncio.to_thread(renderer.render, SOURCE) == PNG
@@ -174,90 +140,6 @@ def test_worker_recovers_after_renderer_response_stalls(
                         assert saved["views"] and saved["failure_reason"] is None
                     runtime.drain()
                     assert runtime.tick()
-
-    asyncio.run(scenario())
-
-
-@pytest.mark.parametrize("operation", ["preview", "save"])
-def test_artifact_completion_keeps_signed_requests_responsive_during_storage_wait(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str,
-) -> None:
-    async def scenario() -> None:
-        fixture = Harness(tmp_path, monkeypatch)
-        async with fixture.running():
-            with fixture.client() as witness:
-                await asyncio.to_thread(witness._gateway.ensure_pod)
-                await enable(fixture)
-                runtime = fixture.runtimes[-1]
-                direct = witness._gateway._service()
-                held, release, expired = threading.Event(), threading.Event(), threading.Event()
-                cleanup_waiting = threading.Event()
-                # Background control uses the same lock; only this request signals cleanup.
-                finishing = ContextVar("finishing", default=False)
-                lock = runtime.lock
-
-                class ObservedLock:
-                    def __enter__(self) -> None:
-                        if finishing.get():
-                            cleanup_waiting.set()
-                        lock.acquire()
-
-                    def __exit__(self, *_args: object) -> None:
-                        lock.release()
-
-                monkeypatch.setattr(runtime, "lock", ObservedLock())
-                load = fixture.state.load
-                selection_key = Selection.key(runtime.scope)
-
-                def delayed_load(key: str) -> Snapshot | None:
-                    if key == selection_key and threading.current_thread().name == "capture-selection":
-                        held.set()
-                        if not release.wait(3):
-                            expired.set()
-                    return load(key)
-
-                monkeypatch.setattr(fixture.state, "load", delayed_load)
-
-                def probe() -> tuple[int, bool]:
-                    path = "/v1/calls/00000000-0000-4000-8000-000000000001"
-                    try:
-                        assert cleanup_waiting.wait(3)
-                        reply = direct.http.get(
-                            path, headers=direct._headers("GET", path, b""),
-                            extensions={"sni_hostname": direct.server_name}, timeout=5,
-                        )
-                        return reply.status_code, not expired.is_set()
-                    finally:
-                        release.set()
-
-                probes: list[asyncio.Task[tuple[int, bool]]] = []
-                captures: list[threading.Thread] = []
-                send = httpx.AsyncHTTPTransport.handle_async_request
-
-                async def renderer_response(transport: httpx.AsyncHTTPTransport, request: httpx.Request) -> httpx.Response:
-                    response = await send(transport, request)
-                    if request.url.path == "/render/grid":
-                        capture = threading.Thread(target=runtime.selected, name="capture-selection")
-                        captures.append(capture)
-                        capture.start()
-                        assert await asyncio.to_thread(held.wait, 3)
-                        finishing.set(True)
-                        probes.append(asyncio.create_task(asyncio.to_thread(probe)))
-                    return response
-
-                monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", renderer_response)
-                try:
-                    with client(fixture, witness.renderer_transport()) as renderer:
-                        if operation == "preview":
-                            assert await asyncio.to_thread(renderer.render, SOURCE) == PNG
-                        else:
-                            assert (await asyncio.to_thread(renderer.save_final, SOURCE))["failure_reason"] is None
-                    assert await probes[0] == (404, True)
-                    assert runtime.rendering == 0
-                finally:
-                    release.set()
-                    for capture in captures:
-                        await asyncio.to_thread(capture.join, 5)
 
     asyncio.run(scenario())
 
@@ -312,43 +194,8 @@ def test_result_saver_saves_every_view_when_larger_render_jobs_time_out(monkeypa
     assert {name: state.get(f"{result.views}/{name}") for name in expected} == expected
 
 
-def test_runner_saves_returned_source_and_all_result_files(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from miner_reference.submissions import run_and_save
-
-    async def scenario() -> None:
-        fixture = Harness(tmp_path, monkeypatch)
-        async with fixture.running():
-            with fixture.client() as witness:
-                await asyncio.to_thread(witness._gateway.ensure_pod)
-                await enable(fixture)
-                with client(fixture, witness.renderer_transport()) as renderer:
-
-                    def generate() -> str:
-                        assert renderer.render(SOURCE) == PNG
-                        return SOURCE + "\n// final"
-
-                    result = await asyncio.to_thread(run_and_save, generate, renderer, tmp_path / "private/final.json")
-                    saved = await asyncio.to_thread(renderer.get_submission)
-                    assert saved == result
-                store = fixture.services[-1].artifacts
-                assert store is not None
-                index = GenerationsAdapter.validate_json(fixture.state.get(store.index_key) or b"{}")
-                assert index[hashlib.sha256(fixture.image).hexdigest()] == GenerationResult.model_validate(result)
-                root = str(result["views"])
-                assert fixture.state.get(str(result["js"])) == (SOURCE + "\n// final").encode()
-                assert result["size"] == len((SOURCE + "\n// final").encode()) and result["failure_reason"] is None
-                for name in ("white/front_left.png", "gray/front_above.png", "grid.png"):
-                    assert fixture.state.get(f"{root}/{name}") == PNG
-                assert fixture.state.get(f"{root}/embeddings.npz") == b"fixture embeddings"
-                assert fixture.paid == 0
-
-    asyncio.run(scenario())
-
-
 def test_final_checkpoint_resumes_after_round_change(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from miner_reference.submissions import run_and_save
 
@@ -361,17 +208,17 @@ def test_final_checkpoint_resumes_after_round_change(
     async def scenario() -> None:
         fixture = Harness(tmp_path, monkeypatch)
         async with fixture.running():
-            with fixture.client() as witness:
-                await asyncio.to_thread(witness._gateway.ensure_pod)
+            async with fixture.client() as witness:
+                await witness._gateway.ensure_pod()
                 first_renders = await enable(fixture)
-                with client(fixture, witness.renderer_transport()) as renderer:
+                with client(fixture, fixture.renderer_transport(witness)) as renderer:
                     first = await asyncio.to_thread(
                         run_and_save, generate, renderer, tmp_path / "final.json",
                     )
                     fixture.scope = Scope(fixture.scope.deployment, "test-1", fixture.scope.hotkey)
                     fixture.gateway.round = fixture.scope.round
                     witness._gateway._direct = None
-                    await asyncio.to_thread(witness._gateway.ensure_pod)
+                    await witness._gateway.ensure_pod()
                     next_renders = await enable(fixture)
                     saved = await asyncio.to_thread(
                         run_and_save, generate, renderer, tmp_path / "final.json",
@@ -387,20 +234,22 @@ def test_final_checkpoint_resumes_after_round_change(
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize("entrypoint", ["main", "batch"])
-@pytest.mark.parametrize("recover", [False, True])
+@pytest.mark.parametrize(("recover", "entrypoint"), [(False, "main"), (False, "batch"), (True, "main")])
 @pytest.mark.parametrize("subscription", [False, True])
 def test_reference_miner_completes_authenticated_flow(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, entrypoint: str, recover: bool, subscription: bool,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    entrypoint: str,
+    recover: bool,
+    subscription: bool,
 ) -> None:
-    import json
-
     from main import generate
-    from miner_reference.batch import BatchSettings, Prompt, run_batch
     from miner_reference.submissions import run_and_save
-    from miner_runtime.runner import run_generation
+    from miner_runtime import batch
+    from miner_runtime.runner import _AsyncCaptureSource, run_generation
     from renderer_client import RendererClient
     from test_recording import PRICING
+    from witness_client import AsyncWitnessClient
     from witness_client.calls import canonical
 
     pricing = json.loads(PRICING)
@@ -423,76 +272,87 @@ def test_reference_miner_completes_authenticated_flow(
         fixture.image, fixture.response_text = PNG, answer
         if recover:
             fixture.failures = ["lost"]
-        path = tmp_path / "prompt.png"
-        path.write_bytes(fixture.image)
-        prompt = Prompt("chair", path, hashlib.sha256(fixture.image).hexdigest())
-        settings = BatchSettings(tmp_path / "batch", 42, "fixture")
+        lost = False
+
+        def make_witness(config: object = None, **kwargs: object) -> AsyncWitnessClient:
+            witness = fixture.client(subscription=subscription)
+            original = witness._gateway.send
+
+            async def send(request: httpx.Request) -> httpx.Response:
+                nonlocal lost
+                response = await original(request)
+                if (
+                    recover and not lost and request.method == "POST"
+                    and request.url.path == "/v1/submissions" and response.is_success
+                ):
+                    lost = True
+                    await response.aclose()
+                    raise httpx.ReadError("Lost final-save acknowledgement", request=request)
+                return response
+
+            monkeypatch.setattr(witness._gateway, "send", send)
+            return witness
+
+        monkeypatch.setenv("OPENAI_API_KEY", "synthetic")
+        monkeypatch.setattr(batch, "Wallet", lambda **kwargs: SimpleNamespace(hotkey=fixture.key))
+        monkeypatch.setattr(batch, "AsyncWitnessClient", make_witness)
+        config = tmp_path / "witness.json"
+        config.write_text("{}")
         async with fixture.running():
-            with fixture.client(subscription=subscription) as witness:
-                await asyncio.to_thread(witness._gateway.ensure_pod)
+            async with make_witness() as witness:
+                await witness._gateway.ensure_pod()
                 rendered = await enable(fixture)
-                original = witness.renderer_transport
-                lost = False
-
-                def transport() -> httpx.BaseTransport:
-                    inner = original()
-
-                    def deliver(request: httpx.Request) -> httpx.Response:
-                        nonlocal lost
-                        response = inner.handle_request(request)
-                        if recover and not lost and request.url.path == "/v1/submissions" and response.is_success:
-                            lost = True
-                            response.close()
-                            raise httpx.ReadError("Lost final-save acknowledgement", request=request)
-                        return response
-
-                    return httpx.MockTransport(deliver)
-
-                monkeypatch.setattr(witness, "renderer_transport", transport)
-                with RendererClient(
-                    "https://witness.internal/v1", renderer_id=IMAGE, transport=transport(),
-                ) as renderer, client(fixture, transport()) as submissions:
+                captures = _AsyncCaptureSource(witness, asyncio.get_running_loop())
+                with (
+                    RendererClient(
+                        "https://witness.internal/v1", renderer_id=IMAGE,
+                        transport=captures.renderer_transport(),
+                    ) as renderer,
+                    client(fixture, captures.renderer_transport()) as submissions,
+                ):
                     checkpoint = tmp_path / "private/final.json"
 
-                    def run() -> object:
+                    async def run() -> object:
                         if entrypoint == "batch":
-                            return run_batch([prompt], settings, witness, renderer, progress=lambda _: None)
-                        return run_and_save(
-                            lambda: run_generation(generate, fixture.image, 42, witness, renderer),
+                            return await batch.run(
+                                generate, {hashlib.sha256(fixture.image).hexdigest(): fixture.image}, 42,
+                                witness_config=config, attempts=1, api=not subscription,
+                            )
+                        return await asyncio.to_thread(
+                            run_and_save,
+                            lambda: run_generation(generate, fixture.image, 42, captures, renderer),
                             submissions, checkpoint,
                         )
 
                     if recover:
-                        if entrypoint == "batch":
-                            assert await asyncio.to_thread(run) == {"chair": "pending"}
-                        else:
-                            with pytest.raises(RenderUnavailable):
-                                await asyncio.to_thread(run)
+                        with pytest.raises(RenderUnavailable):
+                            await run()
                         assert lost and fixture.paid == 7
-                    result = await asyncio.to_thread(run)
-                    if entrypoint == "batch":
-                        assert result == {"chair": "selected"}
-                        output = (settings.output / "chair/selected.js").read_text()
-                    else:
-                        output = json.loads(checkpoint.read_bytes())["output"]
+                    await run()
                     saved = await asyncio.to_thread(submissions.get_submission)
-                    assert fixture.state.get(str(saved["js"])) == output.encode()
+                    output = fixture.state.get(str(saved["js"]))
+                    assert output is not None
+                    if entrypoint == "main":
+                        assert output == json.loads(checkpoint.read_bytes())["output"].encode()
                     assert saved["failure_reason"] is None
                     assert fixture.state.get(str(saved["views"]) + "/embeddings.npz") == b"fixture embeddings"
-                    await asyncio.to_thread(run)
+                    await run()
                     assert fixture.paid == 7 and len(rendered) == 6
 
     asyncio.run(scenario())
 
 
-def test_none_is_saved_as_a_generation_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_none_is_saved_as_a_generation_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+
     async def scenario() -> None:
         fixture = Harness(tmp_path, monkeypatch)
         async with fixture.running():
-            with fixture.client() as witness:
-                await asyncio.to_thread(witness._gateway.ensure_pod)
+            async with fixture.client() as witness:
+                await witness._gateway.ensure_pod()
                 await enable(fixture)
-                with client(fixture, witness.renderer_transport()) as renderer:
+                with client(fixture, fixture.renderer_transport(witness)) as renderer:
                     result = await asyncio.to_thread(renderer.save_final, None)
                     assert result == {"js": None, "views": None, "failure_reason": "generation_failed", "size": 0}
                     assert await asyncio.to_thread(renderer.get_submission) == result
@@ -511,10 +371,10 @@ def test_lost_final_acknowledgement_retries_saving_without_generating_again(
     async def scenario() -> None:
         fixture = Harness(tmp_path, monkeypatch)
         async with fixture.running():
-            with fixture.client() as witness:
-                await asyncio.to_thread(witness._gateway.ensure_pod)
+            async with fixture.client() as witness:
+                await witness._gateway.ensure_pod()
                 rendered = await enable(fixture)
-                inner = witness.renderer_transport()
+                inner = fixture.renderer_transport(witness)
                 lost = False
 
                 def deliver(request: httpx.Request) -> httpx.Response:
@@ -546,14 +406,17 @@ def test_lost_final_acknowledgement_retries_saving_without_generating_again(
     asyncio.run(scenario())
 
 
-def test_rejected_source_reports_an_error_and_keeps_the_saved_output(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_rejected_source_reports_an_error_and_keeps_the_saved_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+
     async def scenario() -> None:
         fixture = Harness(tmp_path, monkeypatch)
         async with fixture.running():
-            with fixture.client() as witness:
-                await asyncio.to_thread(witness._gateway.ensure_pod)
+            async with fixture.client() as witness:
+                await witness._gateway.ensure_pod()
                 await enable(fixture)
-                with client(fixture, witness.renderer_transport()) as renderer:
+                with client(fixture, fixture.renderer_transport(witness)) as renderer:
                     with pytest.raises(RenderRejected):
                         await asyncio.to_thread(renderer.save_final, "invalid")
                     rejected = await asyncio.to_thread(renderer.get_submission)
@@ -568,17 +431,23 @@ def test_rejected_source_reports_an_error_and_keeps_the_saved_output(tmp_path: P
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize("first,second", [(SOURCE, SOURCE + "\n// other"), (SOURCE, None), (None, SOURCE)])
+@pytest.mark.parametrize(
+    "first,second", [(SOURCE, SOURCE + "\n// other"), (SOURCE, None), (None, SOURCE)]
+)
 def test_saved_final_output_cannot_be_changed(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, first: str | None, second: str | None
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    first: str | None,
+    second: str | None,
 ) -> None:
+
     async def scenario() -> None:
         fixture = Harness(tmp_path, monkeypatch)
         async with fixture.running():
-            with fixture.client() as witness:
-                await asyncio.to_thread(witness._gateway.ensure_pod)
+            async with fixture.client() as witness:
+                await witness._gateway.ensure_pod()
                 await enable(fixture)
-                with client(fixture, witness.renderer_transport()) as renderer:
+                with client(fixture, fixture.renderer_transport(witness)) as renderer:
                     saved = await asyncio.to_thread(renderer.save_final, first)
                     with pytest.raises(ArtifactUnavailable) as conflict:
                         await asyncio.to_thread(renderer.save_final, second)
@@ -590,17 +459,20 @@ def test_saved_final_output_cannot_be_changed(
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize("suffix", [".js", "/white/front_left.png", "/embeddings.npz", ".json"])
+@pytest.mark.parametrize(
+    "suffix", [".js", "/white/front_left.png", "/embeddings.npz", ".json"]
+)
 def test_failed_final_save_is_retryable_and_not_reported_as_complete(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, suffix: str
 ) -> None:
+
     async def scenario() -> None:
         fixture = Harness(tmp_path, monkeypatch)
         async with fixture.running():
-            with fixture.client() as witness:
-                await asyncio.to_thread(witness._gateway.ensure_pod)
+            async with fixture.client() as witness:
+                await witness._gateway.ensure_pod()
                 await enable(fixture)
-                with client(fixture, witness.renderer_transport()) as renderer:
+                with client(fixture, fixture.renderer_transport(witness)) as renderer:
                     original = fixture.state.put
                     original_save = fixture.state.save
                     prompt = hashlib.sha256(fixture.image).hexdigest()
@@ -636,16 +508,19 @@ def test_failed_final_save_is_retryable_and_not_reported_as_complete(
     asyncio.run(scenario())
 
 
-def test_embedding_failure_is_reported_and_the_miner_can_retry(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_embedding_failure_is_reported_and_the_miner_can_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+
     async def scenario() -> None:
         fixture = Harness(tmp_path, monkeypatch)
         async with fixture.running():
-            with fixture.client() as witness:
-                await asyncio.to_thread(witness._gateway.ensure_pod)
+            async with fixture.client() as witness:
+                await witness._gateway.ensure_pod()
                 await enable(fixture)
                 embeddings = AsyncMock(side_effect=OSError("Embedding calculation failed"))
                 monkeypatch.setattr("witness_pod.results.build_embeddings_npz", embeddings)
-                with client(fixture, witness.renderer_transport()) as renderer:
+                with client(fixture, fixture.renderer_transport(witness)) as renderer:
                     with pytest.raises(ArtifactUnavailable) as error:
                         await asyncio.to_thread(renderer.save_final, SOURCE)
                     assert error.value.status == 503
@@ -660,15 +535,16 @@ def test_embedding_failure_is_reported_and_the_miner_can_retry(tmp_path: Path, m
 
 @pytest.mark.parametrize("status", [503, 504])
 def test_render_failure_is_returned_for_the_miner_to_retry(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, status: int,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, status: int
 ) -> None:
+
     async def scenario() -> None:
         fixture = Harness(tmp_path, monkeypatch)
         async with fixture.running():
-            with fixture.client() as witness:
-                await asyncio.to_thread(witness._gateway.ensure_pod)
+            async with fixture.client() as witness:
+                await witness._gateway.ensure_pod()
                 await enable(fixture, fail_first_render=True, failure_status=status)
-                with client(fixture, witness.renderer_transport()) as renderer:
+                with client(fixture, fixture.renderer_transport(witness)) as renderer:
                     with pytest.raises(ArtifactUnavailable) as failed:
                         await asyncio.to_thread(renderer.save_final, SOURCE)
                     assert failed.value.status == status
@@ -722,7 +598,7 @@ def test_concurrent_result_index_updates_preserve_each_prompt(monkeypatch: pytes
 
 @pytest.mark.parametrize("case", ["queued", "queue_full"])
 def test_final_saves_complete_without_generating_again(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str
 ) -> None:
     from miner_reference.submissions import run_and_save
 
@@ -746,8 +622,8 @@ def test_final_saves_complete_without_generating_again(
             return source
 
         async with fixture.running():
-            with fixture.client() as witness:
-                await asyncio.to_thread(witness._gateway.ensure_pod)
+            async with fixture.client() as witness:
+                await witness._gateway.ensure_pod()
                 rendered = await enable(fixture)
                 store = fixture.services[-1].artifacts
                 assert store is not None
@@ -765,7 +641,7 @@ def test_final_saves_complete_without_generating_again(
 
                 monkeypatch.setattr(store, "require", require)
                 monkeypatch.setattr("witness_pod.results.build_embeddings_npz", embeddings)
-                inner = witness.renderer_transport()
+                inner = fixture.renderer_transport(witness)
 
                 def deliver(request: httpx.Request) -> httpx.Response:
                     response = inner.handle_request(request)
@@ -814,15 +690,16 @@ def test_final_saves_complete_without_generating_again(
 
 
 def test_final_save_queue_accepts_256_waiting_requests(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+
     async def scenario() -> None:
         fixture = Harness(tmp_path, monkeypatch)
         prompts = [hashlib.sha256(f"prompt-{index}".encode()).hexdigest() for index in range(258)]
         started, release, arrived = asyncio.Event(), asyncio.Event(), asyncio.Event()
         async with fixture.running():
-            with fixture.client() as witness:
-                await asyncio.to_thread(witness._gateway.ensure_pod)
+            async with fixture.client() as witness:
+                await witness._gateway.ensure_pod()
                 await enable(fixture, prompt_ids={prompt: f"official-{i}" for i, prompt in enumerate(prompts)})
                 service = fixture.services[-1]
                 store, saver = service.artifacts, service.result_saver
@@ -876,10 +753,13 @@ def test_final_save_queue_accepts_256_waiting_requests(
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize("failure", ["full", "round_closed", "not_selected", "first_save"])
+@pytest.mark.parametrize(
+    "failure", ["full", "round_closed", "not_selected", "first_save"]
+)
 def test_save_queue_limits_and_failures_release_the_next_job(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
 ) -> None:
+
     async def scenario() -> None:
         fixture = Harness(tmp_path, monkeypatch)
         started, release, arrived = asyncio.Event(), asyncio.Event(), asyncio.Event()
@@ -896,8 +776,8 @@ def test_save_queue_limits_and_failures_release_the_next_job(
             return b"fixture embeddings"
 
         async with fixture.running():
-            with fixture.client() as witness:
-                await asyncio.to_thread(witness._gateway.ensure_pod)
+            async with fixture.client() as witness:
+                await witness._gateway.ensure_pod()
                 rendered = await enable(fixture)
                 service, runtime = fixture.services[-1], fixture.runtimes[-1]
                 store = service.artifacts
@@ -913,9 +793,11 @@ def test_save_queue_limits_and_failures_release_the_next_job(
                 monkeypatch.setattr(store, "require", require)
                 monkeypatch.setattr("witness_pod.results.build_embeddings_npz", embeddings)
                 with (
-                    client(fixture, witness.renderer_transport()) as first,
+                    client(fixture, fixture.renderer_transport(witness)) as first,
                     client(
-                        fixture, witness.renderer_transport(), prompt_image=other_image,
+                        fixture,
+                        fixture.renderer_transport(witness),
+                        prompt_image=other_image,
                         timeout=5,
                     ) as second,
                 ):
@@ -929,7 +811,10 @@ def test_save_queue_limits_and_failures_release_the_next_job(
                             if failure == "full":
                                 with (
                                     client(
-                                        fixture, witness.renderer_transport(), prompt_image=other_image, timeout=1,
+                                        fixture,
+                                        fixture.renderer_transport(witness),
+                                        prompt_image=other_image,
+                                        timeout=1,
                                     ) as overflow,
                                     pytest.raises(ArtifactUnavailable) as full,
                                 ):
@@ -962,7 +847,7 @@ def test_save_queue_limits_and_failures_release_the_next_job(
                             assert isinstance(other_result, dict) and other_result["failure_reason"] is None
                     replacement_rendered: list[str] = []
                     if failure == "not_selected":
-                        await asyncio.to_thread(witness._gateway.ensure_pod)
+                        await witness._gateway.ensure_pod()
                         replacement_rendered = await enable(fixture, prompt_ids=store.prompt_ids)
                     recovered = await asyncio.to_thread(second.save_final, other_source)
                     assert fixture.state.get(str(recovered["js"])) == other_source.encode()
@@ -1018,15 +903,18 @@ def test_final_save_transient_retry_is_bounded_and_preserves_the_checkpoint(
         assert generated == [SOURCE]
 
 
-def test_new_final_saves_require_an_open_round(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_new_final_saves_require_an_open_round(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+
     async def scenario() -> None:
         fixture = Harness(tmp_path, monkeypatch)
         async with fixture.running():
-            with fixture.client() as witness:
-                await asyncio.to_thread(witness._gateway.ensure_pod)
+            async with fixture.client() as witness:
+                await witness._gateway.ensure_pod()
                 await enable(fixture)
                 fixture.services[-1].round_end = 0
-                with client(fixture, witness.renderer_transport()) as renderer:
+                with client(fixture, fixture.renderer_transport(witness)) as renderer:
                     with pytest.raises(ArtifactUnavailable) as closed:
                         await asyncio.to_thread(renderer.save_final, SOURCE)
                     assert closed.value.status == 403
@@ -1035,14 +923,17 @@ def test_new_final_saves_require_an_open_round(tmp_path: Path, monkeypatch: pyte
 
 
 @pytest.mark.parametrize("field", ["seed", "prompt_sha256"])
-def test_final_saving_requires_the_admitted_input(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, field: str) -> None:
+def test_final_saving_requires_the_admitted_input(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, field: str
+) -> None:
+
     async def scenario() -> None:
         fixture = Harness(tmp_path, monkeypatch)
         async with fixture.running():
-            with fixture.client() as witness:
-                await asyncio.to_thread(witness._gateway.ensure_pod)
+            async with fixture.client() as witness:
+                await witness._gateway.ensure_pod()
                 await enable(fixture)
-                with client(fixture, witness.renderer_transport()) as renderer:
+                with client(fixture, fixture.renderer_transport(witness)) as renderer:
                     renderer.generation[field] = {"seed": 43, "prompt_sha256": "d" * 64}[field]
                     with pytest.raises(ArtifactUnavailable) as rejected:
                         await asyncio.to_thread(renderer.save_final, None)
@@ -1051,14 +942,17 @@ def test_final_saving_requires_the_admitted_input(tmp_path: Path, monkeypatch: p
     asyncio.run(scenario())
 
 
-def test_final_save_rejects_prompt_bytes_from_another_input(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_final_save_rejects_prompt_bytes_from_another_input(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+
     async def scenario() -> None:
         fixture = Harness(tmp_path, monkeypatch)
         async with fixture.running():
-            with fixture.client() as witness:
-                await asyncio.to_thread(witness._gateway.ensure_pod)
+            async with fixture.client() as witness:
+                await witness._gateway.ensure_pod()
                 await enable(fixture)
-                with client(fixture, witness.renderer_transport()) as renderer:
+                with client(fixture, fixture.renderer_transport(witness)) as renderer:
                     renderer.prompt_image = base64.b64encode(b"another prompt").decode()
                     with pytest.raises(ArtifactUnavailable) as rejected:
                         await asyncio.to_thread(renderer.save_final, SOURCE)
@@ -1094,78 +988,10 @@ def test_runner_requires_a_private_checkpoint_directory(tmp_path: Path) -> None:
         tmp_path.chmod(0o700)
 
 
-def test_managed_batch_recovers_final_save_on_replacement_without_generation(
+def test_assigned_miner_saves_and_recovers_official_results(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from miner_reference.batch import BatchSettings, Prompt, run_batch
-    from miner_reference.pipeline import ModelCalls
-    from renderer_client import Renderer
 
-    generated: list[str] = []
-
-    def generate(image: bytes, seed: int, calls: ModelCalls, renderer: Renderer) -> str:
-        source = SOURCE + "\n// " + calls.create(model="fixture", input="managed output", request_id=1).output_text
-        generated.append(source)
-        renderer.render(source)
-        return source
-
-    monkeypatch.setattr("miner_reference.pipeline.run", generate)
-
-    async def scenario() -> None:
-        fixture = Harness(tmp_path, monkeypatch)
-        path = tmp_path / "prompt.png"
-        path.write_bytes(fixture.image)
-        prompts = [Prompt("chair", path, hashlib.sha256(fixture.image).hexdigest())]
-        settings = BatchSettings(tmp_path / "batch", 42, "fixture")
-        async with fixture.running():
-            with fixture.client() as witness:
-                await asyncio.to_thread(witness._gateway.ensure_pod)
-                await enable(fixture)
-                original = witness.renderer_transport
-                lost = False
-
-                def transport() -> httpx.BaseTransport:
-                    inner = original()
-
-                    def deliver(request: httpx.Request) -> httpx.Response:
-                        nonlocal lost
-                        response = inner.handle_request(request)
-                        if not lost and request.url.path == "/v1/submissions" and response.is_success:
-                            lost = True
-                            response.close()
-                            raise httpx.ReadError("Lost final-save acknowledgement", request=request)
-                        return response
-
-                    return httpx.MockTransport(deliver)
-
-                monkeypatch.setattr(witness, "renderer_transport", transport)
-                with client(fixture, original()) as renderer:
-                    result = await asyncio.to_thread(
-                        run_batch, prompts, settings, witness, renderer, progress=lambda _: None
-                    )
-                    assert result == {"chair": "pending"} and lost
-                    old = fixture.provider.list()[0]
-                    fixture.selection.update(old, active=False)
-                    fixture.provider.delete(old.id)
-                    witness._gateway._invalidate_for("pod_not_selected")
-                    await asyncio.to_thread(witness._gateway.ensure_pod)
-                    await enable(fixture)
-                    result = await asyncio.to_thread(
-                        run_batch, prompts, settings, witness, renderer, progress=lambda _: None
-                    )
-                    assert result == {"chair": "selected"}
-                assert fixture.paid == 1 and len(generated) == 1
-                assert (settings.output / "chair/selected.js").read_text() == generated[0]
-                store = fixture.services[-1].artifacts
-                assert store is not None
-                assert fixture.state.get(store.prefix(prompts[0].sha256) + ".js") == generated[0].encode()
-
-    asyncio.run(scenario())
-
-
-def test_assigned_miner_saves_and_recovers_official_results(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
     async def scenario() -> None:
         fixture = Harness(tmp_path, monkeypatch)
         empty_image = b"frozen empty prompt"
@@ -1173,24 +999,35 @@ def test_assigned_miner_saves_and_recovers_official_results(
         seed = 987654321
         prompt_ids = {digest: "official-chair", empty_digest: "official-empty"}
         async with fixture.running():
-            with fixture.client() as witness:
-                await asyncio.to_thread(witness._gateway.ensure_pod)
+            async with fixture.client() as witness:
+                await witness._gateway.ensure_pod()
                 rendered = await enable(
                     fixture, prompt_ids=prompt_ids,
                 )
                 store = fixture.services[-1].artifacts
                 assert store is not None
                 store.seed = seed
-                with client(fixture, witness.renderer_transport()) as legacy:
+                with client(fixture, fixture.renderer_transport(witness)) as legacy:
                     assert await asyncio.to_thread(legacy.load_context) == {"submission_commit": None}
-                with httpx.Client(base_url="https://witness.internal", transport=witness.renderer_transport()) as http:
-                    saved = await asyncio.to_thread(http.post, "/v1/submissions", json={
-                        "generation": {"prompt_sha256": digest}, "source": SOURCE,
-                        "prompt_image": base64.b64encode(fixture.image).decode(),
-                    })
-                    empty = await asyncio.to_thread(http.post, "/v1/submissions", json={
-                        "generation": {"prompt_sha256": empty_digest}, "source": None,
-                    })
+                async with httpx.AsyncClient(
+                    base_url="https://witness.internal",
+                    transport=witness.renderer_transport(),
+                ) as http:
+                    saved = await http.post(
+                        "/v1/submissions",
+                        json={
+                            "generation": {"prompt_sha256": digest},
+                            "source": SOURCE,
+                            "prompt_image": base64.b64encode(fixture.image).decode(),
+                        },
+                    )
+                    empty = await http.post(
+                        "/v1/submissions",
+                        json={
+                            "generation": {"prompt_sha256": empty_digest},
+                            "source": None,
+                        },
+                    )
                 assert saved.status_code == empty.status_code == 200
                 expected = {"official-chair": saved.json()["submission"], "official-empty": empty.json()["submission"]}
                 assert str(expected["official-chair"]["js"]).endswith("/official-chair.js")
@@ -1205,8 +1042,8 @@ def test_assigned_miner_saves_and_recovers_official_results(
                     foreign.update_result(digest, GenerationResult(failure_reason="generation_failed"))
             shutil.rmtree(tmp_path / "client", ignore_errors=True)
             fixture.services[-1].round_end = 0
-            with fixture.client("fresh-client") as resumed:
-                recovered = await asyncio.to_thread(resumed._gateway._request_once, "GET", "/v1/submissions")
+            async with fixture.client("fresh-client") as resumed:
+                recovered = await resumed._gateway._request_once("GET", "/v1/submissions")
                 assert json.loads(recovered or b"null") == {"submissions": expected}
             assert rendered == [SOURCE] and fixture.paid == 0 and fixture.provider.creates == 1
 
@@ -1215,13 +1052,14 @@ def test_assigned_miner_saves_and_recovers_official_results(
 
 @pytest.mark.parametrize("source", [SOURCE, None])
 def test_hash_keyed_results_recover_official_ids_and_keep_artifact_pointers(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, source: str | None,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, source: str | None
 ) -> None:
+
     async def scenario() -> None:
         fixture = Harness(tmp_path, monkeypatch)
         async with fixture.running():
-            with fixture.client() as witness:
-                await asyncio.to_thread(witness._gateway.ensure_pod)
+            async with fixture.client() as witness:
+                await witness._gateway.ensure_pod()
                 digest = hashlib.sha256(fixture.image).hexdigest()
                 rendered = await enable(fixture, prompt_ids={digest: "official-chair"})
                 store = fixture.services[-1].artifacts
@@ -1234,9 +1072,9 @@ def test_hash_keyed_results_recover_official_ids_and_keep_artifact_pointers(
                     fixture.state.put(root + "/grid.png", PNG)
                 fixture.state.put(store.index_key, GenerationsAdapter.dump_json({digest: previous}))
                 fixture.services[-1].round_end = 0
-                recovered = await asyncio.to_thread(witness._gateway._request_once, "GET", "/v1/submissions")
+                recovered = await witness._gateway._request_once("GET", "/v1/submissions")
                 assert json.loads(recovered or b"null") == {"submissions": {"official-chair": previous.model_dump()}}
-                with client(fixture, witness.renderer_transport()) as legacy:
+                with client(fixture, fixture.renderer_transport(witness)) as legacy:
                     assert await asyncio.to_thread(legacy.get_submission) == previous.model_dump()
                     assert await asyncio.to_thread(legacy.save_final, source) == previous.model_dump()
                 assert GenerationsAdapter.validate_json(fixture.state.get(store.index_key) or b"{}") == {

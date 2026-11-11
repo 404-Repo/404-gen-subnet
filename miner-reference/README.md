@@ -3,12 +3,12 @@
 Submit a Python repository with a `generate` function in its root `main.py`.
 The sandbox calls it for each prompt image and receives a Three.js module.
 
-Use the [async base miner](https://github.com/404-Repo/404-base-miner-gpt)
-for the launch path below. It exports `async generate(image, seed, witness)`,
-uses `AsyncWitnessClient` for model calls and Pod previews, and submits the
-returned JavaScript through `await witness.submit(image, source)` in its runner.
-The synchronous four-argument reference program in this directory is also
-supported; its helper and replay documentation follows the quickstart.
+The [reference entry point](main.py) exports
+`async generate(image, seed, witness)` and uses `AsyncWitnessClient` for model
+calls and Pod previews. The common `miner_runtime.batch.run` harness owns pending
+prompts, witness sessions, recovery passes and final submission. The
+[manual generation command](../miner-runtime/run.py) loads this entry point and
+uses the same harness.
 
 ## Launch quickstart
 
@@ -17,42 +17,25 @@ Use a local sr25519 wallet hotkey registered on **Finney netuid 17**. The public
 witness origin is **https://witness.subnet404.xyz**. The gateway assigns your
 round and Pod; generation, rendering and submission use that authenticated Pod.
 
-The matching packages are `404-witness-client==0.2.17`,
-`404-renderer-client==0.1.4` and `404-miner-runtime==0.1.5`.
-The base miner and leader both use `miner_runtime.batch.run` for pending prompts,
-witness sessions, recovery passes and submission. The launchers supply their own
-generation function, prompt mapping, seed and wallet settings.
+This source checkout uses `404-witness-client==0.3.0`,
+`404-renderer-client==0.1.5` and `404-miner-runtime==0.1.6`.
+Use matching tested wheels for your platform; see the
+[SDK source-build instructions](../witness-client/DEVELOPMENT.md#build-and-verification).
+From the repository root, install those wheels into a Python environment:
 
 ```sh
-git clone --branch miner-runtime-v0.1.5 --depth 1 \
-  https://github.com/404-Repo/404-gen-subnet.git 404-sdk
-git clone https://github.com/404-Repo/404-base-miner-gpt.git 404-base-miner
-git -C 404-base-miner checkout f9876fb76c07f01831aece93070b8580da50da09
 python3.13 -m venv .venv
 . .venv/bin/activate
-python -m pip install -r https://github.com/404-Repo/404-gen-subnet/releases/download/miner-runtime-v0.1.5/sdk-requirements.txt
-python -m pip install ./404-base-miner
+python -m pip install /path/to/sdk-wheels/404_witness_client-0.3.0-*.whl \
+  /path/to/sdk-wheels/404_renderer_client-0.1.5-*.whl \
+  /path/to/sdk-wheels/404_miner_runtime-0.1.6-*.whl
 python -m pip check
-cd 404-base-miner
 ```
 
-The base miner's package metadata pins the same released wheel URLs and hashes.
-Keep the SDK checkout for its three public proof-parameter files.
-Create `witness.json` at the base miner's root with the absolute parameter path:
-
-```sh
-python - <<'PYCONFIG'
-import json
-from pathlib import Path
-config = {
-    "witness_url": "https://witness.subnet404.xyz",
-    "proof_parameters": str(Path("../404-sdk/witness-server/verifier/params").resolve()),
-}
-Path("witness.json").write_text(json.dumps(config, indent=2) + "\n")
-PYCONFIG
-```
-
-No `state_directory`, separate renderer or local result checkpoint is needed.
+Keep this SDK checkout for the manual launcher, shared result schema and matching
+public proof parameters at `witness-server/worker/witness_pod/verifier/params`.
+The launcher supplies `witness_url` and the absolute `proof_parameters` path to
+the SDK. No separate renderer or local recovery directory is needed.
 For API billing, set `OPENAI_API_KEY` in your environment and add `--api` below.
 For subscription billing, install the [Codex CLI](https://learn.chatgpt.com/docs/codex/cli#install-codex)
 and sign in with your ChatGPT subscription on the miner machine:
@@ -62,38 +45,46 @@ codex -c 'cli_auth_credentials_store="file"' login
 ```
 
 The witness reads the local file login from `CODEX_HOME` or `~/.codex`; a keyring-only
-login is insufficient. Set `codex_home` in `witness.json` for another login
-directory, and keep that directory private. See the official
+login is insufficient. Keep that directory private. See the official
 [authentication guide](https://learn.chatgpt.com/docs/auth). Load/unlock the named
 wallet locally; its private key stays on your machine.
 
-Download the current round's frozen `prompts.txt` and published seed from the
+Use the current round's frozen `prompts.txt` URL and published seed from the
 [active competition](https://github.com/404-Repo/404-active-competition).
-`prompts.txt` contains one image URL per line. Use that round's integer seed;
-keep official prompt filenames when downloading individual images.
+`prompts.txt` contains one image URL per line. Keep official prompt filenames;
+the launcher derives their IDs from the URL stems. From the repository root:
 
 ```sh
-python main.py --prompts /absolute/path/to/prompts.txt --seed PUBLISHED_SEED \
-  --wallet-name miner --wallet-hotkey default
+python miner-runtime/run.py \
+  --source /absolute/path/to/404-subnet/miner-reference \
+  --prompts-url https://example.org/pinned-round/prompts.txt \
+  --seed PUBLISHED_SEED --round gpt-2 \
+  --proof-parameters /absolute/path/to/404-subnet/witness-server/worker/witness_pod/verifier/params \
+  --wallet-name miner --wallet-hotkey default \
+  --workers 8 --parallel-calls 3 --parallel-preparations 3 \
+  --output /absolute/path/to/generated.json
 # For API billing, add --api to the same command.
 ```
 
-The runner awaits `generate(image, seed, witness)` for each pending image.
-Inside generation, await `witness.responses.create(...)` and
-`witness.render(source, RenderOptions(lighting="neutral"))`. It then submits
-`await witness.submit(image, source)` outside generation. The Pod stores the
-final source, judging views and embeddings for collection; there is no second
-upload command. `None` is a submitted failure outcome.
+Supply the actual round name and frozen prompt URL. The runner awaits
+`generate(image, seed, witness)` for each pending image. Inside generation, await
+`witness.responses.create(...)` and
+`witness.render(source, RenderOptions(lighting="neutral"))`. Outside generation,
+the harness submits `await witness.submit(image, source)`. The Pod stores final
+source, judging views and embeddings for collection. `None` is a submitted
+failure outcome. The launcher reads the saved CDN index, verifies completeness
+and exports `generated.json` with absolute artifact URLs. `--cdn` and
+`--witness-url` select the CDN and witness origins when needed.
 
 Each pass calls `await witness.get_submitted()` and skips saved prompt IDs,
-including saved failures. It makes up to three passes by default. Rerun the
-same command for remaining work; identical canonical model requests and stable
+including saved failures. It makes up to three passes by default. Rerun the same
+command for remaining work; identical canonical model requests and stable
 request IDs reuse retained Pod recordings. Keep source, images, seed, models,
 hotkey and authentication mode fixed. Preview bytes must reproduce the same
-model request body. No paid requests are needed for installation checks:
-`python main.py --help` only loads the CLI.
+model request body. `python miner-runtime/run.py --help` prints the CLI without
+loading credentials or contacting services.
 
-## Synchronous reference program
+## Async reference program
 
 Copy [main.py](main.py), [output_specifications.md](output_specifications.md) and
 the [miner_reference package](miner_reference/) into your repository root.
@@ -104,9 +95,10 @@ and the valid refinements. The selected JavaScript is returned.
 Each candidate is centered and scaled using the specified bounding-box calculation
 before rendering, selection, or use as a refinement parent.
 
-Production sandbox isolation and validator integration still need implementation.
-Development helpers capture execution observations, save managed submissions and
-run offline replay without process isolation.
+The manual launcher executes trusted Python locally. Production sandbox isolation
+and validator integration still need implementation. Development execution-host
+helpers and offline replay are separate from the common batch harness. Use
+[validation-worker](../validation-worker/MANUAL_REPLAY.md) for manual replay.
 
 ## What to submit
 
@@ -122,9 +114,10 @@ allowed; the coldkey must cover all their locks. Admission and anti-spam limits
 apply per hotkey, without guaranteed per-team queue fairness.
 
 Commit every module, template, configuration file and data file that affects
-generation. The runner snapshots this source and records its hash. A branch name
-or moving tag cannot identify a submission. You supply Python source; the operator
-provides the sandbox and clients.
+generation. A branch name or moving tag cannot identify a submission. The manual
+launcher reads local source directly; keep that checkout clean at the submitted
+commit. The operator supplies clients; sandbox isolation remains a requirement
+of the complete runtime.
 
 **Multiple Python files and packages are allowed.** Keep `main.py` at the
 repository root as the entry point, exposing `generate(...)`. It may import your
@@ -140,6 +133,7 @@ miner_reference/
     __init__.py
     pipeline.py
     images.py
+    normalize.js
 output_specifications.md
 ```
 
@@ -152,7 +146,7 @@ root entry module and organize your supporting code as needed.
 ## The function
 
 ```python
-def generate(image: bytes, seed: int, witness: WitnessClient, renderer: Renderer) -> str | None:
+async def generate(image: bytes, seed: int, witness: AsyncWitnessClient) -> str | None:
     ...
 ```
 
@@ -160,8 +154,7 @@ def generate(image: bytes, seed: int, witness: WitnessClient, renderer: Renderer
 | --- | --- |
 | `image` | Frozen PNG prompt bytes, identical in generation and replay |
 | `seed` | Published round seed, an integer from zero through 2^64 − 1 |
-| `witness` | The `witness_client.WitnessClient` model-call interface |
-| `renderer` | The `renderer_client.Renderer` rendering interface |
+| `witness` | The supplied `AsyncWitnessClient` for model calls and Pod previews |
 
 Use `seed` to initialize reproducible local randomness. The same value is supplied
 during generation and replay; this example uses it to shuffle candidate order.
@@ -170,10 +163,10 @@ Return the final JavaScript string, or `None` to declare generation failure.
 An uncaught exception is a miner error. The runner checks the return type, UTF-8
 size and JavaScript rules.
 
-By default, `witness.responses.create(...)` waits for the complete response and
+By default, `await witness.responses.create(...)` waits for the complete response and
 returns an OpenAI `Response` object. Read text from `result.output_text` and token
 usage from `result.usage`.
-`renderer.render(source, options)` returns PNG bytes or raises a structured
+`await witness.render(source, options)` returns PNG bytes or raises a structured
 `RenderRejected`. Send prompt images and rendered previews as PNG data URLs in
 `input_image` items. You may render, compare and refine candidates within the
 prompt's budget. A successful example run makes seven model calls and five
@@ -185,12 +178,12 @@ validation errors, followed by normalization and another render. Repairs share
 the model-call limit and have distinct `request_id` values. A prompt makes at
 most twelve model calls and ten renders; valid candidates remain available when
 a repair fails. Infrastructure failures propagate to the runner for recovery.
-The runtime supplies a Pod witness or its offline replay counterpart. Model calls require no prompt binding or recording lifecycle API.
-
-Both clients are supplied in generation and replay. Client construction,
-credentials, recording and recovery are handled by the runtime. Your function
-does not select replay mode, manage exchange IDs, parse a command line or handle
-input/output directories.
+Model calls require no prompt binding or recording lifecycle API. The witness or
+its recorded counterpart is supplied in generation and replay. Client
+construction, credentials and model-response recovery belong to the harness and
+SDK. Execution observations and verified render replay belong to the execution
+host. Your function does not select replay mode, manage exchange IDs, parse a
+command line or handle input/output directories.
 
 The runner saves the exact returned JavaScript or explicit `None` in managed
 submission storage. Prompt IDs are unique lowercase alphanumeric stems. Your
@@ -198,107 +191,68 @@ function handles one image per call; prompt count is a round setting.
 
 ## Run several prompts concurrently
 
-The [batch runner](miner_reference/batch.py) runs independent prompt pipelines
-against the Python CPU Pod witness. The execution host automatically observes each prompt execution. The three initial calls and two refinements run concurrently within
-their stages; each selection waits for all its candidates. Model requests from
-different prompts can overlap each other and rendering. Renders within a prompt
-follow candidate order, independently of model completion order.
+The [common batch harness](../miner-runtime/src/miner_runtime/batch.py) runs
+independent prompt pipelines using the async witness. The three initial calls
+and two refinements run concurrently within their stages; each selection waits
+for all its candidates. Model requests from different prompts can overlap each
+other and rendering. Renders within a prompt follow candidate order,
+independently of model completion order.
 
-A batch may contain all 128 prompts or a larger manifest. `--parallel-prompts`
-bounds active prompt pipelines and `--parallel-calls` bounds active inference
-captures across them. Each pipeline can use up to three simultaneous model calls,
-so eight active prompts can offer up to 24 calls, subject to the shared call limit.
-Defaults remain four active prompts, two simultaneous model calls, and one render.
-All concurrency settings accept 1 through 32. Match `--parallel-calls` to the witness
-Pod's configured `WITNESS_MAX_CAPTURES`, and `--parallel-renders` to renderer capacity.
-For example, eight prompt pipelines with a 12-call limit require a witness Pod
-configured and sized for 12 concurrent captures. The Pod default is 32.
+`--workers` bounds active prompt pipelines (default eight). `--parallel-calls`
+bounds active inference captures across them (default three), and
+`--parallel-preparations` bounds TLS setup, credential proving and authorization
+(default three). The SDK owns both model-call limits; each accepts 1 through 32.
+Each pipeline can offer three simultaneous model calls, subject to the shared
+capture limit. Match `--parallel-calls` to the witness Pod's configured capacity.
+The Pod controls preview and final-save capacity.
 
-Use the pinned `witness_client`, `renderer_client` and `miner_runtime` packages supplied
-by your runtime. The runner in `miner_runtime.runner` owns generation and recovery of
-execution observations. From this checkout, install `miner-runtime` with
-`python -m pip install -e miner-runtime` and put `miner-reference` on `PYTHONPATH`. The witness
-configuration includes the public gateway URL and matching proof parameters; see
-the [client configuration](../witness-client/README.md#configure). `state_directory`
-is an optional hint for execution-host observations, not an SDK recovery requirement.
-This reference driver keeps its own private `--output` checkpoints. For
-[manual replay](../validation-worker/MANUAL_REPLAY.md), use validation-worker.
-The renderer URL and identity refer to an existing renderer. Authentication uses
-the named local wallet and Codex subscription, or `--api` with `OPENAI_API_KEY`.
-Set `RENDERER_API_KEY` when the renderer requires authentication.
+Use the launcher above for published prompt URLs and an exported result index.
+An async application with its own prompt mapping can call the harness directly:
 
-The manifest has a published seed and frozen local image references:
+```python
+from pathlib import Path
 
-```json
-{
-  "seed": 42,
-  "prompts": [
-    {"id": "pumpkin", "path": "/private/prompts/pumpkin.png", "sha256": "IMAGE_SHA256"}
-  ]
-}
+from main import generate
+from miner_runtime.batch import run
+
+await run(
+    generate,
+    {"official-prompt-id": "/absolute/path/to/prompt.png"},
+    42,
+    witness_config=Path("witness.json"),
+    workers=8,
+    parallel_calls=3,
+    parallel_preparations=3,
+)
 ```
 
-IDs are unique lowercase alphanumeric strings; SHA256 values have 64 hexadecimal
-characters. Image bytes must be distinct within a batch. An optional `url` is
-descriptive metadata. The experiment manifest containing `seed` and `prompts`
-with these fields is also accepted; additional provenance fields are retained
-by the experiment and ignored by this runner.
+The mapping keys must be the official prompt IDs. Values may be PNG bytes,
+local filenames or image URLs. `witness.json` contains `witness_url` and the
+absolute `proof_parameters` path; see [client configuration](../witness-client/README.md#configure).
+The harness defaults to the local `miner/default` wallet and Codex subscription;
+pass wallet settings or `api=True` with `OPENAI_API_KEY` as needed.
 
-```sh
-PYTHONPATH=miner-reference python -m miner_reference.batch check \
-  --manifest /private/prompts/manifest.json \
-  --witness-config /private/witness.json \
-  --output /private/miner-batch \
-  --renderer-url http://127.0.0.1:18040 \
-  --renderer-id PINNED_RENDERER_ID \
-  --wallet-name miner --wallet-hotkey default \
-  --parallel-prompts 4 --parallel-calls 2 --parallel-renders 1
-```
+A successful 128-prompt workflow makes 896 model calls and 640 preview grid renders.
+Final judging renders are separate. Invalid or refused candidates are excluded;
+no valid initial candidate or an invalid selection returns `None`. A rejected
+candidate may use the bounded repair calls described above. Stage request IDs
+are 1–3 for initial candidates, 4 for first selection, 5–6 for refinements and 7
+for final selection; repairs use 8–10 and 11–12 respectively.
 
-Use the approved worker image digest as `--renderer-id`. Previews use the Pod renderer
-unless `--renderer-url` selects another preview renderer. Intermediate previews stay
-local to the runner; the Pod and R2 retain only the final submission. Final saving sends the returned JavaScript
-or explicit `None` to the Pod. The Pod saves the JavaScript, prepares and saves the
-judging views, grid and embeddings, then reports success. Saving errors are returned
-for retry; save capacity is controlled by the Pod. The runner checkpoints returned bytes before final-save delivery. Reuse checks the
-prompt hash, seed, renderer identity and approved source commit read from the Pod.
-Retry the same batch output directory after a lost acknowledgement or Pod replacement;
-it resumes final saving without rerunning completed generation. Infrastructure failures
-remain pending. The gateway must have matching [artifact configuration](../witness-gateway/README.md#artifact-storage).
+The harness logs each generating, submitted or failed prompt. An infrastructure
+failure leaves a prompt unfinished while other prompts continue. A later pass
+reads saved submissions again, skips completed prompts and reruns generation for
+unfinished prompts with retained model responses. Previews can run again; the
+common harness does not persist local render or final-output checkpoints.
+After all passes, unfinished prompts raise an error. Declared `None` outcomes
+are saved and skipped on subsequent passes.
 
-`check` verifies the frozen inputs and settings and prints the planned call,
-render and concurrency counts. It does not load credentials or contact services.
-Use `run` in place of `check` to execute. A 128-prompt successful workflow has 896 model calls and
-640 grid renders. Invalid or refused candidates are excluded; no valid initial
-candidate or an invalid selection returns `None`. A rejected candidate may use the bounded repair calls described above.
-
-Console progress shows prompt IDs, stage numbers, input/output tokens and session
-elapsed time. The private output directory contains `run.json`, `progress.json`
-and one subdirectory per prompt. Prompt directories retain model responses and
-usage under `calls/`, source/PNG/rejection checkpoints under `renders/`, and the
-final `selected.js` and `result.json`. The source, seed, inputs, witness
-configuration, wallet identity and renderer identity must stay fixed on resume.
-Concurrency settings may change between runs.
-Recovery restores recorded invocation and delivery order before returning saved
-responses; those waits do not occupy inference capture slots.
-
-An infrastructure failure leaves that prompt `pending` while other prompts
-continue. Repeat the same command to resume saved model responses and render
-outcomes. Completed generation is reused and its final output is submitted again. Saved output and PNG hashes are checked
-before reuse, and one operator holds the output directory lock. The witness owns
-inference deduplication, shared prompt accounting and uncertain dispatches; a
-failed connection never permits this runner to buy a replacement inference.
-`run` exits with status 1 when any prompt is pending; declared failures are terminal.
-
-This is a local batch driver. Production sandbox isolation, verified renderer
-replay and receipt submission belong to the runtime described below.
-
-Outside `generate`, the runner checkpoints the returned JavaScript or explicit
-`None` before saving its final result through the witness Pod. It retries saving
-those bytes after a lost acknowledgement or Pod replacement. The collector reads
-the saved result record directly from the existing public R2 bucket. Replay validation compares
-the reproduced return with this independent submission; a storage receipt does
-not establish source reproducibility.
+The SDK owns inference deduplication and recovery of uncertain dispatches.
+Budget accounting uses verified captured usage, including discarded candidates;
+reading the same captured response again does not buy or charge another call.
+The collector reads the saved Pod result from the public R2 bucket. Validator
+replay compares the reproduced return with that independent submission; a stored
+result does not establish source reproducibility.
 
 ## Generated JavaScript
 
@@ -336,7 +290,7 @@ code-generation models.
 ### Rendering
 
 The runtime fixes the renderer build and default options. The supplied
-`renderer.render(source)` produces a four-view preview grid; use `RenderOptions`
+`await witness.render(source)` produces a four-view preview grid; use `RenderOptions`
 for explicit preview settings. The runtime records those options for replay.
 Final judging uses `render-service-js` 0.4.8 with eight white views, four gray views
 and a grid. The local browser viewer is for inspecting assets, not reproducing
@@ -598,6 +552,13 @@ To preview the examples, run `python3 -m http.server 8080` from this directory a
 open the [browser viewer](http://localhost:8080/examples/viewer.html).
 
 ### Tests
+
+With the matching SDK and `pytest` installed, run the Python reference tests
+from this directory:
+
+```sh
+python -m pytest -q
+```
 
 Run the Three.js validator tests from this directory:
 

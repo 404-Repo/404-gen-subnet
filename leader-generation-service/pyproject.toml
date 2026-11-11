@@ -1,0 +1,83 @@
+[tool.poetry]
+name = "leader-generation-service"
+version = "0.1.0"
+description = "Generate and publish the incumbent leader's round baseline"
+authors = ["Maxim Bladyko <max@404.xyz>"]
+readme = "README.md"
+packages = [{include = "leader_generation_service"}]
+
+[tool.poetry.dependencies]
+python = ">=3.11,<3.14"
+subnet-common = {path = "../shared", develop = true}
+404-witness-client = {path = "../witness-client", develop = true}
+404-miner-runtime = {path = "../miner-runtime", develop = true}
+404-witness-gateway = {path = "../witness-gateway", develop = true}
+pydantic-settings = "2.12.0"
+loguru = "0.7.3"
+httpx = "0.28.1"
+xxhash = "^3.6.0"
+aiohttp = "3.14.4"
+
+[tool.poetry.group.dev.dependencies]
+poetry = "2.2.1"
+poethepoet = {version = "0.38.0", extras = ["poetry_plugin"]}
+black = "25.11.0"
+ruff = "0.14.6"
+bandit = "1.9.2"
+mypy = "2.4.0"
+pytest = "8.3.5"
+pytest-asyncio = "0.25.3"
+build = "1.6.1"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.black]
+target-version = ["py311"]
+line-length = 120
+
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "UP", "I", "S", "B", "Q", "ASYNC", "PTH"]
+ignore = ["ASYNC109"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101"]
+
+[tool.ruff.lint.isort]
+combine-as-imports = true
+lines-after-imports = 2
+
+[tool.bandit]
+skips = ["B104"]
+exclude_dirs = ["tests", ".venv"]
+
+[tool.mypy]
+python_version = "3.11"
+files = ["leader_generation_service", "main.py", "build_image.py", "image_manifest.py"]
+mypy_path = ["../shared", "../witness-client/src", "../renderer-client/src", "../miner-runtime/src", "../witness-gateway"]
+plugins = ["pydantic.mypy"]
+ignore_missing_imports = true
+disallow_untyped_defs = true
+warn_return_any = true
+strict_equality = true
+warn_redundant_casts = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+pythonpath = [".", "../shared", "../witness-client/src", "../renderer-client/src", "../miner-runtime/src", "../witness-gateway"]
+
+[tool.poe]
+poetry_command = ""
+
+[tool.poe.tasks]
+test = "pytest"
+
+[tool.poe.tasks.lint]
+sequence = [{cmd = "ruff check ."}, {cmd = "black --check ."}, {cmd = "bandit . -rq -c pyproject.toml"}, {cmd = "mypy"}]

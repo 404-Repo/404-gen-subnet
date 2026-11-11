@@ -147,6 +147,8 @@ class AsyncPodGatewayClient:
         self._allocation = AsyncSignedTransport(http, hotkey, delivery_timeout)
         self._direct: AsyncSignedTransport | None = None
         self._connections: list[httpx.AsyncClient] = []
+        self._users: dict[AsyncSignedTransport, int] = {}
+        self._closing: dict[httpx.AsyncClient, asyncio.Task[None]] = {}
         self._snapshots: dict[str, Snapshot] = {}
         self._artifacts = AsyncArtifactClient()
 
@@ -159,6 +161,33 @@ class AsyncPodGatewayClient:
 
     async def replace_pod(self) -> None:
         await self.ensure_pod(replace=True)
+
+    def _close_connection(self, http: httpx.AsyncClient) -> asyncio.Task[None] | None:
+        if http not in self._connections:
+            return None
+        existing = self._closing.get(http)
+        if existing is not None:
+            return existing
+
+        async def close() -> None:
+            await http.aclose()
+            self._connections.remove(http)
+
+        task = asyncio.create_task(close())
+        self._closing[http] = task
+
+        def finished(done: asyncio.Task[None]) -> None:
+            # Failed cleanup is retained and reported by aclose().
+            if not done.cancelled() and done.exception() is None:
+                del self._closing[http]
+
+        task.add_done_callback(finished)
+        return task
+
+    def _retire_direct(self) -> None:
+        previous, self._direct = self._direct, None
+        if previous is not None and previous not in self._users:
+            self._close_connection(previous.http)
 
     def _replacement_intent(self, round_number: str, replaces: str | None) -> dict[str, object]:
         identity = (
@@ -277,6 +306,7 @@ class AsyncPodGatewayClient:
             tls=tls,
             server_name="witness.internal",
         )
+        self._retire_direct()
         self._connections.append(http)
         self._direct = service
         self._start_id = str(uuid.UUID(str(session["start_id"])))
@@ -286,6 +316,7 @@ class AsyncPodGatewayClient:
     async def ensure_pod(
         self, *, deadline: float | None = None, replace: bool = False, expected_round: str | None = None,
     ) -> str:
+        explicit_replacement = replace
         observed = self._start_id
         generation = self._replacement_generation
         if deadline is None:
@@ -315,13 +346,18 @@ class AsyncPodGatewayClient:
             )
             allocation = self._allocation_request if self._allocation_round == reply.get("round") else None
             current = reply.get("session")
+            if (
+                replace and not explicit_replacement and not self._replacement_pending
+                and self.round_number is not None and reply.get("round") != self.round_number
+            ):
+                replace = False
             continuing = self._replacement_pending
             if replace:
                 if self.round_number is not None and reply.get("round") != self.round_number:
                     raise WitnessError("Gateway round changed before replacement", code="round_mismatch", source="gateway")
                 self._replacement_generation += 1
                 self._replacement_pending = True
-                self._direct = None
+                self._retire_direct()
             if isinstance(current, dict) and current.get("phase") == "allocated" and (
                 replace and not continuing and (observed is None or current.get("start_id") == observed)
                 or continuing and allocation is not None
@@ -332,7 +368,7 @@ class AsyncPodGatewayClient:
                     allocation = self._replacement_intent(str(reply["round"]), old_start)
                     self._allocation_request, self._allocation_round = allocation, str(reply["round"])
                 self._replacement_pod = str(current["pod_id"])
-                self._direct = None
+                self._retire_direct()
                 reply = await self._allocation_json(
                     "POST", "/v1/pods/start", allocation, deadline=deadline, expected_round=expected_round
                 )
@@ -370,7 +406,7 @@ class AsyncPodGatewayClient:
                 if not isinstance(session, dict):
                     raise WitnessError("Invalid Pod allocation", source="gateway")
                 start_id = str(uuid.UUID(str(session["start_id"])))
-                if self._replacement_pending and session.get("phase") == "retiring":
+                if session.get("phase") == "retiring":
                     retiring = start_id
                 if session.get("phase") in ("rejected", "lost", "retired"):
                     raise WitnessError(
@@ -384,7 +420,7 @@ class AsyncPodGatewayClient:
                     self._allocation_request, self._allocation_round = allocation, str(reply["round"])
                 if self._attach(reply):
                     if self._replacement_pod is not None and session.get("pod_id") == self._replacement_pod:
-                        self._direct = None
+                        self._retire_direct()
                         raise WitnessError("Gateway returned the Pod being replaced", code="pod_replacement_unconfirmed", source="gateway")
                     self._replacement_pod = None
                     self._replacement_pending = False
@@ -410,16 +446,32 @@ class AsyncPodGatewayClient:
         finally:
             self._pod_lock.release()
 
-    async def _service(self, *, deadline: float | None = None) -> AsyncSignedTransport:
+    @asynccontextmanager
+    async def _service(self, *, deadline: float | None = None) -> AsyncIterator[AsyncSignedTransport]:
         await self.ensure_pod(deadline=deadline, expected_round=self.round_number)
         assert self._direct is not None
-        return self._direct
+        service = self._direct
+        self._users[service] = self._users.get(service, 0) + 1
+        try:
+            yield service
+        finally:
+            self._users[service] -= 1
+            if not self._users[service]:
+                del self._users[service]
+                if service is not self._direct:
+                    self._close_connection(service.http)
 
-    def _invalidate_for(self, code: object) -> bool:
+    def _invalidate_for(self, service: AsyncSignedTransport, code: object) -> bool:
         if code != "pod_not_selected":
             return False
-        self._direct = None
+        if service is self._direct:
+            self._retire_direct()
         return True
+
+    def _disconnected(self, service: AsyncSignedTransport) -> None:
+        if service is self._direct:
+            self._retire_direct()
+            self._start_id = None
 
     async def _request_once(
         self,
@@ -430,48 +482,49 @@ class AsyncPodGatewayClient:
         limit: int = 32768,
         deadline: float | None = None,
     ) -> bytes | None:
-        service = await self._service(deadline=deadline)
-        try:
-            return await service._request_once(method, path, body, limit=limit, deadline=deadline)
-        except (httpx.ConnectError, httpx.ConnectTimeout):
-            self._direct, self._start_id = None, None
-            raise
-        except WitnessError as error:
-            if not self._invalidate_for(error.code):
+        async with self._service(deadline=deadline) as service:
+            try:
+                return await service._request_once(method, path, body, limit=limit, deadline=deadline)
+            except (httpx.ConnectError, httpx.ConnectTimeout):
+                self._disconnected(service)
                 raise
-            service = await self._service(deadline=deadline)
+            except WitnessError as error:
+                if not self._invalidate_for(service, error.code):
+                    raise
+        async with self._service(deadline=deadline) as service:
             return await service._request_once(method, path, body, limit=limit, deadline=deadline)
 
     @asynccontextmanager
     async def tunnel(
         self, identifier: str, *, deadline: float | None = None
     ) -> AsyncIterator[AsyncWebSocketTunnel]:
-        service = await self._service(deadline=deadline)
-        async with service.tunnel(identifier, deadline=deadline) as tunnel:
+        async with self._service(deadline=deadline) as service, service.tunnel(identifier, deadline=deadline) as tunnel:
             yield tunnel
 
     async def aclose(self) -> None:
         async with AsyncExitStack() as cleanup:
             cleanup.push_async_callback(self._artifacts.aclose)
-            for http in self._connections:
-                cleanup.push_async_callback(http.aclose)
+            for http in self._connections.copy():
+                task = self._close_connection(http)
+                if task is not None:
+                    cleanup.push_async_callback(asyncio.shield, task)
 
     async def send(self, request: httpx.Request) -> httpx.Response:
-        service = await self._service()
-        try:
-            response = await service.send(request)
-        except (httpx.ConnectError, httpx.ConnectTimeout):
-            self._direct, self._start_id = None, None
-            raise
-        if response.status_code in (401, 409):
+        async with self._service() as service:
             try:
-                error = response.json()
-            except ValueError:
-                pass
-            else:
-                if isinstance(error, dict):
-                    self._invalidate_for(error.get("error"))
-        return response
+                response = await service.send(request)
+            except (httpx.ConnectError, httpx.ConnectTimeout):
+                self._disconnected(service)
+                raise
+            if response.status_code in (401, 409):
+                try:
+                    error = response.json()
+                except ValueError:
+                    pass
+                else:
+                    if isinstance(error, dict):
+                        self._invalidate_for(service, error.get("error"))
+            return response
 
     async def _download(self, link: object, limit: int) -> bytes:
         return await self._artifacts.download(link, limit, delivery_timeout=self.delivery_timeout)

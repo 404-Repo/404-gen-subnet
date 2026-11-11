@@ -10,17 +10,15 @@ import uuid
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Any, cast
 
 import httpx
 import pytest
 from bittensor_wallet import Keypair
-
-from witness_client import AsyncWitnessClient, WitnessClient, WitnessConfig, WitnessError
-from witness_client.async_pods import AsyncSignedTransport
-from witness_client.gateway import SignedTransport
-from test_client_api import config as config
 from test_async_transport import tls_context as tls_context
+from test_config import config as config
+from witness_client import AsyncWitnessClient, WitnessConfig, WitnessError
+from witness_client.async_pods import AsyncSignedTransport
 
 SOURCE = "export default function generate(THREE) { return new THREE.Group(); }"
 IMAGE = b"frozen prompt bytes"
@@ -30,7 +28,6 @@ RESULT: dict[str, object] = {
     "failure_reason": None,
     "size": len(SOURCE),
 }
-Mode = Literal["sync", "async"]
 
 
 @pytest.fixture(autouse=True)
@@ -42,7 +39,7 @@ def isolated_submission(monkeypatch: pytest.MonkeyPatch) -> None:
     def forbidden(*args: object, **kwargs: object) -> None:
         pytest.fail("Submission must not contact a real service")
 
-    monkeypatch.setattr("witness_client.client.Prover", ProverStub)
+    monkeypatch.setattr("witness_client.async_client.Prover", ProverStub)
     monkeypatch.setattr(httpx.HTTPTransport, "handle_request", forbidden)
     monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", forbidden)
 
@@ -50,63 +47,49 @@ def isolated_submission(monkeypatch: pytest.MonkeyPatch) -> None:
 @asynccontextmanager
 async def connected(
     config: WitnessConfig,
-    mode: Mode,
     handler: Callable[[httpx.Request], httpx.Response],
-) -> AsyncIterator[WitnessClient | AsyncWitnessClient]:
+) -> AsyncIterator[AsyncWitnessClient]:
     key = Keypair.create_from_uri("//Alice")
-    live: WitnessClient | AsyncWitnessClient
-    if mode == "sync":
-        live = WitnessClient(config, hotkey=key, openai_api_key="x" * 80)
-        http = httpx.Client(
-            base_url="https://192.0.2.1:8443", transport=httpx.MockTransport(handler)
-        )
-        live._gateway._direct = SignedTransport(
-            http,
-            key,
-            5,
-            headers={"Authorization": "Bearer scoped-access"},
-            server_name="witness.internal",
-        )
-        live._gateway._connections.append(http)
-    else:
-        live = AsyncWitnessClient(config, hotkey=key, openai_api_key="x" * 80)
-        async_http = httpx.AsyncClient(
-            base_url="https://192.0.2.1:8443", transport=httpx.MockTransport(handler)
-        )
-        live._gateway._direct = AsyncSignedTransport(
-            async_http,
-            key,
-            5,
-            headers={"Authorization": "Bearer scoped-access"},
-            server_name="witness.internal",
-        )
-        live._gateway._connections.append(async_http)
+    live: AsyncWitnessClient
+    live = AsyncWitnessClient(config, hotkey=key, openai_api_key="x" * 80)
+    async_http = httpx.AsyncClient(
+        base_url="https://192.0.2.1:8443", transport=httpx.MockTransport(handler)
+    )
+    live._gateway._direct = AsyncSignedTransport(
+        async_http,
+        key,
+        5,
+        headers={"Authorization": "Bearer scoped-access"},
+        server_name="witness.internal",
+    )
+    live._gateway._connections.append(async_http)
     live._gateway._start_id = str(uuid.uuid4())
     live._gateway.round_number = "configured-round"
     try:
         yield live
     finally:
-        if isinstance(live, AsyncWitnessClient):
-            await live.aclose()
-        else:
-            live.close()
+        await live.aclose()
 
 
 async def submit(
-    client: WitnessClient | AsyncWitnessClient, image: bytes, source: str | None
+    client: AsyncWitnessClient, image: bytes, source: str | None
 ) -> dict[str, object]:
-    if isinstance(client, AsyncWitnessClient):
-        return await client.submit(image, source)
-    return client.submit(image, source)
+    return await client.submit(image, source)
 
 
-@pytest.mark.parametrize("mode", ["sync", "async"])
 @pytest.mark.parametrize("raw", [False, True])
-@pytest.mark.parametrize("failure", [httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadError, httpx.ReadTimeout])
+@pytest.mark.parametrize(
+    "failure",
+    [httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadError, httpx.ReadTimeout],
+)
 @pytest.mark.parametrize("replaced", [False, True])
 def test_transport_failure_recovers_current_pod_without_forcing_replacement(
-    config: WitnessConfig, monkeypatch: pytest.MonkeyPatch, tls_context: tuple[object, Path],
-    mode: Mode, raw: bool, failure: type[httpx.TransportError], replaced: bool,
+    config: WitnessConfig,
+    monkeypatch: pytest.MonkeyPatch,
+    tls_context: tuple[object, Path],
+    raw: bool,
+    failure: type[httpx.TransportError],
+    replaced: bool,
 ) -> None:
     failed = False
     old_start = str(uuid.uuid4())
@@ -144,15 +127,12 @@ def test_transport_failure_recovers_current_pod_without_forcing_replacement(
     monkeypatch.setattr(httpx, "AsyncClient", async_http)
 
     async def run() -> None:
-        async with connected(config, mode, handler) as live:
+        async with connected(config, handler) as live:
             live._gateway._start_id = old_start
 
             async def lookup() -> dict[str, object]:
                 if raw:
-                    if isinstance(live, AsyncWitnessClient):
-                        data = await live._gateway._request_once("GET", "/v1/submissions")
-                    else:
-                        data = live._gateway._request_once("GET", "/v1/submissions")
+                    data = await live._gateway._request_once("GET", "/v1/submissions")
                     return {"raw": json.loads(data or b"{}")}
                 return {"submitted": await get_submitted(live)}
 
@@ -168,12 +148,10 @@ def test_transport_failure_recovers_current_pod_without_forcing_replacement(
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("mode", ["sync", "async"])
 @pytest.mark.parametrize("source", [SOURCE, "", None])
 def test_submit_computes_prompt_identity_and_reuses_owned_authenticated_connection(
     config: WitnessConfig,
     monkeypatch: pytest.MonkeyPatch,
-    mode: Mode,
     source: str | None,
 ) -> None:
     calls: list[httpx.Request] = []
@@ -210,7 +188,7 @@ def test_submit_computes_prompt_identity_and_reuses_owned_authenticated_connecti
         return httpx.Response(200, json={"submission": RESULT})
 
     async def run() -> None:
-        async with connected(config, mode, handler) as live:
+        async with connected(config, handler) as live:
             direct = live._gateway._direct
             assert direct is not None
             owned = direct.http
@@ -228,7 +206,6 @@ def test_submit_computes_prompt_identity_and_reuses_owned_authenticated_connecti
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("mode", ["sync", "async"])
 @pytest.mark.parametrize(
     "status,code",
     [
@@ -243,7 +220,6 @@ def test_submit_computes_prompt_identity_and_reuses_owned_authenticated_connecti
 )
 def test_submit_propagates_server_failure_without_retry(
     config: WitnessConfig,
-    mode: Mode,
     status: int,
     code: str,
 ) -> None:
@@ -254,7 +230,7 @@ def test_submit_propagates_server_failure_without_retry(
         return httpx.Response(status, json={"error": code})
 
     async def run() -> None:
-        async with connected(config, mode, handler) as live:
+        async with connected(config, handler) as live:
             with pytest.raises(WitnessError) as failed:
                 await submit(live, IMAGE, SOURCE)
             assert failed.value.status_code == status and failed.value.code == code
@@ -264,10 +240,8 @@ def test_submit_propagates_server_failure_without_retry(
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("mode", ["sync", "async"])
 def test_submit_propagates_lost_reply_without_repeating_the_request(
     config: WitnessConfig,
-    mode: Mode,
 ) -> None:
     calls: list[httpx.Request] = []
 
@@ -276,7 +250,7 @@ def test_submit_propagates_lost_reply_without_repeating_the_request(
         raise httpx.ReadError("Reply lost", request=request)
 
     async def run() -> None:
-        async with connected(config, mode, handler) as live:
+        async with connected(config, handler) as live:
             with pytest.raises(WitnessError) as failed:
                 await submit(live, IMAGE, SOURCE)
             assert failed.value.code == "submission_unresolved"
@@ -286,15 +260,16 @@ def test_submit_propagates_lost_reply_without_repeating_the_request(
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("mode", ["sync", "async"])
 @pytest.mark.parametrize(
     "body", [b"not JSON", b"[]", b"{}", b'{"submission":null}', b"x" * (256 * 1024 + 1)]
 )
 def test_submit_rejects_malformed_saved_metadata(
-    config: WitnessConfig, mode: Mode, body: bytes
+    config: WitnessConfig, body: bytes
 ) -> None:
     async def run() -> None:
-        async with connected(config, mode, lambda _: httpx.Response(200, content=body)) as live:
+        async with connected(
+            config, lambda _: httpx.Response(200, content=body)
+        ) as live:
             with pytest.raises(WitnessError) as failed:
                 await submit(live, IMAGE, SOURCE)
             assert failed.value.code == "invalid_submission"
@@ -319,7 +294,7 @@ def test_invalid_submission_fails_before_network(
 
     async def run() -> None:
         for mode in ("sync", "async"):
-            async with connected(config, mode, forbidden) as live:
+            async with connected(config, forbidden) as live:
                 with pytest.raises(ValueError):
                     await submit(live, image, source)
 
@@ -351,7 +326,7 @@ def test_cancelled_async_submission_closes_response_but_keeps_connection_owned(
                 else httpx.Response(200, json={"submission": RESULT})
             )
 
-        async with connected(config, "async", handler) as live:
+        async with connected(config, handler) as live:
             assert isinstance(live, AsyncWitnessClient)
             direct = live._gateway._direct
             assert direct is not None
@@ -368,17 +343,14 @@ def test_cancelled_async_submission_closes_response_but_keeps_connection_owned(
 
 
 async def get_submitted(
-    client: WitnessClient | AsyncWitnessClient,
+    client: AsyncWitnessClient,
 ) -> dict[str, dict[str, object]]:
-    if isinstance(client, AsyncWitnessClient):
-        return await client.get_submitted()
-    return client.get_submitted()
+    return await client.get_submitted()
 
 
-@pytest.mark.parametrize("mode", ["sync", "async"])
 @pytest.mark.parametrize("saved", [False, True])
 def test_get_submitted_returns_saved_outcomes_through_the_owned_connection(
-    config: WitnessConfig, monkeypatch: pytest.MonkeyPatch, mode: Mode, saved: bool
+    config: WitnessConfig, monkeypatch: pytest.MonkeyPatch, saved: bool
 ) -> None:
     entries = {
         "official-chair": RESULT,
@@ -395,7 +367,7 @@ def test_get_submitted_returns_saved_outcomes_through_the_owned_connection(
         return httpx.Response(200, json={"submissions": entries})
 
     async def run() -> None:
-        async with connected(config, mode, handler) as live:
+        async with connected(config, handler) as live:
             direct = live._gateway._direct
             assert direct is not None
             with monkeypatch.context() as patch:
@@ -411,14 +383,17 @@ def test_get_submitted_returns_saved_outcomes_through_the_owned_connection(
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("mode", ["sync", "async"])
 @pytest.mark.parametrize(
     "status,code",
-    [(401, "allocation_access_expired"), (403, "miner_not_assigned"),
-     (404, "artifact_storage_disabled"), (503, "witness_unavailable")],
+    [
+        (401, "allocation_access_expired"),
+        (403, "miner_not_assigned"),
+        (404, "artifact_storage_disabled"),
+        (503, "witness_unavailable"),
+    ],
 )
 def test_get_submitted_does_not_turn_server_failures_into_empty_results(
-    config: WitnessConfig, mode: Mode, status: int, code: str
+    config: WitnessConfig, status: int, code: str
 ) -> None:
     calls: list[httpx.Request] = []
 
@@ -427,7 +402,7 @@ def test_get_submitted_does_not_turn_server_failures_into_empty_results(
         return httpx.Response(status, json={"error": code})
 
     async def run() -> None:
-        async with connected(config, mode, handler) as live:
+        async with connected(config, handler) as live:
             with pytest.raises(WitnessError) as failed:
                 await get_submitted(live)
             assert failed.value.status_code == status and failed.value.code == code
@@ -437,9 +412,8 @@ def test_get_submitted_does_not_turn_server_failures_into_empty_results(
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("mode", ["sync", "async"])
 def test_get_submitted_preserves_transport_failure_without_retry(
-    config: WitnessConfig, mode: Mode
+    config: WitnessConfig,
 ) -> None:
     calls: list[httpx.Request] = []
 
@@ -448,7 +422,7 @@ def test_get_submitted_preserves_transport_failure_without_retry(
         raise httpx.ReadError("Connection lost", request=request)
 
     async def run() -> None:
-        async with connected(config, mode, handler) as live:
+        async with connected(config, handler) as live:
             with pytest.raises(WitnessError) as failed:
                 await get_submitted(live)
             assert failed.value.code == "submission_lookup_failed"
@@ -458,18 +432,26 @@ def test_get_submitted_preserves_transport_failure_without_retry(
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("mode", ["sync", "async"])
-@pytest.mark.parametrize("body", [
-    b"not JSON", b"[]", b"{}", b'{"submissions":null}', b'{"submissions":[]}',
-    b'{"submissions":{"invalid prompt ID":{}}}',
-    json.dumps({"submissions": {"a" * 64: None}}).encode(),
-    b"x" * (16 * 1024 * 1024 + 17),
-])
+@pytest.mark.parametrize(
+    "body",
+    [
+        b"not JSON",
+        b"[]",
+        b"{}",
+        b'{"submissions":null}',
+        b'{"submissions":[]}',
+        b'{"submissions":{"invalid prompt ID":{}}}',
+        json.dumps({"submissions": {"a" * 64: None}}).encode(),
+        b"x" * (16 * 1024 * 1024 + 17),
+    ],
+)
 def test_get_submitted_rejects_malformed_metadata(
-    config: WitnessConfig, mode: Mode, body: bytes
+    config: WitnessConfig, body: bytes
 ) -> None:
     async def run() -> None:
-        async with connected(config, mode, lambda _: httpx.Response(200, content=body)) as live:
+        async with connected(
+            config, lambda _: httpx.Response(200, content=body)
+        ) as live:
             with pytest.raises(WitnessError) as failed:
                 await get_submitted(live)
             assert failed.value.code == "invalid_submissions"

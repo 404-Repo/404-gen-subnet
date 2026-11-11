@@ -15,10 +15,10 @@ import openai
 import pytest
 from subnet_common.witness.certs import create
 from test_service import Harness, exchange_id
-from witness_client import WitnessClient
+from witness_client import AsyncWitnessClient
+from witness_client.async_transport import async_exchange as exchange
 from witness_client.calls import RequestKey
 from witness_client.request import serialize_body
-from witness_client.transport import exchange
 from witness_pod import VERIFY_SCRIPT
 from witness_pod.channel import Channel
 from witness_pod.storage import Store
@@ -27,10 +27,7 @@ from witness_pod.worker import Verifier, relay
 
 @pytest.mark.parametrize("leave,status", [(False, 200), (True, 200), (False, 401)])
 def test_native_direct_tls_durable_completion_and_exact_recovery(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    leave: bool,
-    status: int,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, leave: bool, status: int
 ) -> None:
     provider_dir = tmp_path / "provider"
     create(provider_dir, "localhost")
@@ -62,7 +59,6 @@ def test_native_direct_tls_durable_completion_and_exact_recovery(
         + response_body
     )
     seen: list[bytes] = []
-
     with socket.socket() as listener, ThreadPoolExecutor(max_workers=1) as pool:
         listener.bind(("127.0.0.1", 0))
         listener.listen()
@@ -90,7 +86,6 @@ def test_native_direct_tls_durable_completion_and_exact_recovery(
             done.set()
 
         captured = pool.submit(provider)
-
         original_run = subprocess.run
 
         def run_verifier(
@@ -135,43 +130,55 @@ def test_native_direct_tls_durable_completion_and_exact_recovery(
                 ("localhost", "/v1/responses"),
             )
 
-            def client_exchange(*args: object, **kwargs: object) -> bytes:
-                return exchange(*args, ca_file=provider_dir / "ca.pem", **kwargs)  # type: ignore[arg-type]
+            async def client_exchange(*args: object, **kwargs: object) -> bytes:
+                return await exchange(*args, ca_file=provider_dir / "ca.pem", **kwargs)
 
-            monkeypatch.setattr("witness_client.client.exchange", client_exchange)
-            original = WitnessClient._authorize
+            monkeypatch.setattr(
+                "witness_client.async_client.async_exchange", client_exchange
+            )
+            original = AsyncWitnessClient._authorize
             if leave:
 
-                def authorize(client: WitnessClient, tunnel: object, disclosure: object, *, deadline: float) -> None:
-                    original(client, tunnel, disclosure, deadline=deadline)  # type: ignore[arg-type]
-                    tunnel.close()  # type: ignore[attr-defined]
+                async def authorize(
+                    client: AsyncWitnessClient,
+                    tunnel: object,
+                    disclosure: object,
+                    *,
+                    deadline: float,
+                ) -> None:
+                    await original(client, tunnel, disclosure, deadline=deadline)
+                    await tunnel.close()
                     raise OSError("Fixture miner left after authorization")
 
-                monkeypatch.setattr(WitnessClient, "_authorize", authorize)
+                monkeypatch.setattr(AsyncWitnessClient, "_authorize", authorize)
             async with fixture.running():
-                with fixture.client() as witness:
+                async with fixture.client() as witness:
                     gateway = witness._gateway
-                    await asyncio.to_thread(gateway.ensure_pod)
+                    await gateway.ensure_pod()
                     await fixture.runners[0].cleanup()
                     gateway_bytes = fixture.gateway_bytes
                     bound = witness
 
-                    def run() -> None:
+                    async def run() -> None:
                         if status != 200:
                             with pytest.raises(openai.APIStatusError) as rejected:
-                                bound.create(model="fixture", input="x" * (1024 * 1024))
+                                await bound.create(model="fixture", input="x" * (1024 * 1024))
                             assert rejected.value.status_code == status
                             assert rejected.value.response.content == response_body
                             with pytest.raises(openai.APIStatusError):
-                                witness.resume(exchange_id(witness))
+                                await witness.resume(exchange_id(witness))
                             return
-                        answer = bound.create(model="fixture", input="x" * (1024 * 1024))
+                        answer = await bound.create(
+                            model="fixture", input="x" * (1024 * 1024)
+                        )
                         assert answer.output_text == text
                         if not leave:
                             assert fixture.origin_bytes == 0
-                        assert witness.resume(exchange_id(witness)).output_text == text
+                        assert (
+                            await witness.resume(exchange_id(witness))
+                        ).output_text == text
 
-                    await asyncio.wait_for(asyncio.to_thread(run), 120)
+                    await asyncio.wait_for(run(), 120)
                     assert done.is_set() and len(seen) == 1
                     assert fixture.gateway_bytes == gateway_bytes
                     assert fixture.provider.creates == 1

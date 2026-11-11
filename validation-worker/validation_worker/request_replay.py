@@ -11,7 +11,7 @@ import struct
 import threading
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
-from typing import Literal, Protocol, Self, Unpack, overload
+from typing import TYPE_CHECKING, Literal, Protocol, Self, Unpack, overload
 
 from openai.types.responses import Response, ResponseStreamEvent
 from openai.types.responses.response_create_params import ResponseCreateParamsBase
@@ -20,10 +20,15 @@ from pydantic import BaseModel, ConfigDict
 from renderer_client import Renderer, RenderOptions
 from renderer_client.client import DEFAULT_OPTIONS
 from subnet_common.witness.pricing import PromptBudget
-from witness_client import AsyncWitnessClient, CapturedResponse, WitnessClient, WitnessError
+from witness_client import AsyncWitnessClient, CapturedResponse, WitnessError
+from witness_client._core import _ClientState
 from witness_client.calls import Digest, RequestKey, canonical
 from witness_client.pods import CallView
 from witness_client.response import AsyncModelStream, ModelStream, model_error, model_result
+
+
+if TYPE_CHECKING:
+    from .replay_worker import Witness
 
 
 PNG_URL = "data:image/png;base64,"
@@ -277,7 +282,7 @@ class PreparedReplay(BaseModel):
     historical_observations_available: Literal[False] = False
 
 
-class RecordedWitnessClient(WitnessClient):
+class RecordedWitnessClient(_ClientState):
     """Give the local replay miner the saved answer for each matching request.
 
     Requests use the witness client's normal format. Responses and errors come
@@ -342,20 +347,26 @@ class RecordedWitnessClient(WitnessClient):
         **params: Unpack[ResponseCreateParamsBase],
     ) -> Response | ModelStream:
         """Answer the miner's request from a matching witness recording."""
-        key, body = self._request(request_id, session_id, params)
-        call_id = RequestKey.from_body(key.provider, body, key.request_id, session_id=key.session_id).id
-        with self._lock:
-            occurrence = self._occurrences.get(call_id, 0)
-            self._occurrences[call_id] = occurrence + 1
-        self.emit("model_operation", call_id=call_id, occurrence=occurrence, action="create", index=0, stream=stream)
+        key, body, call_id, occurrence = self.start_call(request_id, session_id, params, stream=stream)
         try:
-            captured = self._recorded_response(key, body)
+            captured = self.recorded_response(key, body)
         except ReplayMismatch:
             raise
         except WitnessError as error:
             raise model_error(error, self._mode) from error
         result = model_result(captured.status, captured.body, self._mode, stream=stream)
         return _RecordedStream(result, self.emit, call_id, occurrence) if isinstance(result, ModelStream) else result
+
+    def start_call(
+        self, request_id: int, session_id: str | None, params: ResponseCreateParamsBase, *, stream: bool
+    ) -> tuple[RequestKey, bytes, str, int]:
+        key, body = self._request(request_id, session_id, params)
+        call_id = RequestKey.from_body(key.provider, body, key.request_id, session_id=key.session_id).id
+        with self._lock:
+            occurrence = self._occurrences.get(call_id, 0)
+            self._occurrences[call_id] = occurrence + 1
+        self.emit("model_operation", call_id=call_id, occurrence=occurrence, action="create", index=0, stream=stream)
+        return key, body, call_id, occurrence
 
     def render(self, source: str, options: RenderOptions = DEFAULT_OPTIONS) -> bytes:
         """Ask the replay host for a fresh render of the miner's source."""
@@ -516,7 +527,7 @@ class RecordedWitnessClient(WitnessClient):
                 self.emit("request_mismatch", error=str(error))
                 raise
 
-    def _recorded_response(self, key: RequestKey, body: bytes) -> CapturedResponse:
+    def recorded_response(self, key: RequestKey, body: bytes) -> CapturedResponse:
         actual = RequestKey.from_body(key.provider, body, key.request_id, session_id=key.session_id)
         if key.id in self.by_key:
             self.request_matches[actual.id] = (
@@ -605,6 +616,29 @@ class RecordedWitnessClient(WitnessClient):
         if self.problem is not None:
             raise self.problem
 
+    def summary(self) -> dict[str, object]:
+        return {
+            "request_matches": {
+                matching: sum(value == matching for value in self.request_matches.values())
+                for matching in ("exact", "exact_png_pixels", "image_tolerance")
+            },
+            "image_tolerance_matches": [
+                {
+                    "call_id": call_id,
+                    "recorded_call_id": self.image_aliases[call_id].id,
+                    "images": [asdict(difference) for difference in differences],
+                }
+                for call_id, differences in self.image_tolerance_matches.items()
+                if self.request_matches.get(call_id) == "image_tolerance"
+            ],
+            "charged_calls": len(self.budget.charges),
+            "known_credits": str(sum(value for value in self.budget.charges.values() if value is not None)),
+            "unknown_usage_calls": sorted(self.unknown_usage),
+            "assumed_connection_failures": sorted(self.assumed_failures),
+            "used_exchanges": sorted(self.used),
+            "unused_exchanges": sorted(set(self.inventory.captures) - self.used),
+        }
+
 
 class _AsyncRecordedStream(AsyncModelStream):
     """Keep the miner's logged stream reads and closes off its event loop."""
@@ -626,7 +660,7 @@ class _AsyncRecordedStream(AsyncModelStream):
 class AsyncRecordedWitnessClient(AsyncWitnessClient):
     """Let async miners use the same recorded answers and fresh renderer."""
 
-    def __init__(self, witness: RecordedWitnessClient) -> None:
+    def __init__(self, witness: RecordedWitnessClient | Witness) -> None:
         self._recorded = witness
         self.responses = self
 

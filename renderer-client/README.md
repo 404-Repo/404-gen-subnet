@@ -82,7 +82,7 @@ options = RenderOptions(thetas=(30,), phis=(0,), lighting="neutral")
 ```
 
 For the Witness Pod's renderer, use `witness.render(source, options)` through
-`WitnessClient`, or await it through `AsyncWitnessClient`. It owns authentication
+`AsyncWitnessClient`. It owns authentication
 and routing and needs no renderer identity, URL, transport or separate client.
 The explicit `RendererClient` transport and `ArtifactClient` APIs remain supported
 for existing hosts.
@@ -152,7 +152,7 @@ interaction from looking replayable.
 The records are in-memory values, not an authenticated transcript format. The
 validator must establish image provenance or apply its agreed render-comparison
 policy before supplying records. This client does not decide a pixel tolerance,
-trust arbitrary images, persist R2 evidence, or replay model calls. `WitnessClient`
+trust arbitrary images, persist R2 evidence, or replay model calls. `AsyncWitnessClient`
 remains the separate model client.
 
 ## Checks

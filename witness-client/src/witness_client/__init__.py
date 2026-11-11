@@ -5,8 +5,8 @@ from renderer_client import (
     RenderUnavailable,
 )
 
+from ._core import CaptureContext, CapturedResponse
 from .async_client import AsyncWitnessClient
-from .client import CaptureContext, CapturedResponse, WitnessClient
 from .errors import ExchangePending, WitnessError
 from .types import JSONValue, Usage, WitnessConfig
 
@@ -21,7 +21,6 @@ __all__ = [
     "RenderRejected",
     "RenderUnavailable",
     "Usage",
-    "WitnessClient",
     "WitnessConfig",
     "WitnessError",
 ]

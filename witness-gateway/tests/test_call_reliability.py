@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import json
-from concurrent.futures import ThreadPoolExecutor
-from contextlib import ExitStack
+from contextlib import AsyncExitStack
 from pathlib import Path
 from typing import cast
 
 import pytest
+from miner_runtime.observations import ObservedWitness
 from miner_runtime.runner import run_generation
 from openai.types.responses import Response
 from support import MemoryState
@@ -17,7 +17,6 @@ from test_recording import SCOPE
 from test_recovery import PROOF, capture, evidence, prefix
 from test_generation import Capture
 from test_service import Harness, call_key
-from witness_client import WitnessClient
 from witness_client.calls import canonical
 from witness_client.response import ModelStream
 from witness_pod.records import RecordingConflict
@@ -88,7 +87,9 @@ def test_same_key_repeated_results_are_charged_once(
 ) -> None:
     live = Capture(tmp_path)
 
-    def generate(image: bytes, seed: int, witness: WitnessClient, renderer: None) -> str:
+    def generate(
+        image: bytes, seed: int, witness: ObservedWitness, renderer: None
+    ) -> str:
         outcomes = []
         for _ in range(3):
             value = (
@@ -114,25 +115,24 @@ def test_many_independent_clients_join_one_capture_and_keep_the_same_outcome(
         fixture = Harness(tmp_path, monkeypatch)
         fixture.allow_response.clear()
         async with fixture.running():
-            with ExitStack() as stack, ThreadPoolExecutor(max_workers=32) as pool:
-                clients = [stack.enter_context(fixture.client(f"client-{index}")) for index in range(32)]
+            async with AsyncExitStack() as stack:
+                clients = [await stack.enter_async_context(fixture.client(f"client-{index}")) for index in range(32)]
                 for client in clients:
                     client._gateway.delivery_timeout = 15
-                    await asyncio.to_thread(client._gateway.ensure_pod)
+                    await client._gateway.ensure_pod()
 
-                def create(index: int) -> tuple[str, int, int]:
+                async def create(index: int) -> tuple[str, int, int]:
                     client = clients[index]
                     if index % 2:
-                        events = list(client.responses.create(model="fixture", input="image", stream=True))
+                        events = [event async for event in await client.responses.create(model="fixture", input="image", stream=True)]
                         assert events[-1].type == "response.completed"
                         response = events[-1].response
                     else:
-                        response = client.responses.create(model="fixture", input="image")
+                        response = await client.responses.create(model="fixture", input="image")
                     assert response.usage is not None
                     return response.output_text, response.usage.input_tokens, response.usage.output_tokens
 
-                loop = asyncio.get_running_loop()
-                jobs = [loop.run_in_executor(pool, create, index) for index in range(32)]
+                jobs = [asyncio.create_task(create(index)) for index in range(32)]
                 try:
                     assert await asyncio.to_thread(fixture.dispatched.wait, 5)
                     await asyncio.sleep(0.1)

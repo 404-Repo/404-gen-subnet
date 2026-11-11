@@ -125,8 +125,7 @@ remain caller-provided inputs.
 Legacy final-save checkpoint reuse checks the prompt hash, seed, renderer and
 source-commit metadata, including its absence.
 
-Live execution runners can call `WitnessClient.submit(image, source)` or await
-`AsyncWitnessClient.submit(image, source)` after generation returns.
+Live execution runners await `AsyncWitnessClient.submit(image, source)` after generation returns.
 `POST /v1/submissions` accepts `generation.prompt_sha256`, `source` (JavaScript or
 null), and the base64 `prompt_image` for JavaScript. An omitted `generation.seed`
 uses the assigned Pod's configured round seed. Legacy callers may still supply
@@ -138,7 +137,7 @@ frozen `prompt_ids` mapping resolves image SHA256 hashes to the official filenam
 IDs used by the submission collector. An empty
 index returns an empty object inside `submissions`; saved failures are retained.
 The response is bounded to a 16 MiB index plus its JSON envelope. Live runners use
-`WitnessClient.get_submitted()` or await `AsyncWitnessClient.get_submitted()`
+`await AsyncWitnessClient.get_submitted()`
 to resume a batch or recover a committed result after a lost save reply. Lookup
 performs no inference or rendering and does not wait for an unfinished save.
 Generation/replay witness stubs reject both submission operations; validator

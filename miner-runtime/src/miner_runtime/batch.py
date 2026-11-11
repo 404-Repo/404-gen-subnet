@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 from collections.abc import Awaitable, Callable, Mapping
@@ -16,15 +17,84 @@ from loguru import logger
 from witness_client import AsyncWitnessClient, WitnessConfig
 
 
-async def read_image(source: str | bytes, http: httpx.AsyncClient) -> bytes:
+MAX_PROMPT_DOWNLOAD_BYTES = 16 * 1024 * 1024
+
+
+async def read_image(source: str | bytes, http: httpx.AsyncClient, *, max_bytes: int | None = None) -> bytes:
     if isinstance(source, bytes):
         return source
-    if source.startswith(("https://", "http://")):
-        response = await http.get(source)
-        response.raise_for_status()
-        return response.content
+    if source.lower().startswith(("https://", "http://")):
+        async with http.stream("GET", source) as response:
+            response.raise_for_status()
+            if max_bytes is None:
+                return await response.aread()
+            body = bytearray()
+            async for chunk in response.aiter_bytes():
+                if len(body) + len(chunk) > max_bytes:
+                    raise ValueError("Prompt image exceeds its download size limit")
+                body.extend(chunk)
+            return bytes(body)
     async with aiofiles.open(Path(source).expanduser(), "rb") as image_file:
         return await image_file.read()
+
+
+async def run_pass(
+    generate: Callable[[bytes, int, AsyncWitnessClient], Awaitable[str | None]],
+    pending: dict[str, str | bytes],
+    seed: int,
+    *,
+    client: AsyncWitnessClient,
+    workers: int = 8,
+    validate_witness: Callable[[AsyncWitnessClient], Awaitable[Mapping[str, str]]] | None = None,
+    prompt_hashes: Mapping[str, str] | None = None,
+) -> None:
+    """Process pending prompts once, removing confirmed submissions as they finish."""
+    if not pending:
+        return
+    download_limit = MAX_PROMPT_DOWNLOAD_BYTES if prompt_hashes is not None else None
+    async with httpx.AsyncClient(timeout=30, follow_redirects=True, trust_env=False) as http:
+        submitted = await client.get_submitted()
+        if prompt_hashes is not None and set(submitted) - set(prompt_hashes):
+            raise ValueError("Witness contains unexpected prompt IDs")
+        queue = asyncio.Queue[tuple[str, str | bytes]]()
+        for prompt_id, source in pending.copy().items():
+            if prompt_id in submitted:
+                logger.info("{} | already submitted", prompt_id[:12])
+                del pending[prompt_id]
+            else:
+                queue.put_nowait((prompt_id, source))
+
+        async def worker() -> None:
+            while not queue.empty():
+                prompt_id, source = queue.get_nowait()
+                try:
+                    image = await read_image(source, http, max_bytes=download_limit)
+                    if prompt_hashes is not None and hashlib.sha256(image).hexdigest() != prompt_hashes[prompt_id]:
+                        raise ValueError("Prompt image differs from its frozen hash")
+                    if validate_witness is not None:
+                        await validate_witness(client)
+                    logger.info("{} | generating", prompt_id[:12])
+
+                    result = await generate(image, seed, client)
+                    await client.submit(image, result)
+
+                    logger.info("{} | submitted", prompt_id[:12])
+
+                    del pending[prompt_id]
+                except Exception:  # noqa: BLE001
+                    logger.exception("Prompt {} failed", prompt_id)
+
+        await asyncio.gather(*(worker() for _ in range(workers)))
+        # A failed submission request may already have saved a terminal outcome.
+        if pending:
+            if validate_witness is not None:
+                await validate_witness(client)
+            submitted = await client.get_submitted()
+            for prompt_id in submitted:
+                pending.pop(prompt_id, None)
+
+    if pending:
+        raise RuntimeError(f"{len(pending)} prompts remain after one pass")
 
 
 async def run(
@@ -42,52 +112,25 @@ async def run(
     wallet_path: str = "~/.bittensor/wallets",
     api: bool = False,
 ) -> None:
+    """Run pending prompts with a fresh client for each configured attempt."""
     remaining = dict(prompts)
     if not remaining:
         return
     config = cast(WitnessConfig, json.loads(witness_config.read_bytes()))
     hotkey = Wallet(name=wallet_name, hotkey=wallet_hotkey, path=str(Path(wallet_path).expanduser())).hotkey
 
-    async def try_run() -> None:
-        async with AsyncWitnessClient(
-            config,
-            hotkey=hotkey,
-            openai_api_key=os.environ["OPENAI_API_KEY"] if api else None,
-            subscription=None if api else "codex",
-            parallel_calls=parallel_calls,
-            parallel_preparations=parallel_preparations,
-        ) as witness, httpx.AsyncClient(timeout=30, follow_redirects=True, trust_env=False) as http:
-            submitted = await witness.get_submitted()
-            queue = asyncio.Queue[tuple[str, str | bytes]]()
-            for prompt_id, source in remaining.copy().items():
-                if prompt_id in submitted:
-                    logger.info("{} | already submitted", prompt_id[:12])
-                    del remaining[prompt_id]
-                else:
-                    queue.put_nowait((prompt_id, source))
-
-            async def worker() -> None:
-                while not queue.empty():
-                    prompt_id, source = queue.get_nowait()
-                    try:
-                        image = await read_image(source, http)
-                        logger.info("{} | generating", prompt_id[:12])
-
-                        result = await generate(image, seed, witness)
-                        await witness.submit(image, result)
-
-                        logger.info("{} | submitted", prompt_id[:12])
-
-                        del remaining[prompt_id]
-                    except Exception:  # noqa: BLE001
-                        logger.exception("Prompt {} failed", prompt_id)
-
-            await asyncio.gather(*(worker() for _ in range(workers)))
-
     for attempt in range(1, attempts + 1):
         logger.info("Attempt {}/{} | {} prompts remaining", attempt, attempts, len(remaining))
         try:
-            await try_run()
+            async with AsyncWitnessClient(
+                config,
+                hotkey=hotkey,
+                openai_api_key=os.environ["OPENAI_API_KEY"] if api else None,
+                subscription=None if api else "codex",
+                parallel_calls=parallel_calls,
+                parallel_preparations=parallel_preparations,
+            ) as witness:
+                await run_pass(generate, remaining, seed, client=witness, workers=workers)
         except Exception:  # noqa: BLE001
             logger.exception("Attempt {}/{} failed", attempt, attempts)
         if not remaining:

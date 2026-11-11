@@ -6,7 +6,7 @@ defines lifecycle, evidence, budgets and pinned runtime configuration.
 
 ```mermaid
 flowchart LR
-    M[Trusted runner and WitnessClient] -->|Signed calls and TLS chunks| G[Python gateway]
+    M[Trusted runner and AsyncWitnessClient] -->|Signed calls and TLS chunks| G[Python gateway]
     G -->|Manage exact owned resources| P[RunPod CPU Pods]
     P --> W[Capture worker and verifier]
     W <-->|Provider TLS| O[OpenAI]

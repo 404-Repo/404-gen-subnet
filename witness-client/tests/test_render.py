@@ -10,15 +10,14 @@ from collections.abc import AsyncIterator
 import httpx
 import pytest
 from bittensor_wallet import Keypair
-from test_client_api import config as config
-from test_submission import SOURCE, Mode, connected
+from test_config import config as config
+from test_submission import SOURCE, connected
 from test_submission import isolated_submission as isolated_submission
 from witness_client import (
     AsyncWitnessClient,
     RenderOptions,
     RenderRejected,
     RenderUnavailable,
-    WitnessClient,
     WitnessConfig,
 )
 
@@ -27,18 +26,14 @@ GRID = RenderOptions(lighting="neutral")
 
 
 async def render(
-    client: WitnessClient | AsyncWitnessClient, source: str, options: RenderOptions = GRID
+    client: AsyncWitnessClient, source: str, options: RenderOptions = GRID
 ) -> bytes:
-    if isinstance(client, AsyncWitnessClient):
-        return await client.render(source, options)
-    return client.render(source, options)
+    return await client.render(source, options)
 
 
-@pytest.mark.parametrize("mode", ["sync", "async"])
 def test_render_reuses_the_authenticated_pod_and_preserves_options_and_timeout(
     config: WitnessConfig,
     monkeypatch: pytest.MonkeyPatch,
-    mode: Mode,
 ) -> None:
     calls: list[httpx.Request] = []
     options = RenderOptions(thetas=(30,), phis=(-10,), img_size=256, lighting="neutral")
@@ -73,7 +68,7 @@ def test_render_reuses_the_authenticated_pod_and_preserves_options_and_timeout(
         return httpx.Response(200, headers={"content-type": "image/png"}, content=PNG)
 
     async def run() -> None:
-        async with connected(config, mode, handler) as client:
+        async with connected(config, handler) as client:
             direct = client._gateway._direct
             assert direct is not None
             owned = direct.http
@@ -91,8 +86,7 @@ def test_render_reuses_the_authenticated_pod_and_preserves_options_and_timeout(
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("mode", ["sync", "async"])
-def test_render_preserves_structured_rejections(config: WitnessConfig, mode: Mode) -> None:
+def test_render_preserves_structured_rejections(config: WitnessConfig) -> None:
     details = {
         "error": "validation_failed",
         "failures": [{"code": "geometry"}],
@@ -100,7 +94,9 @@ def test_render_preserves_structured_rejections(config: WitnessConfig, mode: Mod
     }
 
     async def run() -> None:
-        async with connected(config, mode, lambda _: httpx.Response(422, json=details)) as client:
+        async with connected(
+            config, lambda _: httpx.Response(422, json=details)
+        ) as client:
             with pytest.raises(RenderRejected) as rejected:
                 await render(client, SOURCE)
             assert rejected.value.details == details
@@ -108,7 +104,6 @@ def test_render_preserves_structured_rejections(config: WitnessConfig, mode: Mod
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("mode", ["sync", "async"])
 @pytest.mark.parametrize(
     "status,body,content_type",
     [
@@ -122,7 +117,6 @@ def test_render_preserves_structured_rejections(config: WitnessConfig, mode: Mod
 )
 def test_render_propagates_errors_without_retry(
     config: WitnessConfig,
-    mode: Mode,
     status: int,
     body: bytes,
     content_type: str,
@@ -134,7 +128,7 @@ def test_render_propagates_errors_without_retry(
         return httpx.Response(status, headers={"content-type": content_type}, content=body)
 
     async def run() -> None:
-        async with connected(config, mode, handler) as client:
+        async with connected(config, handler) as client:
             with pytest.raises(RenderUnavailable):
                 await render(client, SOURCE)
         assert len(calls) == 1
@@ -142,9 +136,8 @@ def test_render_propagates_errors_without_retry(
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("mode", ["sync", "async"])
 def test_render_propagates_transport_failure_without_retry(
-    config: WitnessConfig, mode: Mode
+    config: WitnessConfig,
 ) -> None:
     calls: list[httpx.Request] = []
 
@@ -153,7 +146,7 @@ def test_render_propagates_transport_failure_without_retry(
         raise httpx.ReadError("Preview reply lost", request=request)
 
     async def run() -> None:
-        async with connected(config, mode, handler) as client:
+        async with connected(config, handler) as client:
             with pytest.raises(RenderUnavailable) as failed:
                 await render(client, SOURCE)
             assert isinstance(failed.value.__cause__, httpx.ReadError)
@@ -162,13 +155,12 @@ def test_render_propagates_transport_failure_without_retry(
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("mode", ["sync", "async"])
-def test_render_checks_source_size_before_network(config: WitnessConfig, mode: Mode) -> None:
+def test_render_checks_source_size_before_network(config: WitnessConfig) -> None:
     def forbidden(request: httpx.Request) -> httpx.Response:
         pytest.fail("Oversized source must not reach the Pod")
 
     async def run() -> None:
-        async with connected(config, mode, forbidden) as client:
+        async with connected(config, forbidden) as client:
             with pytest.raises(ValueError, match="1 MiB"):
                 await render(client, "é" * (512 * 1024 + 1))
 
@@ -199,7 +191,7 @@ def test_cancelled_async_render_closes_response_and_leaves_the_client_usable(
                 return httpx.Response(200, headers={"content-type": "image/png"}, stream=Stream())
             return httpx.Response(200, headers={"content-type": "image/png"}, content=PNG)
 
-        async with connected(config, "async", handler) as client:
+        async with connected(config, handler) as client:
             task = asyncio.create_task(render(client, SOURCE))
             await asyncio.wait_for(entered.wait(), 1)
             task.cancel()

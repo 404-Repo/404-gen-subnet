@@ -14,7 +14,8 @@ import httpx
 from bittensor_wallet import Keypair
 from subnet_common.witness.models import Scope
 from subnet_common.witness.state import Snapshot, StateConflict
-from witness_client import CapturedResponse, WitnessClient, WitnessError
+from witness_client import CapturedResponse, WitnessError
+from witness_client._core import _ClientState
 from witness_client.calls import RequestKey, canonical
 from witness_client.pods import PodGatewayClient
 from witness_pod.budget import Budget
@@ -91,7 +92,7 @@ class MemoryState:
         yield from keys
 
 
-class Capture(WitnessClient):
+class Capture(_ClientState):
     def __init__(self, directory: Path, *, pricing: bytes = PRICING) -> None:
         self._state = directory / "state"
         self._state.mkdir(mode=0o700)
@@ -102,8 +103,6 @@ class Capture(WitnessClient):
         self._gateway = cast(
             PodGatewayClient, SimpleNamespace(delivery_timeout=2, round_number=SCOPE.round, ensure_pod=lambda: START)
         )
-        self._calls_lock, self._calls = threading.Lock(), {}
-        self._call_slots = None
         self.state = MemoryState()
         self.records, self.budget = CallRecords(self.state), Budget(self.state, pricing)
         self.pricing = pricing

@@ -1,0 +1,44 @@
+ARG GO_IMAGE=golang:1.27.3-bookworm@sha256:972b4110ba0f47539a975c31e52c64765e1ff19f2d74469ae4a595c6676e80a5
+ARG PYTHON_IMAGE=python:3.13.12-bookworm@sha256:9a4a5ceafb4ddd7468a09ade0049463a7bd1acbefda52adee748544110fd032d
+
+FROM ${GO_IMAGE} AS proof
+ENV GOTOOLCHAIN=local CGO_ENABLED=1 GOFLAGS=-mod=readonly
+WORKDIR /native
+COPY witness-client/native/ ./
+RUN go build -trimpath -buildmode=c-shared -o /libwitnessproof.so . && \
+    go version -m /libwitnessproof.so > /go-build.txt
+
+FROM ${PYTHON_IMAGE} AS python
+RUN command -v git || (apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*)
+
+FROM python AS build
+ARG OFFLINE=0
+ENV PIP_NO_INDEX=${OFFLINE} PIP_FIND_LINKS=/wheelhouse PIP_DISABLE_PIP_VERSION_CHECK=1
+COPY .wheelhouse/ /wheelhouse/
+COPY miner-runtime/requirements-runpod.txt /source/requirements.txt
+RUN python -m venv /opt/leader-image/venv && \
+    /opt/leader-image/venv/bin/python -m pip install --no-cache-dir --require-hashes --only-binary=:all: -r /source/requirements.txt
+COPY witness-client/ /source/witness-client/
+COPY renderer-client/ /source/renderer-client/
+COPY miner-runtime/ /source/miner-runtime/
+COPY --from=proof /libwitnessproof.so /source/witness-client/src/witness_client/libwitnessproof.so
+COPY --from=proof /go-build.txt /source/go-build.txt
+RUN /opt/leader-image/venv/bin/python -m build --wheel --no-isolation --outdir /source/wheels /source/witness-client && \
+    /opt/leader-image/venv/bin/python -m build --wheel --outdir /source/wheels /source/renderer-client && \
+    /opt/leader-image/venv/bin/python -m build --wheel --no-isolation --outdir /source/wheels /source/miner-runtime && \
+    /opt/leader-image/venv/bin/python -m pip install --no-index --no-deps /source/wheels/*.whl && \
+    /opt/leader-image/venv/bin/python -m pip check
+COPY witness-server/worker/witness_pod/verifier/params/ /opt/leader-image/params/
+COPY source.json /source/source.json
+COPY leader-generation-service/image_manifest.py /source/image_manifest.py
+ENV GOMAXPROCS=2 GOMEMLIMIT=768MiB
+RUN /opt/leader-image/venv/bin/python /source/image_manifest.py /source /source/source.json /opt/leader-image/params /opt/leader-image/provenance.json
+
+FROM python AS runtime
+ARG SOURCE_COMMIT
+LABEL org.opencontainers.image.revision=${SOURCE_COMMIT}
+COPY --from=build /opt/leader-image/ /opt/leader-image/
+COPY NOTICE.md /opt/leader-image/licenses/NOTICE.md
+COPY witness-server/worker/witness_pod/verifier/THIRD_PARTY_NOTICES.md /opt/leader-image/licenses/PROOF_THIRD_PARTY_NOTICES.md
+ENV PYTHONUNBUFFERED=1
+ENTRYPOINT ["/opt/leader-image/venv/bin/python", "-m", "miner_runtime.pod"]

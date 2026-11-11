@@ -6,17 +6,19 @@ import asyncio
 import hashlib
 import json
 import time
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import httpx
 import pytest
 from bittensor_wallet import Keypair
-
-from witness_client import AsyncWitnessClient, WitnessConfig, WitnessError
 from test_async_client import isolated_async_client as isolated_async_client
 from test_async_transport import tls_context as tls_context
-from test_client_api import config as config
+from test_config import config as config
+from witness_client import AsyncWitnessClient, WitnessConfig, WitnessError
 
 PNG = b"\x89PNG\r\n\x1a\n"
 FIRST = "00000000-0000-4000-8000-000000000001"
@@ -298,5 +300,221 @@ def test_rejected_replacement_raises_without_starting_again(
                 await witness.replace_pod()
             assert failed.value.code == "pod_unavailable"
             assert service.created == 1
+
+    asyncio.run(run())
+
+
+def test_repeated_replacements_close_idle_clients_and_keep_the_current_client_open(
+    config: WitnessConfig, service: AllocationService,
+) -> None:
+    async def run() -> None:
+        async with client(config) as witness:
+            await witness.get_submitted()
+            for number in range(1, 5):
+                old = witness._gateway._direct
+                assert old is not None
+                await witness.replace_pod()
+                assert await witness.render("source") == PNG + f"pod-{number}".encode()
+                assert old.http.is_closed
+                current = witness._gateway._direct
+                assert current is not None and not current.http.is_closed
+                assert witness._gateway._connections == [current.http]
+        assert all(http.is_closed for http in service.connections)
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("operation", ["submission", "call", "tunnel"])
+@pytest.mark.parametrize("outcome", ["success", "error", "cancel"])
+def test_old_requests_drain_without_blocking_the_new_client(
+    config: WitnessConfig, service: AllocationService, monkeypatch: pytest.MonkeyPatch,
+    operation: str, outcome: str,
+) -> None:
+    async def run() -> None:
+        entered, release, closed = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        handle = service.handle
+
+        async def finish() -> None:
+            entered.set()
+            await release.wait()
+            if outcome == "error":
+                raise httpx.ConnectError("Fixture old connection failed")
+
+        async def deliver(request: httpx.Request) -> httpx.Response:
+            if request.url.host == "192.0.2.1":
+                if operation == "submission" and request.method == "POST":
+                    await finish()
+                    return httpx.Response(200, json={"submission": {"js": "saved.js", "views": "saved"}})
+                if operation == "call" and request.url.path == "/v1/calls/fixture":
+                    await finish()
+                    return httpx.Response(200, json={"saved": True})
+            return await handle(request)
+
+        @asynccontextmanager
+        async def socket(*args: object, **kwargs: object) -> AsyncIterator[SimpleNamespace]:
+            yield SimpleNamespace()
+
+        monkeypatch.setattr(service, "handle", deliver)
+        monkeypatch.setattr("witness_client.async_pods.connect", socket)
+        async with client(config) as witness:
+            await witness.get_submitted()
+            old = witness._gateway._direct
+            assert old is not None
+            close = old.http.aclose
+
+            async def close_old() -> None:
+                await close()
+                closed.set()
+
+            monkeypatch.setattr(old.http, "aclose", close_old)
+
+            async def old_request() -> object:
+                if operation == "submission":
+                    return await witness.submit(b"image", "source")
+                if operation == "call":
+                    return await witness._gateway._request_once("GET", "/v1/calls/fixture")
+                async with witness._gateway.tunnel("fixture"):
+                    await finish()
+                return None
+
+            pending = asyncio.create_task(old_request())
+            try:
+                await asyncio.wait_for(entered.wait(), 1)
+                await asyncio.wait_for(witness.replace_pod(), 1)
+                assert await asyncio.wait_for(witness.render("source"), 1) == PNG + b"pod-1"
+                current = witness._gateway._direct
+                assert current is not None and not current.http.is_closed
+                assert not old.http.is_closed and not pending.done()
+                if outcome == "cancel":
+                    pending.cancel()
+                    with pytest.raises(asyncio.CancelledError):
+                        await pending
+                else:
+                    release.set()
+                    if outcome == "error":
+                        with pytest.raises((httpx.ConnectError, WitnessError)):
+                            await pending
+                    else:
+                        await pending
+                await asyncio.wait_for(closed.wait(), 1)
+                assert witness._gateway._direct is current
+                assert not current.http.is_closed
+            finally:
+                release.set()
+                if not pending.done():
+                    pending.cancel()
+                await asyncio.gather(pending, return_exceptions=True)
+        assert all(http.is_closed for http in service.connections)
+
+    asyncio.run(run())
+
+
+def test_slow_client_close_does_not_hold_the_pod_lock_or_block_new_requests(
+    config: WitnessConfig, service: AllocationService, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def run() -> None:
+        closing, release = asyncio.Event(), asyncio.Event()
+        async with client(config) as witness:
+            await witness.get_submitted()
+            old = witness._gateway._direct
+            assert old is not None
+            close = old.http.aclose
+
+            async def close_old() -> None:
+                closing.set()
+                await release.wait()
+                await close()
+
+            monkeypatch.setattr(old.http, "aclose", close_old)
+            try:
+                await asyncio.wait_for(witness.replace_pod(), 1)
+                await asyncio.wait_for(closing.wait(), 1)
+                assert not witness._gateway._pod_lock.locked()
+                assert await asyncio.wait_for(witness.render("source"), 1) == PNG + b"pod-1"
+            finally:
+                release.set()
+        assert all(http.is_closed for http in service.connections)
+
+    asyncio.run(run())
+
+
+def test_old_client_stays_open_until_its_last_request_finishes(
+    config: WitnessConfig, service: AllocationService, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def run() -> None:
+        entered = [asyncio.Event(), asyncio.Event()]
+        release = [asyncio.Event(), asyncio.Event()]
+        closed = asyncio.Event()
+        handle = service.handle
+
+        async def deliver(request: httpx.Request) -> httpx.Response:
+            if request.url.host == "192.0.2.1" and request.method == "POST":
+                number = int(json.loads(request.content)["source"])
+                entered[number].set()
+                await release[number].wait()
+                return httpx.Response(200, json={"submission": {"js": "saved.js", "views": "saved"}})
+            return await handle(request)
+
+        monkeypatch.setattr(service, "handle", deliver)
+        async with client(config) as witness:
+            await witness.get_submitted()
+            old = witness._gateway._direct
+            assert old is not None
+            close = old.http.aclose
+
+            async def close_old() -> None:
+                await close()
+                closed.set()
+
+            monkeypatch.setattr(old.http, "aclose", close_old)
+            pending = [asyncio.create_task(witness.submit(b"image", str(number))) for number in range(2)]
+            try:
+                await asyncio.wait_for(asyncio.gather(*(event.wait() for event in entered)), 1)
+                await witness.replace_pod()
+                release[0].set()
+                await pending[0]
+                assert not old.http.is_closed
+                assert not pending[1].done()
+                assert await witness.render("source") == PNG + b"pod-1"
+                release[1].set()
+                await pending[1]
+                await asyncio.wait_for(closed.wait(), 1)
+            finally:
+                for event in release:
+                    event.set()
+                for task in pending:
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(*pending, return_exceptions=True)
+
+    asyncio.run(run())
+
+
+def test_failed_background_close_does_not_block_new_work_and_is_reported_at_shutdown(
+    config: WitnessConfig, service: AllocationService, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def run() -> None:
+        witness = client(config)
+        await witness.__aenter__()
+        await witness.get_submitted()
+        old = witness._gateway._direct
+        assert old is not None
+        close = old.http.aclose
+
+        async def unavailable() -> None:
+            raise RuntimeError("Fixture connection cleanup failed")
+
+        monkeypatch.setattr(old.http, "aclose", unavailable)
+        try:
+            await witness.replace_pod()
+            assert await witness.render("source") == PNG + b"pod-1"
+            current = witness._gateway._direct
+            assert current is not None and not current.http.is_closed
+            with pytest.raises(RuntimeError, match="Fixture connection cleanup failed"):
+                await witness.aclose()
+            assert current.http.is_closed
+            assert witness._http.is_closed and witness._gateway._artifacts.http.is_closed
+        finally:
+            await close()
 
     asyncio.run(run())

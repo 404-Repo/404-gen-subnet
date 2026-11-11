@@ -5,19 +5,27 @@ import json
 import threading
 from pathlib import Path
 from types import SimpleNamespace
-from typing import cast
+from typing import Unpack, cast
 
 import httpx
 import pytest
 from bittensor_wallet import Keypair
 from miner_runtime.observations import ReplayMismatch
 from miner_runtime.runner import run_generation
+from openai.types.responses import Response
+from openai.types.responses.response_create_params import ResponseCreateParamsBase
 from support import MemoryState
 from test_recording import PRICING, SCOPE
-from witness_client import AsyncWitnessClient, WitnessClient, WitnessError
+from witness_client import (
+    AsyncWitnessClient,
+    CaptureContext,
+    CapturedResponse,
+    WitnessError,
+)
+from witness_client._core import _ClientState
 from witness_client.calls import RequestKey, canonical
-from witness_client.client import CapturedResponse
 from witness_client.pods import PodGatewayClient
+from witness_client.response import ModelStream, model_error, model_result
 from witness_pod.budget import Budget
 from witness_pod.records import CallRecords
 from witness_pod.recovery import response_failure
@@ -25,7 +33,63 @@ from witness_pod.recovery import response_failure
 START = "00000000-0000-4000-8000-000000000001"
 
 
-class Capture(WitnessClient):
+class Capture(_ClientState):
+    @property
+    def capture_context(self) -> CaptureContext:
+        """Metadata for trusted callers using capture and recovery."""
+        self._gateway.ensure_pod()
+        assert self._gateway.round_number is not None
+        namespace = hashlib.sha256(
+            f"{self._http.base_url}/{self._hotkey.ss58_address}/"
+            f"{self._gateway.round_number}/{self._mode}".encode()
+        ).hexdigest()
+        return CaptureContext(
+            namespace=namespace,
+            provider=self._mode,
+            state_directory=self._state,
+            delivery_timeout=self._gateway.delivery_timeout,
+        )
+
+    def capture_response(self, key: RequestKey, body: bytes) -> CapturedResponse:
+        """Capture or recover the logical call identified by its canonical request."""
+        return self._resolve(key, body, key.session_id)
+
+    def _resolve(
+        self, key: RequestKey, body: bytes, session_id: str | None
+    ) -> CapturedResponse:
+        with self._calls_lock:
+            lock = self._calls.setdefault(key.id, threading.Lock())
+        with lock:
+            return self._capture(key, body, session_id)
+
+    def create(
+        self,
+        *,
+        request_id: int = 0,
+        stream: bool = False,
+        session_id: str | None = None,
+        **params: Unpack[ResponseCreateParamsBase],
+    ) -> Response | ModelStream:
+        """Repeat the same request and request_id to reuse its saved result.
+
+        Change request_id for another model call with the same request.
+        """
+        key, body = self._request(request_id, session_id, params)
+        try:
+            captured = self._resolve(key, body, session_id)
+        except WitnessError as error:
+            raise model_error(error, self._mode) from error
+        return model_result(captured.status, captured.body, self._mode, stream=stream)
+
+    def close(self) -> None:
+        pass
+
+    def __enter__(self) -> Capture:
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.close()
+
     def __init__(self, directory: Path, *, pricing: bytes = PRICING) -> None:
         self._state = directory / "state"
         self._state.mkdir(mode=0o700)
@@ -34,8 +98,9 @@ class Capture(WitnessClient):
         self._hotkey = cast(Keypair, SimpleNamespace(ss58_address=SCOPE.hotkey))
         self._config = {"witness_url": "https://fixture.test", "proof_parameters": "unused"}
         self._gateway = cast(PodGatewayClient, SimpleNamespace(delivery_timeout=2, round_number=SCOPE.round, ensure_pod=lambda: START))
-        self._calls_lock, self._calls = threading.Lock(), {}
-        self._call_slots = None
+        self._calls_lock = threading.Lock()
+        self._calls: dict[str, threading.Lock] = {}
+        self._call_slots: threading.Semaphore | None = None
         self.state = MemoryState()
         self.records, self.budget = CallRecords(self.state), Budget(self.state, pricing)
         self.paid = 0

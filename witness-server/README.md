@@ -7,7 +7,7 @@ saves requests, responses, proofs and usage in private R2 storage.
 
 The [verifier](worker/witness_pod/verifier/README.md) runs inside the worker and in local fixtures.
 Its native proof binary is built from `witness-client/native`. The public client
-is [WitnessClient](../witness-client/README.md). Recordings preserve call identity,
+is [AsyncWitnessClient](../witness-client/README.md). Recordings preserve call identity,
 output bytes and delivery order so recovery and replay can use saved responses.
 
 The [Pod guide](../witness-gateway/PODS.md) describes the lifecycle and runtime

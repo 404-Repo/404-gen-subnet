@@ -8,19 +8,22 @@ from typing import cast
 
 import openai
 import pytest
-from miner_runtime.observations import Execution
+from miner_runtime.observations import Execution, ObservedWitness
 from miner_runtime.runner import run_generation
 from test_recording import PRICING, SCOPE
 from test_generation import Capture
-from witness_client import WitnessClient
+from witness_client import CapturedResponse
 from witness_client.calls import RequestKey, canonical
-from witness_client.client import CapturedResponse
 from witness_client.response import ModelStream
+
 
 @pytest.mark.parametrize("stream", [False, True])
 @pytest.mark.parametrize("error_event", ["response.created", "response.completed"])
 def test_embedded_stream_error_allows_same_id_retry_without_charging_the_failure(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stream: bool, error_event: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stream: bool,
+    error_event: str,
 ) -> None:
     pricing = canonical({**json.loads(PRICING), "calls_per_prompt": 1})
     live = Capture(tmp_path, pricing=pricing)
@@ -46,7 +49,9 @@ def test_embedded_stream_error_allows_same_id_retry_without_charging_the_failure
 
     monkeypatch.setattr(live, "_capture", capture_once)
 
-    def generate(image: bytes, seed: int, witness: WitnessClient, renderer: None) -> str:
+    def generate(
+        image: bytes, seed: int, witness: ObservedWitness, renderer: None
+    ) -> str:
         try:
             result = (
                 witness.create(model="fixture", input="image", request_id=7, stream=True)

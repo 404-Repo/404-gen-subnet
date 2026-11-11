@@ -3,6 +3,7 @@
 import base64
 import hashlib
 import json
+import math
 import os
 import selectors
 import subprocess
@@ -71,8 +72,20 @@ def hotkey_headers(
 
 @timed("subscription_credentials")
 def subscription_credentials(
-    home: str | os.PathLike[str] | None = None, executable: str = "codex"
+    home: str | os.PathLike[str] | None = None, executable: str = "codex",
+    *, credentials_file: str | os.PathLike[str] | None = None,
 ) -> tuple[str, str]:
+    if credentials_file is not None:
+        data: object = json.loads(Path(credentials_file).read_bytes())
+        if not isinstance(data, dict) or set(data) != {"access_token", "account_id"}:
+            raise ValueError("Expected access-only subscription credentials")
+        token, account = data["access_token"], data["account_id"]
+        if not isinstance(token, str) or not isinstance(account, str):
+            raise ValueError("Expected subscription token and account strings")
+        if access_token_expiry(token) < time.time() + 300:
+            raise ValueError("Service subscription credentials expire too soon")
+        return token, account
+
     home_path = Path(home or os.environ.get("CODEX_HOME", "~/.codex")).expanduser()
 
     def read() -> tuple[str, str, float]:
@@ -97,6 +110,19 @@ def subscription_credentials(
             "Subscription login expires too soon; sign in again with Codex"
         )
     return token, account
+
+
+def access_token_expiry(token: str) -> float:
+    """Read the expiry used to schedule renewal of a subscription access token."""
+    try:
+        payload = token.split(".")[1]
+        data = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
+        expiry = data["exp"]
+        if type(expiry) not in (int, float) or not math.isfinite(expiry) or expiry <= 0:
+            raise ValueError
+        return float(expiry)
+    except (ValueError, TypeError, KeyError, IndexError):
+        raise ValueError("Invalid subscription access-token expiry") from None
 
 
 def _refresh_codex(home: Path, executable: str) -> None:

@@ -23,7 +23,7 @@ from PIL.PngImagePlugin import PngInfo
 from replay_fixtures import PRICING, SCOPE, Capture
 from subnet_common.witness.pricing import BudgetRejected
 from test_manual_replay import Stored
-from witness_client import AsyncWitnessClient, WitnessClient, WitnessError
+from witness_client import AsyncWitnessClient, WitnessError
 from witness_client.calls import RequestKey, canonical
 
 from validation_worker import manual_replay as local_replay
@@ -32,7 +32,7 @@ from validation_worker.replay_evidence import (
     SavedReplaySource,
     export_requests,
 )
-from validation_worker.replay_worker import invoke_generate
+from validation_worker.replay_worker import Witness, invoke_generate
 from validation_worker.request_replay import (
     EvidenceUnavailable,
     PreparedReplay,
@@ -173,7 +173,7 @@ def test_async_recorded_stream_allows_miner_tasks_during_blocked_logging(tmp_pat
 def test_sync_replay_matches_requests_reuses_response_and_counts_once(tmp_path: Path) -> None:
     witness = replay_requests(tmp_path)
 
-    def generate(image: bytes, seed: int, client: WitnessClient, renderer: None) -> str:
+    def generate(image: bytes, seed: int, client: RecordedWitnessClient | Witness, renderer: None) -> str:
         a = client.responses.create(model="fixture", input="image").output_text
         b = client.responses.create(model="fixture", input="image").output_text
         return a + b

@@ -10,7 +10,7 @@ JSONObject: TypeAlias = dict[str, JSONValue]
 
 
 class Credentials(TypedDict, total=False):
-    """Authentication arguments passed to WitnessClient; choose exactly one.
+    """Authentication arguments passed to AsyncWitnessClient; choose exactly one.
 
     Attributes:
         openai_api_key: API key used for the OpenAI Responses endpoint.
@@ -32,6 +32,8 @@ class WitnessConfig(TypedDict):
         codex_home: Subscription login directory; defaults to CODEX_HOME or
             ~/.codex.
         codex: Codex executable name or path for login refresh; defaults to codex.
+        codex_credentials_file: Access-only JSON supplied by a service. Read on
+            every request instead of the local login; never refreshed locally.
     """
 
     witness_url: str
@@ -39,6 +41,7 @@ class WitnessConfig(TypedDict):
     state_directory: NotRequired[str]
     codex_home: NotRequired[str]
     codex: NotRequired[str]
+    codex_credentials_file: NotRequired[str]
 
 
 class Session(TypedDict):

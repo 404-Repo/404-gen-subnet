@@ -6,11 +6,13 @@ host does not provide a sandbox, environment freeze or renderer determinism.
 
 from __future__ import annotations
 
+import asyncio
 import fcntl
 import uuid
 from typing import Protocol, TypeVar
 
-from witness_client import CaptureContext, CapturedResponse
+import httpx
+from witness_client import AsyncWitnessClient, CaptureContext, CapturedResponse
 from witness_client.calls import RequestKey
 
 from .observations import (
@@ -95,3 +97,62 @@ def run_generation(
                 execution.aborted = True
                 schedule.persist()
             raise
+
+
+class _AsyncCaptureSource:
+    """Bridge blocking execution workers to a client owned by the event loop."""
+
+    def __init__(
+        self, witness: AsyncWitnessClient, loop: asyncio.AbstractEventLoop
+    ) -> None:
+        self.witness, self.loop = witness, loop
+
+    @property
+    def capture_context(self) -> CaptureContext:
+        return asyncio.run_coroutine_threadsafe(
+            self.witness.capture_context(), self.loop
+        ).result()
+
+    def capture_response(self, key: RequestKey, body: bytes) -> CapturedResponse:
+        return asyncio.run_coroutine_threadsafe(
+            self.witness.capture_response(key, body), self.loop
+        ).result()
+
+    def saved_response(self, exchange_id: str) -> CapturedResponse:
+        return asyncio.run_coroutine_threadsafe(
+            self.witness.saved_response(exchange_id), self.loop
+        ).result()
+
+    def renderer_transport(self) -> httpx.BaseTransport:
+        transport = self.witness.renderer_transport()
+
+        async def send(request: httpx.Request) -> httpx.Response:
+            response = await transport.handle_async_request(request)
+            try:
+                await response.aread()
+            finally:
+                await response.aclose()
+            response.stream = httpx.ByteStream(response.content)
+            return response
+
+        def handle(request: httpx.Request) -> httpx.Response:
+            return asyncio.run_coroutine_threadsafe(send(request), self.loop).result()
+
+        return httpx.MockTransport(handle)
+
+
+async def run_async_generation(
+    generate: Generate[R],
+    image: bytes,
+    seed: int,
+    witness: AsyncWitnessClient,
+    renderer: R,
+) -> str | None:
+    return await asyncio.to_thread(
+        run_generation,
+        generate,
+        image,
+        seed,
+        _AsyncCaptureSource(witness, asyncio.get_running_loop()),
+        renderer,
+    )
