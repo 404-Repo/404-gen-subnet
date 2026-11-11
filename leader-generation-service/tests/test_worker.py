@@ -16,22 +16,22 @@ from witness_client import WitnessError
 
 
 @pytest.fixture
-def generation(scenario, tmp_path, monkeypatch):
+def generation(scenario, settings, tmp_path, monkeypatch):
     directory = tmp_path / "runner"
     directory.mkdir()
     config = pod.Config(
-        generation_image=scenario.snapshot.generation_image,
-        competition_repository=scenario.inputs.repository,
-        competition_branch=scenario.inputs.branch,
-        round_number=scenario.inputs.number,
-        hotkey=scenario.snapshot.hotkey,
-        account_id=scenario.snapshot.account_id,
-        witness_url=scenario.snapshot.witness_url,
-        workers=scenario.snapshot.workers,
-        parallel_calls=scenario.snapshot.parallel_calls,
-        parallel_preparations=scenario.snapshot.parallel_preparations,
-        prover_contexts=scenario.snapshot.prover_contexts,
-        go_cpus=scenario.snapshot.go_cpus,
+        generation_image=settings.generation_image,
+        competition_repository=settings.github_repo,
+        competition_branch=settings.github_branch,
+        round_number=1,
+        hotkey=scenario.deps.hotkey,
+        account_id="abc123",
+        witness_url=settings.witness_url,
+        workers=2,
+        parallel_calls=2,
+        parallel_preparations=1,
+        prover_contexts=1,
+        go_cpus=2,
     )
     (directory / "source").mkdir()
     (directory / "source/main.py").write_text(
@@ -116,7 +116,7 @@ def generation(scenario, tmp_path, monkeypatch):
         assert target == directory
         state["source_fetches"].append((repository, commit))
 
-    wallet = SimpleNamespace(hotkey=SimpleNamespace(ss58_address=scenario.snapshot.hotkey))
+    wallet = SimpleNamespace(hotkey=SimpleNamespace(ss58_address=scenario.deps.hotkey))
     monkeypatch.setattr(bittensor_wallet, "Wallet", lambda **kwargs: wallet)
     monkeypatch.setattr(witness_client, "AsyncWitnessClient", Witness)
     monkeypatch.setattr(pod, "fetch_source", fetch_source)

@@ -23,6 +23,7 @@ from types import ModuleType
 from urllib.parse import quote, urlsplit
 
 IMAGE_PATTERN = r"^[a-z0-9][a-z0-9._:/-]*@sha256:[0-9a-f]{64}$"
+POD_NAME_PREFIX = "leader-runner-"
 IMAGE_ROOT = Path("/opt/leader-image")
 IMAGE_PARAMETERS = IMAGE_ROOT / "params"
 IMAGE_MANIFEST = IMAGE_ROOT / "provenance.json"
@@ -91,8 +92,8 @@ class Config:
 def pod_body(config: Config, *, hotkey: str, access_token: str, name: str | None = None) -> dict[str, object]:
     if not hotkey or not access_token:
         raise ValueError("A job hotkey and access token are required")
-    name = name or f"leader-runner-{uuid.uuid4()}"
-    if not re.fullmatch(r"leader-runner-[A-Za-z0-9-]{1,64}", name):
+    name = name or f"{POD_NAME_PREFIX}{uuid.uuid4()}"
+    if not re.fullmatch(rf"{POD_NAME_PREFIX}[A-Za-z0-9-]{{1,64}}", name):
         raise ValueError("Invalid generation Pod name")
     result: dict[str, object] = {
         "name": name, "image": config.generation_image, "cloud": "SECURE",

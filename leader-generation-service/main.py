@@ -4,6 +4,7 @@ from urllib.parse import urlsplit
 
 from httpx import HTTPStatusError
 from loguru import logger
+from pod_gateway.runpod import CreateUnknown
 from subnet_common.graceful_shutdown import GracefulShutdown
 from subnet_common.utils import format_duration
 
@@ -46,12 +47,23 @@ async def main() -> None:
                     dependencies.hotkey,
                     settings.generation_image.split("@", 1)[1],
                 )
+                starting = True
                 while not shutdown.should_stop:
                     wait = settings.progress_interval_seconds
                     retry_in = format_duration(wait)
                     try:
+                        if starting:
+                            await dependencies.runner.cleanup()
+                            if shutdown.should_stop:
+                                break
+                            starting = False
+                            logger.info("Startup cleanup complete")
                         await generation_iteration(controller, settings)
                     except asyncio.CancelledError:
+                        break
+                    except CreateUnknown:
+                        logger.warning("Restarting in {} for cleanup after an unconfirmed pod create", retry_in)
+                        await shutdown.wait(timeout=wait)
                         break
                     except HTTPStatusError as error:
                         logger.error(

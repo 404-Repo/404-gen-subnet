@@ -12,13 +12,12 @@ from subnet_common.competition.state import CompetitionState, RoundStage
 from subnet_common.discord import DiscordWebhook
 from subnet_common.graceful_shutdown import GracefulShutdown
 from subnet_common.testing import MockGitHubClient
+from subnet_common.witness.models import Pod
 
 from leader_generation_service.credentials import AccessCredentials, CredentialManager
 from leader_generation_service.generation_iteration import Dependencies
-from leader_generation_service.models import Allocation, RoundProgress, Snapshot
 from leader_generation_service.round_runner import RoundRunner
 from leader_generation_service.settings import Settings
-from leader_generation_service.store import JobStore
 from leader_generation_service.witness import SavedResults
 
 
@@ -79,46 +78,27 @@ def settings(tmp_path):
 
 
 class Runner:
-    def __init__(self, store):
-        self.store = store
-        self.ensured = []
+    def __init__(self, image):
+        self.image = image
+        self.startup_cleanups = 0
         self.started = []
         self.terminated = []
-        self.on_ensure = None
 
-    async def ensure(self, job):
-        self.ensured.append(job)
-        if job.allocation is None or job.allocation.phase == "terminated":
-            job.allocations.append(Allocation(pod_id="runner", phase="active"))
-        self.store.save(job)
-        if self.on_ensure:
-            self.on_ensure()
+    async def cleanup(self):
+        self.startup_cleanups += 1
 
-    async def start(self, job, credentials, *, min_validity_seconds):
-        self.started.append(job)
-        job.allocation.phase = "active"
-        self.store.save(job)
+    async def start(self, number, hotkey, credentials, *, min_validity_seconds):
+        self.started.append(number)
+        return Pod(f"runner-{number}", f"leader-runner-fixture-{number}", self.image, "RUNNING", {})
 
-    async def terminate(self, job):
-        self.terminated.append(job.snapshot.inputs.number)
-        if job.allocation:
-            job.allocation.phase = "terminated"
-            self.store.save(job)
+    async def terminate(self, pod):
+        self.terminated.append(pod)
 
 
 @pytest.fixture
 def scenario(settings, tmp_path):
     hotkey = Keypair.create_from_uri("//Alice").ss58_address
     images = {"chair": b"chair", "lamp": b"lamp"}
-    inputs = RoundProgress(
-        repository="test/competition",
-        branch="main",
-        round="test-1",
-        number=1,
-        prompt_ids=tuple(images),
-        generation_deadline_block=100,
-        storage_prefix="sandbox/",
-    )
     leader = LeaderEntry(hotkey=hotkey, repo="test/incumbent", commit="b" * 40, weight=1, effective_block=1)
     prompts = {name: f"https://images.test/{name}.png" for name in images}
     files = {
@@ -149,8 +129,7 @@ def scenario(settings, tmp_path):
         ),
     }
     git = MockGitHubClient(files, ref_sha="a" * 40)
-    store = JobStore(settings.state_directory)
-    runner = Runner(store)
+    runner = Runner(settings.generation_image)
     state = {"saved": {}, "block": 10, "index_reads": 0}
 
     async def head():
@@ -163,30 +142,12 @@ def scenario(settings, tmp_path):
 
     credentials = CredentialManager(tmp_path, "fixture-codex", load=lambda _: access(time.time() + 86400))
     http = httpx.AsyncClient(transport=httpx.MockTransport(request))
-    dependencies = Dependencies(git, store, runner, credentials, SavedResults(http, settings.cdn_url), head, hotkey)
-    snapshot = Snapshot(
-        state_ref="a" * 40,
-        generation_image=settings.generation_image,
-        inputs=inputs,
-        hotkey=hotkey,
-        account_id="abc123",
-        wallet_name=settings.wallet_name,
-        wallet_hotkey=settings.wallet_hotkey,
-        witness_url=settings.witness_url,
-        workers=2,
-        parallel_calls=2,
-        parallel_preparations=1,
-        prover_contexts=1,
-        go_cpus=2,
-        go_memory_mib=2048,
-    )
+    dependencies = Dependencies(git, runner, credentials, SavedResults(http, settings.cdn_url), head, hotkey)
     controller = RoundRunner(dependencies, settings, GracefulShutdown())
     return SimpleNamespace(
         deps=dependencies,
         controller=controller,
         state=state,
-        snapshot=snapshot,
-        inputs=inputs,
         images=images,
         prompts=prompts,
         leader=leader,
