@@ -44,11 +44,13 @@ The judge reads these results together with the independent source-audit verdict
 to determine candidate eligibility.
 
 Pending work has no entry in the terminal result map. Repeated polls reuse the
-candidate's active Pod. When the Pod exits or disappears, a replacement resumes
-the committed checkpoint. A candidate with exhausted prompt attempts stays
-pending. The coordinator removes its Pods after completion or when the request
-leaves the current round. Each poll reads one commit. Later polls resolve the
-branch again to see new requests, results or rounds.
+candidate's active Pod. The worker terminates its Pod after committing a terminal
+checkpoint. The coordinator publishes the verdict from that checkpoint on its
+next poll. If a Pod disappears while work is pending, a replacement resumes the
+checkpoint. A candidate with exhausted prompt attempts stays pending. The
+coordinator removes any remaining Pods for completed candidates or requests that
+leave the current round. Each poll reads one commit. Later polls resolve the branch
+again to see new requests, results or rounds.
 
 Missing `state.json`, malformed competition data and infrastructure failures are
 service errors. They are logged and retried on a later poll, leaving affected

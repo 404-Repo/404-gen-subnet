@@ -1,4 +1,5 @@
 import asyncio
+import os
 from contextlib import ExitStack
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -21,6 +22,10 @@ from validation_worker.sandbox import prepare_sandbox
 from validation_worker.settings import Settings
 
 
+class _PromptFailed(Exception):
+    pass
+
+
 def transient(error: Exception) -> bool:
     if isinstance(error, httpx.HTTPStatusError):
         return error.response.status_code in (408, 429) or error.response.status_code >= 500
@@ -41,12 +46,14 @@ async def run_validation(
     http: httpx.AsyncClient,
     settings: Settings,
     shutdown: GracefulShutdown,
-) -> None:
+) -> bool:
+    """Replay unfinished prompts and return whether a terminal checkpoint is committed."""
     path = f"rounds/{round_num}/{hotkey}/validation.json"
     frozen: RoundInputs | None = None
     source: Path | None = None
     batcher = None
-    source_failure: str | None = None
+    terminal = False
+    pod_id = os.environ.get("RUNPOD_POD_ID")
 
     async def replay_prompts(
         inputs: ValidationInputs, progress: ValidationProgress, checkpoint: GitBatcher, source_cleanup: ExitStack
@@ -56,19 +63,24 @@ async def run_validation(
         if source is not None:
             source_ready.set()
 
-        async def save_prompt(prompt_id: str, state: PromptProgress) -> None:
-            # Publish only completed attempts, even while other prompts are running.
-            progress.prompts[prompt_id] = state.model_copy(deep=True)
+        async def save_progress() -> None:
             await checkpoint.write(
                 path, progress.model_dump_json(indent=2), f"Validate round {round_num}, miner {hotkey}"
             )
 
+        async def save_prompt(prompt_id: str, state: PromptProgress) -> None:
+            # Publish only completed attempts, even while other prompts are running.
+            progress.prompts[prompt_id] = state.model_copy(deep=True)
+            if state.status == "failed":
+                raise _PromptFailed
+            await save_progress()
+
         async def run_slot(slot: int) -> None:
-            nonlocal frozen, source, source_failure
+            nonlocal frozen, source
             jail = None
             with ExitStack() as slot_cleanup:
                 for prompt_id in prompts:
-                    if shutdown.should_stop or source_failure is not None:
+                    if shutdown.should_stop:
                         break
                     saved = progress.prompts.get(prompt_id)
                     state = saved.model_copy(deep=True) if saved is not None else PromptProgress()
@@ -118,8 +130,7 @@ async def run_validation(
                                 state.status = result.verdict.value
                                 state.reason = result.reason
                         except SourceArchiveNotFound as error:
-                            source_failure = str(error)
-                            state.status, state.reason, state.retryable = "failed", source_failure, False
+                            state.status, state.reason, state.retryable = "failed", str(error), False
                         except BudgetRejected as error:
                             state.status, state.reason = "failed", str(error)
                         except Exception as error:
@@ -137,18 +148,20 @@ async def run_validation(
                         await save_prompt(prompt_id, state)
             source_ready.set()
 
-        async with asyncio.TaskGroup() as slots:
-            slots.create_task(run_slot(0))
-            await source_ready.wait()
-            if source is not None and not shutdown.should_stop:
-                for slot in range(1, min(settings.jobs, len(inputs.generations))):
-                    slots.create_task(run_slot(slot))
+        try:
+            async with asyncio.TaskGroup() as slots:
+                slots.create_task(run_slot(0))
+                await source_ready.wait()
+                if source is not None and not shutdown.should_stop:
+                    for slot in range(1, min(settings.jobs, len(inputs.generations))):
+                        slots.create_task(run_slot(slot))
+        except* _PromptFailed:
+            await save_progress()
 
     with ExitStack() as source_cleanup:
         for attempt in range(3):
-            stopping = shutdown.should_stop
-            if stopping:
-                return
+            if shutdown.should_stop:
+                break
             try:
                 await asyncio.to_thread(output.mkdir, parents=True, exist_ok=True, mode=0o700)
                 if batcher is None:
@@ -160,18 +173,38 @@ async def run_validation(
                 inputs = await load_validation_inputs(git, round_num, hotkey, progress.ref)
                 if set(progress.prompts) - inputs.generations.keys():
                     raise ValueError("Validation checkpoint contains foreign prompts")
-                await replay_prompts(inputs, progress, batcher, source_cleanup)
+                if all(state.status != "failed" for state in progress.prompts.values()):
+                    await replay_prompts(inputs, progress, batcher, source_cleanup)
                 if not await batcher.flush():
                     raise RuntimeError("Validation checkpoint has not been committed")
-                if source_failure is not None:
-                    logger.warning(f"Validation failed: round={round_num}, hotkey={hotkey}, reason={source_failure}")
-                    return
-                complete = all(
-                    key in progress.prompts and progress.prompts[key].status != "pending" for key in inputs.generations
-                )
-                logger.info(f"Validation {'complete' if complete else 'pending'}: round={round_num}, hotkey={hotkey}")
-                return
+                failure = next((state for state in progress.prompts.values() if state.status == "failed"), None)
+                if failure is not None:
+                    terminal = True
+                    logger.warning(f"Validation failed: round={round_num}, hotkey={hotkey}, reason={failure.reason}")
+                else:
+                    terminal = all(
+                        key in progress.prompts and progress.prompts[key].status == "passed"
+                        for key in inputs.generations
+                    )
+                    logger.info(
+                        f"Validation {'complete' if terminal else 'pending'}: round={round_num}, hotkey={hotkey}"
+                    )
+                if terminal and pod_id:
+                    api_key = os.environ["RUNPOD_API_KEY"]
+                    mutation = "mutation podTerminate($input: PodTerminateInput!) { podTerminate(input: $input) }"
+                    response = await http.post(
+                        "https://api.runpod.io/graphql",
+                        headers={"Authorization": f"Bearer {api_key}"},
+                        json={"query": mutation, "variables": {"input": {"podId": pod_id}}},
+                    )
+                    response.raise_for_status()
+                    body = response.json()
+                    data = body.get("data") if isinstance(body, dict) else None
+                    if not isinstance(data, dict) or "podTerminate" not in data or body.get("errors"):
+                        raise RuntimeError(f"RunPod did not acknowledge termination of Pod {pod_id}")
+                break
             except Exception as error:
                 logger.error(f"Validation interrupted: round={round_num}, hotkey={hotkey}, error={error!r}")
                 if not transient(error) or attempt == 2 or await shutdown.wait(timeout=attempt + 1):
-                    return
+                    break
+    return terminal
