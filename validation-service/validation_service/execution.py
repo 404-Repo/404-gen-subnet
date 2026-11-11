@@ -62,20 +62,20 @@ async def execute_validation_job(
         GITHUB_BRANCH=settings.github_branch,
     )
     args = ["--round-num", str(round_num), "--hotkey", hotkey, "--ref", ref, "--output", "/var/lib/validation"]
-    response = await runpod.post(
-        "pods",
-        json={
-            "name": pod_name(settings, round_num, hotkey),
-            "image": settings.pod_image,
-            "registry": settings.pod_registry,
-            "cpu": {"id": "cpu3c", "vcpuCount": 4},
-            "cloud": "SECURE",
-            "disk": 12,
-            "env": env,
-            "args": json.dumps({"cmd": args}),
-            "ports": [],
-        },
-    )
+    body: dict[str, object] = {
+        "name": pod_name(settings, round_num, hotkey),
+        "image": settings.pod_image,
+        "registry": settings.pod_registry,
+        "cpu": {"id": "cpu3c", "vcpuCount": 4},
+        "cloud": "SECURE",
+        "disk": 12,
+        "env": env,
+        "args": json.dumps({"cmd": args}),
+        "ports": [],
+    }
+    if settings.pod_data_centers:
+        body["dataCenterIds"] = settings.pod_data_centers
+    response = await runpod.post("pods", json=body)
     response.raise_for_status()
     try:
         pod = Pod.model_validate_json(response.content)

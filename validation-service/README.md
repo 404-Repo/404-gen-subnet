@@ -102,7 +102,9 @@ VALIDATION_WORKER_ENV='{"R2_ENDPOINT":"https://your-account.r2.cloudflarestorage
 The Pod image must contain the worker and its sandbox. Reserve a distinct
 `VALIDATION_POD_PREFIX` for each coordinator. It tracks its Pods by name and
 uses `VALIDATION_POD_IMAGE` when launching a Pod. Each uses 4 `cpu3c` vCPUs and a
-12 GB container disk. `VALIDATION_WORKER_ENV` supplies the worker's R2 and Witness
+12 GB container disk. Set `VALIDATION_POD_DATA_CENTERS` to a JSON array of preferred
+RunPod data center IDs, such as `["EU-CZ-1","EU-NL-1","EU-RO-1"]`.
+`VALIDATION_WORKER_ENV` supplies the worker's R2 and Witness
 settings. Include `"VALIDATION_JOBS":"8"` in that JSON to run up to eight prompts
 at once per Pod. GitHub settings come from the coordinator configuration. Set
 `WITNESS_COMPETITION_BRANCH` in the worker environment when a test branch reuses

@@ -16,6 +16,7 @@ from validation_service.validation_iteration import validation_iteration
 class PodSchedulingTest(unittest.IsolatedAsyncioTestCase):
     async def test_finishes_known_work_after_later_checkpoint_error(self) -> None:
         token = secrets.token_hex(16)
+        data_centers = ["EU-CZ-1", "EU-NL-1", "EU-RO-1"]
         settings = Settings(
             _env_file=None,
             GITHUB_TOKEN=token,
@@ -23,6 +24,7 @@ class PodSchedulingTest(unittest.IsolatedAsyncioTestCase):
             RUNPOD_PROVIDER_API_KEY=token,
             VALIDATION_POD_PREFIX="validation-example",
             VALIDATION_POD_IMAGE="registry.example/validation-worker@sha256:" + "a" * 64,
+            VALIDATION_POD_DATA_CENTERS=data_centers,
             VALIDATION_WORKER_ENV={},
         )
         ref = "b" * 40
@@ -70,7 +72,9 @@ class PodSchedulingTest(unittest.IsolatedAsyncioTestCase):
             [(request.method, request.url.path) for request in requests],
             [("GET", "/v2/pods"), ("DELETE", "/v2/pods/finished-pod"), ("POST", "/v2/pods")],
         )
-        self.assertEqual(json.loads(requests[-1].content)["name"], pod_name(settings, 3, "next"))
+        launch = json.loads(requests[-1].content)
+        self.assertEqual(launch["name"], pod_name(settings, 3, "next"))
+        self.assertEqual(launch["dataCenterIds"], data_centers)
         published = json.loads(git.commit_files.await_args.kwargs["files"][results_path])
         self.assertEqual(
             published,
@@ -91,6 +95,7 @@ class PodSchedulingTest(unittest.IsolatedAsyncioTestCase):
             RUNPOD_PROVIDER_API_KEY=token,
             VALIDATION_POD_PREFIX="validation-example",
             VALIDATION_POD_IMAGE="registry.example/validation-worker@sha256:" + "a" * 64,
+            VALIDATION_POD_DATA_CENTERS=[],
             VALIDATION_WORKER_ENV={},
         )
         ref = "b" * 40
@@ -158,6 +163,7 @@ class PodSchedulingTest(unittest.IsolatedAsyncioTestCase):
             if replace:
                 launch = json.loads(pod_requests[-1].content)
                 self.assertEqual(launch["name"], name)
+                self.assertNotIn("dataCenterIds", launch)
                 args = json.loads(launch["args"])["cmd"]
                 self.assertEqual(args[args.index("--ref") + 1], ref)
 
