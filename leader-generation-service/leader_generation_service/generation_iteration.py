@@ -1,9 +1,8 @@
 import asyncio
-import secrets
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import httpx
 from bittensor_wallet import Wallet
@@ -42,7 +41,6 @@ class Dependencies:
     saved: SavedResults
     head: Callable[[], Awaitable[tuple[int, float]]]
     hotkey: str
-    lifecycle: asyncio.Lock = field(default_factory=asyncio.Lock)
     discord: DiscordWebhook | None = None
 
 
@@ -85,14 +83,6 @@ async def generation_iteration(
     controller: RoundRunner,
     settings: Settings,
 ) -> None:
-    async with controller.dependencies.lifecycle:
-        await _generation_iteration(controller, settings)
-
-
-async def _generation_iteration(
-    controller: RoundRunner,
-    settings: Settings,
-) -> None:
     dependencies, shutdown = controller.dependencies, controller.shutdown
     git, store = dependencies.git, dependencies.store
     ref = await git.get_ref_sha(settings.github_branch)
@@ -114,9 +104,6 @@ async def _generation_iteration(
         if inputs.number != state.current_round:
             await dependencies.runner.terminate(job)
             continue
-        if job.control_token is None:
-            job.control_token = secrets.token_urlsafe(32)
-            store.save(job)
         current = job
     if current is not None:
         await controller.run(current)
@@ -174,7 +161,7 @@ async def _generation_iteration(
         go_cpus=settings.go_cpus,
         go_memory_mib=settings.go_memory_mib,
     )
-    job = Job(snapshot=snapshot, control_token=secrets.token_urlsafe(32))
+    job = Job(snapshot=snapshot)
     store.save(job)
     await controller.run(job)
 

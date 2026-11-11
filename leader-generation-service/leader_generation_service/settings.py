@@ -4,7 +4,7 @@ from typing import Self
 from urllib.parse import urlsplit
 
 from miner_runtime.pod import IMAGE_PATTERN
-from pydantic import AliasChoices, Field, SecretStr, field_validator, model_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -19,9 +19,6 @@ class Settings(BaseSettings):
     runpod_api_key: SecretStr
     max_hourly_cost: Decimal = Field(default=Decimal("0.25"), gt=0, allow_inf_nan=False)
     cdn_url: str
-    control_port: int = Field(
-        default=8080, ge=1, le=65535, validation_alias=AliasChoices("control_port", "credentials_port")
-    )
     witness_url: str = "https://witness.subnet404.xyz"
     subtensor_rpc_url: str = "https://entrypoint-finney.opentensor.ai"
     state_directory: Path = Path("/var/lib/404-leader-generation")

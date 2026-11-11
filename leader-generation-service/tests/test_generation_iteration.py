@@ -236,10 +236,6 @@ async def test_outer_loop_waits_the_configured_interval_after_every_failure(scen
         assert service_shutdown is shutdown
         yield scenario.deps
 
-    @asynccontextmanager
-    async def endpoint(*args):
-        yield
-
     async def cycle(*args):
         cycles.append(1)
         raise RuntimeError("Fixture iteration failure")
@@ -260,7 +256,6 @@ async def test_outer_loop_waits_the_configured_interval_after_every_failure(scen
     monkeypatch.setattr(service, "GracefulShutdown", lambda: shutdown)
     monkeypatch.setattr(service, "setup_logging", lambda _: None)
     monkeypatch.setattr(service, "create_dependencies", dependencies)
-    monkeypatch.setattr(service, "serve_control", endpoint)
     monkeypatch.setattr(service, "generation_iteration", cycle)
     monkeypatch.setattr(service, "maintain_credentials", maintain)
     await service.main()
