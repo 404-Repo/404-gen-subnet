@@ -10,7 +10,7 @@ import httpx
 import pytest
 from conftest import access
 from loguru import logger
-from pydantic import ValidationError
+from pydantic import SecretStr, ValidationError
 from subnet_common.competition.state import CompetitionState, RoundStage
 
 from leader_generation_service.credentials import CredentialManager
@@ -69,6 +69,25 @@ async def test_new_round_starts_without_worker_inputs_and_keeps_the_pod(scenario
     assert len(scenario.deps.runner.started) == 1
     assert scenario.deps.store.load(1).snapshot == job.snapshot
     assert scenario.deps.store.load(1).allocation.id == job.allocation.id
+
+
+async def test_saved_job_reports_which_settings_differ(scenario, settings, iteration_logs):
+    await generation_iteration(scenario.controller, settings)
+    previous = scenario.deps.store.load(1)
+    settings.github_branch = "other"
+    settings.witness_url = "https://other-witness.test"
+    iteration_logs.clear()
+
+    with pytest.raises(ValueError, match="Job belongs to another competition"):
+        await generation_iteration(scenario.controller, settings)
+
+    assert iteration_logs == [
+        "Competition 1 at aaaaaaaaaa: miner_generation",
+        "Round 1 saved job differs from controller settings (GITHUB_BRANCH, WITNESS_URL)",
+    ]
+    assert scenario.deps.store.load(1) == previous
+    assert len(scenario.deps.runner.started) == 1
+    assert scenario.deps.runner.terminated == []
 
 
 async def test_generation_requires_saving_enabled_in_git(scenario, settings):
@@ -312,6 +331,9 @@ async def test_outer_loop_waits_the_configured_interval_after_every_failure(scen
     spec.loader.exec_module(service)
 
     settings.progress_interval_seconds = 1800
+    settings.github_branch = "witness-test"
+    settings.cdn_url = "https://cdn.test/fixture-private-path"
+    settings.discord_webhook_url = SecretStr("https://discord.test/fixture-webhook")
     shutdown = scenario.controller.shutdown
     original_wait = shutdown.wait
     cycles, waits = [], []
@@ -346,15 +368,19 @@ async def test_outer_loop_waits_the_configured_interval_after_every_failure(scen
     monkeypatch.setattr(service, "create_dependencies", dependencies)
     monkeypatch.setattr(service, "generation_iteration", cycle)
     monkeypatch.setattr(service, "maintain_credentials", maintain)
-    errors = []
-    sink = logger.add(lambda message: errors.append(message.record["message"]), level="ERROR", filter=service.__name__)
+    messages = []
+    sink = logger.add(lambda message: messages.append(message.record["message"]), level="INFO", filter=service.__name__)
     try:
         await service.main()
     finally:
         logger.remove(sink)
     assert len(cycles) == 2
     assert waits == [1800, 1800]
-    assert errors == [
+    assert messages == [
+        "Leader generation service started. GITHUB_REPO=test/competition GITHUB_BRANCH=witness-test "
+        f"WITNESS_URL=https://witness.test CDN host=cdn.test STATE_DIRECTORY={settings.state_directory} "
+        f"operator hotkey={scenario.deps.hotkey} generation image digest=sha256:{'d' * 64}",
         "Leader generation cycle failed at github.test (HTTP 503). Retrying in 0:30:00.",
         "Leader generation cycle failed (RuntimeError). Retrying in 0:30:00.",
+        "Leader generation service stopped gracefully",
     ]
