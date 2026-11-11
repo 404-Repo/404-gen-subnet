@@ -15,7 +15,6 @@ without building or executing miner code.
 3. **Build next round schedule**: Set `earliest_reveal_block` to the previous
    round's latest reveal block plus one, `latest_reveal_block` to the next start
    block, and `generation_deadline_block` from the configured generation window.
-   Carry forward the round's `leader_generation_hotkey` if configured.
 4. **Compute leader transition**:
    - `winner_hotkey: "leader"` means defense and leaves history and weight unchanged.
    - The same repository and commit as the current leader also count as defense,

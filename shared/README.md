@@ -63,9 +63,9 @@ source auditing before judging can complete.
 - **Leader generation:** the [leader generation service](../leader-generation-service/README.md)
   runs the previous leader's Python source, identified by repository/commit, on
   the published round prompts and seed. It saves results to the witness under
-  the round's `leader_generation_hotkey`. The collector publishes
-  `rounds/{n}/leader/generated.json` with canonical Three.js and rendered-view
-  locations.
+  the `leader_generation_hotkey` from the competition's `config.json`. The collector
+  publishes `rounds/{n}/leader/generated.json` with canonical Three.js and
+  rendered-view locations.
 - **Replay validator:** consume `validation_requests.json`, replay the exact submitted
   Python source using the published prompts/seed and recorded witness evidence,
   verify the canonical outputs and competition budgets, then publish one terminal

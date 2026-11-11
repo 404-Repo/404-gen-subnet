@@ -32,7 +32,7 @@ errors use five total attempts, waiting at least three seconds or longer when
 `Retry-After` supplies a numeric delay in seconds. The concurrency slot is released
 between attempts. Exhausted retries leave collection retryable.
 
-When the round's `schedule.json` sets `leader_generation_hotkey`, the collector
+When the competition's `config.json` sets `leader_generation_hotkey`, the collector
 also reads the witness index under that operator hotkey. It requires a terminal
 result for every official leader prompt before advancing to duels. The collector
 writes the baseline to `rounds/{n}/leader/generated.json`, and the challenger list
@@ -53,14 +53,14 @@ Reads and writes to the competition Git repository:
 | File | R/W | Description                            |
 |------|-----|----------------------------------------|
 | `state.json` | R/W | Current round and stage                |
-| `config.json` | R | Competition configuration              |
+| `config.json` | R | Competition configuration and optional leader generation hotkey |
 | `prompts.txt` | R | Global prompt pool                     |
-| `rounds/{n}/schedule.json` | R | Round timing, storage prefix and optional leader generation hotkey |
+| `rounds/{n}/schedule.json` | R | Round timing and storage prefix |
 | `rounds/{n}/seed.json` | W | Random seed for prompt selection       |
 | `rounds/{n}/prompts.txt` | W | Selected prompts for the round         |
 | `rounds/{n}/submissions.json` | W | Admitted repo, exact commit, reveal block and round |
 | `rounds/{n}/{hotkey}/generated.json` | W | JS URL, preview prefix, size and failure status |
-| `rounds/{n}/leader/generated.json` | W | Collected leader baseline when configured for the round |
+| `rounds/{n}/leader/generated.json` | W | Collected leader baseline when configured |
 
 ## Development
 ```bash

@@ -57,8 +57,8 @@ prevents another service instance from refreshing it with a different state
 directory. A separate lock owns service state.
 
 `WALLET_NAME=leader` and `WALLET_HOTKEY=default` select the operator hotkey.
-Set its public address as `leader_generation_hotkey` in the round's
-`schedule.json` to enable generation and collection for that round. The witness
+Set its public address as `leader_generation_hotkey` in the competition's
+`config.json` to enable leader generation and collection. The witness
 must admit the operator hotkey. The incumbent miner's hotkey identifies the
 source in `leader.json`. For manual generation, use the pinned source and the
 same operator wallet so results go to the same witness index.
@@ -101,8 +101,8 @@ The competition fixture must also supply:
 - `leader.json` with a leader entry pinning a Python miner repository and full
   source commit containing `main.py` and `generate(image, seed, witness)`.
 - `state.json` selecting `miner_generation` and a test round number.
+- `config.json` with `leader_generation_hotkey` set to the test operator's public address.
 - That round's `prompts.txt`, `seed.json`, and `schedule.json`, with
-  `leader_generation_hotkey` set to the test operator's public address,
   `witness_save_submissions=true`, and `generation_deadline_block=null` for a
   persistent test round. To test collection, supply the round's
   `submissions.json` and select `collecting` after generation completes.

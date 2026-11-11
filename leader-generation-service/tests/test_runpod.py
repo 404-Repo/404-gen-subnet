@@ -8,6 +8,7 @@ import httpx
 import pytest
 from bittensor_wallet import Keypair, Wallet
 from conftest import access
+from loguru import logger
 from pod_gateway.runpod import CreateRejected, CreateUnknown
 from subnet_common.competition.state import CompetitionState, RoundStage
 from subnet_common.witness.models import Pod
@@ -80,6 +81,55 @@ def runner(scenario, settings):
 async def launch(value, job):
     await value.ensure(job)
     await value.start(job, access(4_000_000_000))
+
+
+@pytest.mark.parametrize("lost_reply", [False, True], ids=["direct-confirmation", "recovered-from-inventory"])
+async def test_generation_pod_logs_follow_provider_events(scenario, runner, monkeypatch, lost_reply):
+    value, provider = runner
+    job = Job(snapshot=scenario.snapshot)
+    provider.lose_reply = lost_reply
+    events = provider.events
+    list_pods, get_pod = provider.list, provider.get
+
+    def read_inventory(*, fresh=False):
+        pods = list_pods(fresh=fresh)
+        events.append("inventory read")
+        return pods
+
+    def check_pod(pod_id):
+        pod = get_pod(pod_id)
+        if pod is None:
+            events.append("absence confirmed")
+        return pod
+
+    monkeypatch.setattr(provider, "list", read_inventory)
+    monkeypatch.setattr(provider, "get", check_pod)
+    sink = logger.add(lambda message: events.append(message.record["message"]), filter=runpod.__name__)
+    try:
+        if lost_reply:
+            with pytest.raises(CreateUnknown):
+                await launch(value, job)
+            job = value.store.load(1)
+            await value.status(job)
+        else:
+            await launch(value, job)
+        await value.terminate(job)
+    finally:
+        logger.remove(sink)
+
+    name = job.allocation.name
+    expected = [f"Round 1 requesting generation pod {name}", "create"]
+    if lost_reply:
+        expected.extend(
+            (
+                f"Round 1 creation unconfirmed for generation pod {name}",
+                "inventory read",
+                "Round 1 recovered generation pod pod-1 from inventory",
+            )
+        )
+    else:
+        expected.append("Round 1 created generation pod pod-1")
+    assert events == [*expected, "delete", "absence confirmed", "Round 1 deleted generation pod pod-1"]
 
 
 @pytest.fixture

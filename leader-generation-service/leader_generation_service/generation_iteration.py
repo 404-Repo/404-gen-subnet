@@ -109,14 +109,16 @@ async def generation_iteration(
         await controller.run(current)
         return
     if state.stage != RoundStage.MINER_GENERATION:
+        logger.info("Round {} skipped because stage is {}", state.current_round, state.stage.value)
         return
-    schedule = await require_schedule(git, state.current_round, ref)
-    if schedule.leader_generation_hotkey is None:
-        return
-    if schedule.leader_generation_hotkey != dependencies.hotkey:
-        raise ValueError("Round leader generation hotkey differs from the operator wallet")
-    urls = await require_prompts(git, state.current_round, ref)
     config = await require_competition_config(git, ref)
+    if config.leader_generation_hotkey is None:
+        logger.info("Round {} skipped because config.json has no leader_generation_hotkey", state.current_round)
+        return
+    if config.leader_generation_hotkey != dependencies.hotkey:
+        raise ValueError("Configured leader generation hotkey differs from the operator wallet")
+    schedule = await require_schedule(git, state.current_round, ref)
+    urls = await require_prompts(git, state.current_round, ref)
     seed = await require_seed_from_git(git, state.current_round, ref)
     leader = (await require_leader_state(git, ref)).get_latest()
     if leader is None:
@@ -129,6 +131,7 @@ async def generation_iteration(
         if not time.time() - 60 <= observed <= time.time() + 5:
             raise ValueError("Generation block is stale")
         if block >= schedule.generation_deadline_block:
+            logger.info("Round {} skipped because the generation deadline has been reached", state.current_round)
             return
     credentials = await dependencies.credentials.current()
     inputs = await dependencies.inputs()

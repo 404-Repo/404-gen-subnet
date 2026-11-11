@@ -52,6 +52,7 @@ class ResultCollector:
         """Save results, or wait if the configured leader index is incomplete."""
         round_num = state.current_round
         git = self.git_batcher.git
+        config = await require_competition_config(git, ref)
         submissions = await require_submissions(git=git, round_num=round_num, ref=ref)
         prompt_urls = await require_prompts(git=git, round_num=round_num, ref=ref)
         schedule = await get_schedule(git, round_num, ref)
@@ -59,9 +60,9 @@ class ResultCollector:
         prompts = [Path(unquote(urlsplit(url).path)).stem for url in prompt_urls]
 
         leader = None
-        if schedule is not None and schedule.leader_generation_hotkey is not None:
-            config = await require_competition_config(git, ref)
-            key = f"{storage_prefix}rounds/{config.name}-{round_num}/{schedule.leader_generation_hotkey}/submitted.json"
+        operator_hotkey = config.leader_generation_hotkey
+        if operator_hotkey is not None:
+            key = f"{storage_prefix}rounds/{config.name}-{round_num}/{operator_hotkey}/submitted.json"
             leader = await self._fetch_index(key)
             if not generations_complete(leader, set(prompts)):
                 logger.warning("Round {} is waiting for the complete leader baseline", round_num)
