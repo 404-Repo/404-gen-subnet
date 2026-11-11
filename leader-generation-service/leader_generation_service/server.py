@@ -43,7 +43,7 @@ def application(controller: RoundRunner, settings: Settings) -> web.Application:
             if action in ("start", "resume"):
                 if shutdown.should_stop:
                     raise web.HTTPServiceUnavailable()
-                if action == "resume" and not job.published and not await controller.may_generate(job):
+                if action == "resume" and not job.completed and not await controller.may_generate(job):
                     raise web.HTTPConflict()
                 job.stopped = False
                 dependencies.store.save(job)
@@ -55,7 +55,7 @@ def application(controller: RoundRunner, settings: Settings) -> web.Application:
                 dependencies.store.save(job)
                 await dependencies.runner.terminate(job)
             status = await dependencies.runner.status(job)
-            return {**status, "stopped": job.stopped, "published": job.published}
+            return {**status, "stopped": job.stopped, "completed": job.completed}
 
     async def respond(request: web.Request) -> web.StreamResponse:
         headers = {"Cache-Control": "no-store"}

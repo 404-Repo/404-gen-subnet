@@ -32,6 +32,12 @@ errors use five total attempts, waiting at least three seconds or longer when
 `Retry-After` supplies a numeric delay in seconds. The concurrency slot is released
 between attempts. Exhausted retries leave collection retryable.
 
+When the round's `schedule.json` sets `leader_generation_hotkey`, the collector
+also reads the witness index under that operator hotkey. It requires a terminal
+result for every official leader prompt before advancing to duels. The collector
+writes the baseline to `rounds/{n}/leader/generated.json`, and the challenger list
+in `submissions.json` contains the admitted miners.
+
 ## Algorithm
 
 1. **OPEN stage**: Wait for `latest_reveal_block`, then collect valid submissions within the inclusive reveal window. Keep registered subnet hotkeys whose coldkey covers the conviction lock (default 100 alpha per submitting hotkey, aggregated by coldkey; multiple hotkeys are allowed). Preserve reveal-block ordering, generate the seed and select the configured number of prompts. Publish the admitted list, seed, prompts and MINER_GENERATION state in one Git commit. If none are admitted, transition to FINALIZING.
@@ -49,11 +55,12 @@ Reads and writes to the competition Git repository:
 | `state.json` | R/W | Current round and stage                |
 | `config.json` | R | Competition configuration              |
 | `prompts.txt` | R | Global prompt pool                     |
-| `rounds/{n}/schedule.json` | R | Round timing (reveal blocks, deadline) |
+| `rounds/{n}/schedule.json` | R | Round timing, storage prefix and optional leader generation hotkey |
 | `rounds/{n}/seed.json` | W | Random seed for prompt selection       |
 | `rounds/{n}/prompts.txt` | W | Selected prompts for the round         |
 | `rounds/{n}/submissions.json` | W | Admitted repo, exact commit, reveal block and round |
 | `rounds/{n}/{hotkey}/generated.json` | W | JS URL, preview prefix, size and failure status |
+| `rounds/{n}/leader/generated.json` | W | Collected leader baseline when configured for the round |
 
 ## Development
 ```bash

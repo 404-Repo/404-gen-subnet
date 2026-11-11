@@ -44,10 +44,17 @@ class GenerationResult(BaseModel):
         """True when this stem has a recorded permanent delivery failure."""
         return self.failure_reason is not None
 
+    def is_terminal(self) -> bool:
+        return bool(self.failure_reason) or (self.js is not None and self.views is not None)
+
 
 GenerationsMap = dict[str, GenerationResult]
 
 GenerationsAdapter = TypeAdapter(GenerationsMap)
+
+
+def generations_complete(saved: GenerationsMap, expected: set[str]) -> bool:
+    return bool(expected) and saved.keys() == expected and all(result.is_terminal() for result in saved.values())
 
 
 def generations_path(round_num: int, hotkey: str) -> str:

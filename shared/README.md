@@ -13,7 +13,7 @@ and hotkey identify the submitted source and results for that validation pass.
 | Path | Producer | Consumer | Contract |
 | --- | --- | --- | --- |
 | `rounds/{n}/{hotkey}/generated.json` | Collector | Judge, validator | Prompt stem to `GenerationResult` (`js`, `views`, `failure_reason`, `size`) |
-| `rounds/{n}/leader/generated.json` | Leader generator | Judge | Same result schema, one bundle for the previous leader |
+| `rounds/{n}/leader/generated.json` | Collector | Judge | Same result schema, one bundle for the previous leader |
 | `rounds/{n}/validation_requests.json` | Judge | Validator | Append-only list of `{hotkey}`; one request per round/hotkey |
 | `rounds/{n}/validation_results.json` | Validator | Judge | Hotkey to `{verdict: "passed" or "failed", reason}`; one terminal result |
 | `rounds/{n}/source_audit.json` | Source auditor | Judge | Existing list of `{hotkey, verdict, reason}` source verdicts |
@@ -62,9 +62,10 @@ source auditing before judging can complete.
 
 - **Leader generation:** the [leader generation service](../leader-generation-service/README.md)
   runs the previous leader's Python source, identified by repository/commit, on
-  the published round prompts and seed. It resumes witness-saved work and publishes
-  `rounds/{n}/leader/generated.json` using the `GenerationResult` schema above,
-  with canonical Three.js and rendered-view locations.
+  the published round prompts and seed. It saves results to the witness under
+  the round's `leader_generation_hotkey`. The collector publishes
+  `rounds/{n}/leader/generated.json` with canonical Three.js and rendered-view
+  locations.
 - **Replay validator:** consume `validation_requests.json`, replay the exact submitted
   Python source using the published prompts/seed and recorded witness evidence,
   verify the canonical outputs and competition budgets, then publish one terminal

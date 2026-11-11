@@ -15,6 +15,7 @@ without building or executing miner code.
 3. **Build next round schedule**: Set `earliest_reveal_block` to the previous
    round's latest reveal block plus one, `latest_reveal_block` to the next start
    block, and `generation_deadline_block` from the configured generation window.
+   Carry forward the round's `leader_generation_hotkey` if configured.
 4. **Compute leader transition**:
    - `winner_hotkey: "leader"` means defense and leaves history and weight unchanged.
    - The same repository and commit as the current leader also count as defense,
@@ -66,7 +67,7 @@ Reads and writes to the competition Git repository:
 | `state.json` | R/W | Current round, stage, and next-stage ETA |
 | `config.json` | R | Competition dates and timing |
 | `leader.json` | R/W | Append-only leader transition history |
-| `rounds/{n}/schedule.json` | R/W | Reveal and generation deadline blocks |
+| `rounds/{n}/schedule.json` | R/W | Reveal and generation deadline blocks, optional leader generation hotkey |
 | `rounds/{n}/winner.json` | R | Finalized winner's hotkey, repository, and commit |
 
 There is no `builds.json` dependency in this service.

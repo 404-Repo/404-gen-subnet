@@ -155,6 +155,7 @@ def scenario(settings, tmp_path):
                 "latest_reveal_block": 2,
                 "generation_deadline_block": 100,
                 "witness_storage_prefix": "sandbox/",
+                "leader_generation_hotkey": hotkey,
             }
         ),
     }

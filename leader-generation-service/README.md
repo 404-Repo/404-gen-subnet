@@ -30,13 +30,10 @@ behavior operates independently of this explicit-request interval.
 Each worker downloads its image from the original URL in the frozen competition
 inputs and verifies the image hash before generating it.
 
-The service preserves a complete leader baseline already published for the round.
 When every official prompt has a terminal result in the witness's
-`submitted.json` index, the service expands storage keys with `CDN_URL` and writes
-`rounds/{n}/leader/generated.json` using `GenerationResult`. JavaScript, views,
-recordings and embeddings stay in witness storage. While the round remains current,
-a Git publication failure is retried from that index, including after the CPU
-runner is terminated.
+`submitted.json` index, the service records completion and terminates the
+generation pod. The submission collector reads the same index during
+`collecting` and writes `rounds/{n}/leader/generated.json` for the judge.
 
 ## Configuration and startup
 
@@ -46,7 +43,7 @@ Settings load from the environment and the local `.env` file.
 
 | Required variable | Meaning |
 | --- | --- |
-| `GITHUB_REPO`, `GITHUB_TOKEN` | Competition repository and token permitted to publish its leader index |
+| `GITHUB_REPO`, `GITHUB_TOKEN` | Competition repository and token with read access |
 | `GENERATION_IMAGE` | Published generation image reference pinned with `@sha256:<digest>` |
 | `RUNPOD_API_KEY` | Generation CPU lifecycle credentials; retained on the service |
 | `CDN_URL` | Same artifact CDN origin/prefix used by the collector |
@@ -59,9 +56,14 @@ be that login's only active credential owner. A lock in the login directory
 prevents another service instance from refreshing it with a different state
 directory. A separate lock owns service state.
 
-`WALLET_NAME=leader` and `WALLET_HOTKEY=default` select the operator hotkey. It
-must be admitted by the witness and is distinct from the incumbent miner's public
-hotkey. The operator hotkey and provider account are frozen per job.
+`WALLET_NAME=leader` and `WALLET_HOTKEY=default` select the operator hotkey.
+Set its public address as `leader_generation_hotkey` in the round's
+`schedule.json` to enable generation and collection for that round. The witness
+must admit the operator hotkey. The incumbent miner's hotkey identifies the
+source in `leader.json`. For manual generation, use the pinned source and the
+same operator wallet so results go to the same witness index.
+The operator hotkey and provider account are frozen per job. The coldkey stays
+with the operator.
 
 Optional settings include `GITHUB_BRANCH=main`,
 `WITNESS_URL`, `SUBTENSOR_RPC_URL`,
@@ -82,9 +84,9 @@ metadata, checks artifact integrity and checks the actual CPU/RAM allocation.
 
 Copy [`.env.test.example`](.env.test.example) to this directory's private `.env`.
 It selects `404-Repo/404-active-competition`, branch `witness-test`, and
-`https://witness-test.subnet404.xyz`. Both the service and gateway must follow that
-same branch. Leader indexes are written to `rounds/{n}/leader/generated.json` on
-`witness-test`; artifact URLs use the shared `https://subnet404.xyz` CDN with the
+`https://witness-test.subnet404.xyz`. The service, gateway, and collector must
+follow that branch. The collector writes `rounds/{n}/leader/generated.json` on
+`witness-test`. Artifact URLs use the shared `https://subnet404.xyz` CDN with the
 test round's distinct name. A second competition repository or branch is unnecessary.
 
 The test gateway admits only signed requests from
@@ -100,8 +102,10 @@ The competition fixture must also supply:
   source commit containing `main.py` and `generate(image, seed, witness)`.
 - `state.json` selecting `miner_generation` and a test round number.
 - That round's `prompts.txt`, `seed.json`, and `schedule.json`, with
-  `witness_save_submissions=true` and `generation_deadline_block=null` for a
-  persistent test round. Retain the test competition's distinct name and storage scope.
+  `leader_generation_hotkey` set to the test operator's public address,
+  `witness_save_submissions=true`, and `generation_deadline_block=null` for a
+  persistent test round. To test collection, supply the round's
+  `submissions.json` and select `collecting` after generation completes.
 
 The fixture uses round `witness-test-20261110-0`, two prompts and seed `42`.
 Pin the latest leader entry from competition `main` in the fixture's `leader.json`.
@@ -159,7 +163,7 @@ manual control client. `POST /start` enables generation and keeps an active pod.
 `POST /resume` requests a fresh attempt while the round is open. `GET /status`
 reads provider status and `POST /terminate` stops the job until start or resume.
 Control responses contain only `pod_id`, `name`, `phase`, `stopped`, and
-`published`. Resume first terminates the previous attempt. Start and resume
+`completed`. Resume first terminates the previous attempt. Start and resume
 respect the same allocation interval as the generation loop. A request during
 the interval can return an `intent` phase and the next eligible iteration
 starts a fresh attempt. The generation loop and control operations share one
@@ -189,20 +193,19 @@ After `STALL_REPLACEMENT_SECONDS` without progress (one hour by default), it con
 deletion of the recorded CPU pod and creates a replacement with the same frozen inputs
 and identity. The replacement interval must exceed 1200 seconds. Startup counts
 toward the stall window. Progress and warning state survive service restarts.
-Older rounds only clean up their CPU pods; their saved results are no longer read
-or published. CPU disk is not needed to recover progress. Unavailable or regressing
-saved results do not trigger stall replacement; the service retries the check on
-the next iteration. A Discord delivery failure does not block pod recovery.
+Older rounds only clean up their CPU pods. CPU disk is not needed to recover
+progress. Unavailable or regressing saved results do not trigger stall replacement.
+The service retries the check on the next iteration. A Discord delivery failure
+does not block pod recovery.
 
 `PROGRESS_INTERVAL_SECONDS=1200` sets the wait after every iteration, including
 failures, and must be at least 1200 seconds (20 minutes). Stall thresholds are
 evaluated at each check; longer intervals delay warnings and replacement.
 Allocation-request timestamps in the private journal enforce the minimum gap
 between generation-pod creates across rounds, restarts, manual controls, and rejected requests.
-Failed cleanup prevents another allocation. Current-round completed results are
-published even when subsequent cleanup fails; publication and cleanup are retried
-independently on later iterations. The service only deletes recorded,
-identity-checked CPU pods.
+Failed cleanup prevents another allocation. The service retries pod deletion on
+later iterations. The collector can read completed witness results while cleanup
+is pending.
 
 State and block deadlines are rechecked after worker configuration preparation, before the
 create request. A closed round starts no new attempts. Shutdown starts no new

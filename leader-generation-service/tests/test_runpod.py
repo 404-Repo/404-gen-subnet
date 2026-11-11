@@ -301,7 +301,7 @@ async def test_control_start_keeps_the_pod_and_resume_replaces_after_the_cooldow
         "name": second.allocation.name,
         "phase": "running",
         "stopped": False,
-        "published": False,
+        "completed": False,
     }
 
 
@@ -321,9 +321,7 @@ async def test_control_terminate_stays_stopped_until_explicit_start(control, sce
     assert provider.creates == 2
 
 
-async def test_stopped_cleanup_retries_during_cdn_outage_and_still_publishes(
-    control, scenario, settings, runner, monkeypatch
-):
+async def test_stopped_cleanup_retries_after_provider_outage(control, scenario, settings, runner, monkeypatch):
     request, _ = control
     value, provider = runner
     await request("start")
@@ -340,26 +338,16 @@ async def test_stopped_cleanup_retries_during_cdn_outage_and_still_publishes(
     monkeypatch.setattr(provider, "delete", delete)
     assert (await request("terminate")).status == 503
     assert value.store.load(1).stopped is True
-    saved = scenario.deps.saved
-    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(503))) as http:
-        scenario.deps.saved = SavedResults(http, settings.cdn_url)
-        with pytest.raises(httpx.HTTPStatusError):
-            await generation_iteration(scenario.controller, settings)
-        assert attempts == [pod_id, pod_id]
-        assert provider.pods == {}
-        assert value.store.load(1).allocation.phase == "terminated"
-        assert value.store.load(1).published is False
-    scenario.deps.saved = saved
-    scenario.state["saved"] = {name: {"failure_reason": "generation_failed"} for name in scenario.images}
     await generation_iteration(scenario.controller, settings)
-    assert value.store.load(1).published is True
+
+    assert attempts == [pod_id, pod_id]
+    assert provider.pods == {}
+    assert value.store.load(1).allocation.phase == "terminated"
     assert value.store.load(1).stopped is True
     assert provider.creates == 1
 
 
-async def test_stopped_completed_results_publish_after_cleanup_recovers(
-    control, scenario, settings, runner, monkeypatch
-):
+async def test_completed_job_retries_pod_cleanup(control, scenario, settings, runner, monkeypatch):
     request, _ = control
     value, provider = runner
     await request("start")
@@ -370,15 +358,13 @@ async def test_stopped_completed_results_publish_after_cleanup_recovers(
         raise RuntimeError("Fixture provider deletion unavailable")
 
     monkeypatch.setattr(provider, "delete", unavailable)
-    assert (await request("terminate")).status == 503
     with pytest.raises(RuntimeError, match="deletion unavailable"):
         await generation_iteration(scenario.controller, settings)
-    assert value.store.load(1).published is False
+    assert value.store.load(1).completed
     monkeypatch.setattr(provider, "delete", delete)
     await generation_iteration(scenario.controller, settings)
-    assert value.store.load(1).published is True
-    assert value.store.load(1).stopped is True
-    assert set(json.loads(scenario.deps.git.committed["rounds/1/leader/generated.json"])) == set(scenario.images)
+
+    assert value.store.load(1).allocation.phase == "terminated"
     assert provider.creates == 1
 
 
@@ -495,7 +481,7 @@ async def test_old_job_must_be_disposed_before_starting_the_next_round(
         provider.absent_reply = False
     else:
         await launch(value, old)
-        old.published = True
+        old.completed_prompts = len(old.snapshot.inputs.prompts)
         value.store.save(old)
 
         def unavailable(pod_id):
@@ -626,15 +612,15 @@ async def test_git_outage_defers_results_until_the_current_round_is_known(
         await generation_iteration(scenario.controller, settings)
     assert provider.deleted == []
     assert value.store.load(1).allocation.phase == "active"
-    assert value.store.load(1).published is False
+    assert value.store.load(1).completed is False
     assert scenario.state["index_reads"] == 0
     assert provider.creates == 1
     monkeypatch.setattr(git, "get_ref_sha", original_ref)
     monkeypatch.setattr(git, "get_file", original_file)
     await generation_iteration(scenario.controller, settings)
-    assert value.store.load(1).published is True
+    assert value.store.load(1).completed is True
     assert provider.creates == 1
-    assert set(json.loads(git.committed["rounds/1/leader/generated.json"])) == set(scenario.images)
+    assert not provider.pods
 
 
 async def test_known_lost_runner_is_replaced_with_same_snapshot(scenario, settings, runner, clock):
@@ -963,7 +949,7 @@ async def test_saved_progress_keeps_a_running_generation_pod_and_logs_counts(
         assert any("2/2" in message and "+1" in message for message in messages)
     finally:
         logger.remove(sink)
-    assert value.store.load(1).published
+    assert value.store.load(1).completed
     assert provider.creates == 1 and not provider.pods
 
 
@@ -1084,7 +1070,7 @@ async def test_discord_outage_does_not_prevent_stalled_pod_recovery(
     assert provider.events == ["create", "delete", "create"]
 
 
-async def test_render_rejection_is_terminal_progress_and_is_published(
+async def test_render_rejection_is_terminal_progress(
     control, runner, scenario, settings, clock, discord
 ):
     request, _ = control
@@ -1094,14 +1080,11 @@ async def test_render_rejection_is_terminal_progress_and_is_published(
     clock[0] += 1200
     await generation_iteration(scenario.controller, settings)
     assert value.store.load(1).completed_prompts == 1
-    assert not value.store.load(1).published
+    assert not value.store.load(1).completed
     assert provider.creates == 1 and provider.deleted == []
     assert discord.messages == []
     scenario.state["saved"]["lamp"] = {"failure_reason": "generation_failed"}
     clock[0] += 1200
     await generation_iteration(scenario.controller, settings)
-    assert value.store.load(1).published
+    assert value.store.load(1).completed
     assert provider.creates == 1 and not provider.pods
-    published = json.loads(scenario.deps.git.committed["rounds/1/leader/generated.json"])
-    assert published["chair"]["failure_reason"] == "render_rejected"
-    assert published["lamp"]["failure_reason"] == "generation_failed"

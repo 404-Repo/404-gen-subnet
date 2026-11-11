@@ -12,7 +12,6 @@ from miner_runtime.pod import PARAMS_PATH
 from pod_gateway.membership import Membership, MembershipRefresher
 from pod_gateway.runpod import RunPodClient
 from subnet_common.competition.config import require_competition_config
-from subnet_common.competition.generations import get_generations
 from subnet_common.competition.leader import require_leader_state
 from subnet_common.competition.prompts import require_prompts
 from subnet_common.competition.schedule import require_schedule
@@ -30,7 +29,7 @@ from .runpod import RunpodRunner
 from .runtime import ROOT
 from .settings import Settings
 from .store import JobStore
-from .witness import SavedResults, WitnessInputs, complete
+from .witness import SavedResults, WitnessInputs
 
 
 @dataclass
@@ -124,11 +123,13 @@ async def _generation_iteration(
         return
     if state.stage != RoundStage.MINER_GENERATION:
         return
-    urls = await require_prompts(git, state.current_round, ref)
-    if complete(await get_generations(git, state.current_round, "leader", ref), prompt_ids(urls)):
-        return
-    config = await require_competition_config(git, ref)
     schedule = await require_schedule(git, state.current_round, ref)
+    if schedule.leader_generation_hotkey is None:
+        return
+    if schedule.leader_generation_hotkey != dependencies.hotkey:
+        raise ValueError("Round leader generation hotkey differs from the operator wallet")
+    urls = await require_prompts(git, state.current_round, ref)
+    config = await require_competition_config(git, ref)
     seed = await require_seed_from_git(git, state.current_round, ref)
     leader = (await require_leader_state(git, ref)).get_latest()
     if leader is None:

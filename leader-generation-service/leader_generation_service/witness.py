@@ -3,7 +3,7 @@ from pathlib import Path
 import httpx
 from bittensor_wallet import Keypair
 from pydantic import BaseModel
-from subnet_common.competition.generations import GenerationResult, GenerationsAdapter, GenerationsMap
+from subnet_common.competition.generations import GenerationsAdapter, GenerationsMap
 from subnet_common.witness.rounds import RoundInputs
 from witness_client import AsyncWitnessClient
 
@@ -49,24 +49,3 @@ class SavedResults:
             return {}
         response.raise_for_status()
         return GenerationsAdapter.validate_json(response.content)
-
-    def public(self, saved: GenerationsMap) -> GenerationsMap:
-        return {
-            prompt: result.model_copy(
-                update={
-                    "js": None if result.js is None else f"{self.cdn_url}/{result.js}",
-                    "views": None if result.views is None else f"{self.cdn_url}/{result.views}",
-                }
-            )
-            for prompt, result in saved.items()
-        }
-
-
-def is_terminal(result: GenerationResult) -> bool:
-    return bool(result.failure_reason or (result.js is not None and result.views is not None))
-
-
-def complete(saved: GenerationsMap, expected: set[str]) -> bool:
-    if set(saved) - expected:
-        raise ValueError("Saved result contains an unexpected official prompt ID")
-    return bool(expected) and set(saved) == expected and all(is_terminal(result) for result in saved.values())

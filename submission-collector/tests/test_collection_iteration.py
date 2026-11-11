@@ -385,6 +385,66 @@ async def test_open_hotkey_not_in_metagraph_is_dropped(git: MockGitHubClient, se
     assert set(submissions) == {HOTKEY}
 
 
+async def test_collection_waits_for_the_leader_then_publishes_both_indexes(
+    git: MockGitHubClient, settings: Settings,
+) -> None:
+    add_state(git, stage=RoundStage.COLLECTING)
+    add_config(git)
+    add_prompts(git, ["https://prompts.test/chair.png", "https://prompts.test/table.png"], round_num=1)
+    schedule = add_schedule(git).model_dump()
+    schedule.update(witness_storage_prefix="isolated/", leader_generation_hotkey=HOTKEY_2)
+    git.files["rounds/1/schedule.json"] = json.dumps(schedule)
+    submissions_path = "rounds/1/submissions.json"
+    git.files[submissions_path] = json.dumps({HOTKEY: dict(
+        repo="test/model", commit="c" * 40, revealed_at_block=150, tie_breaker="0" * 128, round="test-comp-1",
+    )})
+    root = "/isolated/rounds/test-comp-1"
+    leader_saved = {"chair": {"js": "leader/chair.js", "views": "leader/chair"}}
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        if request.url.path == f"{root}/{HOTKEY_2}/submitted.json":
+            return httpx.Response(200, json=leader_saved)
+        assert request.url.path == f"{root}/{HOTKEY}/submitted.json"
+        return httpx.Response(200, json={"chair": {"js": "miner/chair.js", "views": "miner/chair"}})
+
+    async def collect(git_batcher, state, ref, settings):
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
+            return await ResultCollector(git_batcher, http, settings).collect(state, ref)
+
+    async def iteration():
+        await collection_iteration(
+            git=git,
+            get_block=make_get_block(),
+            get_commitments=make_get_commitments(),
+            get_hotkey_owners=make_get_hotkey_owners(),
+            get_locked_alpha=make_get_locked_alpha(),
+            collect_fn=collect,
+            settings=settings,
+        )
+
+    await iteration()
+    assert CompetitionState.model_validate_json(git.files["state.json"]).stage == RoundStage.COLLECTING
+    assert git.committed == {}
+
+    leader_saved["table"] = {"js": "leader/table.js"}
+    await iteration()
+    assert CompetitionState.model_validate_json(git.files["state.json"]).stage == RoundStage.COLLECTING
+    assert git.committed == {}
+
+    leader_saved["table"] = {"failure_reason": "render_rejected"}
+    await iteration()
+
+    assert CompetitionState.model_validate_json(git.files["state.json"]).stage == RoundStage.DUELS
+    assert set(json.loads(git.files[submissions_path])) == {HOTKEY}
+    leader = GenerationsAdapter.validate_json(git.committed["rounds/1/leader/generated.json"])
+    assert leader["chair"].js == f"{settings.cdn_url}/leader/chair.js"
+    assert leader["chair"].views == f"{settings.cdn_url}/leader/chair"
+    assert leader["table"].failure_reason == "render_rejected"
+    miner = GenerationsAdapter.validate_json(git.committed[f"rounds/1/{HOTKEY}/generated.json"])
+    assert miner["chair"].js == f"{settings.cdn_url}/miner/chair.js"
+    assert miner["table"].failure_reason == "not_submitted"
+
+
 async def test_collection_replaces_previously_collected_results(git: MockGitHubClient, settings: Settings) -> None:
     state = add_state(git, stage=RoundStage.COLLECTING)
     add_prompts(git, ["https://prompts.test/chair.png", "https://prompts.test/table.png"], round_num=1)

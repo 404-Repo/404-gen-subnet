@@ -7,14 +7,12 @@ from urllib.parse import unquote, urlsplit
 
 from loguru import logger
 from subnet_common.competition.config import require_competition_config
-from subnet_common.competition.generations import GenerationsAdapter, generations_path, get_generations
 from subnet_common.competition.schedule import require_schedule
 from subnet_common.competition.state import RoundStage, require_state
 from subnet_common.graceful_shutdown import GracefulShutdown
 
 from .credentials import ACCESS_TOKEN_MARGIN_SECONDS, AccessCredentials
 from .models import Job
-from .witness import complete, is_terminal
 
 
 if TYPE_CHECKING:
@@ -52,6 +50,8 @@ class RoundRunner:
         if state.current_round != job.snapshot.inputs.number or state.stage != RoundStage.MINER_GENERATION:
             return False
         schedule = await require_schedule(git, state.current_round, ref)
+        if schedule.leader_generation_hotkey != job.snapshot.hotkey:
+            return False
         if (
             schedule.generation_deadline_block != job.snapshot.inputs.generation_deadline_block
             or schedule.witness_storage_prefix != job.snapshot.inputs.storage_prefix
@@ -69,9 +69,8 @@ class RoundRunner:
     async def run(self, job: Job) -> None:
         if self.shutdown.should_stop:
             return
-        if job.stopped or job.published:
+        if job.stopped or job.completed:
             await self.dependencies.runner.terminate(job)
-        if job.published:
             return
         git = self.dependencies.git
         number = job.snapshot.inputs.number
@@ -83,12 +82,13 @@ class RoundRunner:
         try:
             saved = await self.dependencies.saved.read(job.snapshot)
         except Exception:
-            if not job.stopped and not await self.may_generate(job):
+            if not await self.may_generate(job):
                 await self.dependencies.runner.terminate(job)
             raise
         expected = set(job.snapshot.inputs.prompt_ids.values())
-        finished = complete(saved, expected)
-        completed = sum(is_terminal(result) for result in saved.values())
+        if saved.keys() - expected:
+            raise ValueError("Saved result contains an unexpected official prompt ID")
+        completed = sum(result.is_terminal() for result in saved.values())
         delta = completed - job.completed_prompts
         logger.info(
             "Round {} saved {}/{} prompts (+{}, {} pending)",
@@ -98,25 +98,10 @@ class RoundRunner:
             delta,
             len(expected) - completed,
         )
-        if finished:
-            try:
-                if not complete(await get_generations(git, number, "leader", ref), expected):
-                    content = GenerationsAdapter.dump_json(self.dependencies.saved.public(saved), indent=2).decode()
-                    await git.commit_files(
-                        files={generations_path(number, "leader"): content},
-                        message=f"Update generated.json for round {number}, miner leader",
-                        branch=self.settings.github_branch,
-                        base_sha=ref,
-                    )
-            except Exception as error:
-                logger.warning("Round {} baseline publication failed ({})", number, type(error).__name__)
-            else:
-                job.published = True
-                self.dependencies.store.save(job)
-            finally:
-                await self.dependencies.runner.terminate(job)
-            return
-        if job.stopped:
+        if completed == len(expected):
+            job.completed_prompts = completed
+            self.dependencies.store.save(job)
+            await self.dependencies.runner.terminate(job)
             return
         if not await self.may_generate(job):
             await self.dependencies.runner.terminate(job)
@@ -153,11 +138,6 @@ class RoundRunner:
             if stalled < self.settings.stall_replacement_seconds:
                 return
             await self.dependencies.runner.terminate(job)
-
-        if complete(await get_generations(git, number, "leader", ref), expected):
-            job.published = True
-            self.dependencies.store.save(job)
-            return
 
         generation_minutes = (await require_competition_config(git, ref)).generation_stage_minutes
         min_validity_seconds = max(0, generation_minutes) * 60 + ACCESS_TOKEN_MARGIN_SECONDS

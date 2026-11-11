@@ -3,6 +3,7 @@ import json
 import pytest
 from pydantic import SecretStr
 from subnet_common.competition.config import CompetitionConfig
+from subnet_common.competition.generations import GenerationsMap
 from subnet_common.competition.schedule import RoundSchedule
 from subnet_common.competition.state import CompetitionState, RoundStage
 from subnet_common.git_batcher import GitBatcher
@@ -136,5 +137,6 @@ class SpyCollectFn:
         state: CompetitionState,
         ref: str,
         settings: Settings,
-    ) -> None:
+    ) -> dict[str, GenerationsMap]:
         self.called = True
+        return {}

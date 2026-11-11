@@ -71,7 +71,7 @@ async def finalize_round(
         next_round_start=next_round_start,
         next_round_start_block=next_round_start_block,
         config=config,
-        previous_latest_reveal_block=previous_schedule.latest_reveal_block if previous_schedule else None,
+        previous_schedule=previous_schedule,
     )
 
     leader_state = await require_leader_state(git, ref=ref)
@@ -185,7 +185,7 @@ def _build_next_schedule(
     next_round_start: datetime,
     next_round_start_block: int,
     config: CompetitionConfig,
-    previous_latest_reveal_block: int | None,
+    previous_schedule: RoundSchedule | None,
 ) -> RoundSchedule | None:
     """Build the schedule for the next round, or None if competition has ended."""
     if next_round_start.date() > config.last_competition_date:
@@ -198,9 +198,10 @@ def _build_next_schedule(
     generation_deadline_block = next_round_start_block + generation_blocks
 
     return RoundSchedule(
-        earliest_reveal_block=previous_latest_reveal_block + 1 if previous_latest_reveal_block is not None else 0,
+        earliest_reveal_block=previous_schedule.latest_reveal_block + 1 if previous_schedule else 0,
         latest_reveal_block=next_round_start_block,
         generation_deadline_block=generation_deadline_block,
+        leader_generation_hotkey=previous_schedule.leader_generation_hotkey if previous_schedule else None,
     )
 
 
