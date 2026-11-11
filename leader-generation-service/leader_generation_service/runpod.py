@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextvars
 import decimal
 import json
-import secrets
 import time
 from collections.abc import Callable
 from dataclasses import asdict
@@ -14,13 +14,14 @@ from decimal import Decimal
 from typing import TypeVar
 
 import httpx
+from bittensor_wallet import Wallet
 from miner_runtime.pod import Config, pod_body
 from pod_gateway.runpod import CreateRejected, PodProvider
 from subnet_common.graceful_shutdown import GracefulShutdown
 from subnet_common.witness.models import Pod
 from subnet_common.witness.rounds import repository
 
-from .credentials import AccessCredentials
+from .credentials import ACCESS_TOKEN_MARGIN_SECONDS, AccessCredentials
 from .models import Allocation, Job
 from .settings import Settings
 from .store import JobStore, atomic_write
@@ -56,7 +57,10 @@ async def _threaded(operation: Callable[[], T]) -> T:
 
 
 def read_config(store: JobStore, job: Job) -> Config:
-    return Config(**json.loads((store.run_directory(job) / "config.json").read_bytes()))
+    data = json.loads((store.run_directory(job) / "config.json").read_bytes())
+    data.pop("credentials_url", None)
+    data.pop("credential_interval_seconds", None)
+    return Config(**data)
 
 
 class RunpodRunner:
@@ -143,7 +147,6 @@ class RunpodRunner:
             seed=snapshot.inputs.seed,
             hotkey=snapshot.hotkey,
             account_id=snapshot.account_id,
-            credentials_url=f"{self.settings.credentials_url}/v1/jobs/{snapshot.inputs.number}",
             witness_url=snapshot.witness_url,
             cpu_id=self.settings.cpu_id,
             vcpus=self.settings.vcpus,
@@ -155,7 +158,6 @@ class RunpodRunner:
             prover_contexts=snapshot.prover_contexts,
             go_cpus=snapshot.go_cpus,
             go_memory_mib=snapshot.go_memory_mib,
-            credential_interval_seconds=self.settings.credential_check_interval_seconds,
             round_inputs_fingerprint=snapshot.inputs.fingerprint,
         )
         atomic_write(directory / "config.json", json.dumps(asdict(config)).encode())
@@ -163,7 +165,7 @@ class RunpodRunner:
     def _ensure(self, job: Job) -> None:
         allocation = job.allocation
         if allocation is None or allocation.phase == "terminated":
-            allocation = Allocation(token=secrets.token_urlsafe(32))
+            allocation = Allocation()
             job.allocations.append(allocation)
             self.store.save(job)
         elif allocation.phase != "intent":
@@ -173,13 +175,21 @@ class RunpodRunner:
     async def ensure(self, job: Job) -> None:
         await _threaded(lambda: self._ensure(job))
 
-    def _start(self, job: Job, credentials: AccessCredentials) -> None:
+    def _hotkey(self, job: Job) -> str:
+        snapshot = job.snapshot
+        wallet = Wallet(name=snapshot.wallet_name, hotkey=snapshot.wallet_hotkey, path=str(self.settings.wallet_path))
+        if wallet.hotkey_file.is_encrypted() or wallet.hotkey.ss58_address != snapshot.hotkey:
+            raise ValueError("Operator hotkey differs from the frozen job")
+        path = self.settings.wallet_path / snapshot.wallet_name / "hotkeys" / snapshot.wallet_hotkey
+        return base64.b64encode(path.read_bytes()).decode()
+
+    def _start(self, job: Job, credentials: AccessCredentials, min_validity_seconds: int) -> None:
         if self.shutdown.should_stop:
             return
         if credentials.account_id != job.snapshot.account_id:
             raise RuntimeError("Provider account differs from the frozen job")
         allocation = job.allocation
-        if allocation is None or allocation.token is None:
+        if allocation is None:
             raise RuntimeError("Generation attempt is not prepared")
         if allocation.phase != "intent":
             self._owned(job)
@@ -195,7 +205,10 @@ class RunpodRunner:
             return
         config = read_config(self.store, job)
         self._price(config)
-        body = pod_body(config, allocation.token, name=allocation.name)
+        hotkey = self._hotkey(job)
+        if credentials.expires_at < time.time() + min_validity_seconds:
+            raise RuntimeError("Access token has insufficient validity for the generation window")
+        body = pod_body(config, hotkey=hotkey, access_token=credentials.access_token, name=allocation.name)
         previous_requested_at = allocation.requested_at
         allocation.phase = "creating"
         allocation.requested_at = time.time()
@@ -219,8 +232,10 @@ class RunpodRunner:
         job.progress_warning_sent = False
         self.store.save(job)
 
-    async def start(self, job: Job, credentials: AccessCredentials) -> None:
-        await _threaded(lambda: self._start(job, credentials))
+    async def start(
+        self, job: Job, credentials: AccessCredentials, *, min_validity_seconds: int = ACCESS_TOKEN_MARGIN_SECONDS
+    ) -> None:
+        await _threaded(lambda: self._start(job, credentials, min_validity_seconds))
 
     async def status(self, job: Job) -> dict[str, str | None]:
         pod = await _threaded(lambda: self._owned(job))

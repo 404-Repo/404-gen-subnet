@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import json
 import threading
 from decimal import Decimal
@@ -8,6 +9,7 @@ import aiohttp
 import httpx
 import pytest
 from aiohttp.test_utils import make_mocked_request
+from bittensor_wallet import Keypair, Wallet
 from conftest import access
 from pod_gateway.runpod import CreateRejected, CreateUnknown
 from subnet_common.competition.state import CompetitionState, RoundStage
@@ -58,6 +60,8 @@ class Provider:
 
 @pytest.fixture
 def runner(scenario, settings):
+    wallet = Wallet(name=settings.wallet_name, hotkey=settings.wallet_hotkey, path=str(settings.wallet_path))
+    wallet.set_hotkey(Keypair.create_from_uri("//Alice"), encrypt=False, overwrite=True)
     provider = Provider()
     price = {
         "cpus": [
@@ -90,7 +94,7 @@ def control(scenario, settings, runner):
     app = server.application(scenario.controller, settings)
 
     async def request(action, *, token="c" * 43, method=None):
-        method = method or ("GET" if action in ("status", "credentials", "identity", "job") else "POST")
+        method = method or ("GET" if action == "status" else "POST")
         path = f"/v1/jobs/1/{action}"
         headers = {"Authorization": f"Bearer {token}"}
         initial = make_mocked_request(method, path, headers=headers, app=app)
@@ -122,9 +126,9 @@ async def pending_create(control, runner, monkeypatch):
             raise CreateUnknown("Fixture lost create reply")
         return pod
 
-    def observe_start(job, credentials):
+    def observe_start(job, credentials, min_validity_seconds):
         try:
-            start(job, credentials)
+            start(job, credentials, min_validity_seconds)
         finally:
             loop.call_soon_threadsafe(pending.finished.set)
 
@@ -222,14 +226,14 @@ async def test_http_shutdown_drains_provider_work_before_clients_and_state_lock_
 ):
     request, _ = control
     value, provider = runner
-    settings.credentials_port = unused_tcp_port
+    settings.control_port = unused_tcp_port
     shutdown = scenario.controller.shutdown
     ready, stop = asyncio.Event(), asyncio.Event()
     lock_path = settings.state_directory / ".lock"
 
     async def host():
         with exclusive_lock(lock_path):
-            async with server.serve_credentials(scenario.controller, settings):
+            async with server.serve_control(scenario.controller, settings):
                 ready.set()
                 await stop.wait()
             value.http.close()
@@ -290,7 +294,7 @@ async def test_control_start_keeps_the_pod_and_resume_replaces_after_the_cooldow
     second = value.store.load(1)
     assert provider.events == ["create", "delete", "create"]
     assert second.allocations[0].phase == "terminated"
-    assert second.allocation.token != first.allocation.token
+    assert second.allocation.id != first.allocation.id
     assert second.control_token == first.control_token
     assert json.loads(response.body) == {
         "pod_id": second.allocation.pod_id,
@@ -391,29 +395,9 @@ async def test_invalid_control_tokens_are_rejected_while_lifecycle_is_busy(contr
             await asyncio.gather(operation, return_exceptions=True)
 
 
-@pytest.mark.parametrize("action", ["start", "resume", "terminate", "status"])
-async def test_worker_token_cannot_control_the_job(control, runner, action):
+async def test_controls_and_iteration_share_the_lifecycle_lock(control, scenario, settings, runner):
     request, _ = control
-    value, provider = runner
-    await request("start")
-    response = await request(action, token=value.store.load(1).allocation.token)
-    assert response.status == 401
-    assert provider.creates == 1
-    assert provider.deleted == []
-
-
-@pytest.mark.parametrize("resource", ["credentials", "identity", "job"])
-async def test_control_token_cannot_read_worker_secrets(control, resource):
-    request, _ = control
-    await request("start")
-    assert (await request(resource)).status == 401
-
-
-async def test_controls_and_iteration_share_lock_while_credentials_remain_available(
-    control, scenario, settings, runner
-):
-    request, _ = control
-    value, provider = runner
+    _, provider = runner
     await request("start")
     async with scenario.deps.lifecycle:
         iteration = asyncio.create_task(generation_iteration(scenario.controller, settings))
@@ -421,8 +405,6 @@ async def test_controls_and_iteration_share_lock_while_credentials_remain_availa
         await asyncio.sleep(0)
         assert not iteration.done()
         assert not command.done()
-        credentials = await request("credentials", token=value.store.load(1).allocation.token)
-        assert credentials.status == 200
     await asyncio.gather(iteration, command)
     assert provider.creates == 1
 
@@ -680,6 +662,49 @@ async def test_price_ceiling_blocks_create(scenario, runner):
     assert provider.creates == 0
 
 
+async def test_launch_waits_for_a_token_that_covers_the_generation_window(scenario, settings, runner, clock):
+    value, provider = runner
+    scenario.deps.runner = value
+    scenario.deps.credentials.load = lambda *_: access(clock[0] + 7200)
+
+    with pytest.raises(RuntimeError, match="sufficient validity"):
+        await generation_iteration(scenario.controller, settings)
+    assert provider.creates == 0
+
+    credentials = access(clock[0] + 14400)
+    scenario.deps.credentials.load = lambda *_: credentials
+    await generation_iteration(scenario.controller, settings)
+    assert provider.creates == 1
+    environment = provider.bodies[0]["env"]
+    hotkey = settings.wallet_path / settings.wallet_name / "hotkeys" / settings.wallet_hotkey
+    assert base64.b64decode(environment["LEADER_JOB_HOTKEY"]) == hotkey.read_bytes()
+    assert environment["LEADER_JOB_ACCESS_TOKEN"] == credentials.access_token
+    journal = (settings.state_directory / "rounds/1.json").read_text()
+    assert environment["LEADER_JOB_HOTKEY"] not in journal
+    assert environment["LEADER_JOB_ACCESS_TOKEN"] not in journal
+
+
+async def test_create_rechecks_token_validity_after_preflight(scenario, runner, clock, monkeypatch):
+    value, provider = runner
+    job = Job(snapshot=scenario.snapshot)
+    await value.ensure(job)
+    min_validity_seconds = 11400
+    credentials = access(clock[0] + min_validity_seconds + 1)
+    price = value._price
+
+    def slow_price(config):
+        clock[0] += 2
+        return price(config)
+
+    monkeypatch.setattr(value, "_price", slow_price)
+    with pytest.raises(RuntimeError, match="insufficient validity"):
+        await value.start(job, credentials, min_validity_seconds=min_validity_seconds)
+    assert provider.creates == 0
+    allocation = value.store.load(1).allocation
+    assert allocation.phase == "intent"
+    assert allocation.requested_at is None
+
+
 @pytest.mark.parametrize("go_memory_mib", [14 * 1024, 16 * 1024])
 async def test_price_check_requires_ram_for_the_prover_and_worker(scenario, runner, go_memory_mib):
     value, provider = runner
@@ -727,7 +752,6 @@ async def test_broken_pod_is_replaced_after_a_stall_and_preserves_witness_progre
     assert provider.events == ["create", "delete", "create"]
     assert resumed.allocations[0].phase == "terminated"
     assert resumed.allocation.id != previous.allocation.id
-    assert resumed.allocation.token != previous.allocation.token
     assert resumed.snapshot == previous.snapshot
     assert runpod.read_config(value.store, resumed) == config
     assert scenario.state["saved"] == {"chair": {"failure_reason": "generation_failed"}}
@@ -749,6 +773,17 @@ async def test_account_and_pod_identity_mismatch_refuse_operation(scenario, runn
     assert provider.deleted == []
 
 
+async def test_create_rejects_a_different_hotkey(scenario, settings, runner):
+    value, provider = runner
+    job = Job(snapshot=scenario.snapshot)
+    await value.ensure(job)
+    wallet = Wallet(name=settings.wallet_name, hotkey=settings.wallet_hotkey, path=str(settings.wallet_path))
+    wallet.set_hotkey(Keypair.create_from_uri("//Bob"), encrypt=False, overwrite=True)
+    with pytest.raises(ValueError, match="Operator hotkey differs"):
+        await value.start(job, access(4_000_000_000))
+    assert provider.creates == 0
+
+
 async def test_start_request_uses_frozen_source_inputs_and_image(scenario, settings, runner):
     value, provider = runner
     job = Job(snapshot=scenario.snapshot)
@@ -763,7 +798,6 @@ async def test_start_request_uses_frozen_source_inputs_and_image(scenario, setti
     assert config.seed == scenario.inputs.seed
     assert config.hotkey == scenario.snapshot.hotkey
     assert config.account_id == scenario.snapshot.account_id
-    assert config.credentials_url == "https://leader.test/v1/jobs/1"
     assert provider.bodies[0]["name"] == job.allocation.name
 
 

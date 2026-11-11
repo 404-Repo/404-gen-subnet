@@ -57,7 +57,6 @@ class Config:
     seed: int
     hotkey: str
     account_id: str
-    credentials_url: str
     witness_url: str = "https://witness.subnet404.xyz"
     cpu_id: str = "cpu3c"
     vcpus: int = 8
@@ -69,7 +68,6 @@ class Config:
     prover_contexts: int = 4
     go_cpus: int = 8
     go_memory_mib: int = 2048
-    credential_interval_seconds: int = 30
     round_inputs_fingerprint: str | None = None
 
     def __post_init__(self) -> None:
@@ -86,7 +84,6 @@ class Config:
             raise ValueError("Expected an operator hotkey address")
         if not re.fullmatch(r"[a-f0-9-]{1,80}", self.account_id):
             raise ValueError("Expected a subscription account identifier")
-        https(self.credentials_url)
         https(self.witness_url)
         if urlsplit(self.witness_url).path not in ("", "/"):
             raise ValueError("Witness URL must be an HTTPS origin")
@@ -104,13 +101,13 @@ class Config:
             raise ValueError("Prover contexts must fit preparation slots")
         if not 1 <= self.parallel_preparations <= self.parallel_calls <= 32:
             raise ValueError("Preparation slots must fit active calls (1-32)")
-        if self.workers < 1 or not 1 <= self.credential_interval_seconds <= 60:
-            raise ValueError("Invalid workers or credential interval")
+        if self.workers < 1:
+            raise ValueError("Invalid workers")
 
 
-def pod_body(config: Config, token: str, *, name: str | None = None) -> dict[str, object]:
-    if not token or any(value in token for value in ("\n", "\r")):
-        raise ValueError("A job credential token is required")
+def pod_body(config: Config, *, hotkey: str, access_token: str, name: str | None = None) -> dict[str, object]:
+    if not hotkey or not access_token:
+        raise ValueError("A job hotkey and access token are required")
     name = name or f"leader-runner-{uuid.uuid4()}"
     if not re.fullmatch(r"leader-runner-[A-Za-z0-9-]{1,64}", name):
         raise ValueError("Invalid generation Pod name")
@@ -120,7 +117,8 @@ def pod_body(config: Config, token: str, *, name: str | None = None) -> dict[str
         "startSsh": False,
         "env": {
             "LEADER_JOB_CONFIG": json.dumps(asdict(config)),
-            "LEADER_JOB_TOKEN": token,
+            "LEADER_JOB_HOTKEY": hotkey,
+            "LEADER_JOB_ACCESS_TOKEN": access_token,
             "LOGURU_DIAGNOSE": "NO",
         },
     }
@@ -249,22 +247,18 @@ def install_identity(config: Config, directory: Path, value: str) -> None:
         destination.chmod(0o600)
 
 
-def install_credentials(config: Config, directory: Path, values: dict[str, str]) -> None:
+def install_credentials(config: Config, directory: Path, access_token: str) -> None:
     from witness_client.request import load_credentials
 
-    if set(values) != {"access_token", "account_id"}:
-        raise ValueError("Expected access-only subscription credentials")
     private = directory / "private"
     private.mkdir(mode=0o700, exist_ok=True)
     descriptor, name = tempfile.mkstemp(dir=private)
     temporary = Path(name)
     try:
         with os.fdopen(descriptor, "w") as output:
-            json.dump(values, output)
-        _, account = load_credentials({"witness_url": config.witness_url, "proof_parameters": "unused",
-                                       "codex_credentials_file": str(temporary)}, "codex", None)
-        if account != config.account_id:
-            raise ValueError("Job provider account differs from the frozen identity")
+            json.dump({"access_token": access_token, "account_id": config.account_id}, output)
+        load_credentials({"witness_url": config.witness_url, "proof_parameters": "unused",
+                          "codex_credentials_file": str(temporary)}, "codex", None)
         temporary.replace(private / "subscription.json")
     finally:
         temporary.unlink(missing_ok=True)
@@ -342,43 +336,17 @@ async def generate_batch(config: Config, directory: Path) -> None:
                 return
 
 
-async def run_job(config: Config, directory: Path, token: str) -> None:
-    import httpx
-
-    headers = {"Authorization": "Bearer " + token}
-    base = config.credentials_url.rstrip("/")
-    async with httpx.AsyncClient(timeout=30, trust_env=False, follow_redirects=False) as http:
-        response = await http.get(base + "/identity", headers=headers)
-        response.raise_for_status()
-        install_identity(config, directory, response.json()["hotkey"])
-
-        async def refresh() -> None:
-            response = await http.get(base + "/credentials", headers=headers)
-            response.raise_for_status()
-            install_credentials(config, directory, response.json())
-
-        await refresh()
-
-        async def maintain() -> None:
-            while True:
-                await asyncio.sleep(config.credential_interval_seconds)
-                try:
-                    await refresh()
-                except (httpx.HTTPError, ValueError, OSError) as error:
-                    print(f"Access credentials unavailable ({type(error).__name__})", flush=True)
-
-        maintenance = asyncio.create_task(maintain())
-        try:
-            await generate_batch(config, directory)
-        finally:
-            maintenance.cancel()
-            await asyncio.gather(maintenance, return_exceptions=True)
+async def run_job(config: Config, directory: Path, *, hotkey: str, access_token: str) -> None:
+    install_credentials(config, directory, access_token)
+    install_identity(config, directory, hotkey)
+    await generate_batch(config, directory)
 
 
 def main() -> None:
     os.umask(0o077)
     config = Config(**json.loads(os.environ.pop("LEADER_JOB_CONFIG")))
-    token = os.environ.pop("LEADER_JOB_TOKEN")
+    hotkey = os.environ.pop("LEADER_JOB_HOTKEY")
+    access_token = os.environ.pop("LEADER_JOB_ACCESS_TOKEN")
     os.environ.update(runtime_environment(config))
     source_commit = verify_image()
     print(f"Generation image source commit: {source_commit}", flush=True)
@@ -389,7 +357,7 @@ def main() -> None:
     async def run() -> None:
         asyncio.get_running_loop().set_default_executor(
             ThreadPoolExecutor(max_workers=config.workers + config.parallel_calls))
-        await run_job(config, REMOTE, token)
+        await run_job(config, REMOTE, hotkey=hotkey, access_token=access_token)
 
     asyncio.run(run())
 

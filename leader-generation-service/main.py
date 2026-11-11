@@ -11,7 +11,7 @@ from leader_generation_service.generation_iteration import (
     maintain_credentials,
 )
 from leader_generation_service.round_runner import RoundRunner
-from leader_generation_service.server import serve_credentials
+from leader_generation_service.server import serve_control
 from leader_generation_service.settings import Settings
 from leader_generation_service.store import exclusive_lock
 
@@ -32,7 +32,7 @@ async def main() -> None:
     ):
         async with create_dependencies(settings, shutdown) as dependencies:
             controller = RoundRunner(dependencies, settings, shutdown)
-            async with serve_credentials(controller, settings):
+            async with serve_control(controller, settings):
                 maintenance = asyncio.create_task(maintain_credentials(dependencies, settings, shutdown))
                 try:
                     logger.info("Leader generation service started")

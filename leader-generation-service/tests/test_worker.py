@@ -1,6 +1,5 @@
 import asyncio
 import base64
-import json
 import sys
 from dataclasses import replace
 from pathlib import PurePosixPath
@@ -27,7 +26,6 @@ def generation(scenario, tmp_path, monkeypatch):
         seed=scenario.inputs.seed,
         hotkey=scenario.snapshot.hotkey,
         account_id=scenario.snapshot.account_id,
-        credentials_url="https://leader.test/v1/jobs/1",
         witness_url=scenario.snapshot.witness_url,
         workers=scenario.snapshot.workers,
         parallel_calls=scenario.snapshot.parallel_calls,
@@ -183,10 +181,6 @@ async def test_worker_retries_pending_prompts_with_a_single_client_and_twenty_mi
 
     async def request(transport, request):
         nonlocal first_download
-        if request.url.host == "leader.test":
-            if request.url.path.endswith("/identity"):
-                return httpx.Response(200, json={"hotkey": base64.b64encode(b"fixture hotkey").decode()})
-            return httpx.Response(200, json=json.loads(access(4_000_000_000).encode()))
         response = await download(transport, request)
         if first_download:
             state["clock"][0] += pass_duration
@@ -223,7 +217,12 @@ async def test_worker_retries_pending_prompts_with_a_single_client_and_twenty_mi
             state["fail_prompt"] = None
 
     monkeypatch.setattr(witness_class, "replace_pod", replace_witness)
-    await pod.run_job(config, directory, "fixture-job-token")
+    await pod.run_job(
+        config,
+        directory,
+        hotkey=base64.b64encode(b"fixture hotkey").decode(),
+        access_token=access(4_000_000_000).access_token,
+    )
     assert imports.read_text().splitlines() == ["loaded"]
     assert set(state["rows"]) == set(config.prompts)
     assert state["rows"]["lamp"]["failure_reason"] == ("render_rejected" if terminal_rejection else "generation_failed")

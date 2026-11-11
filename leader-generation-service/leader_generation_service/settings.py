@@ -4,7 +4,7 @@ from typing import Self
 from urllib.parse import urlsplit
 
 from miner_runtime.pod import IMAGE_PATTERN
-from pydantic import Field, SecretStr, field_validator, model_validator
+from pydantic import AliasChoices, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -19,8 +19,9 @@ class Settings(BaseSettings):
     runpod_api_key: SecretStr
     max_hourly_cost: Decimal = Field(default=Decimal("0.25"), gt=0, allow_inf_nan=False)
     cdn_url: str
-    credentials_url: str
-    credentials_port: int = Field(default=8080, ge=1, le=65535)
+    control_port: int = Field(
+        default=8080, ge=1, le=65535, validation_alias=AliasChoices("control_port", "credentials_port")
+    )
     witness_url: str = "https://witness.subnet404.xyz"
     subtensor_rpc_url: str = "https://entrypoint-finney.opentensor.ai"
     state_directory: Path = Path("/var/lib/404-leader-generation")
@@ -44,7 +45,7 @@ class Settings(BaseSettings):
     credential_check_interval_seconds: int = Field(default=30, ge=1, le=60)
     log_level: str = "INFO"
 
-    @field_validator("cdn_url", "witness_url", "subtensor_rpc_url", "credentials_url")
+    @field_validator("cdn_url", "witness_url", "subtensor_rpc_url")
     @classmethod
     def https_url(cls, value: str) -> str:
         url = urlsplit(value)
@@ -65,6 +66,4 @@ class Settings(BaseSettings):
             raise ValueError("Proof contexts must fit preparation slots and active calls")
         if urlsplit(self.witness_url).path:
             raise ValueError("Witness URL must be an HTTPS origin")
-        if urlsplit(self.credentials_url).path:
-            raise ValueError("Credential URL must be an HTTPS origin")
         return self

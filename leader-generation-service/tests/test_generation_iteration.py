@@ -95,10 +95,11 @@ async def test_shutdown_during_preparation_does_not_start_generation(scenario, s
     assert scenario.deps.store.load(1).allocation.phase == "active"
 
 
-async def test_service_refreshes_proactively_using_pinned_cli_only(scenario, monkeypatch):
+@pytest.mark.parametrize("min_validity_seconds", [600, 11400])
+async def test_service_refreshes_proactively_using_pinned_cli_only(scenario, monkeypatch, min_validity_seconds):
     from leader_generation_service import credentials
 
-    current = [access(time.time() + 590)]
+    current = [access(time.time() + min_validity_seconds - 10)]
     calls = []
 
     def execute(argv, **kwargs):
@@ -106,15 +107,15 @@ async def test_service_refreshes_proactively_using_pinned_cli_only(scenario, mon
         return b"codex-cli 0.167.0\n"
 
     def refresh(home, executable):
-        current[0] = access(time.time() + 3600)
+        current[0] = access(time.time() + min_validity_seconds + 3600)
         calls.append("refresh")
 
     monkeypatch.setattr(credentials, "execute", execute)
     monkeypatch.setattr(credentials, "subscription_credentials", lambda *args: (current[0].access_token, "abc123"))
     monkeypatch.setattr(credentials, "_refresh_codex", refresh)
     manager = CredentialManager(scenario.deps.store.directory, "fixture-codex")
-    value = await manager.current()
-    assert value.expires_at > time.time() + 600
+    value = await manager.current(min_validity_seconds=min_validity_seconds)
+    assert value.expires_at > time.time() + min_validity_seconds
     assert calls == [["fixture-codex", "--version"], "refresh"]
 
 
@@ -230,7 +231,7 @@ async def test_credentials_renew_while_idle_and_serialize_callers(tmp_path):
     clock = [time.time()]
     loads = []
 
-    def load():
+    def load(_min_validity_seconds):
         loads.append(clock[0])
         return access(clock[0] + 800)
 
@@ -248,9 +249,9 @@ async def test_maintenance_renews_without_a_round_or_pod(scenario, settings, mon
     calls = []
     original = scenario.deps.credentials.load
 
-    def load():
+    def load(min_validity_seconds):
         calls.append("refresh")
-        return original()
+        return original(min_validity_seconds)
 
     scenario.deps.credentials.load = load
 
@@ -321,7 +322,7 @@ async def test_outer_loop_waits_the_configured_interval_after_every_failure(scen
     monkeypatch.setattr(service, "GracefulShutdown", lambda: shutdown)
     monkeypatch.setattr(service, "setup_logging", lambda _: None)
     monkeypatch.setattr(service, "create_dependencies", dependencies)
-    monkeypatch.setattr(service, "serve_credentials", endpoint)
+    monkeypatch.setattr(service, "serve_control", endpoint)
     monkeypatch.setattr(service, "generation_iteration", cycle)
     monkeypatch.setattr(service, "maintain_credentials", maintain)
     await service.main()
