@@ -261,17 +261,19 @@ def load_miner(source: Path) -> ModuleType:
 
 async def generate_batch(config: Config, directory: Path, pending: dict[str, str | bytes], seed: int) -> None:
     from bittensor_wallet import Wallet
-    from witness_client import AsyncWitnessClient, WitnessConfig
+    from witness_client import AsyncWitnessClient, WitnessConfig, WitnessError
 
     from miner_runtime.batch import MAX_PROMPT_DOWNLOAD_BYTES, run_pass
 
     hotkey = Wallet(name="leader", hotkey="default", path=str(directory / "private/wallets")).hotkey
     if hotkey.ss58_address != config.hotkey:
         raise ValueError("Runner hotkey differs from the frozen identity")
+    print("Loading pinned leader code", flush=True)
     generate = load_miner(directory / "source").generate
     witness_config: WitnessConfig = {"witness_url": config.witness_url,
                                     "proof_parameters": str(IMAGE_PARAMETERS),
                                     "codex_credentials_file": str(directory / "private/subscription.json")}
+    print("Initializing witness client and native prover", flush=True)
     async with AsyncWitnessClient(
         witness_config, hotkey=hotkey, subscription="codex",
         parallel_calls=config.parallel_calls, parallel_preparations=config.parallel_preparations,
@@ -281,17 +283,26 @@ async def generate_batch(config: Config, directory: Path, pending: dict[str, str
             if requested_at is not None:
                 delay = max(0, requested_at + 1200 - time.monotonic())
                 if delay:
+                    print(f"Retrying in {delay:.0f} seconds", flush=True)
                     await asyncio.sleep(delay)
+            operation = "Witness pod request"
+            print(f"Requesting witness pod from {config.witness_url}", flush=True)
             requested_at = time.monotonic()
             try:
                 await witness.replace_pod()
+                operation = "Generation pass"
+                print("Witness pod ready. Reading saved prompt results", flush=True)
                 await run_pass(
                     generate, pending, seed, workers=config.workers, client=witness,
                     max_prompt_bytes=MAX_PROMPT_DOWNLOAD_BYTES,
                 )
             except Exception as error:
-                print(f"Generation pass failed ({type(error).__name__}); pending prompts will be retried", flush=True)
+                reason = type(error).__name__
+                if isinstance(error, WitnessError) and error.status_code is not None:
+                    reason = f"HTTP {error.status_code}"
+                print(f"{operation} failed ({reason}). Retry will check pending prompt IDs ({len(pending)}).", flush=True)
             else:
+                print("Generation pass finished. Worker is exiting.", flush=True)
                 return
 
 
@@ -321,7 +332,9 @@ async def run_job(config: Config, directory: Path, *, hotkey: str, access_token:
     }
     print(f"Round {state.current_round} at {revision[:10]}: {len(pending)} prompts, "
           f"leader {leader.repo}@{leader.commit}", flush=True)
+    print("Fetching pinned leader source from GitHub", flush=True)
     await asyncio.to_thread(fetch_source, leader.repo, leader.commit, directory)
+    print("Installing worker credentials and hotkey", flush=True)
     install_credentials(config, directory, access_token)
     install_identity(config, directory, hotkey)
     await generate_batch(config, directory, pending, seed)

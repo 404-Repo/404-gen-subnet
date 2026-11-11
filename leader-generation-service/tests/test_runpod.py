@@ -58,11 +58,8 @@ class Provider:
 
 
 @pytest.fixture
-def runner(scenario, settings):
-    wallet = Wallet(name=settings.wallet_name, hotkey=settings.wallet_hotkey, path=str(settings.wallet_path))
-    wallet.set_hotkey(Keypair.create_from_uri("//Alice"), encrypt=False, overwrite=True)
-    provider = Provider()
-    price = {
+def cpu_catalog():
+    return {
         "cpus": [
             {
                 "id": "cpu3c",
@@ -74,9 +71,26 @@ def runner(scenario, settings):
             }
         ]
     }
-    http = httpx.Client(transport=httpx.MockTransport(lambda request: httpx.Response(200, json=price)))
+
+
+@pytest.fixture
+def runner(scenario, settings, cpu_catalog):
+    wallet = Wallet(name=settings.wallet_name, hotkey=settings.wallet_hotkey, path=str(settings.wallet_path))
+    wallet.set_hotkey(Keypair.create_from_uri("//Alice"), encrypt=False, overwrite=True)
+    provider = Provider()
+    http = httpx.Client(transport=httpx.MockTransport(lambda request: httpx.Response(200, json=cpu_catalog)))
     value = runpod.RunpodRunner(settings, scenario.deps.store, provider, http, shutdown=scenario.controller.shutdown)
     return value, provider
+
+
+@pytest.fixture
+def runpod_errors():
+    errors = []
+    sink = logger.add(lambda message: errors.append(message.record["message"]), level="ERROR", filter=runpod.__name__)
+    try:
+        yield errors
+    finally:
+        logger.remove(sink)
 
 
 async def launch(value, job):
@@ -477,11 +491,63 @@ async def test_known_lost_runner_is_replaced_with_same_snapshot(scenario, settin
     assert provider.deleted == ["pod-2"]
 
 
-async def test_price_ceiling_blocks_create(scenario, runner):
+async def test_price_ceiling_blocks_create(scenario, runner, runpod_errors):
     value, provider = runner
     value.settings.max_hourly_cost = Decimal("0.001")
     with pytest.raises(RuntimeError, match="cost ceiling"):
         await launch(value, Job(snapshot=scenario.snapshot))
+    assert provider.creates == 0
+    estimate = Decimal("0.08") + Decimal("2") / 730
+    assert runpod_errors == [f"RunPod estimated cost of ${estimate}/hour exceeds the $0.001/hour cost ceiling"]
+
+
+@pytest.mark.parametrize(
+    "changes,data_center,reason",
+    [
+        ({"id": "other"}, None, "RunPod CPU catalog does not list cpu3c for 8 vCPUs"),
+        ({"availability": "NONE"}, None, "RunPod CPU cpu3c has no capacity for 8 vCPUs"),
+        ({}, "unavailable", "RunPod CPU cpu3c has no capacity for 8 vCPUs in data center unavailable"),
+        ({"price": {"securePerVcpu": "invalid"}}, None, "RunPod CPU catalog returned an invalid price for cpu3c"),
+        ({"price": {"securePerVcpu": "0"}}, None, "RunPod CPU catalog returned an invalid price for cpu3c"),
+        ({"vcpu": {"min": 2, "max": 4}}, None, "RunPod CPU cpu3c supports 2 to 4 vCPUs but 8 were requested"),
+    ],
+)
+async def test_cpu_catalog_block_logs_the_reason(
+    scenario, runner, cpu_catalog, runpod_errors, changes, data_center, reason
+):
+    value, provider = runner
+    value.settings.data_center = data_center
+    cpu_catalog["cpus"][0].update(changes)
+
+    with pytest.raises(RuntimeError, match="Could not verify RunPod CPU"):
+        await launch(value, Job(snapshot=scenario.snapshot))
+
+    assert runpod_errors == [reason]
+    assert provider.creates == 0
+
+
+@pytest.mark.parametrize(
+    "status,reason",
+    [
+        (503, "RunPod CPU catalog request failed (HTTP 503)"),
+        (None, "RunPod CPU catalog request failed (ReadTimeout)"),
+        (200, "RunPod CPU catalog returned invalid data for cpu3c (JSONDecodeError)"),
+    ],
+)
+async def test_cpu_catalog_request_failure_logs_the_reason(scenario, runner, runpod_errors, status, reason):
+    value, provider = runner
+
+    def reply(request):
+        if status is None:
+            raise httpx.ReadTimeout("fixture catalog details", request=request)
+        return httpx.Response(status, text="fixture catalog details")
+
+    with httpx.Client(transport=httpx.MockTransport(reply)) as http:
+        value.http = http
+        with pytest.raises(RuntimeError, match="Could not verify RunPod CPU"):
+            await launch(value, Job(snapshot=scenario.snapshot))
+
+    assert runpod_errors == [reason]
     assert provider.creates == 0
 
 
@@ -529,17 +595,19 @@ async def test_create_rechecks_token_validity_after_preflight(scenario, runner, 
 
 
 @pytest.mark.parametrize("go_memory_mib", [14 * 1024, 16 * 1024])
-async def test_price_check_requires_ram_for_the_prover_and_worker(scenario, runner, go_memory_mib):
+async def test_price_check_requires_ram_for_the_prover_and_worker(scenario, runner, runpod_errors, go_memory_mib):
     value, provider = runner
     job = Job(snapshot=scenario.snapshot.model_copy(update={"go_memory_mib": go_memory_mib}))
     await value.ensure(job)
     if go_memory_mib == 14 * 1024:
         await value.start(job, access(4_000_000_000))
         assert provider.creates == 1
+        assert runpod_errors == []
     else:
         with pytest.raises(RuntimeError, match="RAM"):
             await value.start(job, access(4_000_000_000))
         assert provider.creates == 0
+        assert runpod_errors == ["RunPod CPU cpu3c offers 16384 MiB RAM but the worker needs 18432 MiB"]
 
 
 async def test_price_check_uses_the_prepared_request_resources(scenario, runner):
