@@ -5,10 +5,12 @@ from urllib.parse import unquote, urlsplit
 
 import httpx
 from loguru import logger
+from subnet_common.competition.config import require_competition_config
 from subnet_common.competition.generations import (
     GenerationResult,
     GenerationsAdapter,
     GenerationsMap,
+    generations_complete,
     save_generations,
 )
 from subnet_common.competition.prompts import require_prompts
@@ -33,7 +35,7 @@ def _retry_delay(retry_state: RetryCallState) -> float:
 
 
 class ResultCollector:
-    """Collect miners' saved result indexes."""
+    """Collect saved result indexes for the round."""
 
     def __init__(
         self,
@@ -46,13 +48,25 @@ class ResultCollector:
         self.settings = settings
         self.semaphore = asyncio.Semaphore(settings.max_concurrent_downloads)
 
-    async def collect(self, state: CompetitionState, ref: str) -> dict[str, GenerationsMap]:
-        """Read each miner's complete index and save results for the round's prompts."""
-        submissions = await require_submissions(git=self.git_batcher.git, round_num=state.current_round, ref=ref)
-        prompt_urls = await require_prompts(git=self.git_batcher.git, round_num=state.current_round, ref=ref)
-        schedule = await get_schedule(self.git_batcher.git, state.current_round, ref)
+    async def collect(self, state: CompetitionState, ref: str) -> dict[str, GenerationsMap] | None:
+        """Save results, or wait if the configured leader index is incomplete."""
+        round_num = state.current_round
+        git = self.git_batcher.git
+        submissions = await require_submissions(git=git, round_num=round_num, ref=ref)
+        prompt_urls = await require_prompts(git=git, round_num=round_num, ref=ref)
+        schedule = await get_schedule(git, round_num, ref)
         storage_prefix = "" if schedule is None else schedule.witness_storage_prefix
         prompts = [Path(unquote(urlsplit(url).path)).stem for url in prompt_urls]
+
+        leader = None
+        if schedule is not None and schedule.leader_generation_hotkey is not None:
+            config = await require_competition_config(git, ref)
+            key = f"{storage_prefix}rounds/{config.name}-{round_num}/{schedule.leader_generation_hotkey}/submitted.json"
+            leader = await self._fetch_index(key)
+            if not generations_complete(leader, set(prompts)):
+                logger.warning("Round {} is waiting for the complete leader baseline", round_num)
+                return None
+
         hotkeys = list(submissions.keys())
         random.shuffle(hotkeys)
         logger.info(f"Collecting {len(hotkeys)} result indexes for {len(prompts)} prompts")
@@ -62,12 +76,14 @@ class ResultCollector:
                 hotkey=hotkey,
                 submission=submissions[hotkey],
                 prompts=prompts,
-                round_num=state.current_round,
+                round_num=round_num,
                 storage_prefix=storage_prefix,
             )
             for hotkey in hotkeys
         ]
         results = await asyncio.gather(*tasks)
+        if leader is not None:
+            await self._save_index("leader", leader, prompts, round_num)
         return dict(zip(hotkeys, results, strict=True))
 
     async def _collect_miner(
@@ -85,6 +101,11 @@ class ResultCollector:
 
         key = f"{storage_prefix}rounds/{submission.round}/{hotkey}/submitted.json"
         saved = await self._fetch_index(key)
+        return await self._save_index(hotkey, saved, prompts, round_num)
+
+    async def _save_index(
+        self, hotkey: str, saved: GenerationsMap, prompts: list[str], round_num: int
+    ) -> GenerationsMap:
         generations = {}
         for prompt in prompts:
             result = saved.get(prompt, GenerationResult(failure_reason="not_submitted"))

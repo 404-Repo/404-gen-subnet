@@ -12,7 +12,6 @@ from subnet_common.competition.state import CompetitionState, RoundStage
 
 from leader_generation_service.credentials import CredentialManager
 from leader_generation_service.generation_iteration import generation_iteration, maintain_credentials
-from leader_generation_service.models import Job
 from leader_generation_service.settings import Settings
 from leader_generation_service.store import JobStore, exclusive_lock
 
@@ -119,112 +118,51 @@ async def test_service_refreshes_proactively_using_pinned_cli_only(scenario, mon
     assert calls == [["fixture-codex", "--version"], "refresh"]
 
 
-async def test_publish_only_complete_witness_index_and_retry_failed_commit(scenario, settings, monkeypatch):
-    scenario.deps.store.save(Job(snapshot=scenario.snapshot))
+async def test_generation_finishes_with_a_complete_witness_index(scenario, settings):
+    await generation_iteration(scenario.controller, settings)
+    journal = settings.state_directory / "rounds/1.json"
+    legacy_job = json.loads(journal.read_text())
+    legacy_job["published"] = False
+    journal.write_text(json.dumps(legacy_job))
+
     scenario.state["saved"] = {"chair": {"js": "chair.js", "views": "chair", "size": 12}}
     await generation_iteration(scenario.controller, settings)
-    assert scenario.deps.git.committed == {}
+    assert scenario.deps.store.load(1).completed_prompts == 1
+    assert not scenario.deps.store.load(1).completed
     scenario.state["saved"]["lamp"] = {"failure_reason": "generation_failed"}
-    original = scenario.deps.git.commit_files
-
-    async def fail(**kwargs):
-        raise RuntimeError("fixture conflict")
-
-    monkeypatch.setattr(scenario.deps.git, "commit_files", fail)
     await generation_iteration(scenario.controller, settings)
-    assert scenario.deps.store.load(1).published is False
-    started = len(scenario.deps.runner.started)
-    monkeypatch.setattr(scenario.deps.git, "commit_files", original)
-    await generation_iteration(scenario.controller, settings)
-    result = json.loads(scenario.deps.git.committed["rounds/1/leader/generated.json"])
-    assert result["chair"]["js"] == "https://cdn.test/chair.js"
-    assert result["chair"]["views"] == "https://cdn.test/chair"
-    assert result["lamp"]["failure_reason"] == "generation_failed"
-    assert scenario.deps.store.load(1).published is True
-    assert len(scenario.deps.runner.started) == started
+
+    job = scenario.deps.store.load(1)
+    assert job.completed and job.allocation.phase == "terminated"
+    assert len(scenario.deps.runner.started) == 1
 
 
-async def test_existing_published_baseline_skips_new_job(scenario, settings):
-    scenario.deps.git.files["rounds/1/leader/generated.json"] = json.dumps(
-        {name: {"failure_reason": "generation_failed"} for name in scenario.images}
-    )
+async def test_saved_manual_results_finish_the_job_before_cpu_allocation(scenario, settings):
+    scenario.state["saved"] = {name: {"failure_reason": "generation_failed"} for name in scenario.images}
+
     await generation_iteration(scenario.controller, settings)
+
+    job = scenario.deps.store.load(1)
+    assert job.completed and job.allocation is None
+    assert scenario.deps.runner.started == []
+
+
+@pytest.mark.parametrize("hotkey", [None, "5" * 48])
+async def test_generation_requires_the_scheduled_operator_wallet(scenario, settings, hotkey):
+    files = scenario.deps.git.files
+    path = "rounds/1/schedule.json"
+    schedule = json.loads(files[path])
+    schedule["leader_generation_hotkey"] = hotkey
+    files[path] = json.dumps(schedule)
+
+    if hotkey is None:
+        await generation_iteration(scenario.controller, settings)
+    else:
+        with pytest.raises(ValueError, match="differs from the operator wallet"):
+            await generation_iteration(scenario.controller, settings)
+
     assert scenario.deps.store.jobs() == []
     assert scenario.state["input_reads"] == 0
-
-
-@pytest.mark.parametrize("witness_complete", [True, False])
-async def test_active_job_preserves_a_manual_baseline(scenario, settings, clock, witness_complete):
-    await generation_iteration(scenario.controller, settings)
-    git = scenario.deps.git
-    path = "rounds/1/leader/generated.json"
-    manual = json.dumps({name: {"js": f"https://manual.test/{name}.js", "views": "views"} for name in scenario.images})
-    git.files[path] = manual
-    if witness_complete:
-        scenario.state["saved"] = {name: {"failure_reason": "generation_failed"} for name in scenario.images}
-    clock[0] += settings.stall_replacement_seconds
-
-    await generation_iteration(scenario.controller, settings)
-
-    assert git.files[path] == manual
-    assert git.committed == {}
-    assert len(scenario.deps.runner.started) == 1
-    job = scenario.deps.store.load(1)
-    assert job.published and job.allocation.phase == "terminated"
-
-
-async def test_publication_conflict_waits_for_the_next_iteration(scenario, settings, monkeypatch):
-    await generation_iteration(scenario.controller, settings)
-    git = scenario.deps.git
-    path = "rounds/1/leader/generated.json"
-    manual = json.dumps({name: {"js": f"https://manual.test/{name}.js", "views": "views"} for name in scenario.images})
-    scenario.state["saved"] = {name: {"failure_reason": "generation_failed"} for name in scenario.images}
-    attempts = []
-    original = git.commit_files
-
-    async def commit(**kwargs):
-        attempts.append(kwargs["base_sha"])
-        if len(attempts) == 1:
-            git.files[path] = manual
-            git.ref_sha = "c" * 40
-            raise RuntimeError("Fixture non-fast-forward")
-        return await original(**kwargs)
-
-    monkeypatch.setattr(git, "commit_files", commit)
-    await generation_iteration(scenario.controller, settings)
-    assert not scenario.deps.store.load(1).published
-    await generation_iteration(scenario.controller, settings)
-
-    assert attempts == ["a" * 40]
-    assert git.files[path] == manual
-    assert scenario.deps.store.load(1).published
-
-
-async def test_round_advance_during_saved_read_prevents_old_round_publication(scenario, settings, monkeypatch):
-    await generation_iteration(scenario.controller, settings)
-    scenario.state["saved"] = {name: {"failure_reason": "generation_failed"} for name in scenario.images}
-    git = scenario.deps.git
-    original_read = scenario.deps.saved.read
-    original_commit = git.commit_files
-
-    async def read(snapshot):
-        saved = await original_read(snapshot)
-        git.files["state.json"] = CompetitionState(current_round=2, stage=RoundStage.MINER_GENERATION).model_dump_json()
-        git.ref_sha = "c" * 40
-        return saved
-
-    async def commit(*, base_sha, **kwargs):
-        if base_sha != git.ref_sha:
-            raise RuntimeError("Fixture non-fast-forward")
-        return await original_commit(base_sha=base_sha, **kwargs)
-
-    monkeypatch.setattr(scenario.deps.saved, "read", read)
-    monkeypatch.setattr(git, "commit_files", commit)
-    await generation_iteration(scenario.controller, settings)
-
-    assert git.committed == {}
-    job = scenario.deps.store.load(1)
-    assert not job.published and job.allocation.phase == "terminated"
 
 
 async def test_credentials_renew_while_idle_and_serialize_callers(tmp_path):

@@ -23,10 +23,7 @@ from submission_collector.settings import Settings
 from submission_collector.submission import Submission, parse_commitment
 
 
-CollectFn = Callable[[GitBatcher, CompetitionState, str, Settings], Awaitable[dict[str, GenerationsMap]]]
-"""Signature: (git_batcher, state, ref, settings) -> dict[hotkey, GenerationsMap].
-Creates the HTTP client and runs result collection.
-"""
+CollectFn = Callable[[GitBatcher, CompetitionState, str, Settings], Awaitable[dict[str, GenerationsMap] | None]]
 
 
 SECONDS_PER_BLOCK = 12
@@ -73,7 +70,7 @@ async def run_collection_iteration(
 
         async def collect_fn(
             git_batcher: GitBatcher, state: CompetitionState, ref: str, settings: Settings
-        ) -> dict[str, GenerationsMap]:
+        ) -> dict[str, GenerationsMap] | None:
             async with httpx.AsyncClient(timeout=httpx.Timeout(60, connect=10)) as http_client:
                 collector = ResultCollector(
                     git_batcher=git_batcher,
@@ -300,6 +297,8 @@ async def _handle_collecting(
     """Collect generated and submitted results and transition to DUELS."""
     git_batcher = GitBatcher(git=git, base_sha=ref, branch=settings.github_branch)
     results = await collect_fn(git_batcher, state, ref, settings)
+    if results is None:
+        return
     state.stage = RoundStage.DUELS
     state.next_stage_eta = None
     await git_batcher.write(

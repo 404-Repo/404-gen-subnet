@@ -63,10 +63,14 @@ class Job(BaseModel):
     control_token: str | None = Field(default=None, min_length=43, max_length=128, repr=False)
     stopped: bool = False
     allocations: list[Allocation] = Field(default_factory=list)
-    published: bool = False
+    legacy_published: bool = Field(default=False, validation_alias="published", exclude=True, repr=False)
     completed_prompts: int = Field(default=0, ge=0)
     last_progress_at: float | None = Field(default=None, ge=0, allow_inf_nan=False)
     progress_warning_sent: bool = False
+
+    @property
+    def completed(self) -> bool:
+        return self.completed_prompts == len(self.snapshot.inputs.prompts)
 
     @property
     def allocation(self) -> Allocation | None:

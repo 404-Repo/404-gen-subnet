@@ -89,7 +89,8 @@ async def test_new_leader_takes_over(git: MockGitHubClient, settings: Settings) 
     """Miner wins with different repo, becomes new leader with weight 1.0."""
     add_state(git, current_round=1)
     add_config(git)
-    schedule = add_schedule(git, round_num=1)
+    operator_hotkey = "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY"
+    schedule = add_schedule(git, round_num=1, leader_generation_hotkey=operator_hotkey)
     add_leader(git, weight=1.0)
     add_round_result(git, round_num=1, winner_hotkey="miner_hotkey", repo="miner/repo")
 
@@ -113,6 +114,7 @@ async def test_new_leader_takes_over(git: MockGitHubClient, settings: Settings) 
         earliest_reveal_block=schedule.latest_reveal_block + 1,
         latest_reveal_block=schedule.latest_reveal_block + hours_to_blocks(24),
         generation_deadline_block=schedule.latest_reveal_block + hours_to_blocks(26),
+        leader_generation_hotkey=operator_hotkey,
     )
 
     leaders = LeaderListAdapter.validate_json(committed["leader.json"])
