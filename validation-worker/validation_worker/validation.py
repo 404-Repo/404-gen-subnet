@@ -12,9 +12,10 @@ from subnet_common.github import GitHubClient
 from subnet_common.graceful_shutdown import GracefulShutdown
 from subnet_common.r2_client import R2Client
 from subnet_common.witness.pricing import BudgetRejected, PromptBudget
+from subnet_common.witness.rounds import RoundInputs
 
 from validation_worker.execution import validate_prompt
-from validation_worker.inputs import load_validation_inputs
+from validation_worker.inputs import ValidationInputs, load_validation_inputs
 from validation_worker.preparation import SourceArchiveNotFound, load_round_inputs, prepare_source, read_object
 from validation_worker.sandbox import prepare_sandbox
 from validation_worker.settings import Settings
@@ -42,30 +43,35 @@ async def run_validation(
     shutdown: GracefulShutdown,
 ) -> None:
     path = f"rounds/{round_num}/{hotkey}/validation.json"
-    jail = None
-    frozen = None
+    frozen: RoundInputs | None = None
+    source: Path | None = None
     batcher = None
-    source_failure = None
-    with ExitStack() as cleanup:
-        for attempt in range(3):
-            stopping = shutdown.should_stop
-            if stopping:
-                return
-            try:
-                await asyncio.to_thread(output.mkdir, parents=True, exist_ok=True, mode=0o700)
-                if batcher is None:
-                    batcher = await GitBatcher.create(git=git, branch=settings.github_branch)
-                raw = await batcher.read(path)
-                progress = (
-                    ValidationProgress.model_validate_json(raw) if raw is not None else ValidationProgress(ref=ref)
-                )
-                inputs = await load_validation_inputs(git, round_num, hotkey, progress.ref)
-                if set(progress.prompts) - inputs.generations.keys():
-                    raise ValueError("Validation checkpoint contains foreign prompts")
-                for prompt_id in inputs.generations:
+    source_failure: str | None = None
+
+    async def replay_prompts(
+        inputs: ValidationInputs, progress: ValidationProgress, checkpoint: GitBatcher, source_cleanup: ExitStack
+    ) -> None:
+        prompts = iter(inputs.generations)
+        source_ready = asyncio.Event()
+        if source is not None:
+            source_ready.set()
+
+        async def save_prompt(prompt_id: str, state: PromptProgress) -> None:
+            # Publish only completed attempts, even while other prompts are running.
+            progress.prompts[prompt_id] = state.model_copy(deep=True)
+            await checkpoint.write(
+                path, progress.model_dump_json(indent=2), f"Validate round {round_num}, miner {hotkey}"
+            )
+
+        async def run_slot(slot: int) -> None:
+            nonlocal frozen, source, source_failure
+            jail = None
+            with ExitStack() as slot_cleanup:
+                for prompt_id in prompts:
                     if shutdown.should_stop or source_failure is not None:
                         break
-                    state = progress.prompts.setdefault(prompt_id, PromptProgress())
+                    saved = progress.prompts.get(prompt_id)
+                    state = saved.model_copy(deep=True) if saved is not None else PromptProgress()
                     deadline = None
                     while state.status == "pending" and state.retryable and state.attempts < 3:
                         if shutdown.should_stop or (state.attempts and await shutdown.wait(timeout=state.attempts)):
@@ -76,9 +82,7 @@ async def run_validation(
                         if deadline <= now:
                             state.retryable = False
                             state.reason = "Validation deadline exhausted"
-                            await batcher.write(
-                                path, progress.model_dump_json(indent=2), f"Validate round {round_num}, miner {hotkey}"
-                            )
+                            await save_prompt(prompt_id, state)
                             break
                         state.attempts += 1
                         budget = None
@@ -86,12 +90,20 @@ async def run_validation(
                             async with asyncio.timeout_at(deadline):
                                 if frozen is None:
                                     frozen = await load_round_inputs(inputs, r2, settings)
-                                if jail is None:
-                                    cleanup.close()
-                                    directory = Path(
-                                        cleanup.enter_context(TemporaryDirectory(prefix=".validation-", dir=output))
+                                if source is None:
+                                    source_cleanup.close()
+                                    source_dir = Path(
+                                        source_cleanup.enter_context(TemporaryDirectory(prefix=".source-", dir=output))
                                     )
-                                    source = await prepare_source(inputs, git, directory)
+                                    source = await prepare_source(inputs, git, source_dir)
+                                    source_ready.set()
+                                if jail is None:
+                                    slot_cleanup.close()
+                                    directory = Path(
+                                        slot_cleanup.enter_context(
+                                            TemporaryDirectory(prefix=".validation-", dir=output)
+                                        )
+                                    )
                                     jail = await asyncio.to_thread(prepare_sandbox, source, directory, settings)
                                 pricing = await read_object(
                                     r2, r2.bucket, f"pod-pricing/v1/{settings.witness_deployment}.json"
@@ -101,7 +113,7 @@ async def run_validation(
                                 budget.accept()
                                 prompt = next(prompt for prompt in frozen.prompts if prompt.id == prompt_id)
                                 result = await validate_prompt(
-                                    inputs, prompt, jail, directory, r2, http, settings, budget
+                                    inputs, prompt, jail, directory, r2, http, settings, budget, slot=slot
                                 )
                                 state.status = result.verdict.value
                                 state.reason = result.reason
@@ -122,9 +134,33 @@ async def run_validation(
                                 f"Prompt pending: round={round_num}, hotkey={hotkey}, prompt={prompt_id}, "
                                 f"attempt={state.attempts}, error={type(error).__name__}"
                             )
-                        await batcher.write(
-                            path, progress.model_dump_json(indent=2), f"Validate round {round_num}, miner {hotkey}"
-                        )
+                        await save_prompt(prompt_id, state)
+            source_ready.set()
+
+        async with asyncio.TaskGroup() as slots:
+            slots.create_task(run_slot(0))
+            await source_ready.wait()
+            if source is not None and not shutdown.should_stop:
+                for slot in range(1, min(settings.jobs, len(inputs.generations))):
+                    slots.create_task(run_slot(slot))
+
+    with ExitStack() as source_cleanup:
+        for attempt in range(3):
+            stopping = shutdown.should_stop
+            if stopping:
+                return
+            try:
+                await asyncio.to_thread(output.mkdir, parents=True, exist_ok=True, mode=0o700)
+                if batcher is None:
+                    batcher = await GitBatcher.create(git=git, branch=settings.github_branch)
+                raw = await batcher.read(path)
+                progress = (
+                    ValidationProgress.model_validate_json(raw) if raw is not None else ValidationProgress(ref=ref)
+                )
+                inputs = await load_validation_inputs(git, round_num, hotkey, progress.ref)
+                if set(progress.prompts) - inputs.generations.keys():
+                    raise ValueError("Validation checkpoint contains foreign prompts")
+                await replay_prompts(inputs, progress, batcher, source_cleanup)
                 if not await batcher.flush():
                     raise RuntimeError("Validation checkpoint has not been committed")
                 if source_failure is not None:

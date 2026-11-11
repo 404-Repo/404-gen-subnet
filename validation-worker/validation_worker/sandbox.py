@@ -41,7 +41,7 @@ Requests: TypeAdapter[ModelCall | RenderCall | MinerResult] = TypeAdapter(
 
 
 def prepare_sandbox(source: Path, directory: Path, settings: Settings) -> Path:
-    """Copy the credential-free runtime and submitted source once for this job."""
+    """Copy the credential-free runtime and submitted source for one reusable slot."""
     template = settings.sandbox_root.resolve()
     if (
         shutil.which("nsjail") is None
@@ -67,10 +67,11 @@ def prepare_sandbox(source: Path, directory: Path, settings: Settings) -> Path:
 
 
 class Sandbox:
-    """One credential-free miner process inside the job's prepared jail."""
+    """One credential-free miner process inside a prepared jail."""
 
-    def __init__(self, root: Path, image: Path, seed: int, settings: Settings) -> None:
+    def __init__(self, root: Path, image: Path, seed: int, settings: Settings, slot: int = 0) -> None:
         self.root, self.image, self.seed, self.settings = root, image, seed, settings
+        self.uid = 40000 + slot
         self.process: asyncio.subprocess.Process | None = None
 
     async def __aenter__(self) -> "Sandbox":
@@ -80,7 +81,7 @@ class Sandbox:
         scratch = self.root / "scratch"
         await asyncio.to_thread(shutil.rmtree, scratch)
         await asyncio.to_thread(scratch.mkdir, mode=0o700)
-        await asyncio.to_thread(os.chown, scratch, 40000, 40000)
+        await asyncio.to_thread(os.chown, scratch, self.uid, self.uid)
         await asyncio.to_thread(shutil.copyfile, self.image, self.root / "prompt.png")
         self.process = await asyncio.create_subprocess_exec(
             binary,
@@ -100,9 +101,9 @@ class Sandbox:
             "--disable_clone_newuts",
             "--disable_clone_newcgroup",
             "--user",
-            "40000",
+            str(self.uid),
             "--group",
-            "40000",
+            str(self.uid),
             "--skip_setsid",
             "--nice_level",
             "0",
