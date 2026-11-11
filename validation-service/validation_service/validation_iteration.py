@@ -46,6 +46,8 @@ async def validation_iteration(
         if name not in jobs or worker_pod.status in ("EXITED", "ERROR", "TERMINATED"):
             await delete_worker_pod(runpod, pods.pop(name))
 
+    finished: list[str] = []
+    next_hotkey: str | None = None
     for name, hotkey in jobs.items():
         if shutdown.should_stop:
             break
@@ -57,26 +59,31 @@ async def validation_iteration(
         result, has_work = await validation_outcome(git, round_num, hotkey, ref)
         if result is not None:
             results[hotkey] = result
-            await git.commit_files(
-                files={
-                    f"rounds/{round_num}/validation_results.json": ValidationResultsAdapter.dump_json(
-                        results, indent=2
-                    ).decode()
-                },
-                message=f"Validate round {round_num}, miner {hotkey}",
-                branch=settings.github_branch,
-                base_sha=ref,
-            )
-            logger.info(f"Published {result.verdict.value}: round={round_num}, hotkey={hotkey}")
-            if pod is not None:
-                await delete_worker_pod(runpod, pod)
-            break
-        if not has_work:
+            finished.append(name)
+        elif not has_work:
             if pod is not None:
                 await delete_worker_pod(runpod, pods.pop(name))
-            continue
-        if not pods:
-            await execute_validation_job(runpod, settings, round_num, hotkey, ref)
-            break
+        elif next_hotkey is None:
+            next_hotkey = hotkey
+
+    if finished:
+        await git.commit_files(
+            files={
+                f"rounds/{round_num}/validation_results.json": ValidationResultsAdapter.dump_json(
+                    results, indent=2
+                ).decode()
+            },
+            message=f"Publish validation results for round {round_num}",
+            branch=settings.github_branch,
+            base_sha=ref,
+        )
+        for name in finished:
+            hotkey = jobs[name]
+            logger.info(f"Published {results[hotkey].verdict.value}: round={round_num}, hotkey={hotkey}")
+            if name in pods:
+                await delete_worker_pod(runpod, pods.pop(name))
+
+    if next_hotkey is not None and not pods and not shutdown.should_stop:
+        await execute_validation_job(runpod, settings, round_num, next_hotkey, ref)
 
     return state.next_stage_eta
