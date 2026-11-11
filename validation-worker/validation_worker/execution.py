@@ -156,6 +156,8 @@ async def model_response(
                 )
             except BudgetRejected as error:
                 raise ValueError("Verified usage and frozen pricing are inconsistent") from error
+        if call.phase == "failed" and verified.provider_status == 200:
+            return WitnessError("Unusable provider response", call.exchange_id, code="capture_failed", source="gateway")
         return call.exchange_id, verified.provider_status, response
 
 

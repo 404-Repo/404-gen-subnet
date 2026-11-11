@@ -31,6 +31,7 @@ from subnet_common.r2_client import R2Client
 from subnet_common.witness.models import Scope, json_bytes
 from subnet_common.witness.pricing import PromptBudget
 from subnet_common.witness.rounds import PromptImage, RoundInputs
+from witness_client import WitnessError
 from witness_pod.renderer import RenderCache
 
 from validation_worker import execution
@@ -593,10 +594,23 @@ def test_existing_checkpoint_keeps_completed_prompts() -> None:
     assert progress.prompts["lamp"].reason == "Output differs"
 
 
-def test_automatic_replay_uses_selected_pricing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("failed_capture", [False, True], ids=["issued", "failed-http-200"])
+def test_automatic_replay_handles_verified_capture(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failed_capture: bool
+) -> None:
     live = Capture(tmp_path)
     request, body = live._request(0, None, {"model": "fixture", "input": "image"})
-    response = live._capture(request, body, None)
+    if failed_capture:
+        live.outcome = (
+            200,
+            b'data: {"type":"response.completed",'
+            b'"response":{"id":"resp_fixture","status":"completed","output":[]}}\n\n',
+            None,
+        )
+        with pytest.raises(WitnessError, match="Unusable provider response"):
+            live._capture(request, body, None)
+    else:
+        live._capture(request, body, None)
     record = live.records.load(SCOPE, request.id)
     assert record is not None
     parameters = tmp_path / "parameters"
@@ -666,6 +680,16 @@ def test_automatic_replay_uses_selected_pricing(tmp_path: Path, monkeypatch: pyt
             budget,
         )
     )
-    assert result == (record.call.exchange_id, 200, response.body)
     budget.accept()
-    assert budget.charges == {request.id: Decimal("4")}
+    if failed_capture:
+        assert isinstance(result, WitnessError)
+        assert (result.code, result.source, result.exchange_id) == (
+            "capture_failed",
+            "gateway",
+            record.call.exchange_id,
+        )
+        assert budget.charges == {}
+    else:
+        response = live.saved_response(record.call.exchange_id)
+        assert result == (record.call.exchange_id, 200, response.body)
+        assert budget.charges == {request.id: Decimal("4")}
