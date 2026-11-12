@@ -12,7 +12,7 @@ from subnet_common.competition.config import require_competition_config
 from subnet_common.competition.prompts import prompt_ids, require_prompts
 from subnet_common.competition.schedule import require_schedule
 from subnet_common.competition.state import RoundStage, require_state
-from subnet_common.discord import DiscordWebhook
+from subnet_common.discord import DiscordFailureAlert, DiscordWebhook
 from subnet_common.github import GitHubClient
 from subnet_common.graceful_shutdown import GracefulShutdown
 
@@ -59,7 +59,7 @@ async def create_dependencies(settings: Settings, shutdown: GracefulShutdown) ->
                     key.ss58_address,
                     discord=(
                         DiscordWebhook(settings.discord_webhook_url.get_secret_value())
-                        if settings.discord_webhook_url is not None
+                        if settings.discord_webhook_url
                         else None
                     ),
                 )
@@ -108,14 +108,30 @@ async def generation_iteration(
     saved = await dependencies.saved.read(
         f"{config.name}-{number}", schedule.witness_storage_prefix, dependencies.hotkey
     )
-    completed = sum(saved[prompt].is_terminal() for prompt in expected & saved.keys())
-    await controller.run(number, completed, len(expected), config.generation_stage_minutes, ref, deadline)
+    completed = [saved[prompt] for prompt in expected & saved.keys() if saved[prompt].is_terminal()]
+    await controller.run(
+        number,
+        len(completed),
+        len(expected),
+        config.generation_stage_minutes,
+        ref,
+        deadline,
+        failed=sum(result.is_failed() for result in completed),
+    )
 
 
 async def maintain_credentials(dependencies: Dependencies, settings: Settings, shutdown: GracefulShutdown) -> None:
+    error_alert = DiscordFailureAlert(
+        dependencies.discord,
+        title="Leader Subscription Maintenance Error",
+        action="Check the subscription login and leader generation service logs.",
+    )
     while not shutdown.should_stop:
         try:
             await dependencies.credentials.current()
         except Exception as error:
             logger.error("Subscription maintenance failed ({})", type(error).__name__)
+            await error_alert.notify(error)
+        else:
+            error_alert.reset()
         await shutdown.wait(timeout=settings.credential_check_interval_seconds)

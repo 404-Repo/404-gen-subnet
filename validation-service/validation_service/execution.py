@@ -1,5 +1,6 @@
 import hashlib
 import json
+from dataclasses import dataclass
 from datetime import datetime
 from urllib.parse import quote
 
@@ -19,6 +20,14 @@ class Pod(BaseModel):
     name: str
     status: str
     created_at: AwareDatetime | None = Field(default=None, alias="createdAt")
+
+
+@dataclass(frozen=True)
+class ValidationOutcome:
+    result: ValidationResult | None = None
+    has_work: bool = True
+    passed_prompts: int = 0
+    total_prompts: int = 0
 
 
 PodList = TypeAdapter(list[Pod])
@@ -111,24 +120,24 @@ async def pod_has_stalled(
         raise ValueError("Invalid checkpoint commit timestamp") from error
 
 
-async def validation_outcome(
-    git: GitHubClient, round_num: int, hotkey: str, ref: str
-) -> tuple[ValidationResult | None, bool]:
-    """Read the verdict and whether any prompts still have attempts available."""
+async def validation_outcome(git: GitHubClient, round_num: int, hotkey: str, ref: str) -> ValidationOutcome:
+    """Read the verdict, remaining work, and prompt counts from the checkpoint."""
     raw = await git.get_file(f"rounds/{round_num}/{hotkey}/validation.json", ref=ref)
     if raw is None:
-        return None, True
+        return ValidationOutcome()
     progress = ValidationProgress.model_validate_json(raw)
     expected = await get_generations(git, round_num, hotkey, ref=progress.ref)
     if not expected or progress.prompts.keys() - expected.keys():
         raise ValueError("Validation checkpoint differs from the candidate's prompts")
     for state in progress.prompts.values():
         if state.status == "failed":
-            return ValidationResult(verdict=ValidationVerdict.FAILED, reason=state.reason), False
-    if progress.prompts.keys() != expected.keys():
-        return None, True
-    if all(state.status == "passed" for state in progress.prompts.values()):
-        return ValidationResult(verdict=ValidationVerdict.PASSED), False
-    return None, any(
+            return ValidationOutcome(
+                result=ValidationResult(verdict=ValidationVerdict.FAILED, reason=state.reason), has_work=False
+            )
+    passed = sum(state.status == "passed" for state in progress.prompts.values())
+    if passed == len(expected):
+        return ValidationOutcome(result=ValidationResult(verdict=ValidationVerdict.PASSED), has_work=False)
+    has_work = progress.prompts.keys() != expected.keys() or any(
         state.status == "pending" and state.retryable and state.attempts < 3 for state in progress.prompts.values()
     )
+    return ValidationOutcome(has_work=has_work, passed_prompts=passed, total_prompts=len(expected))

@@ -42,11 +42,11 @@ def offline(monkeypatch):
 
 @pytest.fixture
 def discord(scenario, monkeypatch):
-    state = SimpleNamespace(messages=[], status=200)
+    state = SimpleNamespace(embeds=[], status=200)
 
     async def deliver(transport, request):
         assert request.url == "https://discord.test/progress"
-        state.messages.append(json.loads(request.content))
+        state.embeds.extend(json.loads(request.content)["embeds"])
         return httpx.Response(state.status, json={})
 
     monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", deliver)

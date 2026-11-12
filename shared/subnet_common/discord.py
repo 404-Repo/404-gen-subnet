@@ -32,3 +32,26 @@ class DiscordWebhook:
                 response.raise_for_status()
         except Exception as error:
             logger.warning("Discord notification failed ({})", type(error).__name__)
+
+
+class DiscordFailureAlert:
+    """Report the first failure of a retry loop until a successful cycle."""
+
+    def __init__(self, webhook: DiscordWebhook | None, *, title: str, action: str) -> None:
+        self._webhook = webhook
+        self._title = title
+        self._action = action
+        self._reported = False
+
+    async def notify(self, error: Exception) -> None:
+        if self._webhook is None or self._reported:
+            return
+        self._reported = True
+        await self._webhook.send_embed(
+            title=self._title,
+            color=0xE74C3C,
+            description=f"`{type(error).__name__}`\n{self._action}",
+        )
+
+    def reset(self) -> None:
+        self._reported = False

@@ -175,6 +175,11 @@ iteration reads the current round in Git and
 and logs completed, total, newly completed, and pending prompt counts. A pod stays
 running while saved results advance. After 20 minutes without new terminal results,
 the service sends one warning per stall to `DISCORD_WEBHOOK_URL`, if configured.
+The same webhook reports the first eligible poll with pending prompts in a round,
+advances in the terminal prompt count, and completion with delivered and failed
+totals. These updates use the controller's in-memory round state. The generation
+and credential maintenance loops each report the first error in a streak of
+failed cycles.
 After `STALL_REPLACEMENT_SECONDS` without progress (one hour by default), it confirms
 deletion of the CPU pod and creates a replacement using `GENERATION_IMAGE`
 and the current settings. The replacement interval must exceed 1200 seconds.

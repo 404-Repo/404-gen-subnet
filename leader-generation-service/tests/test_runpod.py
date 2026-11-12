@@ -335,7 +335,7 @@ async def test_old_pod_must_be_deleted_before_starting_the_next_round(scenario, 
 
 @pytest.mark.parametrize("already_deleted", [False, True])
 async def test_new_round_starts_after_old_pod_cleanup_without_reading_old_results(
-    scenario, settings, runner, already_deleted
+    scenario, settings, runner, already_deleted, discord
 ):
     value, provider = runner
     scenario.deps.runner = value
@@ -361,6 +361,10 @@ async def test_new_round_starts_after_old_pod_cleanup_without_reading_old_result
     assert scenario.controller.pod.id == "pod-2"
     assert provider.pods.keys() == {"pod-2"}
     assert reads == [f"/sandbox/rounds/test-2/{scenario.deps.hotkey}/submitted.json"]
+    assert [embed["title"] for embed in discord.embeds] == [
+        "Round 1 Leader Generation Queued",
+        "Round 2 Leader Generation Queued",
+    ]
 
 
 @pytest.mark.parametrize("failed_read", ["ref", "state"])
@@ -616,12 +620,16 @@ async def test_no_progress_warns_at_twenty_minutes_and_uses_the_replacement_thre
     previous = scenario.controller.pod
     clock[0] += 1199
     await generation_iteration(scenario.controller, settings)
-    assert discord.messages == [] and provider.deleted == []
+    assert [embed["title"] for embed in discord.embeds] == ["Round 1 Leader Generation Queued"]
+    assert provider.deleted == []
     clock[0] += 1
     await generation_iteration(scenario.controller, settings)
     assert scenario.controller.pod is previous
     assert provider.creates == 1 and provider.deleted == []
-    assert len(discord.messages) == 1
+    assert [embed["title"] for embed in discord.embeds] == [
+        "Round 1 Leader Generation Queued",
+        "Leader generation stalled",
+    ]
     clock[0] += (replacement_seconds or 3600) - 1201
     await generation_iteration(scenario.controller, settings)
     assert provider.creates == 1 and provider.deleted == []
@@ -629,7 +637,7 @@ async def test_no_progress_warns_at_twenty_minutes_and_uses_the_replacement_thre
     await generation_iteration(scenario.controller, settings)
     assert provider.events == ["create", "delete", "create"]
     assert scenario.controller.pod is not previous
-    assert len(discord.messages) == 1
+    assert len(discord.embeds) == 2
 
 
 async def test_saved_progress_keeps_a_running_generation_pod_and_logs_counts(
@@ -648,12 +656,13 @@ async def test_saved_progress_keeps_a_running_generation_pod_and_logs_counts(
         scenario.state["saved"] = {"chair": {"failure_reason": "generation_failed"}}
         await generation_iteration(scenario.controller, settings)
         assert provider.creates == 1 and provider.deleted == []
-        assert discord.messages == []
+        assert discord.embeds[-1]["title"] == "Round 1 Leader Generation Progress"
+        assert "**1/2**" in discord.embeds[-1]["description"]
         assert any("1/2" in message and "+1" in message for message in messages)
         clock[0] += 1200
         await generation_iteration(scenario.controller, settings)
         assert scenario.controller.pod is previous
-        assert len(discord.messages) == 1
+        assert discord.embeds[-1]["title"] == "Leader generation stalled"
         clock[0] += 1200
         scenario.state["saved"]["lamp"] = {"failure_reason": "generation_failed"}
         await generation_iteration(scenario.controller, settings)
@@ -671,7 +680,7 @@ async def test_new_progress_resets_the_stall_timer_and_warning(runner, scenario,
     await generation_iteration(scenario.controller, settings)
     clock[0] += 1200
     await generation_iteration(scenario.controller, settings)
-    assert len(discord.messages) == 1
+    assert discord.embeds[-1]["title"] == "Leader generation stalled"
     clock[0] += 1200
     scenario.state["saved"] = {"chair": {"failure_reason": "generation_failed"}}
     await generation_iteration(scenario.controller, settings)
@@ -679,7 +688,7 @@ async def test_new_progress_resets_the_stall_timer_and_warning(runner, scenario,
     assert provider.creates == 1 and provider.deleted == []
     clock[0] += 1200
     await generation_iteration(scenario.controller, settings)
-    assert len(discord.messages) == 2
+    assert [embed["title"] for embed in discord.embeds].count("Leader generation stalled") == 2
     assert provider.creates == 1
     clock[0] += settings.stall_replacement_seconds - 1200
     await generation_iteration(scenario.controller, settings)
@@ -749,7 +758,7 @@ async def test_discord_failure_logs_the_error_type_without_the_webhook(scenario,
         await scenario.deps.discord.send_embed(title="Fixture warning", color=0)
     finally:
         logger.remove(sink)
-    assert len(discord.messages) == 1
+    assert len(discord.embeds) == 1
     assert any("HTTPStatusError" in message for message in messages)
     assert all("https://discord.test/progress" not in message for message in messages)
 
@@ -776,7 +785,7 @@ async def test_render_rejection_is_terminal_progress(runner, scenario, settings,
     assert scenario.controller.completed_prompts == 1
     assert scenario.controller.pod is not None
     assert provider.creates == 1 and provider.deleted == []
-    assert discord.messages == []
+    assert discord.embeds[-1]["title"] == "Round 1 Leader Generation Progress"
     scenario.state["saved"]["lamp"] = {"failure_reason": "generation_failed"}
     clock[0] += 1200
     await generation_iteration(scenario.controller, settings)

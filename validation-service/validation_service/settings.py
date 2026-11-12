@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     github_token: SecretStr = Field(..., alias="GITHUB_TOKEN", description="GitHub personal access token")
     github_repo: str = Field(..., alias="GITHUB_REPO", description="Git repo with the current competition state")
     github_branch: str = Field(default="main", alias="GITHUB_BRANCH", description="Competition Git branch to read")
+    discord_webhook_url: SecretStr | None = Field(default=None, alias="DISCORD_WEBHOOK_URL")
 
     runpod_api_key: SecretStr = Field(alias="RUNPOD_PROVIDER_API_KEY")
     pod_image: str = Field(alias="VALIDATION_POD_IMAGE", pattern=r"@sha256:[0-9a-f]{64}$")
