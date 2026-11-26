@@ -3,16 +3,22 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import ssl
 from dataclasses import replace
 from pathlib import Path
 
 import httpx
 import pytest
 from aiohttp import web
+from miner_runtime.batch import run_pass
+from renderer_client import RenderOptions
+from subnet_common.competition.generations import read_completed_prompts
 from subnet_common.witness.models import Scope
 from support import MemoryState
 from test_artifacts import PNG, SOURCE, client, enable
 from test_service import Harness
+from witness_client import AsyncWitnessClient
 from witness_pod.renderer import MAX_SUCCESSFUL_RENDERS, RenderCache
 
 
@@ -60,6 +66,72 @@ def test_identical_previews_reuse_the_saved_png(tmp_path: Path, monkeypatch: pyt
                     assert results == [PNG] * 3
                     assert await asyncio.to_thread(renderer.render, SOURCE) == PNG
                 assert rendered == [SOURCE]
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("replace_worker", [False, True], ids=["same_witness", "replacement_witness"])
+def test_leader_restart_resumes_cached_previews_without_authentication_429(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, replace_worker: bool,
+) -> None:
+    async def scenario() -> None:
+        fixture = Harness(tmp_path, monkeypatch)
+        prompts = {str(index): f"prompt {index}".encode() for index in range(25)}
+        prompt_ids = {hashlib.sha256(image).hexdigest(): prompt for prompt, image in prompts.items()}
+        options = [RenderOptions(thetas=(float(angle),), phis=(0,)) for angle in range(12)]
+        generated: list[bytes] = []
+        preview_statuses: list[int] = []
+
+        async def generate(image: bytes, seed: int, witness: AsyncWitnessClient) -> str:
+            generated.append(image)
+            for view in options:
+                assert await witness.render(SOURCE, view) == PNG
+            return SOURCE
+
+        async with fixture.running():
+            async with fixture.client("before-restart") as witness:
+                witness._gateway.delivery_timeout = 20
+                await witness._gateway.ensure_pod()
+                await enable(fixture, prompt_ids=prompt_ids)
+                renders = await enable_cache(fixture)
+                for view in options:
+                    assert await witness.render(SOURCE, view) == PNG
+                await witness.submit(prompts["0"], SOURCE)
+
+            async with fixture.client("after-restart") as witness:
+                witness._gateway.delivery_timeout = 20
+                if replace_worker:
+                    await witness.replace_pod()
+                    await enable(fixture, prompt_ids=prompt_ids)
+                    renders = await enable_cache(fixture)
+                else:
+                    await witness._gateway.ensure_pod()
+                previous_renders = len(renders)
+                store = fixture.services[-1].artifacts
+                assert store is not None
+                send = witness._gateway.send
+
+                async def observe(request: httpx.Request) -> httpx.Response:
+                    response = await send(request)
+                    if request.url.path == "/v1/render/grid":
+                        preview_statuses.append(response.status_code)
+                    return response
+
+                monkeypatch.setattr(witness._gateway, "send", observe)
+                pending: dict[str, str | bytes] = dict(prompts)
+
+                async def read_saved(_: httpx.AsyncClient) -> set[str]:
+                    async with httpx.AsyncClient(verify=ssl.create_default_context(), trust_env=False) as cdn:
+                        return await read_completed_prompts(cdn, url=f"{fixture.artifact_origin}/{store.index_key}")
+
+                await run_pass(generate, pending, 42, client=witness, workers=24, read_saved=read_saved)
+
+                assert fixture.provider.creates == (2 if replace_worker else 1)
+                assert not pending
+                assert sorted(generated) == sorted(list(prompts.values())[1:])
+                assert preview_statuses == [200] * 288
+                assert len(renders) == previous_renders
+                assert {key for key, result in store.results().items() if result.is_terminal()} == set(prompts)
 
     asyncio.run(scenario())
 

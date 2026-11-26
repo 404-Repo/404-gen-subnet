@@ -71,7 +71,7 @@ class Witness:
             if hotkey != assigned_hotkey:
                 raise AuthRejected("miner_not_assigned", 403)
 
-        self.auth = Authenticator(authorize)
+        self.auth = Authenticator(authorize, max_nonces_per_hotkey=None)
         self.renderer_url = "http://127.0.0.1:8002/render/grid"
         if artifacts is not None and artifacts.scope != runtime.scope:
             raise ValueError("Artifact storage belongs to another miner")
