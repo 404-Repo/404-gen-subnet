@@ -32,8 +32,11 @@ def keypair_from_hotkey(hotkey: str) -> Keypair:
 
 
 class Authenticator:
-    def __init__(self, authorize: Callable[[str], None]) -> None:
+    def __init__(
+        self, authorize: Callable[[str], None], *, max_nonces_per_hotkey: int | None = 256
+    ) -> None:
         self.authorize = authorize
+        self._max_nonces_per_hotkey = max_nonces_per_hotkey
         self._nonces: dict[tuple[str, str], int] = {}
         self._expiry: list[tuple[int, str, str]] = []
         self._counts: dict[str, int] = {}
@@ -49,7 +52,8 @@ class Authenticator:
                 del self._counts[owner]
         if (hotkey, nonce) in self._nonces:
             raise AuthRejected("replayed_hotkey_auth")
-        if len(self._nonces) >= 100_000 or self._counts.get(hotkey, 0) >= 256:
+        limit = self._max_nonces_per_hotkey
+        if len(self._nonces) >= 100_000 or (limit is not None and self._counts.get(hotkey, 0) >= limit):
             raise AuthRejected("authentication_busy", 429)
 
     def verify(
